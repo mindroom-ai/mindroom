@@ -1,0 +1,12 @@
+# Generated files
+signing.key
+*.log
+*.pid
+
+# Media and uploads
+media_store/
+uploads/
+
+# Database files
+*.db
+*.sqlite

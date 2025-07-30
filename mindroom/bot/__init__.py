@@ -1,0 +1,1 @@
+"""Mindroom bot module."""

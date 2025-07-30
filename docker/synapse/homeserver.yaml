@@ -1,0 +1,65 @@
+# Minimal Synapse configuration for mindroom development
+
+server_name: "localhost"
+public_baseurl: http://localhost:8008/
+
+# HTTP listener
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    bind_addresses: ['0.0.0.0']
+    resources:
+      - names: [client, federation]
+
+# Database
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: synapse_password
+    database: synapse
+    host: postgres
+    port: 5432
+
+# Redis for caching (optional but recommended)
+redis:
+  enabled: true
+  host: redis
+  port: 6379
+
+# Storage
+media_store_path: "/data/media_store"
+signing_key_path: "/data/signing.key"
+
+# Logging
+log_config: "/data/log.config"
+
+# Registration - open for development
+enable_registration: true
+enable_registration_without_verification: true
+
+# Disable rate limiting for development
+rc_message:
+  per_second: 10000
+  burst_count: 10000
+
+rc_registration:
+  per_second: 10000
+  burst_count: 10000
+
+rc_login:
+  address:
+    per_second: 10000
+    burst_count: 10000
+  account:
+    per_second: 10000
+    burst_count: 10000
+
+# Security
+macaroon_secret_key: "mindroom_dev_secret_change_in_production"
+form_secret: "mindroom_form_secret_change_in_production"
+
+# Minimal configuration - no email, no TURN, no metrics
+report_stats: false
+enable_metrics: false

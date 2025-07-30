@@ -1,0 +1,136 @@
+[build-system]
+build-backend = "hatchling.build"
+requires = [ "hatchling" ]
+
+[project]
+name = "mindroom"
+version = "0.1.0"
+description = "A universal interface for AI agents with persistent memory, where every conversation has a home"
+readme = "README.md"
+authors = [
+  { name = "mindroom team" },
+]
+requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "agno[anthropic,google,ollama,openai,sql,ddg,arxiv,wikipedia,yfinance,newspaper,github]>=1.7.6",
+  "diskcache>=5.6.3",
+  "matrix-nio>=0.24",
+  "python-dotenv>=1",
+]
+
+urls.documentation = "https://github.com/basnijholt/mindroom"
+urls.homepage = "https://github.com/basnijholt/mindroom"
+urls.repository = "https://github.com/basnijholt/mindroom"
+
+[dependency-groups]
+dev = [
+  "aioresponses>=0.7.8",
+  "mypy>=1.17",
+  "pre-commit>=4.2",
+  "pre-commit-uv>=4.1.4",
+  "pytest>=8.4.1",
+  "pytest-asyncio>=1.1",
+  "pytest-cov>=6.2.1",
+  "pytest-mock>=3.14.1",
+  "pytest-sugar>=1",
+  "pytest-timeout>=2.4",
+  "pytest-xdist>=3.8",
+  "ruff>=0.12.5",
+]
+
+[tool.hatch.version]
+source = "versioningit"
+
+[tool.hatch.build.targets.wheel]
+packages = [ "." ]
+
+[tool.ruff]
+target-version = "py312"
+
+line-length = 120
+lint.select = [
+  "B",   # flake8-bugbear
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # isort
+  "SIM", # flake8-simplify
+  "UP",  # pyupgrade
+  "W",   # pycodestyle warnings
+]
+lint.ignore = [
+  "E501", # Line too long
+]
+
+[tool.pytest.ini_options]
+testpaths = [ "tests" ]
+python_files = "test_*.py"
+asyncio_mode = "auto"
+pythonpath = [ "." ]
+addopts = """
+    -vvv
+    --cov=mindroom
+    --cov-report term
+    --cov-report html
+    --cov-report xml
+    --asyncio-mode=strict
+    --timeout 60
+    --durations 20
+"""
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if TYPE_CHECKING",
+  "if __name__ == .__main__.:",
+]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = false
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = "nio.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "yaml"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "agno.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "diskcache.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sqlalchemy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "aioresponses.*"
+ignore_missing_imports = true
+
+[tool.versioningit]
+default-version = "0.0.0"
+
+[tool.versioningit.vcs]
+method = "git"
+match = [ "v*" ]
+default-tag = "0.0.0"
