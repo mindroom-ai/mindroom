@@ -14,6 +14,9 @@ from .matrix import fetch_thread_history, prepare_response_content
 from .matrix_agent_manager import AgentMatrixUser, ensure_all_agent_users, login_agent_user
 from .matrix_room_manager import get_room_aliases
 
+# Enable colors in logger
+logger = logger.opt(colors=True)
+
 
 @dataclass
 class AgentBot:

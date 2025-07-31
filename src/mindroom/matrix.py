@@ -16,6 +16,9 @@ def prepare_response_content(response_text: str, event: nio.RoomMessageText, age
 
     from .logging_config import colorize
 
+    # Enable colors in logger
+    logger = logger.opt(colors=True)
+
     content: dict[str, Any] = {"msgtype": "m.text", "body": response_text}
 
     relates_to = event.source.get("content", {}).get("m.relates_to")
