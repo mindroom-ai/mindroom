@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 from types import FrameType
@@ -11,6 +12,41 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from loguru import Logger
+
+__all__ = ["setup_logging", "colorize"]
+
+
+def colorize(agent_name: str) -> str:
+    """Get a colorized agent name string with consistent color based on the name.
+
+    Args:
+        agent_name: The agent name to colorize
+
+    Returns:
+        The agent name wrapped in color tags, e.g. "<cyan>[agent_name]</cyan>"
+    """
+    # List of available colors that work well in terminals
+    colors = [
+        "cyan",
+        "magenta",
+        "green",
+        "yellow",
+        "blue",
+        "red",
+        "light-cyan",
+        "light-magenta",
+        "light-green",
+        "light-yellow",
+        "light-blue",
+        "light-red",
+    ]
+
+    # Use hash to get consistent color for each agent
+    hash_value = int(hashlib.md5(agent_name.encode()).hexdigest(), 16)
+    color_index = hash_value % len(colors)
+    color = colors[color_index]
+
+    return f"<{color}>[{agent_name}]</{color}>"
 
 
 class InterceptHandler(logging.Handler):
@@ -57,7 +93,7 @@ def setup_logging(level: str = "INFO", colorize: bool = True) -> Logger:
     logger.add(
         sys.stderr,
         colorize=colorize,
-        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
+        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - {message}",
         level=level,
     )
 

@@ -9,6 +9,7 @@ from loguru import logger
 
 from .agent_loader import load_config
 from .ai import ai_response
+from .logging_config import colorize
 from .matrix import fetch_thread_history, prepare_response_content
 from .matrix_agent_manager import AgentMatrixUser, ensure_all_agent_users, login_agent_user
 from .matrix_room_manager import get_room_aliases
@@ -34,14 +35,14 @@ class AgentBot:
             self.client = await login_agent_user(self.agent_user)
 
             # Register event callbacks
-            logger.debug(f"[{self.agent_name}] Registering event callbacks")
+            logger.debug(f"{colorize(self.agent_name)} Registering event callbacks")
             self.client.add_event_callback(self._on_invite, nio.InviteEvent)
             self.client.add_event_callback(self._on_message, nio.RoomMessageText)
-            logger.debug(f"[{self.agent_name}] Event callbacks registered")
+            logger.debug(f"{colorize(self.agent_name)} Event callbacks registered")
 
             self.running = True
             logger.info(
-                f"[{self.agent_name}] Started agent bot: {self.agent_user.display_name} ({self.agent_user.user_id})"
+                f"{colorize(self.agent_name)} Started agent bot: {self.agent_user.display_name} ({self.agent_user.user_id})"
             )
 
             # Auto-join configured rooms
@@ -61,23 +62,25 @@ class AgentBot:
                 # Try to join the room
                 response = await self.client.join(room_id)
                 if isinstance(response, nio.JoinResponse):
-                    logger.info(f"[{self.agent_name}] Joined room: {room_id}")
+                    logger.info(f"{colorize(self.agent_name)} Joined room: {room_id}")
                 else:
-                    logger.warning(f"[{self.agent_name}] Could not join room {room_id}: {response}")
+                    logger.warning(f"{colorize(self.agent_name)} Could not join room {room_id}: {response}")
             except Exception as e:
-                logger.error(f"[{self.agent_name}] Error joining room {room_id}: {e}")
+                logger.error(f"{colorize(self.agent_name)} Error joining room {room_id}: {e}")
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         if not self.client or not self.running:
-            logger.warning(f"[{self.agent_name}] Cannot sync: client={self.client is not None}, running={self.running}")
+            logger.warning(
+                f"{colorize(self.agent_name)} Cannot sync: client={self.client is not None}, running={self.running}"
+            )
             return
 
-        logger.info(f"[{self.agent_name}] Starting sync_forever")
+        logger.info(f"{colorize(self.agent_name)} Starting sync_forever")
         try:
             await self.client.sync_forever(timeout=30000)
         except Exception as e:
-            logger.error(f"[{self.agent_name}] Sync error: {e}")
+            logger.error(f"{colorize(self.agent_name)} Sync error: {e}")
             self.running = False
 
     async def stop(self) -> None:
@@ -85,25 +88,25 @@ class AgentBot:
         self.running = False
         if self.client:
             await self.client.close()
-            logger.info(f"[{self.agent_name}] Stopped agent bot: {self.agent_user.display_name}")
+            logger.info(f"{colorize(self.agent_name)} Stopped agent bot: {self.agent_user.display_name}")
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         """Handle room invitations."""
-        logger.info(f"[{self.agent_name}] Received invite to room: {room.display_name} ({room.room_id})")
+        logger.info(f"{colorize(self.agent_name)} Received invite to room: {room.display_name} ({room.room_id})")
         if self.client:
             await self.client.join(room.room_id)
-            logger.info(f"[{self.agent_name}] Joined room: {room.room_id}")
+            logger.info(f"{colorize(self.agent_name)} Joined room: {room.room_id}")
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle messages in rooms."""
         logger.debug(
-            f"[{self.agent_name}] Message received - Room: {room.room_id} ({room.display_name}), "
+            f"{colorize(self.agent_name)} Message received - Room: {room.room_id} ({room.display_name}), "
             f"Sender: {event.sender}, Body: '{event.body}', Event source: {event.source}"
         )
 
         # Don't respond to own messages
         if event.sender == self.agent_user.user_id:
-            logger.debug(f"[{self.agent_name}] Ignoring own message")
+            logger.debug(f"{colorize(self.agent_name)} Ignoring own message")
             return
 
         # Don't respond to other agent messages (avoid agent loops)
@@ -116,12 +119,12 @@ class AgentBot:
             and sender_username != "mindroom_user"  # Allow user messages
             and event.sender != self.agent_user.user_id
         ):  # Allow own messages (already filtered above)
-            logger.debug(f"[{self.agent_name}] Ignoring message from other agent: {event.sender}")
+            logger.debug(f"{colorize(self.agent_name)} Ignoring message from other agent: {event.sender}")
             return
 
         # Debug logging
         logger.debug(
-            f"[{self.agent_name}] Checking message: '{event.body}' - "
+            f"{colorize(self.agent_name)} Checking message: '{event.body}' - "
             f"Agent user_id: {self.agent_user.user_id}, display_name: {self.agent_user.display_name}"
         )
 
@@ -131,19 +134,19 @@ class AgentBot:
         mentioned = self.agent_user.user_id in mentioned_users
 
         logger.debug(
-            f"[{self.agent_name}] Checking mentions - m.mentions field: {mentions}, Agent is mentioned: {mentioned}"
+            f"{colorize(self.agent_name)} Checking mentions - m.mentions field: {mentions}, Agent is mentioned: {mentioned}"
         )
 
         if not mentioned:
             # In threads, respond to all messages
             relates_to = event.source.get("content", {}).get("m.relates_to", {})
             is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
-            logger.debug(f"[{self.agent_name}] Thread check - is_thread: {is_thread}, relates_to: {relates_to}")
+            logger.debug(f"{colorize(self.agent_name)} Thread check - is_thread: {is_thread}, relates_to: {relates_to}")
             if not is_thread:
-                logger.debug(f"[{self.agent_name}] Not mentioned and not in thread, ignoring message")
+                logger.debug(f"{colorize(self.agent_name)} Not mentioned and not in thread, ignoring message")
                 return
 
-        logger.info(f"[{self.agent_name}] WILL PROCESS message from {event.sender}: {event.body}")
+        logger.info(f"{colorize(self.agent_name)} WILL PROCESS message from {event.sender}: {event.body}")
 
         # For now, use the full message body as the prompt
         # The actual mention text might not be in the body with modern Matrix clients
@@ -172,7 +175,7 @@ class AgentBot:
         content = prepare_response_content(response_text, event, agent_name=self.agent_name)
 
         logger.debug(
-            f"[{self.agent_name}] Sending response - Room ID: {room.room_id}, "
+            f"{colorize(self.agent_name)} Sending response - Room ID: {room.room_id}, "
             f"Message type: m.room.message, Content: {content}"
         )
 
@@ -182,7 +185,7 @@ class AgentBot:
                 message_type="m.room.message",
                 content=content,
             )
-            logger.info(f"[{self.agent_name}] Sent response to room {room.room_id}")
+            logger.info(f"{colorize(self.agent_name)} Sent response to room {room.room_id}")
 
 
 @dataclass
