@@ -1,23 +1,37 @@
 """Logging configuration for mindroom using loguru."""
 
+from __future__ import annotations
+
 import logging
 import sys
+from types import FrameType
+from typing import TYPE_CHECKING
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from loguru import Logger
 
 
 class InterceptHandler(logging.Handler):
     """Handler to intercept standard logging and redirect to loguru."""
 
-    def emit(self, record):
+    def emit(self, record: logging.LogRecord) -> None:
+        """Emit a log record to loguru.
+
+        Args:
+            record: The LogRecord instance containing log information
+        """
         # Get corresponding Loguru level if it exists
+        level: str | int
         try:
             level = logger.level(record.levelname).name
         except ValueError:
             level = record.levelno
 
         # Find caller from where originated the logged message
-        frame, depth = sys._getframe(6), 6
+        frame: FrameType | None = sys._getframe(6)
+        depth: int = 6
         while frame and frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
             depth += 1
@@ -25,13 +39,16 @@ class InterceptHandler(logging.Handler):
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
-def setup_logging(level="INFO", colorize=True):
+def setup_logging(level: str = "INFO", colorize: bool = True) -> Logger:
     """
     Configure loguru for mindroom and intercept standard logging.
 
     Args:
-        level: Minimum logging level
+        level: Minimum logging level (e.g., "DEBUG", "INFO", "WARNING", "ERROR")
         colorize: Whether to use colors in output
+
+    Returns:
+        The configured loguru logger instance
     """
     # Remove default loguru handler
     logger.remove()
