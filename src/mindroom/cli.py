@@ -11,8 +11,21 @@ import typer
 import yaml
 from rich.console import Console
 
-app = typer.Typer(help="Mindroom Matrix bot management CLI")
+app = typer.Typer(
+    help="Mindroom Matrix bot management CLI",
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 console = Console()
+
+
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Show help if no command is provided."""
+    if ctx.invoked_subcommand is None:
+        console.print(ctx.get_help())
+        raise typer.Exit()
+
 
 CREDENTIALS_FILE = Path("matrix_users.yaml")
 ENV_FILE = Path(".env")
