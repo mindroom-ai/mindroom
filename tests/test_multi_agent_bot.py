@@ -69,6 +69,8 @@ class TestAgentBot:
         """Test starting an agent bot."""
         # Mock the client
         mock_client = AsyncMock()
+        # add_event_callback is a sync method, not async
+        mock_client.add_event_callback = MagicMock()
         mock_login.return_value = mock_client
 
         bot = AgentBot(mock_agent_user)
@@ -92,6 +94,8 @@ class TestAgentBot:
         """Test that agent bot auto-joins configured rooms on start."""
         # Mock the client
         mock_client = AsyncMock()
+        # add_event_callback is a sync method, not async
+        mock_client.add_event_callback = MagicMock()
         mock_login.return_value = mock_client
 
         # Mock join responses
@@ -296,6 +300,8 @@ class TestMultiAgentOrchestrator:
         """Test starting all agent bots."""
         mock_ensure_users.return_value = mock_agent_users
         mock_client = AsyncMock()
+        # add_event_callback is a sync method, not async
+        mock_client.add_event_callback = MagicMock()
         mock_client.sync_forever = AsyncMock(side_effect=KeyboardInterrupt)
         mock_login.return_value = mock_client
 

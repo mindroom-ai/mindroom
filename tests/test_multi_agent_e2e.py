@@ -44,6 +44,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
     with patch("mindroom.bot.login_agent_user") as mock_login:
         # Mock the client
         mock_client = AsyncMock()
+        mock_client.add_event_callback = MagicMock()
         mock_client.user_id = mock_calculator_agent.user_id
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
@@ -112,6 +113,7 @@ async def test_agent_ignores_other_agents(
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
         mock_client = AsyncMock()
+        mock_client.add_event_callback = MagicMock()
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
@@ -152,6 +154,7 @@ async def test_agent_responds_in_threads_without_mention(mock_calculator_agent: 
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
         mock_client = AsyncMock()
+        mock_client.add_event_callback = MagicMock()
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
@@ -235,6 +238,7 @@ async def test_orchestrator_manages_multiple_agents() -> None:
         # Test starting all agents
         with patch("mindroom.bot.login_agent_user") as mock_login:
             mock_client = AsyncMock()
+            mock_client.add_event_callback = MagicMock()
             mock_client.sync_forever = AsyncMock(side_effect=KeyboardInterrupt)
             mock_login.return_value = mock_client
 
@@ -292,6 +296,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser)
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
         mock_client = AsyncMock()
+        mock_client.add_event_callback = MagicMock()
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 

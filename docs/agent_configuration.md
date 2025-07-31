@@ -78,12 +78,59 @@ agents:
 
 ### Configuration Fields
 
-- **agent_name**: The identifier used to call the agent (e.g., `@calculator:`)
+- **agent_name**: The identifier used for the Matrix account (becomes `@mindroom_<agent_name>:localhost`)
 - **display_name**: A friendly name shown in conversations
 - **role**: A brief description of the agent's purpose
 - **tools**: List of tools the agent can use (see Available Tools below)
 - **instructions**: Specific guidelines for the agent's behavior
+- **rooms**: List of room aliases where this agent should be active
 - **num_history_runs**: Number of previous conversation turns to include for context (default: 5)
+
+## Room Configuration
+
+Agents can be assigned to specific rooms in your Matrix server. This allows you to:
+- Create topic-specific rooms (e.g., "dev" for development, "research" for research tasks)
+- Control which agents have access to which conversations
+- Organize your AI assistants by domain or purpose
+
+### How Rooms Work
+
+1. **Room Aliases**: In `agents.yaml`, you specify simple room aliases like `lobby`, `dev`, `research`
+2. **Automatic Creation**: When you run `mindroom run`, it automatically creates any missing rooms
+3. **Agent Assignment**: Agents are automatically invited to their configured rooms
+4. **Room Persistence**: Room information is stored in `matrix_users.yaml` (auto-generated)
+
+### Example Room Setup
+
+```yaml
+agents:
+  code:
+    display_name: "CodeAgent"
+    role: "Programming assistant"
+    tools: [file, shell]
+    rooms:
+      - lobby      # Available in main lobby
+      - dev        # Available in development room
+      - automation # Available in automation room
+
+  research:
+    display_name: "ResearchAgent"
+    role: "Information gathering"
+    tools: [duckduckgo, wikipedia, arxiv]
+    rooms:
+      - lobby      # Available in main lobby
+      - research   # Available in research room
+      - science    # Available in science room
+```
+
+### Common Room Patterns
+
+- **lobby**: Main coordination room where all agents can interact
+- **dev**: Development and programming discussions
+- **research**: Research and information gathering
+- **analysis**: Data analysis and insights
+- **ops**: Operations and system management
+- **help**: General assistance and support
 
 ## Available Tools
 
@@ -195,16 +242,20 @@ agents:
     num_history_runs: 8
 ```
 
-## Using Agents
+## Using Agents in the Multi-Agent System
 
-To interact with an agent in your Matrix chat:
+Each agent now has its own Matrix account. To interact with an agent:
 
-1. **Mention the agent**: `@agent_name: your message`
-   - Example: `@calculator: what is 25 * 4?`
-   - Example: `@research: tell me about quantum computing`
+1. **Mention the agent by its full Matrix ID**: `@mindroom_agentname:localhost`
+   - Example: `@mindroom_calculator:localhost what is 25 * 4?`
+   - Example: `@mindroom_research:localhost tell me about quantum computing`
 
-2. **Default agent**: If you mention the bot without specifying an agent, it uses the `general` agent
-   - Example: `@bot: hello!` (uses general agent)
+2. **In threads**: Agents automatically respond to all messages without needing mentions
+   - Start a thread by replying to any message
+   - The agent will see and respond to all subsequent messages in that thread
+
+3. **Multiple agents**: You can mention multiple agents in one message
+   - Example: `@mindroom_research:localhost @mindroom_analyst:localhost Compare renewable energy trends`
 
 ## Tool Requirements
 

@@ -40,11 +40,11 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - **Local agents**: Run on your hardware with full privacy for sensitive data
 - **Cloud agents**: More powerful models for complex tasks
 - **Specialized agents**: Each with unique tools and expertise
-  - @calculator - Mathematical computations
-  - @code - Programming and file operations
-  - @research - Web research and fact-checking
-  - @analyst - Data analysis and visualization
-  - @finance - Market data and financial analysis
+  - @mindroom_calculator - Mathematical computations
+  - @mindroom_code - Programming and file operations
+  - @mindroom_research - Web research and fact-checking
+  - @mindroom_analyst - Data analysis and visualization
+  - @mindroom_finance - Market data and financial analysis
   - And many more...
 
 ### Memory Architecture
@@ -154,24 +154,24 @@ In your Matrix client (Element, etc.):
 
 ### Multi-Agent Collaboration
 ```
-You: @mindroom_research @mindroom_analyst What are the latest trends in renewable energy?
+You: @mindroom_research:localhost @mindroom_analyst:localhost What are the latest trends in renewable energy?
 ResearchAgent: I'll gather recent data on renewable energy trends...
 AnalystAgent: Based on the research, here's my analysis of the key patterns...
 ```
 
 ### Memory Persistence
 ```
-You: @mindroom_general Remember that my project deadline is next Friday
+You: @mindroom_general:localhost Remember that my project deadline is next Friday
 GeneralAgent: I've noted your project deadline for next Friday.
 [Days later in a different conversation]
-You: @mindroom_general What do you know about my schedule?
+You: @mindroom_general:localhost What do you know about my schedule?
 GeneralAgent: You have a project deadline this Friday (in 2 days).
 ```
 
 ### Room-Based Context
 ```
 [In "dev" room]
-You: @mindroom_code How should we structure the authentication module?
+You: @mindroom_code:localhost How should we structure the authentication module?
 CodeAgent: Based on our previous discussions in this room about the FastAPI backend...
 ```
 
