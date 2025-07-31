@@ -2,10 +2,12 @@
 
 import asyncio
 import os
+from dataclasses import dataclass, field
 
 import nio
 from loguru import logger
 
+from .agent_loader import load_config
 from .ai import ai_response
 from .logging_config import setup_logging
 from .matrix import fetch_thread_history, prepare_response_content
@@ -14,14 +16,19 @@ from .matrix_agent_manager import AgentMatrixUser, ensure_all_agent_users, login
 setup_logging(level="INFO")
 
 
+@dataclass
 class AgentBot:
     """Represents a single agent bot with its own Matrix account."""
 
-    def __init__(self, agent_user: AgentMatrixUser) -> None:
-        self.agent_user = agent_user
-        self.agent_name = agent_user.agent_name
-        self.client: nio.AsyncClient | None = None
-        self.running = False
+    agent_user: AgentMatrixUser
+    rooms: list[str] = field(default_factory=list)
+    client: nio.AsyncClient | None = field(default=None, init=False)
+    running: bool = field(default=False, init=False)
+
+    @property
+    def agent_name(self) -> str:
+        """Get the agent name from the user."""
+        return self.agent_user.agent_name
 
     async def start(self) -> None:
         """Start the agent bot."""
@@ -31,9 +38,29 @@ class AgentBot:
             self.client.add_event_callback(self._on_message, nio.RoomMessageText)
             self.running = True
             logger.info(f"Started agent bot: {self.agent_user.display_name} ({self.agent_user.user_id})")
+
+            # Auto-join configured rooms
+            if self.rooms:
+                await self._join_configured_rooms()
         except Exception as e:
             logger.error(f"Failed to start agent bot {self.agent_name}: {e}")
             raise
+
+    async def _join_configured_rooms(self) -> None:
+        """Join all configured rooms for this agent."""
+        if not self.client:
+            return
+
+        for room_id in self.rooms:
+            try:
+                # Try to join the room
+                response = await self.client.join(room_id)
+                if isinstance(response, nio.JoinResponse):
+                    logger.info(f"Agent {self.agent_name} joined room: {room_id}")
+                else:
+                    logger.warning(f"Agent {self.agent_name} could not join room {room_id}: {response}")
+            except Exception as e:
+                logger.error(f"Error joining room {room_id} for agent {self.agent_name}: {e}")
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
@@ -70,8 +97,13 @@ class AgentBot:
         if event.sender.startswith("@mindroom_") and event.sender != self.agent_user.user_id:
             return
 
-        # Check if this agent is mentioned
-        if self.agent_user.user_id not in event.body and self.agent_user.display_name not in event.body:
+        # Check if this agent is mentioned (with @ symbol)
+        mentioned = (
+            f"@{self.agent_user.user_id}" in event.body  # Full Matrix ID mention
+            or f"@{self.agent_user.display_name}" in event.body  # Display name mention
+            or self.agent_user.user_id in event.body  # Direct user ID (Matrix sometimes includes without @)
+        )
+        if not mentioned:
             # In threads, respond to all messages
             relates_to = event.source.get("content", {}).get("m.relates_to", {})
             is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
@@ -82,7 +114,14 @@ class AgentBot:
 
         # Extract prompt (remove agent mention)
         prompt = event.body
-        for mention in [self.agent_user.user_id, self.agent_user.display_name]:
+        # Remove various mention formats
+        mentions_to_remove = [
+            f"@{self.agent_user.user_id}",  # Full Matrix ID with @
+            f"@{self.agent_user.display_name}",  # Display name with @
+            self.agent_user.user_id,  # Just the user ID
+            self.agent_user.display_name,  # Just the display name
+        ]
+        for mention in mentions_to_remove:
             prompt = prompt.replace(mention, "").strip()
         prompt = prompt.lstrip(":").strip()
 
@@ -117,23 +156,30 @@ class AgentBot:
             logger.info(f"Agent {self.agent_name} sent response to room {room.room_id}")
 
 
+@dataclass
 class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
-    def __init__(self) -> None:
-        self.agent_bots: dict[str, AgentBot] = {}
-        self.running = False
+    agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
+    running: bool = field(default=False, init=False)
 
     async def initialize(self) -> None:
         """Initialize all agent bots."""
         logger.info("Initializing multi-agent system...")
+
+        # Load agent configuration
+        config = load_config()
 
         # Ensure all agents have Matrix accounts
         agent_users = await ensure_all_agent_users()
 
         # Create bot instances for each agent
         for agent_name, agent_user in agent_users.items():
-            bot = AgentBot(agent_user)
+            # Get rooms from agent configuration
+            agent_config = config.agents.get(agent_name)
+            rooms = agent_config.rooms if agent_config else []
+
+            bot = AgentBot(agent_user, rooms=rooms)
             self.agent_bots[agent_name] = bot
 
         logger.info(f"Initialized {len(self.agent_bots)} agent bots")
@@ -182,19 +228,6 @@ class MultiAgentOrchestrator:
                 logger.info(f"Invited agent {agent_name} to room {room_id}")
             except Exception as e:
                 logger.error(f"Failed to invite agent {agent_name} to room {room_id}: {e}")
-
-
-# Keep old Bot class for backward compatibility during migration
-class Bot:
-    """Legacy single bot implementation - DEPRECATED."""
-
-    def __init__(self) -> None:
-        logger.warning("Using deprecated Bot class. Please migrate to MultiAgentOrchestrator.")
-        self.orchestrator = MultiAgentOrchestrator()
-
-    async def start(self) -> None:
-        """Start the bot - now starts multi-agent system."""
-        await self.orchestrator.start()
 
 
 async def main() -> None:

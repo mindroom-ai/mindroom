@@ -3,6 +3,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
@@ -51,6 +52,12 @@ class TestAgentBot:
         assert bot.agent_name == "calculator"
         assert bot.client is None
         assert not bot.running
+        assert bot.rooms == []
+
+        # Test with rooms
+        rooms = ["!room1:localhost", "!room2:localhost"]
+        bot_with_rooms = AgentBot(mock_agent_user, rooms=rooms)
+        assert bot_with_rooms.rooms == rooms
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.login_agent_user")
@@ -74,6 +81,33 @@ class TestAgentBot:
         assert mock_client.add_event_callback.call_count == 2
         assert bot.running
         assert bot.client == mock_client
+
+    @pytest.mark.asyncio
+    @patch("mindroom.bot.login_agent_user")
+    async def test_agent_bot_auto_join_rooms(
+        self,
+        mock_login: AsyncMock,
+        mock_agent_user: AgentMatrixUser,
+    ) -> None:
+        """Test that agent bot auto-joins configured rooms on start."""
+        # Mock the client
+        mock_client = AsyncMock()
+        mock_login.return_value = mock_client
+
+        # Mock join responses
+        mock_client.join.side_effect = [
+            AsyncMock(spec=nio.JoinResponse),
+            AsyncMock(spec=nio.JoinResponse),
+        ]
+
+        rooms = ["!room1:localhost", "!room2:localhost"]
+        bot = AgentBot(mock_agent_user, rooms=rooms)
+        await bot.start()
+
+        # Verify rooms were joined
+        assert mock_client.join.call_count == 2
+        mock_client.join.assert_any_call("!room1:localhost")
+        mock_client.join.assert_any_call("!room2:localhost")
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser) -> None:
@@ -325,32 +359,3 @@ class TestMultiAgentOrchestrator:
         calls = mock_inviter_client.room_invite.call_args_list
         invited_users = {call[0][1] for call in calls}
         assert invited_users == {"@mindroom_calculator:localhost", "@mindroom_general:localhost"}
-
-
-class TestBackwardCompatibility:
-    """Test backward compatibility with old Bot class."""
-
-    @pytest.mark.asyncio
-    @patch("mindroom.bot.ensure_all_agent_users")
-    @patch("mindroom.bot.login_agent_user")
-    async def test_legacy_bot_class(
-        self,
-        mock_login: AsyncMock,
-        mock_ensure_users: AsyncMock,
-        mock_agent_users: dict[str, AgentMatrixUser],
-    ) -> None:
-        """Test that legacy Bot class still works."""
-        from mindroom.bot import Bot
-
-        mock_ensure_users.return_value = mock_agent_users
-        mock_client = AsyncMock()
-        mock_client.sync_forever = AsyncMock(side_effect=KeyboardInterrupt)
-        mock_login.return_value = mock_client
-
-        bot = Bot()  # Should log deprecation warning
-
-        with pytest.raises(KeyboardInterrupt):
-            await bot.start()
-
-        # Verify it started the multi-agent system
-        assert mock_login.call_count == 2  # Called for each agent

@@ -13,6 +13,7 @@ agents:
       - "Remember context from the conversation."
       - "Be conversational and friendly."
       - "Ask clarifying questions when needed."
+    rooms: []  # Add room IDs here for auto-join, e.g., ["!abc123:localhost", "!xyz789:localhost"]
     num_history_runs: 5
 
   # Calculator agent for mathematical operations

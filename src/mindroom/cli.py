@@ -150,6 +150,13 @@ def test():
     asyncio.run(_test())
 
 
+@app.command()
+def invite_agents():
+    """Invite all agents to an existing room."""
+    room_id = typer.prompt("Enter room ID to invite agents to")
+    asyncio.run(_invite_agents(room_id))
+
+
 async def _test():
     """Test bot connection."""
     creds = load_credentials()
@@ -191,6 +198,105 @@ async def _test():
         await client.close()
 
 
+async def _invite_agents(room_id: str) -> None:
+    """Invite all agents to a room."""
+    creds = load_credentials()
+    if not creds or "user" not in creds:
+        console.print("❌ No user credentials found! Run: mindroom setup")
+        return
+
+    username = f"@{creds['user']['username']}:localhost"
+    password = creds["user"]["password"]
+
+    client = nio.AsyncClient(HOMESERVER, username)
+
+    try:
+        # Login
+        response = await client.login(password=password)
+        if not isinstance(response, nio.LoginResponse):
+            console.print(f"❌ Failed to login: {response}")
+            return
+
+        console.print(f"✅ Logged in as {username}")
+
+        # Load all agent credentials
+        agent_count = 0
+        for key, value in creds.items():
+            if key.startswith("agent_"):
+                agent_username = value["username"]
+                agent_id = f"@{agent_username}:localhost"
+
+                try:
+                    await client.room_invite(room_id, agent_id)
+                    console.print(f"✅ Invited {agent_id}")
+                    agent_count += 1
+                except Exception as e:
+                    console.print(f"❌ Failed to invite {agent_id}: {e}")
+
+        console.print(f"\n✨ Invited {agent_count} agents to room {room_id}")
+
+    finally:
+        await client.close()
+
+
+@app.command()
+def create_agent_room():
+    """Create a new room and invite all agents."""
+    room_name = typer.prompt("Enter room name", default="Mindroom Agents")
+    asyncio.run(_create_agent_room(room_name))
+
+
+async def _create_agent_room(room_name: str) -> None:
+    """Create a room and invite all agents."""
+    creds = load_credentials()
+    if not creds or "user" not in creds:
+        console.print("❌ No user credentials found! Run: mindroom setup")
+        return
+
+    username = f"@{creds['user']['username']}:localhost"
+    password = creds["user"]["password"]
+
+    client = nio.AsyncClient(HOMESERVER, username)
+
+    try:
+        # Login
+        response = await client.login(password=password)
+        if not isinstance(response, nio.LoginResponse):
+            console.print(f"❌ Failed to login: {response}")
+            return
+
+        console.print(f"✅ Logged in as {username}")
+
+        # Create room
+        response = await client.room_create(name=room_name)
+        if not isinstance(response, nio.RoomCreateResponse):
+            console.print(f"❌ Failed to create room: {response}")
+            return
+
+        room_id = response.room_id
+        console.print(f"✅ Created room: {room_id}")
+
+        # Invite all agents
+        agent_count = 0
+        for key, value in creds.items():
+            if key.startswith("agent_"):
+                agent_username = value["username"]
+                agent_id = f"@{agent_username}:localhost"
+
+                try:
+                    await client.room_invite(room_id, agent_id)
+                    console.print(f"✅ Invited {agent_id}")
+                    agent_count += 1
+                except Exception as e:
+                    console.print(f"❌ Failed to invite {agent_id}: {e}")
+
+        console.print(f"\n✨ Created room '{room_name}' with {agent_count} agents!")
+        console.print("💬 You can now chat with agents by mentioning them!")
+
+    finally:
+        await client.close()
+
+
 @app.command()
 def info():
     """Show current credentials and status."""
@@ -207,6 +313,19 @@ def info():
 
     if "user" in creds:
         console.print(f"👤 User: {creds['user']['username']} (password: {creds['user']['password']}")
+
+    # Show all agents
+    agent_count = 0
+    console.print("\n🤖 Agents:")
+    for key, value in creds.items():
+        if key.startswith("agent_"):
+            agent_name = key.replace("agent_", "")
+            agent_username = value["username"]
+            console.print(f"  • {agent_name}: @{agent_username}:localhost")
+            agent_count += 1
+
+    if agent_count == 0:
+        console.print("  (No agents found)")
 
     console.print(f"\n🌐 Server: {HOMESERVER}")
 
