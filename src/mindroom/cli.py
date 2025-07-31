@@ -1,6 +1,7 @@
 """Mindroom CLI - Simplified multi-agent Matrix bot system."""
 
 import asyncio
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -154,25 +155,41 @@ async def _run() -> None:
         existing_rooms = load_rooms()
         missing_rooms = required_rooms - set(existing_rooms.keys())
 
-        if missing_rooms:
-            console.print(f"\n🏗️  Creating {len(missing_rooms)} rooms...")
+        # Login as user for room operations
+        username = f"@{creds['user']['username']}:localhost"
+        password = creds["user"]["password"]
+        client = nio.AsyncClient(HOMESERVER, username)
 
-            # Login as user to create rooms
-            username = f"@{creds['user']['username']}:localhost"
-            password = creds["user"]["password"]
-            client = nio.AsyncClient(HOMESERVER, username)
-
-            try:
-                response = await client.login(password=password)
-                if isinstance(response, nio.LoginResponse):
+        try:
+            response = await client.login(password=password)
+            if isinstance(response, nio.LoginResponse):
+                # Create missing rooms
+                if missing_rooms:
+                    console.print(f"\n🏗️  Creating {len(missing_rooms)} rooms...")
                     for room_key in missing_rooms:
                         room_name = room_key.replace("_", " ").title()
                         await _create_room_and_invite_agents(room_key, room_name, client)
-                else:
-                    console.print(f"❌ Failed to login: {response}")
-                    sys.exit(1)
-            finally:
-                await client.close()
+
+                # Ensure agents are invited to all required rooms (including existing ones)
+                console.print("\n🔄 Ensuring agents are invited to all rooms...")
+                for room_key in required_rooms:
+                    if room_key in existing_rooms:
+                        room = existing_rooms[room_key]
+                        # Re-invite agents to ensure they have access
+                        from mindroom.agent_loader import load_config
+
+                        config = load_config()
+
+                        for agent_name, agent_config in config.agents.items():
+                            if room_key in agent_config.rooms:
+                                agent_id = f"@mindroom_{agent_name}:localhost"
+                                with contextlib.suppress(Exception):
+                                    await client.room_invite(room.room_id, agent_id)
+            else:
+                console.print(f"❌ Failed to login: {response}")
+                sys.exit(1)
+        finally:
+            await client.close()
 
     # Agent accounts are created automatically by the bot system
     console.print("\n🤖 Starting agents...")
@@ -325,14 +342,16 @@ def main():
     """Main entry point that shows help by default."""
     import sys
 
+    # Handle -h flag by replacing with --help
+    for i, arg in enumerate(sys.argv):
+        if arg == "-h":
+            sys.argv[i] = "--help"
+            break
+
     # If no arguments provided, show help
     if len(sys.argv) == 1:
+        # Show help by appending --help to argv
         sys.argv.append("--help")
-
-    # Replace -h with --help for consistency
-    if "-h" in sys.argv:
-        index = sys.argv.index("-h")
-        sys.argv[index] = "--help"
 
     app()
 
