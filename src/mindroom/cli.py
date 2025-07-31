@@ -240,14 +240,17 @@ async def _invite_agents(room_id: str) -> None:
 
 
 @app.command()
-def create_agent_room():
-    """Create a new room and invite all agents."""
-    room_name = typer.prompt("Enter room name", default="Mindroom Agents")
-    asyncio.run(_create_agent_room(room_name))
+def create_agent_room(
+    room_alias: str = typer.Argument(..., help="Room alias (e.g., 'lobby', 'dev', 'research')"),
+    room_name: str = typer.Option(None, help="Display name for the room"),
+    invite_agents: bool = typer.Option(True, help="Automatically invite all agents to the room"),
+) -> None:
+    """Create a new room and optionally invite all agents."""
+    asyncio.run(_create_agent_room(room_alias, room_name, invite_agents))
 
 
-async def _create_agent_room(room_name: str) -> None:
-    """Create a room and invite all agents."""
+async def _create_agent_room(room_alias: str, room_name: str | None, invite_agents: bool) -> None:
+    """Create a new room and optionally invite all agents."""
     creds = load_credentials()
     if not creds or "user" not in creds:
         console.print("❌ No user credentials found! Run: mindroom setup")
@@ -267,34 +270,138 @@ async def _create_agent_room(room_name: str) -> None:
 
         console.print(f"✅ Logged in as {username}")
 
-        # Create room
-        response = await client.room_create(name=room_name)
-        if not isinstance(response, nio.RoomCreateResponse):
+        # If no room name provided, use the alias
+        if not room_name:
+            room_name = room_alias.capitalize()
+
+        # Create the room
+        room_config = {
+            "name": room_name,
+            "alias": room_alias,  # This creates #room_alias:localhost
+            "visibility": nio.RoomVisibility.private,
+            "preset": nio.RoomPreset.private_chat,
+        }
+
+        response = await client.room_create(**room_config)
+
+        if isinstance(response, nio.RoomCreateResponse):
+            room_id = response.room_id
+            console.print(f"✅ Created room: {room_name} (#{room_alias}:localhost) -> {room_id}")
+
+            if invite_agents:
+                # Invite all agents
+                agent_count = 0
+                for key, value in creds.items():
+                    if key.startswith("agent_"):
+                        agent_username = value["username"]
+                        agent_id = f"@{agent_username}:localhost"
+
+                        try:
+                            await client.room_invite(room_id, agent_id)
+                            console.print(f"✅ Invited {agent_id}")
+                            agent_count += 1
+                        except Exception as e:
+                            console.print(f"❌ Failed to invite {agent_id}: {e}")
+
+                console.print(f"\n✨ Created room '{room_name}' with {agent_count} agents!")
+        else:
             console.print(f"❌ Failed to create room: {response}")
-            return
-
-        room_id = response.room_id
-        console.print(f"✅ Created room: {room_id}")
-
-        # Invite all agents
-        agent_count = 0
-        for key, value in creds.items():
-            if key.startswith("agent_"):
-                agent_username = value["username"]
-                agent_id = f"@{agent_username}:localhost"
-
-                try:
-                    await client.room_invite(room_id, agent_id)
-                    console.print(f"✅ Invited {agent_id}")
-                    agent_count += 1
-                except Exception as e:
-                    console.print(f"❌ Failed to invite {agent_id}: {e}")
-
-        console.print(f"\n✨ Created room '{room_name}' with {agent_count} agents!")
-        console.print("💬 You can now chat with agents by mentioning them!")
 
     finally:
         await client.close()
+
+
+@app.command()
+def create_all_rooms() -> None:
+    """Create all rooms defined in agents.yaml and invite relevant agents."""
+    asyncio.run(_create_all_rooms())
+
+
+async def _create_all_rooms() -> None:
+    """Create all rooms defined in agents.yaml and invite relevant agents."""
+    import sys
+
+    from mindroom.agent_loader import load_config
+
+    sys.path.append(str(Path(__file__).parent))
+
+    creds = load_credentials()
+    if not creds or "user" not in creds:
+        console.print("❌ No user credentials found! Run: mindroom setup")
+        return
+
+    username = f"@{creds['user']['username']}:localhost"
+    password = creds["user"]["password"]
+
+    # Load agent configuration to get all unique rooms
+    config = load_config()
+    all_rooms = set()
+    room_to_agents: dict[str, list[str]] = {}
+
+    # Collect all unique rooms and which agents belong to each
+    for agent_name, agent_config in config.agents.items():
+        for room in agent_config.rooms:
+            all_rooms.add(room)
+            if room not in room_to_agents:
+                room_to_agents[room] = []
+            room_to_agents[room].append(agent_name)
+
+    client = nio.AsyncClient(HOMESERVER, username)
+
+    try:
+        # Login
+        response = await client.login(password=password)
+        if not isinstance(response, nio.LoginResponse):
+            console.print(f"❌ Failed to login: {response}")
+            return
+
+        console.print(f"✅ Logged in as {username}")
+
+        # Create each room
+        room_mapping = {}  # Maps room IDs from config to actual room IDs
+        for room_ref in all_rooms:
+            # Extract room alias from the reference (e.g., "!lobby:localhost" -> "lobby")
+            room_alias = room_ref[1 : room_ref.index(":")] if room_ref.startswith("!") and ":" in room_ref else room_ref
+
+            room_name = room_alias.capitalize()
+
+            # Create the room
+            room_config = {
+                "name": room_name,
+                "alias": room_alias,
+                "visibility": nio.RoomVisibility.private,
+                "preset": nio.RoomPreset.private_chat,
+            }
+
+            response = await client.room_create(**room_config)
+
+            if isinstance(response, nio.RoomCreateResponse):
+                room_id = response.room_id
+                room_mapping[room_ref] = room_id
+                console.print(f"✅ Created room: {room_name} (#{room_alias}:localhost) -> {room_id}")
+
+                # Get agents that should be in this room
+                agents_for_room = room_to_agents.get(room_ref, [])
+                console.print(f"   Agents for this room: {', '.join(agents_for_room)}")
+
+                # Invite agents to this room
+                for agent_name in agents_for_room:
+                    agent_key = f"agent_{agent_name}"
+                    if agent_key in creds:
+                        agent_username = creds[agent_key]["username"]
+                        agent_id = f"@{agent_username}:localhost"
+                        try:
+                            await client.room_invite(room_id, agent_id)
+                            console.print(f"   ✅ Invited {agent_name} ({agent_id})")
+                        except Exception as e:
+                            console.print(f"   ❌ Failed to invite {agent_name}: {e}")
+            else:
+                console.print(f"❌ Failed to create room {room_alias}: {response}")
+
+    finally:
+        await client.close()
+
+    console.print("\n✨ Room creation complete!")
 
 
 @app.command()

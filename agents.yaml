@@ -14,8 +14,8 @@ agents:
       - "Be conversational and friendly."
       - "Ask clarifying questions when needed."
     rooms:
-      - "!lobby:localhost"  # Main coordination room for all agents
-      - "!help:localhost"   # General help and assistance
+      - "!XeqkOykvpdhfoKCrQO:localhost"  # Main coordination room for all agents (lobby)
+      - "!ttzoOtKWdvbSfYPOcU:localhost"   # General help and assistance (help)
     num_history_runs: 5
 
   # Calculator agent for mathematical operations
@@ -30,9 +30,9 @@ agents:
       - "Explain the mathematical concepts when helpful."
       - "Double-check calculations for accuracy."
     rooms:
-      - "!lobby:localhost"     # Main coordination room
-      - "!science:localhost"   # Science and math collaboration
-      - "!analysis:localhost"  # Data analysis tasks
+      - "!XeqkOykvpdhfoKCrQO:localhost"     # Main coordination room (lobby)
+      - "!vHavUnTzTMmAUEveXo:localhost"   # Science and math collaboration (science)
+      - "!XiGCYUuFjGCzcOGQcS:localhost"  # Data analysis tasks (analysis)
     num_history_runs: 5
 
   # Code agent for programming tasks
@@ -51,9 +51,9 @@ agents:
       - "Always read files before modifying them"
       - "Follow the project's existing style and conventions"
     rooms:
-      - "!lobby:localhost"      # Main coordination room
-      - "!dev:localhost"        # Development and programming
-      - "!automation:localhost" # Automation and scripting
+      - "!XeqkOykvpdhfoKCrQO:localhost"      # Main coordination room (lobby)
+      - "!BFEXDUSnIarGSxVbEJ:localhost"        # Development and programming (dev)
+      - "!XxxyJwdbAswNTeayhc:localhost" # Automation and scripting (automation)
     num_history_runs: 5
 
   # Shell command execution agent
@@ -70,10 +70,10 @@ agents:
       - "Suggest safer alternatives when appropriate."
       - "Remember the user's working directory context."
     rooms:
-      - "!lobby:localhost"      # Main coordination room
-      - "!dev:localhost"        # Development tasks
-      - "!automation:localhost" # System automation
-      - "!ops:localhost"        # Operations and maintenance
+      - "!XeqkOykvpdhfoKCrQO:localhost"      # Main coordination room (lobby)
+      - "!BFEXDUSnIarGSxVbEJ:localhost"        # Development tasks (dev)
+      - "!XxxyJwdbAswNTeayhc:localhost" # System automation (automation)
+      - "!LQFVZZKOGdHcxLneTS:localhost"        # Operations and maintenance (ops)
     num_history_runs: 5
 
   # Text summarization agent
@@ -89,9 +89,9 @@ agents:
       - "Indicate the level of detail in your summary."
       - "Preserve important quotes or specific data points."
     rooms:
-      - "!lobby:localhost"    # Main coordination room
-      - "!research:localhost" # Research collaboration
-      - "!docs:localhost"     # Documentation and writing
+      - "!XeqkOykvpdhfoKCrQO:localhost"    # Main coordination room (lobby)
+      - "!dILWmRJrGmlMysZWtb:localhost" # Research collaboration (research)
+      - "!drRGiBxZGNlCODlPOv:localhost"     # Documentation and writing (docs)
     num_history_runs: 5
 
   # Research agent for information gathering
@@ -110,10 +110,10 @@ agents:
       - "Provide balanced viewpoints on controversial topics."
       - "Summarize findings in a clear, organized manner."
     rooms:
-      - "!lobby:localhost"    # Main coordination room
-      - "!research:localhost" # Research collaboration
-      - "!science:localhost"  # Scientific research
-      - "!news:localhost"     # Current events research
+      - "!XeqkOykvpdhfoKCrQO:localhost"    # Main coordination room (lobby)
+      - "!dILWmRJrGmlMysZWtb:localhost" # Research collaboration (research)
+      - "!vHavUnTzTMmAUEveXo:localhost"  # Scientific research (science)
+      - "!RBzXsLHNRFtOVPvgGT:localhost"     # Current events research (news)
     num_history_runs: 5
 
   # Financial data analysis agent
@@ -131,10 +131,10 @@ agents:
       - "Include relevant disclaimers about investment advice."
       - "Present data in a clear, organized format."
     rooms:
-      - "!lobby:localhost"     # Main coordination room
-      - "!finance:localhost"   # Financial analysis
-      - "!analysis:localhost"  # Data analysis collaboration
-      - "!business:localhost"  # Business discussions
+      - "!XeqkOykvpdhfoKCrQO:localhost"     # Main coordination room (lobby)
+      - "!fZaLPNeaIfPtphCLSd:localhost"   # Financial analysis (finance)
+      - "!XiGCYUuFjGCzcOGQcS:localhost"  # Data analysis collaboration (analysis)
+      - "!RiaUjyDPSbzFKSkUDg:localhost"  # Business discussions (business)
     num_history_runs: 5
 
   # News and current events agent
@@ -152,10 +152,10 @@ agents:
       - "Distinguish between news and opinion pieces."
       - "Highlight key developments and their significance."
     rooms:
-      - "!lobby:localhost"    # Main coordination room
-      - "!news:localhost"     # News and current events
-      - "!research:localhost" # Research collaboration
-      - "!business:localhost" # Business news
+      - "!XeqkOykvpdhfoKCrQO:localhost"    # Main coordination room (lobby)
+      - "!RBzXsLHNRFtOVPvgGT:localhost"     # News and current events (news)
+      - "!dILWmRJrGmlMysZWtb:localhost" # Research collaboration (research)
+      - "!RiaUjyDPSbzFKSkUDg:localhost" # Business news (business)
     num_history_runs: 5
 
   # Data analysis agent
@@ -173,11 +173,11 @@ agents:
       - "Provide actionable insights and recommendations."
       - "Handle missing or inconsistent data appropriately."
     rooms:
-      - "!lobby:localhost"     # Main coordination room
-      - "!analysis:localhost"  # Data analysis hub
-      - "!science:localhost"   # Scientific data analysis
-      - "!finance:localhost"   # Financial data analysis
-      - "!business:localhost"  # Business analytics
+      - "!XeqkOykvpdhfoKCrQO:localhost"     # Main coordination room (lobby)
+      - "!XiGCYUuFjGCzcOGQcS:localhost"  # Data analysis hub (analysis)
+      - "!vHavUnTzTMmAUEveXo:localhost"   # Scientific data analysis (science)
+      - "!fZaLPNeaIfPtphCLSd:localhost"   # Financial data analysis (finance)
+      - "!RiaUjyDPSbzFKSkUDg:localhost"  # Business analytics (business)
     num_history_runs: 5
 
 # Configuration for agent defaults
