@@ -1,3 +1,4 @@
+import functools
 import os
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,12 @@ AGNO_MODEL_STR = os.getenv("AGNO_MODEL")
 
 # Configure caching
 ENABLE_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
+
+
+@functools.cache
+def get_cache(storage_path: Path) -> diskcache.Cache | None:
+    """Get or create a cache instance for the given storage path."""
+    return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_CACHE else None
 
 
 def get_model_instance() -> Model:
@@ -61,7 +68,8 @@ async def _cached_agent_run(
         context += "\nCurrent message:\n"
         full_prompt = context + prompt
 
-    if not ENABLE_CACHE:
+    cache = get_cache(storage_path)
+    if cache is None:
         # If caching is disabled, run directly
         agent = create_agent(agent_name, model, storage_path)
         return await agent.arun(full_prompt, session_id=session_id)  # type: ignore[no-any-return]
@@ -69,7 +77,6 @@ async def _cached_agent_run(
     # Create a cache key based on agent name, prompt, and model
     cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
     # Check if result exists in cache
-    cache = diskcache.Cache(storage_path / ".ai_cache")
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         logger.info(f"Cache hit for agent '{agent_name}' with prompt: '{prompt}'")
