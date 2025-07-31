@@ -172,6 +172,7 @@ async def _run() -> None:
 
                 # Ensure agents are invited to all required rooms (including existing ones)
                 console.print("\n🔄 Ensuring agents are invited to all rooms...")
+                invite_count = 0
                 for room_key in required_rooms:
                     if room_key in existing_rooms:
                         room = existing_rooms[room_key]
@@ -185,6 +186,10 @@ async def _run() -> None:
                                 agent_id = f"@mindroom_{agent_name}:localhost"
                                 with contextlib.suppress(Exception):
                                     await client.room_invite(room.room_id, agent_id)
+                                    invite_count += 1
+                                    # Add small delay every 10 invites to avoid rate limits
+                                    if invite_count % 10 == 0:
+                                        await asyncio.sleep(0.1)
             else:
                 console.print(f"❌ Failed to login: {response}")
                 sys.exit(1)
