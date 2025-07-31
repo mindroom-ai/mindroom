@@ -71,8 +71,29 @@ def setup_logging(level: str = "INFO", colorize: bool = True) -> Logger:
         logging.getLogger(name).handlers = []
         logging.getLogger(name).propagate = True
 
-    # Optional: Set specific levels for noisy libraries
-    # logging.getLogger("urllib3").setLevel(logging.WARNING)
-    # logging.getLogger("asyncio").setLevel(logging.WARNING)
+    # Set specific levels for noisy libraries (unless in DEBUG mode)
+    if level != "DEBUG":
+        # Silence noisy third-party libraries
+        noisy_libraries = [
+            "urllib3",
+            "asyncio",
+            "nio.client",
+            "nio.responses",
+            "nio.api",
+            "httpx",
+            "httpcore",
+            "charset_normalizer",
+            "filelock",
+            "peewee",
+            "markdown_it",
+            "anthropic",
+            "openai",
+        ]
+
+        for lib in noisy_libraries:
+            logging.getLogger(lib).setLevel(logging.WARNING)
+
+    # For mindroom logs, always show at the configured level
+    logging.getLogger("mindroom").setLevel(level)
 
     return logger

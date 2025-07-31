@@ -168,15 +168,16 @@ class TestAgentBot:
         mock_event.source = {
             "content": {
                 "body": "@mindroom_calculator:localhost: What's 2+2?",
+                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
             }
         }
 
         await bot._on_message(mock_room, mock_event)
 
-        # Verify AI response was called
+        # Verify AI response was called with the full message body as prompt
         mock_ai_response.assert_called_once_with(
             "calculator",
-            "What's 2+2?",
+            "@mindroom_calculator:localhost: What's 2+2?",
             "!test:localhost",
             thread_history=[],
         )
@@ -198,6 +199,7 @@ class TestAgentBot:
         mock_event = MagicMock()
         mock_event.sender = "@mindroom_calculator:localhost"
         mock_event.body = "My own message"
+        mock_event.source = {"content": {}}
 
         await bot._on_message(mock_room, mock_event)
 
@@ -214,6 +216,7 @@ class TestAgentBot:
         mock_event = MagicMock()
         mock_event.sender = "@mindroom_general:localhost"
         mock_event.body = "Message from another agent"
+        mock_event.source = {"content": {}}
 
         await bot._on_message(mock_room, mock_event)
 

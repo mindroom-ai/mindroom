@@ -204,7 +204,15 @@ async def _create_missing_rooms(client: nio.AsyncClient, required_rooms: set[str
 
 
 @app.command()
-def run():
+def run(
+    log_level: str = typer.Option(
+        "INFO",
+        "--log-level",
+        "-l",
+        help="Set the logging level (DEBUG, INFO, WARNING, ERROR)",
+        case_sensitive=False,
+    ),
+) -> None:
     """Run the mindroom multi-agent system.
 
     This command automatically:
@@ -213,15 +221,15 @@ def run():
     - Creates all rooms defined in agents.yaml
     - Starts the multi-agent system
     """
-    asyncio.run(_run())
+    asyncio.run(_run(log_level=log_level.upper()))
 
 
-async def _run() -> None:
+async def _run(log_level: str = "INFO") -> None:
     """Run the multi-agent system with automatic setup."""
     from mindroom.agent_loader import load_config
     from mindroom.bot import main
 
-    console.print("🚀 Starting Mindroom multi-agent system...\n")
+    console.print(f"🚀 Starting Mindroom multi-agent system (log level: {log_level})...\n")
 
     # Ensure we have a user account
     config = await _ensure_user_account()
@@ -258,7 +266,7 @@ async def _run() -> None:
     console.print("Press Ctrl+C to stop\n")
 
     try:
-        await main()
+        await main(log_level=log_level)
     except KeyboardInterrupt:
         console.print("\n✋ Stopped")
 

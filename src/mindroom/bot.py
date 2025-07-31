@@ -9,12 +9,9 @@ from loguru import logger
 
 from .agent_loader import load_config
 from .ai import ai_response
-from .logging_config import setup_logging
 from .matrix import fetch_thread_history, prepare_response_content
 from .matrix_agent_manager import AgentMatrixUser, ensure_all_agent_users, login_agent_user
 from .matrix_room_manager import get_room_aliases
-
-setup_logging(level="DEBUG")
 
 
 @dataclass
@@ -265,8 +262,17 @@ class MultiAgentOrchestrator:
                 logger.error(f"Failed to invite agent {agent_name} to room {room_id}: {e}")
 
 
-async def main() -> None:
-    """Main entry point for the multi-agent bot system."""
+async def main(log_level: str = "INFO") -> None:
+    """Main entry point for the multi-agent bot system.
+
+    Args:
+        log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
+    """
+    from .logging_config import setup_logging
+
+    # Set up logging with the specified level
+    setup_logging(level=log_level)
+
     # Create tmp directory for sqlite dbs if it doesn't exist
     if not os.path.exists("tmp"):
         os.makedirs("tmp")

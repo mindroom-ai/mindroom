@@ -62,6 +62,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
                 "content": {
                     "msgtype": "m.text",
                     "body": message_body,
+                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
                 "event_id": "$test_event:example.org",
                 "sender": test_user_id,
@@ -88,10 +89,10 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
                 # Process the message
                 await bot._on_message(room, message_event)
 
-                # Verify AI was called with correct parameters
+                # Verify AI was called with correct parameters (full message body as prompt)
                 mock_ai.assert_called_once_with(
                     "calculator",
-                    "What's 15% of 200?",
+                    "@mindroom_calculator:localhost What's 15% of 200?",
                     test_room_id,
                     thread_history=[],
                 )
