@@ -7,10 +7,7 @@ from dotenv import load_dotenv
 # Load configuration from .env file
 load_dotenv()
 
-# Load configuration from .env file
-MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER")
-MATRIX_USER_ID = os.getenv("MATRIX_USER_ID")
-MATRIX_PASSWORD = os.getenv("MATRIX_PASSWORD")
+MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
 
 
 def prepare_response_content(response_text: str, event: nio.RoomMessageText) -> dict[str, Any]:

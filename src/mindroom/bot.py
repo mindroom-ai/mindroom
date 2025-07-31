@@ -201,20 +201,12 @@ class MultiAgentOrchestrator:
             await self.initialize()
 
         # Start each agent bot
-        start_tasks = []
-        for _agent_name, bot in self.agent_bots.items():
-            start_tasks.append(bot.start())
-
-        await asyncio.gather(*start_tasks)
+        await asyncio.gather(*(bot.start() for bot in self.agent_bots.values()))
         self.running = True
         logger.info("All agent bots started successfully")
 
         # Run sync loops for all agents concurrently
-        sync_tasks = []
-        for bot in self.agent_bots.values():
-            sync_tasks.append(bot.sync_forever())
-
-        await asyncio.gather(*sync_tasks)
+        await asyncio.gather(*(bot.sync_forever() for bot in self.agent_bots.values()))
 
     async def stop(self) -> None:
         """Stop all agent bots."""
