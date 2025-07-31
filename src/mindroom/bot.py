@@ -185,9 +185,7 @@ class AgentBot:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
         # Generate response
-        response_text = await ai_response(
-            self.agent_name, prompt, session_id, thread_history=thread_history, storage_path=self.storage_path
-        )
+        response_text = await ai_response(self.agent_name, prompt, session_id, self.storage_path, thread_history)
 
         # Prepare and send response
         content = prepare_response_content(response_text, event, agent_name=self.agent_name)
