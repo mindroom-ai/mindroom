@@ -1,0 +1,9 @@
+agent_general:
+  password: general_secure_password_65356d3d32270d2e
+  username: mindroom_general
+bot:
+  password: bot_password_123
+  username: mindroom_bot
+user:
+  password: user_password_123
+  username: mindroom_user
