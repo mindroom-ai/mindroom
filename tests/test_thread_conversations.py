@@ -11,16 +11,11 @@ import re
 from typing import Any
 from unittest.mock import patch
 
+import nio
 import pytest
 import pytest_asyncio
 from aioresponses import aioresponses
 from dotenv import load_dotenv
-from nio import (
-    AsyncClient,
-    MatrixRoom,
-    MessageDirection,
-    RoomMessageText,
-)
 
 from mindroom.bot import Bot
 
@@ -61,10 +56,10 @@ def _mock_room_send_response(
 
 @pytest_asyncio.fixture
 async def client():
-    """Create an AsyncClient for testing and ensure cleanup."""
+    """Create an nio.AsyncClient for testing and ensure cleanup."""
     homeserver = "https://matrix.example.org"
     user_id = "@test:example.org"
-    client = AsyncClient(homeserver, user_id)
+    client = nio.AsyncClient(homeserver, user_id)
     yield client
     await client.close()
 
@@ -91,9 +86,9 @@ async def _create_thread_message(
     sender: str,
     body: str,
     thread_root: str,
-) -> RoomMessageText:
+) -> nio.RoomMessageText:
     """Create a threaded message event."""
-    return RoomMessageText(
+    return nio.RoomMessageText(
         body=body,
         formatted_body=body,
         format="org.matrix.custom.html",
@@ -128,7 +123,7 @@ async def test_single_thread_context_preservation_with_ai(bot: Bot) -> None:
     bot.client.user_id = "@bot:example.org"
     bot.client.user = "bot"
 
-    room = MatrixRoom(room_id, bot.client.user_id)
+    room = nio.MatrixRoom(room_id, bot.client.user_id)
 
     # Track AI responses from actual AI
     ai_responses = []
@@ -234,7 +229,7 @@ async def test_multiple_threads_context_isolation_with_ai(bot: Bot) -> None:
     bot.client.user_id = "@bot:example.org"
     bot.client.user = "bot"
 
-    room = MatrixRoom(room_id, bot.client.user_id)
+    room = nio.MatrixRoom(room_id, bot.client.user_id)
 
     # Track AI responses by thread
     thread_responses: dict[str, list[str]] = {thread1_root: [], thread2_root: []}
@@ -368,7 +363,7 @@ async def test_multiple_agents_maintain_separate_contexts_in_thread(bot: Bot) ->
     bot.client.user_id = "@bot:example.org"
     bot.client.user = "bot"
 
-    room = MatrixRoom(room_id, bot.client.user_id)
+    room = nio.MatrixRoom(room_id, bot.client.user_id)
 
     # Track AI responses
     ai_responses = []
@@ -497,7 +492,7 @@ async def test_thread_all_messages_treated_as_mentions_with_ai(bot: Bot) -> None
     bot.client.user_id = "@bot:example.org"
     bot.client.user = "bot"
 
-    room = MatrixRoom(room_id, bot.client.user_id)
+    room = nio.MatrixRoom(room_id, bot.client.user_id)
 
     # Track AI responses from actual AI
     ai_responses = []
@@ -592,7 +587,7 @@ async def test_agent_sees_full_thread_history(bot: Bot) -> None:
     bot.client.user_id = "@bot:example.org"
     bot.client.user = "bot"
 
-    room = MatrixRoom(room_id, bot.client.user_id)
+    room = nio.MatrixRoom(room_id, bot.client.user_id)
 
     # Track AI responses
     ai_responses = []
@@ -641,7 +636,7 @@ async def test_agent_sees_full_thread_history(bot: Bot) -> None:
         start=None,
         limit=100,
         message_filter={"types": ["m.room.message"]},
-        direction=MessageDirection.back,
+        direction=nio.MessageDirection.back,
     )
 
     # Verify AI responded

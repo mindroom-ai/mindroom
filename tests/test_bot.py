@@ -1,7 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
-from nio import RoomMessageText
 
 from mindroom.bot import Bot
 from mindroom.matrix import parse_message
@@ -57,7 +57,7 @@ async def test_on_message_thread_reply(mock_ai_response: AsyncMock) -> None:
     room = MagicMock()
     room.room_id = "!room:localhost"
 
-    event = RoomMessageText(
+    event = nio.RoomMessageText(
         body="a threaded message",
         formatted_body="a threaded message",
         format="org.matrix.custom.html",

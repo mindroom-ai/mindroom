@@ -6,9 +6,9 @@ import os
 import sys
 from pathlib import Path
 
+import nio
 import typer
 import yaml
-from nio import AsyncClient, LoginResponse, RegisterResponse, RoomCreateResponse
 from rich.console import Console
 
 app = typer.Typer(help="Mindroom Matrix bot management CLI")
@@ -50,10 +50,10 @@ async def _setup():
     bot_username = "mindroom_bot"
     bot_password = "bot_password_123"
 
-    client = AsyncClient(HOMESERVER, f"@{bot_username}:localhost")
+    client = nio.AsyncClient(HOMESERVER, f"@{bot_username}:localhost")
     try:
         response = await client.register(username=bot_username, password=bot_password)
-        if isinstance(response, RegisterResponse):
+        if isinstance(response, nio.RegisterResponse):
             console.print(f"✅ Created bot: @{bot_username}:localhost")
             creds["bot"] = {"username": bot_username, "password": bot_password}
         else:
@@ -66,10 +66,10 @@ async def _setup():
     user_username = "mindroom_user"
     user_password = "user_password_123"
 
-    client = AsyncClient(HOMESERVER, f"@{user_username}:localhost")
+    client = nio.AsyncClient(HOMESERVER, f"@{user_username}:localhost")
     try:
         response = await client.register(username=user_username, password=user_password)
-        if isinstance(response, RegisterResponse):
+        if isinstance(response, nio.RegisterResponse):
             console.print(f"✅ Created user: @{user_username}:localhost")
             creds["user"] = {"username": user_username, "password": user_password}
         else:
@@ -152,12 +152,12 @@ async def _test():
     password = creds["user"]["password"]
     bot_id = f"@{creds['bot']['username']}:localhost"
 
-    client = AsyncClient(HOMESERVER, username)
+    client = nio.AsyncClient(HOMESERVER, username)
 
     try:
         # Login
         response = await client.login(password=password)
-        if not isinstance(response, LoginResponse):
+        if not isinstance(response, nio.LoginResponse):
             console.print(f"❌ Failed to login: {response}")
             return
 
@@ -165,7 +165,7 @@ async def _test():
 
         # Create room
         response = await client.room_create(name="Mindroom Test")
-        if isinstance(response, RoomCreateResponse):
+        if isinstance(response, nio.RoomCreateResponse):
             room_id = response.room_id
             console.print(f"✅ Created room: {room_id}")
 

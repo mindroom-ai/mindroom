@@ -7,13 +7,9 @@ We test the full flow from receiving events to making HTTP calls.
 import re
 from unittest.mock import patch
 
+import nio
 import pytest
 from aioresponses import aioresponses
-from nio import (
-    InviteMemberEvent,
-    MatrixRoom,
-    RoomMessageText,
-)
 
 from mindroom.bot import Bot
 
@@ -50,7 +46,7 @@ async def test_bot_processes_message_and_sends_response() -> None:
 
         # Create a message event
         message_body = f"{bot_user_id} Hello, can you help me?"
-        message_event = RoomMessageText(
+        message_event = nio.RoomMessageText(
             body=message_body,
             formatted_body=message_body,
             format="org.matrix.custom.html",
@@ -67,7 +63,7 @@ async def test_bot_processes_message_and_sends_response() -> None:
         )
         message_event.sender = test_user_id
 
-        room = MatrixRoom(test_room_id, bot_user_id)
+        room = nio.MatrixRoom(test_room_id, bot_user_id)
 
         try:
             with aioresponses() as m:
@@ -129,7 +125,7 @@ async def test_bot_handles_room_invite() -> None:
         bot.client.user_id = bot_user_id
 
         # Create invite event
-        invite_event = InviteMemberEvent(
+        invite_event = nio.InviteMemberEvent(
             source={
                 "type": "m.room.member",
                 "state_key": bot_user_id,
@@ -144,7 +140,7 @@ async def test_bot_handles_room_invite() -> None:
             prev_content=None,
         )
 
-        room = MatrixRoom(test_room_id, bot_user_id)
+        room = nio.MatrixRoom(test_room_id, bot_user_id)
 
         # Mock the join method
         join_called = False
@@ -192,7 +188,7 @@ async def test_bot_preserves_thread_context() -> None:
         bot.client.user = "bot"
 
         # Create threaded message
-        thread_message = RoomMessageText(
+        thread_message = nio.RoomMessageText(
             body=f"{bot_user_id} What is Python?",
             formatted_body=f"{bot_user_id} What is Python?",
             format="org.matrix.custom.html",
@@ -215,7 +211,7 @@ async def test_bot_preserves_thread_context() -> None:
         )
         thread_message.sender = "@user:example.org"
 
-        room = MatrixRoom(test_room_id, bot_user_id)
+        room = nio.MatrixRoom(test_room_id, bot_user_id)
 
         sent_content = None
 
@@ -281,7 +277,7 @@ async def test_bot_ignores_own_messages() -> None:
         bot.client.user_id = bot_user_id
 
         # Create message from bot itself
-        self_message = RoomMessageText(
+        self_message = nio.RoomMessageText(
             body="I am the bot",
             formatted_body="I am the bot",
             format="org.matrix.custom.html",
@@ -295,7 +291,7 @@ async def test_bot_ignores_own_messages() -> None:
         )
         self_message.sender = bot_user_id
 
-        room = MatrixRoom(test_room_id, bot_user_id)
+        room = nio.MatrixRoom(test_room_id, bot_user_id)
 
         try:
             with aioresponses() as m:  # noqa: SIM117
@@ -338,7 +334,7 @@ async def test_bot_routes_to_different_agents() -> None:
         bot.client.user_id = bot_user_id
         bot.client.user = "bot"
 
-        room = MatrixRoom(test_room_id, bot_user_id)
+        room = nio.MatrixRoom(test_room_id, bot_user_id)
 
         try:
             for message_body, expected_agent, expected_prompt in test_cases:
@@ -350,7 +346,7 @@ async def test_bot_routes_to_different_agents() -> None:
                         payload={"event_id": "$resp:example.org"},
                     )
 
-                    message = RoomMessageText(
+                    message = nio.RoomMessageText(
                         body=message_body,
                         formatted_body=message_body,
                         format="org.matrix.custom.html",

@@ -24,31 +24,10 @@ from contextlib import suppress
 from typing import Any
 from unittest.mock import patch
 
+import nio
 import pytest
 import pytest_asyncio
 from aioresponses import CallbackResult, aioresponses
-from nio import (
-    AsyncClient,
-    JoinedMembersError,
-    JoinedMembersResponse,
-    JoinedRoomsError,
-    JoinedRoomsResponse,
-    JoinError,
-    JoinResponse,
-    LoginInfoError,
-    LoginInfoResponse,
-    LoginResponse,
-    MatrixRoom,
-    RoomMessagesError,
-    RoomMessagesResponse,
-    RoomMessageText,
-    RoomPutStateError,
-    RoomPutStateResponse,
-    RoomSendError,
-    RoomSendResponse,
-    SyncError,
-    SyncResponse,
-)
 
 from mindroom.bot import Bot
 
@@ -60,16 +39,16 @@ class TestMockingStrategy:
 
     @pytest_asyncio.fixture
     async def client(self):
-        """Create an AsyncClient for testing and ensure cleanup."""
+        """Create an nio.AsyncClient for testing and ensure cleanup."""
         homeserver = "https://matrix.example.org"
         user_id = "@test:example.org"
-        client = AsyncClient(homeserver, user_id)
+        client = nio.AsyncClient(homeserver, user_id)
         yield client
         await client.close()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_login_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_login_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that login actually requires HTTP mocking to succeed."""
         if use_mock:
             # WITH mocking - should succeed
@@ -81,14 +60,14 @@ class TestMockingStrategy:
                         "user_id": "@test:example.org",  # Must be hardcoded - client.user_id is empty before login
                         "access_token": "test_token",
                         "device_id": "TESTDEVICE",
-                        "home_server": "example.org",  # Required field for nio LoginResponse validation
+                        "home_server": "example.org",  # Required field for nio nio.LoginResponse validation
                     },
                 )
 
                 response = await client.login("password")
 
                 # Should succeed
-                assert isinstance(response, LoginResponse)
+                assert isinstance(response, nio.LoginResponse)
                 assert client.access_token == "test_token"
                 assert len(m.requests) == 1
         else:
@@ -106,7 +85,7 @@ class TestMockingStrategy:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_room_send_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_room_send_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that room_send actually requires HTTP mocking to succeed."""
         room_id = "!test:example.org"
 
@@ -132,7 +111,7 @@ class TestMockingStrategy:
                 )
 
                 # Should succeed
-                assert isinstance(response, RoomSendResponse)
+                assert isinstance(response, nio.RoomSendResponse)
                 assert response.event_id == "$test_event:example.org"
                 assert len(m.requests) == 1
         else:
@@ -148,14 +127,14 @@ class TestMockingStrategy:
                     timeout=TIMEOUT,
                 )
                 # Should fail
-                assert isinstance(response, RoomSendError)
+                assert isinstance(response, nio.RoomSendError)
             except TimeoutError:
                 # Timeout is also a valid failure mode
                 pass
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_sync_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_sync_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that sync actually requires HTTP mocking to succeed."""
         client.access_token = "test_token"
 
@@ -177,7 +156,7 @@ class TestMockingStrategy:
                 response = await client.sync(timeout=30)
 
                 # Should succeed
-                assert isinstance(response, SyncResponse)
+                assert isinstance(response, nio.SyncResponse)
                 assert response.next_batch == "s123456"
                 assert len(m.requests) == 1
         else:
@@ -186,7 +165,7 @@ class TestMockingStrategy:
             try:
                 response = await asyncio.wait_for(client.sync(timeout=1000), timeout=TIMEOUT)
                 # Should fail
-                assert isinstance(response, SyncError)
+                assert isinstance(response, nio.SyncError)
                 assert "Failed to sync" in str(response) or "Unknown error" in str(response)
             except TimeoutError:
                 # This is also a valid failure mode
@@ -194,7 +173,7 @@ class TestMockingStrategy:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_join_room_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_join_room_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that join actually requires HTTP mocking to succeed."""
         room_id = "!test:example.org"
         client.access_token = "test_token"
@@ -211,7 +190,7 @@ class TestMockingStrategy:
                 response = await client.join(room_id)
 
                 # Should succeed
-                assert isinstance(response, JoinResponse)
+                assert isinstance(response, nio.JoinResponse)
                 assert response.room_id == room_id
                 assert len(m.requests) == 1
         else:
@@ -219,13 +198,13 @@ class TestMockingStrategy:
             try:
                 response = await asyncio.wait_for(client.join(room_id), timeout=TIMEOUT)
                 # Should fail
-                assert isinstance(response, JoinError)
+                assert isinstance(response, nio.JoinError)
             except TimeoutError:
                 # Timeout is also a valid failure mode
                 pass
 
     @pytest.mark.asyncio
-    async def test_multiple_operations_require_all_mocks(self, client: AsyncClient) -> None:
+    async def test_multiple_operations_require_all_mocks(self, client: nio.AsyncClient) -> None:
         """Test that complex operations require all HTTP calls to be mocked."""
         homeserver = client.homeserver
 
@@ -245,12 +224,12 @@ class TestMockingStrategy:
 
             # Login should work
             login_response = await client.login("password")
-            assert isinstance(login_response, LoginResponse)
+            assert isinstance(login_response, nio.LoginResponse)
 
             # But sync should fail because it's not mocked
             try:
                 sync_response = await asyncio.wait_for(client.sync(timeout=1000), timeout=TIMEOUT)
-                assert isinstance(sync_response, SyncError)
+                assert isinstance(sync_response, nio.SyncError)
             except TimeoutError:
                 # This is also a valid failure mode
                 pass
@@ -281,14 +260,14 @@ class TestMockingStrategy:
 
             # Both should work
             login_response = await client.login("password")
-            assert isinstance(login_response, LoginResponse)
+            assert isinstance(login_response, nio.LoginResponse)
 
             sync_response = await client.sync(timeout=1000)
-            assert isinstance(sync_response, SyncResponse)
+            assert isinstance(sync_response, nio.SyncResponse)
             assert sync_response.next_batch == "s789"
 
     @pytest.mark.asyncio
-    async def test_request_inspection(self, client: AsyncClient) -> None:
+    async def test_request_inspection(self, client: nio.AsyncClient) -> None:
         """Test that we can inspect the actual HTTP requests made."""
         room_id = "!test:example.org"
         client.access_token = "test_token"
@@ -409,7 +388,7 @@ class TestBotMockingStrategy:
         bot.client.user = "bot"
 
         # Create a test message
-        message = RoomMessageText(
+        message = nio.RoomMessageText(
             body=f"{bot.client.user_id} Hello bot!",
             formatted_body=f"{bot.client.user_id} Hello bot!",
             format="org.matrix.custom.html",
@@ -423,7 +402,7 @@ class TestBotMockingStrategy:
         )
         message.sender = "@user:example.org"
 
-        room = MatrixRoom(room_id, bot.client.user_id)
+        room = nio.MatrixRoom(room_id, bot.client.user_id)
 
         # WITHOUT HTTP mocking but WITH AI mocking - should fail
         with patch("mindroom.bot.ai_response") as mock_ai:
@@ -460,16 +439,16 @@ class TestMockingStrategyExtended:
 
     @pytest_asyncio.fixture
     async def client(self):
-        """Create an AsyncClient for testing and ensure cleanup."""
+        """Create an nio.AsyncClient for testing and ensure cleanup."""
         homeserver = "https://matrix.example.org"
         user_id = "@test:example.org"
-        client = AsyncClient(homeserver, user_id)
+        client = nio.AsyncClient(homeserver, user_id)
         yield client
         await client.close()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_set_displayname_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_set_displayname_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that set_displayname actually requires HTTP mocking to succeed."""
         client.access_token = "test_token"
         display_name = "Test Bot"
@@ -497,7 +476,7 @@ class TestMockingStrategyExtended:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_room_invite_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_room_invite_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that room_invite actually requires HTTP mocking to succeed."""
         room_id = "!test:example.org"
         user_id = "@invitee:example.org"
@@ -524,7 +503,7 @@ class TestMockingStrategyExtended:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_room_messages_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_room_messages_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that room_messages actually requires HTTP mocking to succeed."""
         room_id = "!test:example.org"
         client.access_token = "test_token"
@@ -556,21 +535,21 @@ class TestMockingStrategyExtended:
                 response = await client.room_messages(room_id, start="s123")
 
                 # Should succeed
-                assert isinstance(response, RoomMessagesResponse)
+                assert isinstance(response, nio.RoomMessagesResponse)
                 assert len(response.chunk) == 1
                 assert len(m.requests) == 1
         else:
             # WITHOUT mocking - should fail
             try:
                 response = await asyncio.wait_for(client.room_messages(room_id, start="s123"), timeout=TIMEOUT)
-                assert isinstance(response, RoomMessagesError)
+                assert isinstance(response, nio.RoomMessagesError)
             except TimeoutError:
                 # Timeout is also valid
                 pass
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_joined_members_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_joined_members_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that joined_members actually requires HTTP mocking to succeed."""
         room_id = "!test:example.org"
         client.access_token = "test_token"
@@ -598,21 +577,21 @@ class TestMockingStrategyExtended:
                 response = await client.joined_members(room_id)
 
                 # Should succeed
-                assert isinstance(response, JoinedMembersResponse)
+                assert isinstance(response, nio.JoinedMembersResponse)
                 assert len(response.members) == 2
                 assert len(m.requests) == 1
         else:
             # WITHOUT mocking - should fail
             try:
                 response = await asyncio.wait_for(client.joined_members(room_id), timeout=TIMEOUT)
-                assert isinstance(response, JoinedMembersError)
+                assert isinstance(response, nio.JoinedMembersError)
             except TimeoutError:
                 # Timeout is also valid
                 pass
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_joined_rooms_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_joined_rooms_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that joined_rooms actually requires HTTP mocking to succeed."""
         client.access_token = "test_token"
 
@@ -634,7 +613,7 @@ class TestMockingStrategyExtended:
                 response = await client.joined_rooms()
 
                 # Should succeed
-                assert isinstance(response, JoinedRoomsResponse)
+                assert isinstance(response, nio.JoinedRoomsResponse)
                 assert len(response.rooms) == 3
                 assert "!room1:example.org" in response.rooms
                 assert len(m.requests) == 1
@@ -642,14 +621,14 @@ class TestMockingStrategyExtended:
             # WITHOUT mocking - should fail
             try:
                 response = await asyncio.wait_for(client.joined_rooms(), timeout=TIMEOUT)
-                assert isinstance(response, JoinedRoomsError)
+                assert isinstance(response, nio.JoinedRoomsError)
             except TimeoutError:
                 # Timeout is also valid
                 pass
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_room_put_state_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_room_put_state_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that room_put_state actually requires HTTP mocking to succeed."""
         room_id = "!test:example.org"
         event_type = "m.room.name"
@@ -668,21 +647,21 @@ class TestMockingStrategyExtended:
                 response = await client.room_put_state(room_id, event_type, content)
 
                 # Should succeed
-                assert isinstance(response, RoomPutStateResponse)
+                assert isinstance(response, nio.RoomPutStateResponse)
                 assert response.event_id == "$state_event:example.org"
                 assert len(m.requests) == 1
         else:
             # WITHOUT mocking - should fail
             try:
                 response = await asyncio.wait_for(client.room_put_state(room_id, event_type, content), timeout=TIMEOUT)
-                assert isinstance(response, RoomPutStateError)
+                assert isinstance(response, nio.RoomPutStateError)
             except TimeoutError:
                 # Timeout is also valid
                 pass
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_login_info_mocking(self, client: AsyncClient, use_mock: bool) -> None:
+    async def test_login_info_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that login_info actually requires HTTP mocking to succeed."""
         if use_mock:
             # WITH mocking - should succeed
@@ -710,7 +689,7 @@ class TestMockingStrategyExtended:
                 response = await client.login_info()
 
                 # Should succeed
-                assert isinstance(response, LoginInfoResponse)
+                assert isinstance(response, nio.LoginInfoResponse)
                 assert len(response.flows) == 2
                 assert response.flows[0] == "m.login.password"
                 assert response.flows[1] == "m.login.sso"
@@ -721,4 +700,4 @@ class TestMockingStrategyExtended:
                 response = await asyncio.wait_for(client.login_info(), timeout=TIMEOUT)
                 # Some servers might actually respond, so check for error
                 if response:
-                    assert isinstance(response, LoginInfoError | LoginInfoResponse)
+                    assert isinstance(response, nio.LoginInfoError | nio.LoginInfoResponse)

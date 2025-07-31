@@ -1,16 +1,8 @@
 import asyncio
 import os
-from typing import Any
 
+import nio
 from loguru import logger
-from nio import (
-    AsyncClient,
-    InviteEvent,
-    LoginResponse,
-    MatrixRoom,
-    MessageDirection,
-    RoomMessageText,
-)
 
 from .ai import ai_response
 from .logging_config import setup_logging
@@ -18,56 +10,13 @@ from .matrix import (
     MATRIX_HOMESERVER,
     MATRIX_PASSWORD,
     MATRIX_USER_ID,
+    fetch_thread_history,
     handle_message_parsing,
     prepare_response_content,
 )
 
 # Configure logger with colors
 setup_logging(level="INFO")
-
-
-async def fetch_thread_history(client: AsyncClient, room_id: str, thread_id: str) -> list[dict[str, Any]]:
-    """Fetch all messages in a thread.
-
-    Args:
-        client: The Matrix client instance
-        room_id: The room ID to fetch messages from
-        thread_id: The thread root event ID
-
-    Returns:
-        List of messages in chronological order, each containing sender, body, timestamp, and event_id
-
-    """
-    messages = []
-    from_token = None
-
-    while True:
-        response = await client.room_messages(
-            room_id,
-            start=from_token,
-            limit=100,
-            message_filter={"types": ["m.room.message"]},
-            direction=MessageDirection.back,
-        )
-
-        for event in response.chunk:
-            if hasattr(event, "source") and event.source.get("type") == "m.room.message":
-                relates_to = event.source.get("content", {}).get("m.relates_to", {})
-                if relates_to.get("rel_type") == "m.thread" and relates_to.get("event_id") == thread_id:
-                    messages.append(
-                        {
-                            "sender": event.sender,
-                            "body": getattr(event, "body", ""),
-                            "timestamp": event.server_timestamp,
-                            "event_id": event.event_id,
-                        },
-                    )
-
-        if not response.end:
-            break
-        from_token = response.end
-
-    return list(reversed(messages))  # Return in chronological order
 
 
 class Bot:
@@ -77,29 +26,29 @@ class Bot:
             raise ValueError(msg)
         assert MATRIX_HOMESERVER is not None
         assert MATRIX_USER_ID is not None
-        self.client = AsyncClient(MATRIX_HOMESERVER, MATRIX_USER_ID)
-        self.client.add_event_callback(self._on_invite, InviteEvent)
-        self.client.add_event_callback(self._on_message, RoomMessageText)
+        self.client = nio.AsyncClient(MATRIX_HOMESERVER, MATRIX_USER_ID)
+        self.client.add_event_callback(self._on_invite, nio.InviteEvent)
+        self.client.add_event_callback(self._on_message, nio.RoomMessageText)
 
     async def start(self) -> None:
         """Start the bot."""
         logger.info("Starting bot...")
         assert MATRIX_PASSWORD is not None
         response = await self.client.login(MATRIX_PASSWORD)
-        if isinstance(response, LoginResponse):
+        if isinstance(response, nio.LoginResponse):
             logger.info(f"Successfully logged in as {self.client.user_id}")
             await self.client.sync_forever(timeout=30000)
         else:
             logger.error(f"Failed to log in: {response}")
             await self.client.close()
 
-    async def _on_invite(self, room: MatrixRoom, event: InviteEvent) -> None:
+    async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         """Callback for when the bot is invited to a room."""
         logger.info(f"Received invite to room: {room.display_name} ({room.room_id})")
         await self.client.join(room.room_id)
         logger.info(f"Joined room: {room.room_id}")
 
-    async def _on_message(self, room: MatrixRoom, event: RoomMessageText) -> None:
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Callback for when a message is received in a room."""
         if event.sender == self.client.user_id:
             return
