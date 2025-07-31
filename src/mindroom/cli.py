@@ -212,6 +212,12 @@ def run(
         help="Set the logging level (DEBUG, INFO, WARNING, ERROR)",
         case_sensitive=False,
     ),
+    storage_path: str = typer.Option(
+        "tmp",
+        "--storage-path",
+        "-s",
+        help="Base directory for storing agent data (response tracking, etc.)",
+    ),
 ) -> None:
     """Run the mindroom multi-agent system.
 
@@ -221,10 +227,10 @@ def run(
     - Creates all rooms defined in agents.yaml
     - Starts the multi-agent system
     """
-    asyncio.run(_run(log_level=log_level.upper()))
+    asyncio.run(_run(log_level=log_level.upper(), storage_path=storage_path))
 
 
-async def _run(log_level: str = "INFO") -> None:
+async def _run(log_level: str = "INFO", storage_path: str = "tmp") -> None:
     """Run the multi-agent system with automatic setup."""
     from mindroom.agent_loader import load_config
     from mindroom.bot import main
@@ -266,7 +272,7 @@ async def _run(log_level: str = "INFO") -> None:
     console.print("Press Ctrl+C to stop\n")
 
     try:
-        await main(log_level=log_level)
+        await main(log_level=log_level, storage_path=storage_path)
     except KeyboardInterrupt:
         console.print("\n✋ Stopped")
 

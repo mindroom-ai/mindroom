@@ -25,6 +25,7 @@ class AgentBot:
 
     agent_user: AgentMatrixUser
     rooms: list[str] = field(default_factory=list)
+    storage_path: str = field(default="tmp")
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
@@ -40,7 +41,7 @@ class AgentBot:
             self.client = await login_agent_user(self.agent_user)
 
             # Initialize response tracker
-            self.response_tracker = ResponseTracker(self.agent_name)
+            self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
 
             # Register event callbacks
             logger.debug(f"{colorize(self.agent_name)} Registering event callbacks")
@@ -184,7 +185,9 @@ class AgentBot:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
         # Generate response
-        response_text = await ai_response(self.agent_name, prompt, session_id, thread_history=thread_history)
+        response_text = await ai_response(
+            self.agent_name, prompt, session_id, thread_history=thread_history, storage_path=self.storage_path
+        )
 
         # Prepare and send response
         content = prepare_response_content(response_text, event, agent_name=self.agent_name)
@@ -212,6 +215,7 @@ class AgentBot:
 class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
+    storage_path: str = field(default="tmp")
     agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
 
@@ -241,7 +245,7 @@ class MultiAgentOrchestrator:
                 resolved_room = room_aliases.get(room, room)
                 resolved_rooms.append(resolved_room)
 
-            bot = AgentBot(agent_user, rooms=resolved_rooms)
+            bot = AgentBot(agent_user, rooms=resolved_rooms, storage_path=self.storage_path)
             self.agent_bots[agent_name] = bot
 
         logger.info(f"Initialized {len(self.agent_bots)} agent bots")
@@ -284,22 +288,23 @@ class MultiAgentOrchestrator:
                 logger.error(f"Failed to invite agent {agent_name} to room {room_id}: {e}")
 
 
-async def main(log_level: str = "INFO") -> None:
+async def main(log_level: str = "INFO", storage_path: str = "tmp") -> None:
     """Main entry point for the multi-agent bot system.
 
     Args:
         log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
+        storage_path: The base directory for storing agent data (default: "tmp")
     """
     from .logging_config import setup_logging
 
     # Set up logging with the specified level
     setup_logging(level=log_level)
 
-    # Create tmp directory for sqlite dbs if it doesn't exist
-    if not os.path.exists("tmp"):
-        os.makedirs("tmp")
+    # Create storage directory if it doesn't exist
+    if not os.path.exists(storage_path):
+        os.makedirs(storage_path)
 
-    orchestrator = MultiAgentOrchestrator()
+    orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
     try:
         await orchestrator.start()
     except KeyboardInterrupt:

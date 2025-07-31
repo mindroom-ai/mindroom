@@ -9,14 +9,15 @@ from loguru import logger
 class ResponseTracker:
     """Track which event IDs have been responded to by an agent."""
 
-    def __init__(self, agent_name: str):
+    def __init__(self, agent_name: str, base_path: Path | str = "tmp"):
         """Initialize response tracker for an agent.
 
         Args:
             agent_name: Name of the agent
+            base_path: Base directory for storing response tracking data (default: "tmp")
         """
         self.agent_name = agent_name
-        self.store_path = Path("tmp") / "response_tracking" / agent_name
+        self.store_path = Path(base_path) / "response_tracking" / agent_name
         self.store_path.mkdir(parents=True, exist_ok=True)
         self.responses_file = self.store_path / "responded_events.json"
         self.responded_events: set[str] = self._load_responded_events()

@@ -166,37 +166,33 @@ class TestAgentBot:
         # Initialize response tracker with isolated path
         from mindroom.response_tracker import ResponseTracker
 
-        store_path = tmp_path / "response_tracking" / bot.agent_name
-        store_path.mkdir(parents=True)
+        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
-        with patch("mindroom.response_tracker.Path") as mock_path:
-            mock_path.return_value = store_path
-            bot.response_tracker = ResponseTracker(bot.agent_name)
+        # Create mock room and event
+        mock_room = MagicMock()
+        mock_room.room_id = "!test:localhost"
 
-            # Create mock room and event
-            mock_room = MagicMock()
-            mock_room.room_id = "!test:localhost"
-
-            mock_event = MagicMock()
-            mock_event.sender = "@user:localhost"
-            mock_event.body = "@mindroom_calculator:localhost: What's 2+2?"  # Include full user ID
-            mock_event.event_id = "event123"
-            mock_event.source = {
-                "content": {
-                    "body": "@mindroom_calculator:localhost: What's 2+2?",
-                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-                }
+        mock_event = MagicMock()
+        mock_event.sender = "@user:localhost"
+        mock_event.body = "@mindroom_calculator:localhost: What's 2+2?"  # Include full user ID
+        mock_event.event_id = "event123"
+        mock_event.source = {
+            "content": {
+                "body": "@mindroom_calculator:localhost: What's 2+2?",
+                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
             }
+        }
 
-            await bot._on_message(mock_room, mock_event)
+        await bot._on_message(mock_room, mock_event)
 
-            # Verify AI response was called with the full message body as prompt
-            mock_ai_response.assert_called_once_with(
-                "calculator",
-                "@mindroom_calculator:localhost: What's 2+2?",
-                "!test:localhost",
-                thread_history=[],
-            )
+        # Verify AI response was called with the full message body as prompt
+        mock_ai_response.assert_called_once_with(
+            "calculator",
+            "@mindroom_calculator:localhost: What's 2+2?",
+            "!test:localhost",
+            thread_history=[],
+            storage_path="tmp",
+        )
 
         # Verify message was sent
         bot.client.room_send.assert_called_once()
@@ -266,34 +262,29 @@ class TestAgentBot:
         # Initialize response tracker with isolated path
         from mindroom.response_tracker import ResponseTracker
 
-        store_path = tmp_path / "response_tracking" / bot.agent_name
-        store_path.mkdir(parents=True)
+        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
-        with patch("mindroom.response_tracker.Path") as mock_path:
-            mock_path.return_value = store_path
-            bot.response_tracker = ResponseTracker(bot.agent_name)
+        mock_room = MagicMock()
+        mock_room.room_id = "!test:localhost"
 
-            mock_room = MagicMock()
-            mock_room.room_id = "!test:localhost"
-
-            mock_event = MagicMock()
-            mock_event.sender = "@user:localhost"
-            mock_event.body = "Thread message without mention"
-            mock_event.event_id = "event123"
-            mock_event.source = {
-                "content": {
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "thread_root",
-                    },
+        mock_event = MagicMock()
+        mock_event.sender = "@user:localhost"
+        mock_event.body = "Thread message without mention"
+        mock_event.event_id = "event123"
+        mock_event.source = {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "thread_root",
                 },
-            }
+            },
+        }
 
-            await bot._on_message(mock_room, mock_event)
+        await bot._on_message(mock_room, mock_event)
 
-            # Should respond even without mention
-            mock_ai_response.assert_called_once()
-            bot.client.room_send.assert_called_once()
+        # Should respond even without mention
+        mock_ai_response.assert_called_once()
+        bot.client.room_send.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_agent_bot_skips_already_responded_messages(
@@ -305,39 +296,32 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user)
         bot.client = AsyncMock()
         # Initialize response tracker with isolated path
-        from unittest.mock import patch
-
         from mindroom.response_tracker import ResponseTracker
 
-        store_path = tmp_path / "response_tracking" / bot.agent_name
-        store_path.mkdir(parents=True)
+        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
-        with patch("mindroom.response_tracker.Path") as mock_path:
-            mock_path.return_value = store_path
-            bot.response_tracker = ResponseTracker(bot.agent_name)
+        # Mark an event as already responded
+        bot.response_tracker.mark_responded("event123")
 
-            # Mark an event as already responded
-            bot.response_tracker.mark_responded("event123")
+        # Create mock room and event
+        mock_room = MagicMock()
+        mock_room.room_id = "!test:localhost"
 
-            # Create mock room and event
-            mock_room = MagicMock()
-            mock_room.room_id = "!test:localhost"
-
-            mock_event = MagicMock()
-            mock_event.sender = "@user:localhost"
-            mock_event.body = "@mindroom_calculator:localhost: What's 2+2?"
-            mock_event.event_id = "event123"  # Same event ID
-            mock_event.source = {
-                "content": {
-                    "body": "@mindroom_calculator:localhost: What's 2+2?",
-                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-                }
+        mock_event = MagicMock()
+        mock_event.sender = "@user:localhost"
+        mock_event.body = "@mindroom_calculator:localhost: What's 2+2?"
+        mock_event.event_id = "event123"  # Same event ID
+        mock_event.source = {
+            "content": {
+                "body": "@mindroom_calculator:localhost: What's 2+2?",
+                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
             }
+        }
 
-            await bot._on_message(mock_room, mock_event)
+        await bot._on_message(mock_room, mock_event)
 
-            # Should not send any message since it already responded
-            bot.client.room_send.assert_not_called()
+        # Should not send any message since it already responded
+        bot.client.room_send.assert_not_called()
 
 
 class TestMultiAgentOrchestrator:

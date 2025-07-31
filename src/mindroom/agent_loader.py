@@ -52,13 +52,14 @@ def load_config(config_path: Path | None = None) -> AgentsConfig:
     return config
 
 
-def create_agent(agent_name: str, model: Model, config_path: Path | None = None) -> Agent:
+def create_agent(agent_name: str, model: Model, config_path: Path | None = None, storage_path: str = "tmp") -> Agent:
     """Create an agent instance from configuration.
 
     Args:
         agent_name: Name of the agent to create
         model: The AI model to use
         config_path: Optional path to configuration file
+        storage_path: Base directory for storing agent data (default: "tmp")
 
     Returns:
         Configured Agent instance
@@ -86,8 +87,8 @@ def create_agent(agent_name: str, model: Model, config_path: Path | None = None)
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
     # Create storage
-    os.makedirs("tmp", exist_ok=True)
-    storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=f"tmp/{agent_name}.db")
+    os.makedirs(storage_path, exist_ok=True)
+    storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=f"{storage_path}/{agent_name}.db")
 
     # Create agent with defaults applied
     agent = Agent(
