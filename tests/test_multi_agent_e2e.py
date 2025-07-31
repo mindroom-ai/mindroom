@@ -37,7 +37,7 @@ def mock_general_agent() -> AgentMatrixUser:
 
 
 @pytest.mark.asyncio
-async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrixUser) -> None:
+async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrixUser, tmp_path: Path) -> None:
     """Test that an agent processes messages where it's directly mentioned."""
     test_room_id = "!test:example.org"
     test_user_id = "@alice:example.org"
@@ -50,7 +50,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent)
+        bot = AgentBot(mock_calculator_agent, tmp_path)
         await bot.start()
 
         # Create a message mentioning the calculator agent
@@ -96,7 +96,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
                     "@mindroom_calculator:localhost What's 15% of 200?",
                     test_room_id,
                     thread_history=[],
-                    storage_path=Path("tmp"),
+                    storage_path=tmp_path,
                 )
 
                 # Verify message was sent
@@ -110,6 +110,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
 async def test_agent_ignores_other_agents(
     mock_calculator_agent: AgentMatrixUser,
     mock_general_agent: AgentMatrixUser,
+    tmp_path: Path,
 ) -> None:
     """Test that agents ignore messages from other agents."""
     test_room_id = "!test:example.org"
@@ -120,7 +121,7 @@ async def test_agent_ignores_other_agents(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent)
+        bot = AgentBot(mock_calculator_agent, tmp_path)
         await bot.start()
 
         # Create a message from another agent
@@ -149,7 +150,10 @@ async def test_agent_ignores_other_agents(
 
 
 @pytest.mark.asyncio
-async def test_agent_responds_in_threads_without_mention(mock_calculator_agent: AgentMatrixUser) -> None:
+async def test_agent_responds_in_threads_without_mention(
+    mock_calculator_agent: AgentMatrixUser,
+    tmp_path: Path,
+) -> None:
     """Test that agents respond to all messages in threads even without mention."""
     test_room_id = "!test:example.org"
     test_user_id = "@alice:example.org"
@@ -161,7 +165,7 @@ async def test_agent_responds_in_threads_without_mention(mock_calculator_agent: 
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent)
+        bot = AgentBot(mock_calculator_agent, tmp_path)
         await bot.start()
 
         # Create a thread message without agent mention
@@ -200,7 +204,7 @@ async def test_agent_responds_in_threads_without_mention(mock_calculator_agent: 
                 "What about 20% of 300?",
                 f"{test_room_id}:{thread_root_id}",
                 thread_history=[],
-                storage_path=Path("tmp"),
+                storage_path=tmp_path,
             )
 
             # Verify thread response format
@@ -211,7 +215,7 @@ async def test_agent_responds_in_threads_without_mention(mock_calculator_agent: 
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_manages_multiple_agents() -> None:
+async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     """Test that the orchestrator manages multiple agents correctly."""
     with patch("mindroom.bot.ensure_all_agent_users") as mock_ensure:
         # Mock agent users
@@ -231,7 +235,7 @@ async def test_orchestrator_manages_multiple_agents() -> None:
         }
         mock_ensure.return_value = mock_agents
 
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()
 
         # Verify agents were created
@@ -255,7 +259,7 @@ async def test_orchestrator_manages_multiple_agents() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_invites_agents_to_room() -> None:
+async def test_orchestrator_invites_agents_to_room(tmp_path: Path) -> None:
     """Test that the orchestrator can invite all agents to a room."""
     test_room_id = "!test:example.org"
 
@@ -276,7 +280,7 @@ async def test_orchestrator_invites_agents_to_room() -> None:
         }
         mock_ensure.return_value = mock_agents
 
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()
 
         # Test inviting agents
@@ -294,7 +298,7 @@ async def test_orchestrator_invites_agents_to_room() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser) -> None:
+async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser, tmp_path: Path) -> None:
     """Test that agents properly handle room invitations."""
     test_room_id = "!test:example.org"
 
@@ -304,7 +308,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser)
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent)
+        bot = AgentBot(mock_calculator_agent, tmp_path)
         await bot.start()
 
         # Create invite event

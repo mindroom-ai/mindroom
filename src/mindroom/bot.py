@@ -24,8 +24,8 @@ class AgentBot:
     """Represents a single agent bot with its own Matrix account."""
 
     agent_user: AgentMatrixUser
+    storage_path: Path
     rooms: list[str] = field(default_factory=list)
-    storage_path: Path = field(default=Path("tmp"))
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
@@ -215,7 +215,7 @@ class AgentBot:
 class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
-    storage_path: Path = field(default=Path("tmp"))
+    storage_path: Path
     agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
 
@@ -245,7 +245,7 @@ class MultiAgentOrchestrator:
                 resolved_room = room_aliases.get(room, room)
                 resolved_rooms.append(resolved_room)
 
-            bot = AgentBot(agent_user, rooms=resolved_rooms, storage_path=self.storage_path)
+            bot = AgentBot(agent_user, self.storage_path, rooms=resolved_rooms)
             self.agent_bots[agent_name] = bot
 
         logger.info(f"Initialized {len(self.agent_bots)} agent bots")

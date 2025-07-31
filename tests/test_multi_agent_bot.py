@@ -46,9 +46,9 @@ class TestAgentBot:
     """Test cases for AgentBot class."""
 
     @pytest.mark.asyncio
-    async def test_agent_bot_initialization(self, mock_agent_user: AgentMatrixUser) -> None:
+    async def test_agent_bot_initialization(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test AgentBot initialization."""
-        bot = AgentBot(mock_agent_user)
+        bot = AgentBot(mock_agent_user, tmp_path)
         assert bot.agent_user == mock_agent_user
         assert bot.agent_name == "calculator"
         assert bot.client is None
@@ -57,7 +57,7 @@ class TestAgentBot:
 
         # Test with rooms
         rooms = ["!room1:localhost", "!room2:localhost"]
-        bot_with_rooms = AgentBot(mock_agent_user, rooms=rooms)
+        bot_with_rooms = AgentBot(mock_agent_user, tmp_path, rooms=rooms)
         assert bot_with_rooms.rooms == rooms
 
     @pytest.mark.asyncio
@@ -66,6 +66,7 @@ class TestAgentBot:
         self,
         mock_login: AsyncMock,
         mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
     ) -> None:
         """Test starting an agent bot."""
         # Mock the client
@@ -74,7 +75,7 @@ class TestAgentBot:
         mock_client.add_event_callback = MagicMock()
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_agent_user)
+        bot = AgentBot(mock_agent_user, tmp_path)
         await bot.start()
 
         # Verify login was called
@@ -91,6 +92,7 @@ class TestAgentBot:
         self,
         mock_login: AsyncMock,
         mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
     ) -> None:
         """Test that agent bot auto-joins configured rooms on start."""
         # Mock the client
@@ -106,7 +108,7 @@ class TestAgentBot:
         ]
 
         rooms = ["!room1:localhost", "!room2:localhost"]
-        bot = AgentBot(mock_agent_user, rooms=rooms)
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=rooms)
         await bot.start()
 
         # Verify rooms were joined
@@ -115,9 +117,9 @@ class TestAgentBot:
         mock_client.join.assert_any_call("!room2:localhost")
 
     @pytest.mark.asyncio
-    async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser) -> None:
+    async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
-        bot = AgentBot(mock_agent_user)
+        bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
         bot.running = True
 
@@ -127,9 +129,9 @@ class TestAgentBot:
         bot.client.close.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_agent_bot_on_invite(self, mock_agent_user: AgentMatrixUser) -> None:
+    async def test_agent_bot_on_invite(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test agent bot handling room invitations."""
-        bot = AgentBot(mock_agent_user)
+        bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
 
         # Create mock room and event
@@ -156,7 +158,7 @@ class TestAgentBot:
         mock_fetch_history.return_value = []
         mock_ai_response.return_value = "Calculator response"
 
-        bot = AgentBot(mock_agent_user)
+        bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -191,7 +193,7 @@ class TestAgentBot:
             "@mindroom_calculator:localhost: What's 2+2?",
             "!test:localhost",
             thread_history=[],
-            storage_path=Path("tmp"),
+            storage_path=tmp_path,
         )
 
         # Verify message was sent
@@ -202,9 +204,9 @@ class TestAgentBot:
         assert call_args[1]["content"]["body"] == "Calculator response"
 
     @pytest.mark.asyncio
-    async def test_agent_bot_ignores_own_messages(self, mock_agent_user: AgentMatrixUser) -> None:
+    async def test_agent_bot_ignores_own_messages(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test that agent bot ignores its own messages."""
-        bot = AgentBot(mock_agent_user)
+        bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -219,9 +221,9 @@ class TestAgentBot:
         bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_agent_bot_ignores_other_agents(self, mock_agent_user: AgentMatrixUser) -> None:
+    async def test_agent_bot_ignores_other_agents(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test that agent bot ignores messages from other agents."""
-        bot = AgentBot(mock_agent_user)
+        bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -251,7 +253,7 @@ class TestAgentBot:
         ]
         mock_ai_response.return_value = "Thread response"
 
-        bot = AgentBot(mock_agent_user)
+        bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
 
         # Mock successful room_send response
@@ -293,7 +295,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Test that agent bot skips messages it has already responded to."""
-        bot = AgentBot(mock_agent_user)
+        bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
         # Initialize response tracker with isolated path
         from mindroom.response_tracker import ResponseTracker
@@ -328,9 +330,9 @@ class TestMultiAgentOrchestrator:
     """Test cases for MultiAgentOrchestrator class."""
 
     @pytest.mark.asyncio
-    async def test_orchestrator_initialization(self) -> None:
+    async def test_orchestrator_initialization(self, tmp_path: Path) -> None:
         """Test MultiAgentOrchestrator initialization."""
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         assert orchestrator.agent_bots == {}
         assert not orchestrator.running
 
@@ -340,11 +342,12 @@ class TestMultiAgentOrchestrator:
         self,
         mock_ensure_users: AsyncMock,
         mock_agent_users: dict[str, AgentMatrixUser],
+        tmp_path: Path,
     ) -> None:
         """Test initializing the orchestrator with agents."""
         mock_ensure_users.return_value = mock_agent_users
 
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()
 
         assert len(orchestrator.agent_bots) == 2
@@ -359,6 +362,7 @@ class TestMultiAgentOrchestrator:
         mock_login: AsyncMock,
         mock_ensure_users: AsyncMock,
         mock_agent_users: dict[str, AgentMatrixUser],
+        tmp_path: Path,
     ) -> None:
         """Test starting all agent bots."""
         mock_ensure_users.return_value = mock_agent_users
@@ -368,7 +372,7 @@ class TestMultiAgentOrchestrator:
         mock_client.sync_forever = AsyncMock(side_effect=KeyboardInterrupt)
         mock_login.return_value = mock_client
 
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()  # Need to initialize first
 
         # Start the orchestrator but don't wait for sync_forever
@@ -388,11 +392,12 @@ class TestMultiAgentOrchestrator:
         self,
         mock_ensure_users: AsyncMock,
         mock_agent_users: dict[str, AgentMatrixUser],
+        tmp_path: Path,
     ) -> None:
         """Test stopping all agent bots."""
         mock_ensure_users.return_value = mock_agent_users
 
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()
 
         # Mock the agent clients
@@ -413,11 +418,12 @@ class TestMultiAgentOrchestrator:
         self,
         mock_ensure_users: AsyncMock,
         mock_agent_users: dict[str, AgentMatrixUser],
+        tmp_path: Path,
     ) -> None:
         """Test inviting all agents to a room."""
         mock_ensure_users.return_value = mock_agent_users
 
-        orchestrator = MultiAgentOrchestrator()
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()
 
         mock_inviter_client = AsyncMock()

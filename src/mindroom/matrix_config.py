@@ -8,7 +8,6 @@ import yaml
 from pydantic import BaseModel, Field, field_serializer
 
 MATRIX_USERS_FILE = Path("matrix_users.yaml")
-DATA_DIR = Path("data")
 
 
 class MatrixAccount(BaseModel):
