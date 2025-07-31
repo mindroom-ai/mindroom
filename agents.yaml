@@ -13,7 +13,9 @@ agents:
       - "Remember context from the conversation."
       - "Be conversational and friendly."
       - "Ask clarifying questions when needed."
-    rooms: []  # Add room IDs here for auto-join, e.g., ["!abc123:localhost", "!xyz789:localhost"]
+    rooms:
+      - "!lobby:localhost"  # Main coordination room for all agents
+      - "!help:localhost"   # General help and assistance
     num_history_runs: 5
 
   # Calculator agent for mathematical operations
@@ -27,6 +29,10 @@ agents:
       - "Show your work step by step."
       - "Explain the mathematical concepts when helpful."
       - "Double-check calculations for accuracy."
+    rooms:
+      - "!lobby:localhost"     # Main coordination room
+      - "!science:localhost"   # Science and math collaboration
+      - "!analysis:localhost"  # Data analysis tasks
     num_history_runs: 5
 
   # Code agent for programming tasks
@@ -44,6 +50,10 @@ agents:
       - "Be careful with shell commands - explain what they do"
       - "Always read files before modifying them"
       - "Follow the project's existing style and conventions"
+    rooms:
+      - "!lobby:localhost"      # Main coordination room
+      - "!dev:localhost"        # Development and programming
+      - "!automation:localhost" # Automation and scripting
     num_history_runs: 5
 
   # Shell command execution agent
@@ -59,6 +69,11 @@ agents:
       - "Provide clear output and error messages."
       - "Suggest safer alternatives when appropriate."
       - "Remember the user's working directory context."
+    rooms:
+      - "!lobby:localhost"      # Main coordination room
+      - "!dev:localhost"        # Development tasks
+      - "!automation:localhost" # System automation
+      - "!ops:localhost"        # Operations and maintenance
     num_history_runs: 5
 
   # Text summarization agent
@@ -73,6 +88,10 @@ agents:
       - "Use bullet points for clarity when appropriate."
       - "Indicate the level of detail in your summary."
       - "Preserve important quotes or specific data points."
+    rooms:
+      - "!lobby:localhost"    # Main coordination room
+      - "!research:localhost" # Research collaboration
+      - "!docs:localhost"     # Documentation and writing
     num_history_runs: 5
 
   # Research agent for information gathering
@@ -90,6 +109,11 @@ agents:
       - "Distinguish between facts and opinions."
       - "Provide balanced viewpoints on controversial topics."
       - "Summarize findings in a clear, organized manner."
+    rooms:
+      - "!lobby:localhost"    # Main coordination room
+      - "!research:localhost" # Research collaboration
+      - "!science:localhost"  # Scientific research
+      - "!news:localhost"     # Current events research
     num_history_runs: 5
 
   # Financial data analysis agent
@@ -106,6 +130,11 @@ agents:
       - "Explain financial concepts clearly."
       - "Include relevant disclaimers about investment advice."
       - "Present data in a clear, organized format."
+    rooms:
+      - "!lobby:localhost"     # Main coordination room
+      - "!finance:localhost"   # Financial analysis
+      - "!analysis:localhost"  # Data analysis collaboration
+      - "!business:localhost"  # Business discussions
     num_history_runs: 5
 
   # News and current events agent
@@ -122,6 +151,11 @@ agents:
       - "Include publication dates and sources."
       - "Distinguish between news and opinion pieces."
       - "Highlight key developments and their significance."
+    rooms:
+      - "!lobby:localhost"    # Main coordination room
+      - "!news:localhost"     # News and current events
+      - "!research:localhost" # Research collaboration
+      - "!business:localhost" # Business news
     num_history_runs: 5
 
   # Data analysis agent
@@ -138,6 +172,12 @@ agents:
       - "Identify patterns and trends in data."
       - "Provide actionable insights and recommendations."
       - "Handle missing or inconsistent data appropriately."
+    rooms:
+      - "!lobby:localhost"     # Main coordination room
+      - "!analysis:localhost"  # Data analysis hub
+      - "!science:localhost"   # Scientific data analysis
+      - "!finance:localhost"   # Financial data analysis
+      - "!business:localhost"  # Business analytics
     num_history_runs: 5
 
 # Configuration for agent defaults
