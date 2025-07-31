@@ -13,6 +13,7 @@ from .logging_config import colorize
 from .matrix import fetch_thread_history, prepare_response_content
 from .matrix_agent_manager import AgentMatrixUser, ensure_all_agent_users, login_agent_user
 from .matrix_room_manager import get_room_aliases
+from .response_tracker import ResponseTracker
 
 # Enable colors in logger
 logger = logger.opt(colors=True)
@@ -26,6 +27,7 @@ class AgentBot:
     rooms: list[str] = field(default_factory=list)
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
+    response_tracker: ResponseTracker = field(init=False)
 
     @property
     def agent_name(self) -> str:
@@ -36,6 +38,9 @@ class AgentBot:
         """Start the agent bot."""
         try:
             self.client = await login_agent_user(self.agent_user)
+
+            # Initialize response tracker
+            self.response_tracker = ResponseTracker(self.agent_name)
 
             # Register event callbacks
             logger.debug(f"{colorize(self.agent_name)} Registering event callbacks")
@@ -81,10 +86,7 @@ class AgentBot:
 
         logger.info(f"{colorize(self.agent_name)} Starting sync_forever")
         try:
-            # Use full_state=True to work with stored sync tokens
-            # This ensures we don't reprocess old messages after restart
-            # The library will automatically use timeout=0 for the first sync
-            await self.client.sync_forever(timeout=30000, full_state=True)
+            await self.client.sync_forever(timeout=30000)
         except Exception as e:
             logger.error(f"{colorize(self.agent_name)} Sync error: {e}")
             self.running = False
@@ -152,6 +154,13 @@ class AgentBot:
                 logger.debug(f"{colorize(self.agent_name)} Not mentioned and not in thread, ignoring message")
                 return
 
+        # Check if we've already responded to this specific event
+        if self.response_tracker.has_responded(event.event_id):
+            logger.info(
+                f"{colorize(self.agent_name)} Already responded to event {event.event_id} from {event.sender}, skipping"
+            )
+            return
+
         logger.info(f"{colorize(self.agent_name)} WILL PROCESS message from {event.sender}: {event.body}")
 
         # For now, use the full message body as the prompt
@@ -186,12 +195,17 @@ class AgentBot:
         )
 
         if self.client:
-            await self.client.room_send(
+            response = await self.client.room_send(
                 room_id=room.room_id,
                 message_type="m.room.message",
                 content=content,
             )
-            logger.info(f"{colorize(self.agent_name)} Sent response to room {room.room_id}")
+            if isinstance(response, nio.RoomSendResponse):
+                # Mark this event as responded to
+                self.response_tracker.mark_responded(event.event_id)
+                logger.info(f"{colorize(self.agent_name)} Sent response to room {room.room_id}")
+            else:
+                logger.error(f"{colorize(self.agent_name)} Failed to send response: {response}")
 
 
 @dataclass
