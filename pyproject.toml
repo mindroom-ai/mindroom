@@ -60,7 +60,7 @@ dev = [
 source = "versioningit"
 
 [tool.hatch.build.targets.wheel]
-packages = [ "." ]
+packages = [ "src/mindroom" ]
 
 [tool.ruff]
 target-version = "py312"
@@ -83,7 +83,7 @@ lint.ignore = [
 testpaths = [ "tests" ]
 python_files = "test_*.py"
 asyncio_mode = "auto"
-pythonpath = [ "." ]
+pythonpath = [ "src" ]
 addopts = """
     -vvv
     --cov=mindroom

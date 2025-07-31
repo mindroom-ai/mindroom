@@ -13,7 +13,7 @@ from .models import AgentConfig, AgentsConfig
 from .tools import get_tool_by_name
 
 # Default path to agents configuration file
-DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent / "agents.yaml"
+DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "agents.yaml"
 
 # Global caches
 _config_cache: dict[Path, AgentsConfig] = {}

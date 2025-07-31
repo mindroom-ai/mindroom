@@ -14,7 +14,7 @@ from loguru import logger
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 
 
-def register_tool(name: str) -> Callable[[], type[Toolkit]]:
+def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
     """Decorator to register a tool factory function.
 
     Args:

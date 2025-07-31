@@ -1,7 +1,7 @@
 import os
 from typing import Any
 
-import diskcache  # type: ignore[import-untyped]
+import diskcache
 from agno.models.anthropic import Claude
 from agno.models.base import Model
 from agno.models.ollama import Ollama
