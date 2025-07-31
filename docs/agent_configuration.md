@@ -1,134 +1,265 @@
 # Agent Configuration Guide
 
-mindroom uses a YAML-based configuration system for defining agents. This allows you to easily customize existing agents or create entirely new ones without modifying any code.
+mindroom uses a YAML-based configuration system that makes it easy to customize agents for your specific needs. You can modify existing agents or create entirely new ones by editing a simple configuration file.
 
-## Configuration File Location
+## Configuration File
 
-The default agent configuration file is located at `agents.yaml` in the project root. You can also specify a custom configuration file path when initializing the bot.
+The default agent configuration file is `agents.yaml` in the project root. You can also specify a custom configuration file when starting the bot.
+
+## Available Agents
+
+mindroom comes with several pre-configured agents, each specialized for different tasks:
+
+### Default Agents
+
+1. **general** - A friendly conversational assistant
+   - No tools required
+   - Provides helpful responses to general questions
+   - Maintains conversation context
+
+2. **calculator** - Mathematical problem solver
+   - Uses calculator tool for accurate computations
+   - Shows step-by-step solutions
+   - Explains mathematical concepts
+
+3. **code** - Programming assistant
+   - Can read, write, and modify files
+   - Executes shell commands
+   - Follows coding best practices
+
+4. **shell** - System operations specialist
+   - Executes shell commands safely
+   - Explains what commands do before running them
+   - Suggests safer alternatives when needed
+
+5. **summary** - Text summarization expert
+   - Creates concise summaries of long texts
+   - Extracts key points and main ideas
+   - Preserves important details
+
+6. **research** - Information gathering specialist
+   - Searches the web with DuckDuckGo
+   - Queries Wikipedia for encyclopedic information
+   - Searches academic papers on arXiv
+   - Cross-references multiple sources
+
+7. **finance** - Financial data analyst
+   - Retrieves real-time stock market data
+   - Performs financial calculations
+   - Provides market analysis
+
+8. **news** - Current events reporter
+   - Searches for recent news
+   - Summarizes articles from multiple sources
+   - Provides balanced coverage
+
+9. **data_analyst** - Data analysis specialist
+   - Processes CSV files
+   - Performs statistical analysis
+   - Creates insights from data
 
 ## Agent Configuration Structure
 
-Each agent is defined with the following properties:
+Each agent in the YAML file follows this structure:
 
 ```yaml
 agents:
   agent_name:
-    display_name: "Human-readable name for the agent"
-    role: "Description of what the agent does"
+    display_name: "Human-readable name"
+    role: "What the agent does"
     tools:
       - tool_name_1
       - tool_name_2
     instructions:
-      - "Specific instruction 1"
-      - "Specific instruction 2"
-    num_history_runs: 5  # Number of previous conversations to include
+      - "Specific behavior instruction 1"
+      - "Specific behavior instruction 2"
+    num_history_runs: 5  # How many previous messages to remember
 ```
+
+### Configuration Fields
+
+- **agent_name**: The identifier used to call the agent (e.g., `@calculator:`)
+- **display_name**: A friendly name shown in conversations
+- **role**: A brief description of the agent's purpose
+- **tools**: List of tools the agent can use (see Available Tools below)
+- **instructions**: Specific guidelines for the agent's behavior
+- **num_history_runs**: Number of previous conversation turns to include for context (default: 5)
 
 ## Available Tools
 
-The following tools are available for agents to use:
+Tools give agents the ability to perform specific actions:
 
-- `calculator` - Mathematical calculations
-- `file` - File reading and writing operations
-- `shell` - Shell command execution
-- `csv` - CSV file handling and data analysis
-- `arxiv` - Academic paper search from arXiv
-- `duckduckgo` - Web search
-- `wikipedia` - Wikipedia article lookup
-- `newspaper` - News article parsing
-- `yfinance` - Financial data and stock information
+### Basic Tools
+- **calculator** - Perform mathematical calculations
+- **file** - Read, write, and manage files
+- **shell** - Execute command line operations
+- **python** - Run Python code snippets
+
+### Data & Analysis Tools
+- **csv** - Process and analyze CSV files
+- **pandas** - Advanced data manipulation and analysis
+- **yfinance** - Fetch financial market data
+
+### Research & Information Tools
+- **arxiv** - Search academic papers
+- **duckduckgo** - Web search
+- **googlesearch** - Google search (requires API key)
+- **tavily** - AI-powered search (requires API key)
+- **wikipedia** - Encyclopedia lookup
+- **newspaper** - Parse and extract news articles
+- **website** - Extract content from websites
+- **jina** - Advanced document processing
+
+### Development Tools
+- **docker** - Manage Docker containers (requires Docker installed)
+- **github** - Interact with GitHub repositories (requires token)
+
+### Communication Tools
+- **email** - Send emails (requires SMTP configuration)
+- **telegram** - Send Telegram messages (requires bot token)
 
 ## Creating Custom Agents
 
-### Example 1: Simple Agent (No Tools)
+### Example 1: Simple Helper Agent
 
 ```yaml
 agents:
-  motivator:
-    display_name: "MotivationalCoach"
-    role: "Provide encouragement and positive reinforcement"
+  helper:
+    display_name: "HelpfulAssistant"
+    role: "Provide friendly help and encouragement"
     tools: []
     instructions:
       - "Always be positive and encouraging"
-      - "Provide specific, actionable advice"
-      - "Celebrate small wins"
+      - "Offer specific, actionable advice"
+      - "Ask clarifying questions when needed"
     num_history_runs: 3
 ```
 
-### Example 2: Advanced Agent (Multiple Tools)
+### Example 2: Project Manager Agent
 
 ```yaml
 agents:
   project_manager:
-    display_name: "ProjectManagerAgent"
-    role: "Help manage software projects and development tasks"
+    display_name: "ProjectManager"
+    role: "Help manage software projects"
     tools:
       - file
       - shell
-      - csv
+      - github
     instructions:
       - "Track project tasks and milestones"
       - "Generate status reports"
-      - "Analyze project metrics"
-      - "Help with git operations"
+      - "Help with version control"
       - "Create and update documentation"
     num_history_runs: 10
 ```
 
-## Using Custom Configuration Files
-
-You can create your own configuration file and use it:
-
-```python
-from pathlib import Path
-from mindroom.agents import get_agent
-from mindroom.agent_loader import create_agent
-
-# Use a custom configuration file directly
-config_path = Path("path/to/your/agents.yaml")
-agent = create_agent("your_custom_agent", model, config_path)
-
-# Or use the standard interface (uses default agents.yaml)
-agent = get_agent("agent_name", model)
-```
-
-## Best Practices
-
-1. **Clear Role Definition**: Make the agent's purpose clear in the `role` field
-2. **Specific Instructions**: Provide detailed instructions for consistent behavior
-3. **Appropriate Tools**: Only include tools the agent actually needs
-4. **History Context**: Set `num_history_runs` based on how much context the agent needs
-5. **Testing**: Test your custom agents thoroughly before deployment
-
-## Extending the System
-
-### Adding Custom Tools
-
-To add new tools to the system:
-
-1. Implement your tool following the Agno tools interface
-2. Register it in `mindroom/tools.py` using the decorator:
-
-```python
-from mindroom.tools import register_tool
-
-@register_tool("your_tool_name")
-def _get_your_custom_tool():
-    from your_module import YourCustomTool
-    return YourCustomTool
-```
-
-3. Use it in your agent configuration:
+### Example 3: Data Science Agent
 
 ```yaml
 agents:
-  your_agent:
+  data_scientist:
+    display_name: "DataScientist"
+    role: "Analyze data and create insights"
     tools:
-      - your_tool_name
+      - python
+      - pandas
+      - csv
+      - calculator
+    instructions:
+      - "Perform statistical analysis"
+      - "Create data visualizations"
+      - "Clean and preprocess data"
+      - "Explain findings clearly"
+    num_history_runs: 5
 ```
 
-The lazy import pattern (importing inside the function) ensures that missing dependencies won't break the entire system.
+### Example 4: Research Assistant
 
-## Examples
+```yaml
+agents:
+  researcher:
+    display_name: "ResearchAssistant"
+    role: "Comprehensive research and fact-checking"
+    tools:
+      - arxiv
+      - wikipedia
+      - duckduckgo
+      - website
+      - file
+    instructions:
+      - "Find credible sources"
+      - "Cross-reference information"
+      - "Create research summaries"
+      - "Track sources and citations"
+    num_history_runs: 8
+```
 
-See `agents_custom_example.yaml` for more examples of custom agent configurations.
+## Using Agents
+
+To interact with an agent in your Matrix chat:
+
+1. **Mention the agent**: `@agent_name: your message`
+   - Example: `@calculator: what is 25 * 4?`
+   - Example: `@research: tell me about quantum computing`
+
+2. **Default agent**: If you mention the bot without specifying an agent, it uses the `general` agent
+   - Example: `@bot: hello!` (uses general agent)
+
+## Tool Requirements
+
+Some tools need additional setup:
+
+### Tools requiring API keys:
+- **googlesearch** - Set up Google API credentials
+- **tavily** - Get API key from Tavily
+- **github** - Create a GitHub personal access token
+- **telegram** - Create a Telegram bot and get token
+- **email** - Configure SMTP server details
+
+### Tools requiring software:
+- **docker** - Install Docker on your system
+
+### Tools that work immediately:
+- **calculator**, **file**, **shell**, **python**, **csv**, **pandas**, **arxiv**, **duckduckgo**, **wikipedia**, **newspaper**, **website**, **jina**, **yfinance**
+
+## Best Practices
+
+1. **Clear Agent Roles**: Give each agent a specific, well-defined purpose
+2. **Appropriate Tools**: Only include tools the agent actually needs
+3. **Detailed Instructions**: Provide clear behavioral guidelines
+4. **Context Management**: Set `num_history_runs` based on how much context is needed
+5. **Test Your Agents**: Try different scenarios to ensure they behave as expected
+
+## Tips for Writing Instructions
+
+Good instructions are specific and actionable:
+
+✅ Good: "Always cite your sources with author and publication date"
+❌ Vague: "Be accurate"
+
+✅ Good: "Explain technical concepts in simple terms"
+❌ Vague: "Be helpful"
+
+✅ Good: "Ask for clarification if the request is ambiguous"
+❌ Vague: "Understand the user"
+
+## Custom Configuration Files
+
+You can create multiple configuration files for different purposes:
+
+1. Create a new YAML file (e.g., `my_agents.yaml`)
+2. Define your agents using the structure above
+3. Use the custom file when starting mindroom
+
+## Troubleshooting
+
+If an agent isn't working as expected:
+
+1. Check that all required tools are properly configured
+2. Verify the YAML syntax is correct (proper indentation)
+3. Ensure tool names are spelled correctly
+4. Test with simpler instructions first
+5. Check logs for any error messages
+
+Remember: agents are only as good as their configuration. Take time to craft clear roles and instructions for the best results!

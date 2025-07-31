@@ -95,6 +95,76 @@ def yfinance_tools():
     return YFinanceTools
 
 
+@register_tool("python")
+def python_tools():
+    from agno.tools.python import PythonTools
+
+    return PythonTools
+
+
+@register_tool("pandas")
+def pandas_tools():
+    from agno.tools.pandas import PandasTools
+
+    return PandasTools
+
+
+@register_tool("docker")
+def docker_tools():
+    from agno.tools.docker import DockerTools
+
+    return DockerTools
+
+
+@register_tool("github")
+def github_tools():
+    from agno.tools.github import GithubTools
+
+    return GithubTools
+
+
+@register_tool("email")
+def email_tools():
+    from agno.tools.email import EmailTools
+
+    return EmailTools
+
+
+@register_tool("telegram")
+def telegram_tools():
+    from agno.tools.telegram import TelegramTools
+
+    return TelegramTools
+
+
+@register_tool("tavily")
+def tavily_tools():
+    from agno.tools.tavily import TavilyTools
+
+    return TavilyTools
+
+
+@register_tool("googlesearch")
+def googlesearch_tools():
+    from agno.tools.googlesearch import GoogleSearchTools
+
+    return GoogleSearchTools
+
+
+@register_tool("website")
+def website_tools():
+    from agno.tools.website import WebsiteTools
+
+    return WebsiteTools
+
+
+@register_tool("jina")
+def jina_tools():
+    from agno.tools.jina import JinaReaderTools
+
+    return JinaReaderTools
+
+
 def get_tool_by_name(tool_name: str) -> Any:
     """Get a tool instance by its registered name.
 
