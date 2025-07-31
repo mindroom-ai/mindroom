@@ -14,7 +14,7 @@ from .matrix import fetch_thread_history, prepare_response_content
 from .matrix_agent_manager import AgentMatrixUser, ensure_all_agent_users, login_agent_user
 from .matrix_room_manager import get_room_aliases
 
-setup_logging(level="INFO")
+setup_logging(level="DEBUG")
 
 
 @dataclass
@@ -35,8 +35,13 @@ class AgentBot:
         """Start the agent bot."""
         try:
             self.client = await login_agent_user(self.agent_user)
+
+            # Register event callbacks
+            logger.debug(f"Registering event callbacks for {self.agent_name}")
             self.client.add_event_callback(self._on_invite, nio.InviteEvent)
             self.client.add_event_callback(self._on_message, nio.RoomMessageText)
+            logger.debug(f"Event callbacks registered for {self.agent_name}")
+
             self.running = True
             logger.info(f"Started agent bot: {self.agent_user.display_name} ({self.agent_user.user_id})")
 
@@ -66,8 +71,12 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         if not self.client or not self.running:
+            logger.warning(
+                f"Cannot sync agent {self.agent_name}: client={self.client is not None}, running={self.running}"
+            )
             return
 
+        logger.info(f"Starting sync_forever for agent {self.agent_name}")
         try:
             await self.client.sync_forever(timeout=30000)
         except Exception as e:
@@ -90,41 +99,58 @@ class AgentBot:
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle messages in rooms."""
+        logger.debug(f"=== Message received by {self.agent_name} ===")
+        logger.debug(f"Room: {room.room_id} ({room.display_name})")
+        logger.debug(f"Sender: {event.sender}")
+        logger.debug(f"Body: '{event.body}'")
+        logger.debug(f"Event source: {event.source}")
+
         # Don't respond to own messages
         if event.sender == self.agent_user.user_id:
+            logger.debug(f"Ignoring own message from {self.agent_name}")
             return
 
         # Don't respond to other agent messages (avoid agent loops)
-        if event.sender.startswith("@mindroom_") and event.sender != self.agent_user.user_id:
+        # Extract username from sender ID (e.g., @mindroom_calculator:localhost -> mindroom_calculator)
+        sender_username = event.sender.split(":")[0][1:]  # Remove @ and domain
+
+        # Check if sender is another agent (but not the user account)
+        if (
+            sender_username.startswith("mindroom_")
+            and sender_username != "mindroom_user"  # Allow user messages
+            and event.sender != self.agent_user.user_id
+        ):  # Allow own messages (already filtered above)
+            logger.debug(f"Ignoring message from other agent: {event.sender}")
             return
 
-        # Check if this agent is mentioned (with @ symbol)
-        mentioned = (
-            f"@{self.agent_user.user_id}" in event.body  # Full Matrix ID mention
-            or f"@{self.agent_user.display_name}" in event.body  # Display name mention
-            or self.agent_user.user_id in event.body  # Direct user ID (Matrix sometimes includes without @)
-        )
+        # Debug logging
+        logger.debug(f"Agent {self.agent_name} checking message: '{event.body}'")
+        logger.debug(f"Agent user_id: {self.agent_user.user_id}")
+        logger.debug(f"Agent display_name: {self.agent_user.display_name}")
+
+        # Check if this agent is mentioned using the proper Matrix m.mentions field
+        mentions = event.source.get("content", {}).get("m.mentions", {})
+        mentioned_users = mentions.get("user_ids", [])
+        mentioned = self.agent_user.user_id in mentioned_users
+
+        logger.debug(f"Checking mentions for {self.agent_name}:")
+        logger.debug(f"  - m.mentions field: {mentions}")
+        logger.debug(f"  - Agent is mentioned: {mentioned}")
+
         if not mentioned:
             # In threads, respond to all messages
             relates_to = event.source.get("content", {}).get("m.relates_to", {})
             is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
+            logger.debug(f"Thread check - is_thread: {is_thread}, relates_to: {relates_to}")
             if not is_thread:
+                logger.debug("Not mentioned and not in thread, ignoring message")
                 return
 
-        logger.info(f"Agent {self.agent_name} processing message from {event.sender}: {event.body}")
+        logger.info(f"Agent {self.agent_name} WILL PROCESS message from {event.sender}: {event.body}")
 
-        # Extract prompt (remove agent mention)
-        prompt = event.body
-        # Remove various mention formats
-        mentions_to_remove = [
-            f"@{self.agent_user.user_id}",  # Full Matrix ID with @
-            f"@{self.agent_user.display_name}",  # Display name with @
-            self.agent_user.user_id,  # Just the user ID
-            self.agent_user.display_name,  # Just the display name
-        ]
-        for mention in mentions_to_remove:
-            prompt = prompt.replace(mention, "").strip()
-        prompt = prompt.lstrip(":").strip()
+        # For now, use the full message body as the prompt
+        # The actual mention text might not be in the body with modern Matrix clients
+        prompt = event.body.strip()
 
         if not prompt:
             return
@@ -147,6 +173,12 @@ class AgentBot:
 
         # Prepare and send response
         content = prepare_response_content(response_text, event)
+
+        logger.debug("=== Sending response ===")
+        logger.debug(f"Room ID: {room.room_id}")
+        logger.debug("Message type: m.room.message")
+        logger.debug(f"Content: {content}")
+        logger.debug("=== End sending response ===")
 
         if self.client:
             await self.client.room_send(
