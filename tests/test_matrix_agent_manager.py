@@ -12,12 +12,11 @@ from mindroom.matrix_agent_manager import (
     create_agent_user,
     ensure_all_agent_users,
     get_agent_credentials,
-    load_matrix_users,
     login_agent_user,
     register_matrix_user,
     save_agent_credentials,
-    save_matrix_users,
 )
+from mindroom.matrix_config import MatrixConfig
 
 
 @pytest.fixture
@@ -25,8 +24,11 @@ def temp_matrix_users_file(tmp_path: Path) -> Path:
     """Create a temporary matrix_users.yaml file."""
     file_path = tmp_path / "matrix_users.yaml"
     initial_data = {
-        "bot": {"username": "mindroom_bot", "password": "bot_password_123"},
-        "user": {"username": "mindroom_user", "password": "user_password_123"},
+        "accounts": {
+            "bot": {"username": "mindroom_bot", "password": "bot_password_123"},
+            "user": {"username": "mindroom_user", "password": "user_password_123"},
+        },
+        "rooms": {},
     }
     with open(file_path, "w") as f:
         yaml.dump(initial_data, f)
@@ -68,41 +70,44 @@ class TestMatrixUserManagement:
 
     def test_load_matrix_users(self, temp_matrix_users_file: Path) -> None:
         """Test loading matrix users from file."""
-        with patch("mindroom.matrix_agent_manager.MATRIX_USERS_FILE", temp_matrix_users_file):
-            users = load_matrix_users()
+        with patch("mindroom.matrix_config.MATRIX_USERS_FILE", temp_matrix_users_file):
+            config = MatrixConfig.load()
 
-        assert "bot" in users
-        assert users["bot"]["username"] == "mindroom_bot"
-        assert "user" in users
-        assert users["user"]["username"] == "mindroom_user"
+        assert "bot" in config.accounts
+        assert config.accounts["bot"].username == "mindroom_bot"
+        assert "user" in config.accounts
+        assert config.accounts["user"].username == "mindroom_user"
 
-    @patch("mindroom.matrix_agent_manager.MATRIX_USERS_FILE")
+    @patch("mindroom.matrix_config.MATRIX_USERS_FILE")
     def test_load_matrix_users_no_file(self, mock_file: MagicMock) -> None:
         """Test loading matrix users when file doesn't exist."""
         mock_file.exists.return_value = False
-        users = load_matrix_users()
-        assert users == {}
+        config = MatrixConfig.load()
+        assert config.accounts == {}
+        assert config.rooms == {}
 
     def test_save_matrix_users(self, tmp_path: Path) -> None:
         """Test saving matrix users to file."""
         file_path = tmp_path / "test_users.yaml"
 
-        users = {"agent_test": {"username": "mindroom_test", "password": "test_pass"}}
-
-        with patch("mindroom.matrix_agent_manager.MATRIX_USERS_FILE", file_path):
-            save_matrix_users(users)
+        with patch("mindroom.matrix_config.MATRIX_USERS_FILE", file_path):
+            config = MatrixConfig()
+            config.add_account("agent_test", "mindroom_test", "test_pass")
+            config.save()
 
         # Verify the file was written correctly
         with open(file_path) as f:
             saved_data = yaml.safe_load(f)
-        assert saved_data == users
+        assert "accounts" in saved_data
+        assert "agent_test" in saved_data["accounts"]
+        assert saved_data["accounts"]["agent_test"]["username"] == "mindroom_test"
 
-    @patch("mindroom.matrix_agent_manager.load_matrix_users")
+    @patch("mindroom.matrix_config.MatrixConfig.load")
     def test_get_agent_credentials(self, mock_load: MagicMock) -> None:
         """Test getting agent credentials."""
-        mock_load.return_value = {
-            "agent_calculator": {"username": "mindroom_calculator", "password": "calc_pass"},
-        }
+        mock_config = MatrixConfig()
+        mock_config.add_account("agent_calculator", "mindroom_calculator", "calc_pass")
+        mock_load.return_value = mock_config
 
         creds = get_agent_credentials("calculator")
         assert creds is not None
@@ -113,19 +118,21 @@ class TestMatrixUserManagement:
         creds = get_agent_credentials("nonexistent")
         assert creds is None
 
-    @patch("mindroom.matrix_agent_manager.save_matrix_users")
-    @patch("mindroom.matrix_agent_manager.load_matrix_users")
+    @patch("mindroom.matrix_config.MatrixConfig.save")
+    @patch("mindroom.matrix_config.MatrixConfig.load")
     def test_save_agent_credentials(self, mock_load: MagicMock, mock_save: MagicMock) -> None:
         """Test saving agent credentials."""
-        mock_load.return_value = {"bot": {"username": "bot", "password": "pass"}}
+        mock_config = MatrixConfig()
+        mock_config.add_account("bot", "bot", "pass")
+        mock_load.return_value = mock_config
 
         save_agent_credentials("calculator", "mindroom_calculator", "calc_pass")
 
-        expected_users = {
-            "bot": {"username": "bot", "password": "pass"},
-            "agent_calculator": {"username": "mindroom_calculator", "password": "calc_pass"},
-        }
-        mock_save.assert_called_once_with(expected_users)
+        # Verify the account was added
+        assert "agent_calculator" in mock_config.accounts
+        assert mock_config.accounts["agent_calculator"].username == "mindroom_calculator"
+        assert mock_config.accounts["agent_calculator"].password == "calc_pass"
+        mock_save.assert_called_once()
 
 
 class TestMatrixRegistration:

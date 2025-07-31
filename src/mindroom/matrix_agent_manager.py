@@ -6,20 +6,17 @@ for each AI agent, allowing them to appear as separate users in chat rooms.
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 
 import nio
-import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
 from .agent_loader import load_config
+from .matrix_config import MatrixConfig
 
 load_dotenv()
 
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
-MATRIX_USERS_FILE = Path("matrix_users.yaml")
 
 
 @dataclass
@@ -182,48 +179,6 @@ async def ensure_all_agent_users() -> dict[str, AgentMatrixUser]:
     return agent_users
 
 
-def load_matrix_users() -> dict[str, dict[str, str]]:
-    """Load existing matrix users from YAML file.
-
-    Returns:
-        Dictionary of existing users (excluding rooms section)
-    """
-    if not MATRIX_USERS_FILE.exists():
-        return {}
-
-    with open(MATRIX_USERS_FILE) as f:
-        data = yaml.safe_load(f) or {}
-
-    # Filter out non-user entries (like 'rooms')
-    return {k: v for k, v in data.items() if isinstance(v, dict) and "username" in v}
-
-
-def save_matrix_users(users: dict[str, dict[str, str]]) -> None:
-    """Save matrix users to YAML file.
-
-    Args:
-        users: Dictionary of users to save
-    """
-    # Load existing data to preserve rooms section
-    existing_data: dict[str, Any] = {}
-    if MATRIX_USERS_FILE.exists():
-        with open(MATRIX_USERS_FILE) as f:
-            existing_data = yaml.safe_load(f) or {}
-
-    # Remove the 'rooms' key from users if it exists (to avoid overwriting)
-    users_only = {k: v for k, v in users.items() if k != "rooms"}
-
-    # Merge user data with existing data, preserving rooms
-    rooms_data = existing_data.get("rooms", {})
-    merged_data = {**users_only}
-    if rooms_data:
-        merged_data["rooms"] = rooms_data
-
-    with open(MATRIX_USERS_FILE, "w") as f:
-        yaml.dump(merged_data, f, default_flow_style=False, sort_keys=False)
-    logger.info(f"Saved matrix users to {MATRIX_USERS_FILE}")
-
-
 def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
     """Get credentials for a specific agent from matrix_users.yaml.
 
@@ -233,9 +188,12 @@ def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
     Returns:
         Dictionary with username and password, or None if not found
     """
-    users = load_matrix_users()
+    config = MatrixConfig.load()
     agent_key = f"agent_{agent_name}"
-    return users.get(agent_key)
+    account = config.get_account(agent_key)
+    if account:
+        return {"username": account.username, "password": account.password}
+    return None
 
 
 def save_agent_credentials(agent_name: str, username: str, password: str) -> None:
@@ -246,10 +204,8 @@ def save_agent_credentials(agent_name: str, username: str, password: str) -> Non
         username: The Matrix username
         password: The Matrix password
     """
-    users = load_matrix_users()
+    config = MatrixConfig.load()
     agent_key = f"agent_{agent_name}"
-    users[agent_key] = {
-        "username": username,
-        "password": password,
-    }
-    save_matrix_users(users)
+    config.add_account(agent_key, username, password)
+    config.save()
+    logger.info(f"Saved credentials for agent {agent_name}")

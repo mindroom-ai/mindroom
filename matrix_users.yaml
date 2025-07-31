@@ -1,37 +1,37 @@
-agent_calculator:
-  password: calculator_secure_password_27a32533aea603f9
-  username: mindroom_calculator
-agent_code:
-  password: code_secure_password_b4970c6cd5f9fc7b
-  username: mindroom_code
-agent_data_analyst:
-  password: data_analyst_secure_password_9f68639615b7484e
-  username: mindroom_data_analyst
-agent_finance:
-  password: finance_secure_password_cfc48a9442340778
-  username: mindroom_finance
-agent_general:
-  password: general_secure_password_65356d3d32270d2e
-  username: mindroom_general
-agent_news:
-  password: news_secure_password_72847a9dec80a3fb
-  username: mindroom_news
-agent_research:
-  password: research_secure_password_61c334a652b026d8
-  username: mindroom_research
-agent_shell:
-  password: shell_secure_password_160ac178775718f7
-  username: mindroom_shell
-agent_summary:
-  password: summary_secure_password_d6dfe6c5f24e9e1c
-  username: mindroom_summary
-bot:
-  password: bot_password_123
-  username: mindroom_bot
-user:
-  password: user_password_123
-  username: mindroom_user
-
+accounts:
+  agent_calculator:
+    password: calculator_secure_password_27a32533aea603f9
+    username: mindroom_calculator
+  agent_code:
+    password: code_secure_password_b4970c6cd5f9fc7b
+    username: mindroom_code
+  agent_data_analyst:
+    password: data_analyst_secure_password_9f68639615b7484e
+    username: mindroom_data_analyst
+  agent_finance:
+    password: finance_secure_password_cfc48a9442340778
+    username: mindroom_finance
+  agent_general:
+    password: general_secure_password_65356d3d32270d2e
+    username: mindroom_general
+  agent_news:
+    password: news_secure_password_72847a9dec80a3fb
+    username: mindroom_news
+  agent_research:
+    password: research_secure_password_61c334a652b026d8
+    username: mindroom_research
+  agent_shell:
+    password: shell_secure_password_160ac178775718f7
+    username: mindroom_shell
+  agent_summary:
+    password: summary_secure_password_d6dfe6c5f24e9e1c
+    username: mindroom_summary
+  bot:
+    password: bot_password_123
+    username: mindroom_bot
+  user:
+    password: user_password_123
+    username: mindroom_user
 rooms:
   lobby:
     room_id: '!XeqkOykvpdhfoKCrQO:localhost'

@@ -1,37 +1,28 @@
 """Mindroom CLI - Simplified multi-agent Matrix bot system."""
 
 import asyncio
-import contextlib
 import os
 import sys
-from pathlib import Path
+from typing import NamedTuple
 
 import nio
 import typer
-import yaml
 from rich.console import Console
 
 from mindroom.matrix import MATRIX_HOMESERVER
+from mindroom.matrix_config import MatrixConfig
 
 app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
 console = Console()
 
 HOMESERVER = MATRIX_HOMESERVER or "http://localhost:8008"
-CREDENTIALS_FILE = Path("matrix_users.yaml")
 
 
-def load_credentials() -> dict:
-    """Load credentials from matrix_users.yaml."""
-    if not CREDENTIALS_FILE.exists():
-        return {}
-    with open(CREDENTIALS_FILE) as f:
-        return yaml.safe_load(f) or {}
+class InviteResult(NamedTuple):
+    """Result of inviting an agent to a room."""
 
-
-def save_credentials(creds: dict) -> None:
-    """Save credentials to matrix_users.yaml."""
-    with open(CREDENTIALS_FILE, "w") as f:
-        yaml.dump(creds, f, default_flow_style=False, sort_keys=False)
+    success: bool
+    already_member: bool
 
 
 async def _register_user(username: str, password: str, display_name: str) -> None:
@@ -57,6 +48,83 @@ async def _register_user(username: str, password: str, display_name: str) -> Non
             console.print(f"❌ Failed to register {username}: {response}")
     finally:
         await client.close()
+
+
+async def _get_room_members(client: nio.AsyncClient, room_id: str, room_key: str) -> set[str]:
+    """Get the current members of a room."""
+    try:
+        members_response = await client.joined_members(room_id)
+        if isinstance(members_response, nio.JoinedMembersResponse):
+            # members is a list of RoomMember objects
+            return set(member.user_id for member in members_response.members)
+        else:
+            console.print(f"⚠️  Could not check members for {room_key}")
+            return set()
+    except Exception as e:
+        console.print(f"⚠️  Error checking members for {room_key}: {e}")
+        return set()
+
+
+async def _invite_agent_to_room(client: nio.AsyncClient, room_id: str, room_key: str, agent_id: str) -> InviteResult:
+    """Invite an agent to a room. Returns InviteResult."""
+    try:
+        response = await client.room_invite(room_id, agent_id)
+        if isinstance(response, nio.RoomInviteResponse):
+            console.print(f"✅ Invited {agent_id} to {room_key}")
+            return InviteResult(success=True, already_member=False)
+        else:
+            console.print(f"❌ Failed to invite {agent_id} to {room_key}: {response}")
+            return InviteResult(success=False, already_member=False)
+    except Exception as e:
+        console.print(f"❌ Error inviting {agent_id} to {room_key}: {e}")
+        return InviteResult(success=False, already_member=False)
+
+
+async def _ensure_agents_in_rooms(client: nio.AsyncClient, required_rooms: set[str]) -> None:
+    """Ensure all agents are invited to their configured rooms."""
+    from mindroom.agent_loader import load_config
+    from mindroom.matrix_room_manager import load_rooms
+
+    console.print("\n🔄 Checking agent room access...")
+
+    config = load_config()
+    existing_rooms = load_rooms()
+
+    successful_invites = 0
+    failed_invites = 0
+    already_in_room = 0
+
+    for room_key in required_rooms:
+        if room_key not in existing_rooms:
+            continue
+
+        room = existing_rooms[room_key]
+        room_members = await _get_room_members(client, room.room_id, room_key)
+
+        # Check each agent for this room
+        for agent_name, agent_config in config.agents.items():
+            if room_key not in agent_config.rooms:
+                continue
+
+            agent_id = f"@mindroom_{agent_name}:localhost"
+
+            # Skip if already in room
+            if agent_id in room_members:
+                already_in_room += 1
+                console.print(f"✓ {agent_id} already in {room_key}")
+                continue
+
+            # Invite if not in room
+            result = await _invite_agent_to_room(client, room.room_id, room_key, agent_id)
+            if result.success:
+                successful_invites += 1
+            else:
+                failed_invites += 1
+
+    console.print(
+        f"\n📊 Room access summary: {successful_invites} invited, "
+        f"{already_in_room} already present, {failed_invites} failed"
+    )
 
 
 async def _create_room_and_invite_agents(room_key: str, room_name: str, user_client: nio.AsyncClient) -> str | None:
@@ -101,6 +169,43 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
     return None
 
 
+async def _ensure_user_account() -> MatrixConfig:
+    """Ensure a user account exists, creating one if necessary."""
+    config = MatrixConfig.load()
+
+    if not config.get_account("user"):
+        console.print("📝 Creating user account...")
+
+        # Generate credentials
+        user_username = "mindroom_user"
+        user_password = f"user_password_{os.urandom(8).hex()}"
+
+        # Register user
+        await _register_user(user_username, user_password, "Mindroom User")
+
+        # Save credentials
+        config.add_account("user", user_username, user_password)
+        config.save()
+
+        console.print(f"✅ User account ready: @{user_username}:localhost")
+
+    return config
+
+
+async def _create_missing_rooms(client: nio.AsyncClient, required_rooms: set[str]) -> None:
+    """Create any missing rooms from the required set."""
+    from mindroom.matrix_room_manager import load_rooms
+
+    existing_rooms = load_rooms()
+    missing_rooms = required_rooms - set(existing_rooms.keys())
+
+    if missing_rooms:
+        console.print(f"\n🏗️  Creating {len(missing_rooms)} rooms...")
+        for room_key in missing_rooms:
+            room_name = room_key.replace("_", " ").title()
+            await _create_room_and_invite_agents(room_key, room_name, client)
+
+
 @app.command()
 def run():
     """Run the mindroom multi-agent system.
@@ -121,75 +226,33 @@ async def _run() -> None:
 
     console.print("🚀 Starting Mindroom multi-agent system...\n")
 
-    # Check if we have a user account
-    creds = load_credentials()
-    if not creds or "user" not in creds:
-        console.print("📝 Creating user account...")
+    # Ensure we have a user account
+    config = await _ensure_user_account()
 
-        # Generate credentials
-        user_username = "mindroom_user"
-        user_password = f"user_password_{os.urandom(8).hex()}"
+    # Load agent configuration and collect required rooms
+    agent_config = load_config()
+    required_rooms = set(room for agent_cfg in agent_config.agents.values() for room in agent_cfg.rooms)
 
-        # Register user
-        await _register_user(user_username, user_password, "Mindroom User")
-
-        # Save credentials
-        creds = load_credentials()
-        creds["user"] = {"username": user_username, "password": user_password}
-        save_credentials(creds)
-
-        console.print(f"✅ User account ready: @{user_username}:localhost")
-
-    # Load agent configuration
-    config = load_config()
-    required_rooms = set()
-
-    # Collect all rooms mentioned in agents.yaml
-    for agent_config in config.agents.values():
-        required_rooms.update(agent_config.rooms)
-
+    # Handle room creation and agent invitations if needed
     if required_rooms:
-        # Check which rooms need to be created
-        from mindroom.matrix_room_manager import load_rooms
-
-        existing_rooms = load_rooms()
-        missing_rooms = required_rooms - set(existing_rooms.keys())
-
         # Login as user for room operations
-        username = f"@{creds['user']['username']}:localhost"
-        password = creds["user"]["password"]
+        user_account = config.get_account("user")
+        if not user_account:
+            console.print("❌ No user account found")
+            sys.exit(1)
+
+        username = f"@{user_account.username}:localhost"
+        password = user_account.password
         client = nio.AsyncClient(HOMESERVER, username)
 
         try:
             response = await client.login(password=password)
             if isinstance(response, nio.LoginResponse):
-                # Create missing rooms
-                if missing_rooms:
-                    console.print(f"\n🏗️  Creating {len(missing_rooms)} rooms...")
-                    for room_key in missing_rooms:
-                        room_name = room_key.replace("_", " ").title()
-                        await _create_room_and_invite_agents(room_key, room_name, client)
+                # Create any missing rooms
+                await _create_missing_rooms(client, required_rooms)
 
-                # Ensure agents are invited to all required rooms (including existing ones)
-                console.print("\n🔄 Ensuring agents are invited to all rooms...")
-                invite_count = 0
-                for room_key in required_rooms:
-                    if room_key in existing_rooms:
-                        room = existing_rooms[room_key]
-                        # Re-invite agents to ensure they have access
-                        from mindroom.agent_loader import load_config
-
-                        config = load_config()
-
-                        for agent_name, agent_config in config.agents.items():
-                            if room_key in agent_config.rooms:
-                                agent_id = f"@mindroom_{agent_name}:localhost"
-                                with contextlib.suppress(Exception):
-                                    await client.room_invite(room.room_id, agent_id)
-                                    invite_count += 1
-                                    # Add small delay every 10 invites to avoid rate limits
-                                    if invite_count % 10 == 0:
-                                        await asyncio.sleep(0.1)
+                # Ensure agents are invited to all required rooms
+                await _ensure_agents_in_rooms(client, required_rooms)
             else:
                 console.print(f"❌ Failed to login: {response}")
                 sys.exit(1)
@@ -209,8 +272,8 @@ async def _run() -> None:
 @app.command()
 def info():
     """Show current system status."""
-    creds = load_credentials()
-    if not creds:
+    config = MatrixConfig.load()
+    if not config.accounts and not config.rooms:
         console.print("❌ No configuration found. Run: mindroom run")
         return
 
@@ -218,25 +281,23 @@ def info():
     console.print("=" * 40)
 
     # User info
-    if "user" in creds:
-        console.print(f"\n👤 User: @{creds['user']['username']}:localhost")
+    user_account = config.get_account("user")
+    if user_account:
+        console.print(f"\n👤 User: @{user_account.username}:localhost")
 
     # Agent info
-    agent_count = sum(1 for key in creds if key.startswith("agent_"))
-    if agent_count > 0:
-        console.print(f"\n🤖 Agents: {agent_count} registered")
-        for key, value in creds.items():
-            if key.startswith("agent_"):
-                agent_name = key.replace("agent_", "")
-                console.print(f"  • {agent_name}: @{value['username']}:localhost")
+    agent_accounts = [(key, acc) for key, acc in config.accounts.items() if key.startswith("agent_")]
+    if agent_accounts:
+        console.print(f"\n🤖 Agents: {len(agent_accounts)} registered")
+        for key, account in agent_accounts:
+            agent_name = key.replace("agent_", "")
+            console.print(f"  • {agent_name}: @{account.username}:localhost")
 
     # Room info
-    if "rooms" in creds:
-        console.print(f"\n🏠 Rooms: {len(creds['rooms'])} created")
-        for room_key, room_data in creds["rooms"].items():
-            room_name = room_data.get("name", room_key)
-            room_alias = room_data.get("alias", f"#{room_key}")
-            console.print(f"  • {room_name} ({room_alias})")
+    if config.rooms:
+        console.print(f"\n🏠 Rooms: {len(config.rooms)} created")
+        for _room_key, room in config.rooms.items():
+            console.print(f"  • {room.name} ({room.alias})")
 
     console.print(f"\n🌐 Server: {HOMESERVER}")
 
@@ -256,13 +317,14 @@ async def _create_room(room_alias: str, room_name: str | None) -> None:
         room_name = room_alias.replace("_", " ").title()
 
     # Ensure we have a user account
-    creds = load_credentials()
-    if not creds or "user" not in creds:
+    config = MatrixConfig.load()
+    user_account = config.get_account("user")
+    if not user_account:
         console.print("❌ No user account found. Run: mindroom run")
         return
 
-    username = f"@{creds['user']['username']}:localhost"
-    password = creds["user"]["password"]
+    username = f"@{user_account.username}:localhost"
+    password = user_account.password
     client = nio.AsyncClient(HOMESERVER, username)
 
     try:
@@ -283,13 +345,14 @@ def invite_agents(room_id: str = typer.Argument(..., help="Room ID to invite age
 
 async def _invite_agents(room_id: str) -> None:
     """Invite agents to a room."""
-    creds = load_credentials()
-    if not creds or "user" not in creds:
+    config = MatrixConfig.load()
+    user_account = config.get_account("user")
+    if not user_account:
         console.print("❌ No user account found. Run: mindroom run")
         return
 
-    username = f"@{creds['user']['username']}:localhost"
-    password = creds["user"]["password"]
+    username = f"@{user_account.username}:localhost"
+    password = user_account.password
     client = nio.AsyncClient(HOMESERVER, username)
 
     try:
@@ -309,11 +372,11 @@ async def _invite_agents(room_id: str) -> None:
                 # Invite agents based on configuration
                 from mindroom.agent_loader import load_config
 
-                config = load_config()
+                agent_config = load_config()
 
                 invited_count = 0
-                for agent_name, agent_config in config.agents.items():
-                    if room_key in agent_config.rooms:
+                for agent_name, agent_cfg in agent_config.agents.items():
+                    if room_key in agent_cfg.rooms:
                         agent_id = f"@mindroom_{agent_name}:localhost"
                         try:
                             await client.room_invite(room_id, agent_id)
@@ -326,9 +389,9 @@ async def _invite_agents(room_id: str) -> None:
             else:
                 # Invite all agents if room not in config
                 agent_count = 0
-                for key, value in creds.items():
+                for key, account in config.accounts.items():
                     if key.startswith("agent_"):
-                        agent_id = f"@{value['username']}:localhost"
+                        agent_id = f"@{account.username}:localhost"
                         try:
                             await client.room_invite(room_id, agent_id)
                             console.print(f"✅ Invited {agent_id}")
