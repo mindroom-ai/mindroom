@@ -1,8 +1,8 @@
 import asyncio
-import logging
 import os
 from typing import Any
 
+from loguru import logger
 from nio import (
     AsyncClient,
     InviteEvent,
@@ -13,6 +13,7 @@ from nio import (
 )
 
 from .ai import ai_response
+from .logging_config import setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
     MATRIX_PASSWORD,
@@ -21,8 +22,8 @@ from .matrix import (
     prepare_response_content,
 )
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configure logger with colors
+setup_logging(level="INFO")
 
 
 async def fetch_thread_history(client: AsyncClient, room_id: str, thread_id: str) -> list[dict[str, Any]]:
@@ -82,32 +83,35 @@ class MinimalBot:
 
     async def start(self) -> None:
         """Start the bot."""
-        logging.info("Starting bot...")
+        logger.info("Starting bot...")
         assert MATRIX_PASSWORD is not None
         response = await self.client.login(MATRIX_PASSWORD)
         if isinstance(response, LoginResponse):
-            logging.info(f"Successfully logged in as {self.client.user_id}")
+            logger.info(f"Successfully logged in as {self.client.user_id}")
             await self.client.sync_forever(timeout=30000)
         else:
-            logging.error(f"Failed to log in: {response}")
+            logger.error(f"Failed to log in: {response}")
             await self.client.close()
 
     async def _on_invite(self, room: MatrixRoom, event: InviteEvent) -> None:
         """Callback for when the bot is invited to a room."""
-        logging.info(f"Received invite to room: {room.display_name} ({room.room_id})")
+        logger.info(f"Received invite to room: {room.display_name} ({room.room_id})")
         await self.client.join(room.room_id)
-        logging.info(f"Joined room: {room.room_id}")
+        logger.info(f"Joined room: {room.room_id}")
 
     async def _on_message(self, room: MatrixRoom, event: RoomMessageText) -> None:
         """Callback for when a message is received in a room."""
         if event.sender == self.client.user_id:
             return
 
+        logger.info(f"Received message from {event.sender}: {event.body}")
         parsed_data = handle_message_parsing(event, self.client.user_id, self.client.user)
         if not parsed_data:
+            logger.info(f"Message not parsed as a bot command: {event.body}")
             return
 
         agent_name, prompt = parsed_data
+        logger.info(f"Parsed command - Agent: {agent_name}, Prompt: {prompt}")
 
         # Create a unique session_id that includes thread information for context isolation
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
@@ -130,7 +134,7 @@ class MinimalBot:
             message_type="m.room.message",
             content=content,
         )
-        logging.info(f"Sent response to room {room.room_id}")
+        logger.info(f"Sent response to room {room.room_id}")
 
 
 async def main() -> None:
@@ -145,4 +149,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Bot stopped by user.")
+        logger.info("Bot stopped by user.")

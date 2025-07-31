@@ -47,6 +47,7 @@ def create_agent(
         storage=storage,
         add_history_to_messages=True,
         num_history_runs=num_history_runs,
+        markdown=True,
     )
 
     _agent_cache[cache_key] = agent

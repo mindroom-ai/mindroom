@@ -1,13 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.12"
-# dependencies = [
-#     "matrix-nio>=0.24",
-#     "pyyaml>=6.0",
-#     "rich",
-#     "typer",
-# ]
-# ///
+#!/usr/bin/env python3
 """Minimal mindroom CLI for Matrix bot management."""
 
 import asyncio
@@ -119,7 +110,7 @@ OLLAMA_HOST=http://pc.local:11434
 @app.command()
 def run():
     """Run the mindroom bot."""
-    from mindroom.minimal_bot import main  # type: ignore[import-not-found]
+    from mindroom.minimal_bot import main
 
     creds = load_credentials()
     if not creds or "bot" not in creds:
@@ -127,8 +118,9 @@ def run():
         sys.exit(1)
 
     # Set environment variables
-    os.environ["MATRIX_BOT_USERNAME"] = creds["bot"]["username"]
-    os.environ["MATRIX_BOT_PASSWORD"] = creds["bot"]["password"]
+    os.environ["MATRIX_HOMESERVER"] = HOMESERVER
+    os.environ["MATRIX_USER_ID"] = f"@{creds['bot']['username']}:localhost"
+    os.environ["MATRIX_PASSWORD"] = creds["bot"]["password"]
 
     console.print(f"🤖 Starting mindroom bot as @{creds['bot']['username']}:localhost")
     console.print("Press Ctrl+C to stop\n")

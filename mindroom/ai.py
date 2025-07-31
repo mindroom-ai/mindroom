@@ -1,4 +1,3 @@
-import logging
 import os
 from typing import Any
 
@@ -9,6 +8,7 @@ from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.run.response import RunResponse
 from dotenv import load_dotenv
+from loguru import logger
 
 from .agents import get_agent
 
@@ -33,6 +33,7 @@ def get_model_instance() -> Model:
         raise ValueError(msg)
 
     provider, model_id = AGNO_MODEL_STR.split(":", 1)
+    logger.info(f"Using AI model from provider '{provider}' with ID '{model_id}'")
 
     if provider == "ollama":
         return Ollama(id=model_id, host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
@@ -73,7 +74,7 @@ async def _cached_agent_run(
     # Check if result exists in cache
     cached_result = CACHE.get(cache_key)
     if cached_result is not None:
-        logging.info(f"Cache hit for agent '{agent_name}' with prompt: '{prompt}'")
+        logger.info(f"Cache hit for agent '{agent_name}' with prompt: '{prompt}'")
         return cached_result  # type: ignore[no-any-return]
 
     # If not in cache, run the agent and cache the result
@@ -82,7 +83,7 @@ async def _cached_agent_run(
 
     # Cache the result
     CACHE.set(cache_key, response)
-    logging.info(f"Cached response for agent '{agent_name}' with prompt: '{prompt}'")
+    logger.info(f"Cached response for agent '{agent_name}' with prompt: '{prompt}'")
 
     return response  # type: ignore[no-any-return]
 
@@ -94,11 +95,11 @@ async def ai_response(
     thread_history: list[dict[str, Any]] | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent."""
-    logging.info(f"Routing to agent '{agent_name}' for prompt: '{prompt}'")
+    logger.info(f"Routing to agent '{agent_name}' for prompt: '{prompt}'")
     try:
         model = get_model_instance()
         response = await _cached_agent_run(agent_name, prompt, session_id, model, thread_history)
         return response.content or ""
     except Exception as e:
-        logging.exception(f"Error generating AI response: {e}")
+        logger.exception(f"Error generating AI response: {e}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"
