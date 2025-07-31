@@ -4,10 +4,11 @@ import pytest
 from agno.agent import Agent
 from agno.models.ollama import Ollama
 
-from mindroom.agents import get_agent, list_agents
+from mindroom.agent_loader import create_agent as get_agent
+from mindroom.agent_loader import get_agent_info, list_agents
 
 
-@patch("mindroom.agents.base.SqliteStorage")
+@patch("mindroom.agent_loader.SqliteStorage")
 def test_get_agent_calculator(mock_storage: MagicMock) -> None:
     """Tests that the calculator agent is created correctly."""
     model = Ollama(id="test")
@@ -17,7 +18,7 @@ def test_get_agent_calculator(mock_storage: MagicMock) -> None:
     mock_storage.assert_called_once_with(table_name="calculator_sessions", db_file="tmp/calculator.db")
 
 
-@patch("mindroom.agents.base.SqliteStorage")
+@patch("mindroom.agent_loader.SqliteStorage")
 def test_get_agent_general(mock_storage: MagicMock) -> None:
     """Tests that the general agent is created correctly."""
     model = Ollama(id="test")
@@ -27,7 +28,7 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:
     mock_storage.assert_called_once_with(table_name="general_sessions", db_file="tmp/general.db")
 
 
-@patch("mindroom.agents.base.SqliteStorage")
+@patch("mindroom.agent_loader.SqliteStorage")
 def test_get_agent_code(mock_storage: MagicMock) -> None:
     """Tests that the code agent is created correctly."""
     model = Ollama(id="test")
@@ -37,7 +38,7 @@ def test_get_agent_code(mock_storage: MagicMock) -> None:
     mock_storage.assert_called_once_with(table_name="code_sessions", db_file="tmp/code.db")
 
 
-@patch("mindroom.agents.base.SqliteStorage")
+@patch("mindroom.agent_loader.SqliteStorage")
 def test_get_agent_shell(mock_storage: MagicMock) -> None:
     """Tests that the shell agent is created correctly."""
     model = Ollama(id="test")
@@ -47,7 +48,7 @@ def test_get_agent_shell(mock_storage: MagicMock) -> None:
     mock_storage.assert_called_once_with(table_name="shell_sessions", db_file="tmp/shell.db")
 
 
-@patch("mindroom.agents.base.SqliteStorage")
+@patch("mindroom.agent_loader.SqliteStorage")
 def test_get_agent_summary(mock_storage: MagicMock) -> None:
     """Tests that the summary agent is created correctly."""
     model = Ollama(id="test")
@@ -70,11 +71,22 @@ def test_list_agents() -> None:
     """Tests that list_agents returns all available agents."""
     agents = list_agents()
     assert isinstance(agents, list)
+    # Check core agents are present
     assert "calculator" in agents
     assert "general" in agents
     assert "code" in agents
     assert "shell" in agents
     assert "summary" in agents
-    assert len(agents) == 5
+    # We should have at least these 5 core agents, but may have more from YAML
+    assert len(agents) >= 5
     # Check they are sorted
     assert agents == sorted(agents)
+
+
+def test_get_agent_info() -> None:
+    """Tests that get_agent_info returns correct information."""
+    info = get_agent_info("calculator")
+    assert info.display_name == "CalculatorAgent"
+    assert info.role == "Solve mathematical problems."
+    assert info.tools == ["calculator"]
+    assert len(info.instructions) > 0

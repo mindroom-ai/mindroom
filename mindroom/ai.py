@@ -10,7 +10,7 @@ from agno.run.response import RunResponse
 from dotenv import load_dotenv
 from loguru import logger
 
-from .agents import get_agent
+from .agent_loader import create_agent as get_agent
 
 # Load environment variables from .env file
 load_dotenv()
