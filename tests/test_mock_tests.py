@@ -50,7 +50,7 @@ from nio import (
     SyncResponse,
 )
 
-from mindroom.bot import MinimalBot
+from mindroom.bot import Bot
 
 TIMEOUT = 0.2
 
@@ -340,11 +340,11 @@ class TestMockingStrategy:
 
 
 class TestBotMockingStrategy:
-    """Test mocking strategy specifically for our MinimalBot."""
+    """Test mocking strategy specifically for our Bot."""
 
     @pytest_asyncio.fixture
     async def bot(self):
-        """Create a MinimalBot for testing and ensure cleanup."""
+        """Create a Bot for testing and ensure cleanup."""
         homeserver = "https://matrix.example.org"
         bot_user_id = "@bot:example.org"
 
@@ -354,13 +354,13 @@ class TestBotMockingStrategy:
             patch("mindroom.matrix.MATRIX_PASSWORD", "password"),
             patch("os.path.exists", return_value=True),
         ):
-            bot = MinimalBot()
+            bot = Bot()
             yield bot
             await bot.client.close()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_bot_login_requires_mocking(self, bot: MinimalBot, use_mock: bool) -> None:
+    async def test_bot_login_requires_mocking(self, bot: Bot, use_mock: bool) -> None:
         """Test that bot login actually requires HTTP mocking."""
         if use_mock:
             # WITH mocking - should succeed
@@ -400,7 +400,7 @@ class TestBotMockingStrategy:
             assert not bot.client.access_token or bot.client.access_token == ""
 
     @pytest.mark.asyncio
-    async def test_bot_message_processing_requires_all_mocks(self, bot: MinimalBot) -> None:
+    async def test_bot_message_processing_requires_all_mocks(self, bot: Bot) -> None:
         """Test that bot message processing requires proper HTTP mocking."""
         room_id = "!test:example.org"
 

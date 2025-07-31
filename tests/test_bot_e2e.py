@@ -15,7 +15,7 @@ from nio import (
     RoomMessageText,
 )
 
-from mindroom.bot import MinimalBot
+from mindroom.bot import Bot
 
 from .test_helpers import mock_room_messages_empty
 
@@ -41,7 +41,7 @@ async def test_bot_processes_message_and_sends_response() -> None:
         patch("mindroom.matrix.MATRIX_PASSWORD", "password"),
         patch("os.path.exists", return_value=True),
     ):
-        bot = MinimalBot()
+        bot = Bot()
 
         # Set up the bot as already logged in
         bot.client.access_token = "test_token"
@@ -122,7 +122,7 @@ async def test_bot_handles_room_invite() -> None:
         patch("mindroom.matrix.MATRIX_PASSWORD", "password"),
         patch("os.path.exists", return_value=True),
     ):
-        bot = MinimalBot()
+        bot = Bot()
 
         # Set up as logged in
         bot.client.access_token = "test_token"
@@ -186,7 +186,7 @@ async def test_bot_preserves_thread_context() -> None:
         patch("mindroom.matrix.MATRIX_PASSWORD", "password"),
         patch("os.path.exists", return_value=True),
     ):
-        bot = MinimalBot()
+        bot = Bot()
         bot.client.access_token = "test_token"
         bot.client.user_id = bot_user_id
         bot.client.user = "bot"
@@ -276,7 +276,7 @@ async def test_bot_ignores_own_messages() -> None:
         patch("mindroom.matrix.MATRIX_PASSWORD", "password"),
         patch("os.path.exists", return_value=True),
     ):
-        bot = MinimalBot()
+        bot = Bot()
         bot.client.access_token = "test_token"
         bot.client.user_id = bot_user_id
 
@@ -333,7 +333,7 @@ async def test_bot_routes_to_different_agents() -> None:
         patch("mindroom.matrix.MATRIX_PASSWORD", "password"),
         patch("os.path.exists", return_value=True),
     ):
-        bot = MinimalBot()
+        bot = Bot()
         bot.client.access_token = "test_token"
         bot.client.user_id = bot_user_id
         bot.client.user = "bot"

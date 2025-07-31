@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from nio import RoomMessageText
 
-from mindroom.bot import MinimalBot
+from mindroom.bot import Bot
 from mindroom.matrix import parse_message
 
 from .test_helpers import mock_room_messages_empty
@@ -49,7 +49,7 @@ async def test_on_message_thread_reply(mock_ai_response: AsyncMock) -> None:
         patch("mindroom.matrix.MATRIX_USER_ID", "@bot:localhost"),
         patch("mindroom.matrix.MATRIX_PASSWORD", "password"),
     ):
-        bot = MinimalBot()
+        bot = Bot()
     bot.client = AsyncMock()
     bot.client.user_id = "@bot:localhost"
     bot.client.user = "bot"

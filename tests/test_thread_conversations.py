@@ -22,7 +22,7 @@ from nio import (
     RoomMessageText,
 )
 
-from mindroom.bot import MinimalBot
+from mindroom.bot import Bot
 
 from .test_helpers import mock_room_messages_empty, mock_room_messages_with_history
 
@@ -71,7 +71,7 @@ async def client():
 
 @pytest_asyncio.fixture
 async def bot():
-    """Create a MinimalBot for testing and ensure cleanup."""
+    """Create a Bot for testing and ensure cleanup."""
     homeserver = "https://matrix.example.org"
     bot_user_id = "@bot:example.org"
 
@@ -81,7 +81,7 @@ async def bot():
         patch("mindroom.matrix.MATRIX_PASSWORD", "password"),
         patch("os.path.exists", return_value=True),
     ):
-        bot = MinimalBot()
+        bot = Bot()
         yield bot
         await bot.client.close()
 
@@ -117,7 +117,7 @@ async def _create_thread_message(
 
 
 @pytest.mark.asyncio
-async def test_single_thread_context_preservation_with_ai(bot: MinimalBot) -> None:
+async def test_single_thread_context_preservation_with_ai(bot: Bot) -> None:
     """Test that bot preserves context within a single thread using actual AI."""
     room_id = "!test:example.org"
     thread_root = "$thread_root:example.org"
@@ -223,7 +223,7 @@ async def test_single_thread_context_preservation_with_ai(bot: MinimalBot) -> No
 
 
 @pytest.mark.asyncio
-async def test_multiple_threads_context_isolation_with_ai(bot: MinimalBot) -> None:
+async def test_multiple_threads_context_isolation_with_ai(bot: Bot) -> None:
     """Test that contexts are isolated between different threads using actual AI."""
     room_id = "!test:example.org"
     thread1_root = "$thread1:example.org"
@@ -357,7 +357,7 @@ async def test_multiple_threads_context_isolation_with_ai(bot: MinimalBot) -> No
 
 
 @pytest.mark.asyncio
-async def test_multiple_agents_maintain_separate_contexts_in_thread(bot: MinimalBot) -> None:
+async def test_multiple_agents_maintain_separate_contexts_in_thread(bot: Bot) -> None:
     """Test that multiple agents (calculator and general) maintain separate contexts in the same thread."""
     room_id = "!test:example.org"
     thread_root = "$thread:example.org"
@@ -486,7 +486,7 @@ async def test_multiple_agents_maintain_separate_contexts_in_thread(bot: Minimal
 
 
 @pytest.mark.asyncio
-async def test_thread_all_messages_treated_as_mentions_with_ai(bot: MinimalBot) -> None:
+async def test_thread_all_messages_treated_as_mentions_with_ai(bot: Bot) -> None:
     """Test that all thread messages are treated as bot mentions using actual AI."""
     room_id = "!test:example.org"
     thread_root = "$thread:example.org"
@@ -581,7 +581,7 @@ async def test_thread_all_messages_treated_as_mentions_with_ai(bot: MinimalBot) 
 
 
 @pytest.mark.asyncio
-async def test_agent_sees_full_thread_history(bot: MinimalBot) -> None:
+async def test_agent_sees_full_thread_history(bot: Bot) -> None:
     """Test that agents can access entire thread history when mentioned."""
     room_id = "!test:example.org"
     thread_root = "$thread_root:example.org"

@@ -2,17 +2,17 @@
 
 from unittest.mock import AsyncMock
 
-from mindroom.bot import MinimalBot
+from mindroom.bot import Bot
 
 
-def mock_room_messages_empty(bot: MinimalBot) -> None:
+def mock_room_messages_empty(bot: Bot) -> None:
     """Mock room_messages to return empty thread history."""
     mock_room_messages = AsyncMock()
     mock_room_messages.return_value = AsyncMock(chunk=[], end=None)
     bot.client.room_messages = mock_room_messages
 
 
-def mock_room_messages_with_history(bot: MinimalBot, thread_id: str, messages: list[tuple[str, str, str]]) -> None:
+def mock_room_messages_with_history(bot: Bot, thread_id: str, messages: list[tuple[str, str, str]]) -> None:
     """Mock room_messages to return specific thread history.
 
     Args:

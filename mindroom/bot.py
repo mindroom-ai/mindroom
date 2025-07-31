@@ -70,7 +70,7 @@ async def fetch_thread_history(client: AsyncClient, room_id: str, thread_id: str
     return list(reversed(messages))  # Return in chronological order
 
 
-class MinimalBot:
+class Bot:
     def __init__(self) -> None:
         if not all([MATRIX_HOMESERVER, MATRIX_USER_ID, MATRIX_PASSWORD]):
             msg = "Matrix configuration is missing from .env file."
@@ -141,7 +141,7 @@ async def main() -> None:
     # Create tmp directory for sqlite dbs if it doesn't exist
     if not os.path.exists("tmp"):
         os.makedirs("tmp")
-    bot = MinimalBot()
+    bot = Bot()
     await bot.start()
 
 
