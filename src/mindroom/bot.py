@@ -173,13 +173,23 @@ class MultiAgentOrchestrator:
         # Ensure all agents have Matrix accounts
         agent_users = await ensure_all_agent_users()
 
+        # Get room aliases mapping if available
+        room_aliases = getattr(config, "room_aliases", {})
+
         # Create bot instances for each agent
         for agent_name, agent_user in agent_users.items():
             # Get rooms from agent configuration
             agent_config = config.agents.get(agent_name)
             rooms = agent_config.rooms if agent_config else []
 
-            bot = AgentBot(agent_user, rooms=rooms)
+            # Resolve room aliases to actual room IDs
+            resolved_rooms = []
+            for room in rooms:
+                # If it's an alias, resolve it; otherwise use as-is
+                resolved_room = room_aliases.get(room, room)
+                resolved_rooms.append(resolved_room)
+
+            bot = AgentBot(agent_user, rooms=resolved_rooms)
             self.agent_bots[agent_name] = bot
 
         logger.info(f"Initialized {len(self.agent_bots)} agent bots")

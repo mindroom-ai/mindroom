@@ -2,6 +2,21 @@
 # This file defines all available agents and their configurations
 # Users can add custom agents by adding new entries to this file
 
+# Room aliases for better readability
+room_aliases:
+  lobby: "!XeqkOykvpdhfoKCrQO:localhost"
+  help: "!ttzoOtKWdvbSfYPOcU:localhost"
+  dev: "!BFEXDUSnIarGSxVbEJ:localhost"
+  automation: "!XxxyJwdbAswNTeayhc:localhost"
+  ops: "!LQFVZZKOGdHcxLneTS:localhost"
+  research: "!dILWmRJrGmlMysZWtb:localhost"
+  docs: "!drRGiBxZGNlCODlPOv:localhost"
+  science: "!vHavUnTzTMmAUEveXo:localhost"
+  news: "!RBzXsLHNRFtOVPvgGT:localhost"
+  finance: "!fZaLPNeaIfPtphCLSd:localhost"
+  analysis: "!XiGCYUuFjGCzcOGQcS:localhost"
+  business: "!RiaUjyDPSbzFKSkUDg:localhost"
+
 agents:
   # General conversation agent
   general:
@@ -14,8 +29,8 @@ agents:
       - "Be conversational and friendly."
       - "Ask clarifying questions when needed."
     rooms:
-      - "!XeqkOykvpdhfoKCrQO:localhost"  # Main coordination room for all agents (lobby)
-      - "!ttzoOtKWdvbSfYPOcU:localhost"   # General help and assistance (help)
+      - lobby    # Main coordination room for all agents
+      - help     # General help and assistance
     num_history_runs: 5
 
   # Calculator agent for mathematical operations
@@ -30,9 +45,9 @@ agents:
       - "Explain the mathematical concepts when helpful."
       - "Double-check calculations for accuracy."
     rooms:
-      - "!XeqkOykvpdhfoKCrQO:localhost"     # Main coordination room (lobby)
-      - "!vHavUnTzTMmAUEveXo:localhost"   # Science and math collaboration (science)
-      - "!XiGCYUuFjGCzcOGQcS:localhost"  # Data analysis tasks (analysis)
+      - lobby      # Main coordination room
+      - science    # Science and math collaboration
+      - analysis   # Data analysis tasks
     num_history_runs: 5
 
   # Code agent for programming tasks
@@ -51,9 +66,9 @@ agents:
       - "Always read files before modifying them"
       - "Follow the project's existing style and conventions"
     rooms:
-      - "!XeqkOykvpdhfoKCrQO:localhost"      # Main coordination room (lobby)
-      - "!BFEXDUSnIarGSxVbEJ:localhost"        # Development and programming (dev)
-      - "!XxxyJwdbAswNTeayhc:localhost" # Automation and scripting (automation)
+      - lobby       # Main coordination room
+      - dev         # Development and programming
+      - automation  # Automation and scripting
     num_history_runs: 5
 
   # Shell command execution agent
@@ -70,10 +85,10 @@ agents:
       - "Suggest safer alternatives when appropriate."
       - "Remember the user's working directory context."
     rooms:
-      - "!XeqkOykvpdhfoKCrQO:localhost"      # Main coordination room (lobby)
-      - "!BFEXDUSnIarGSxVbEJ:localhost"        # Development tasks (dev)
-      - "!XxxyJwdbAswNTeayhc:localhost" # System automation (automation)
-      - "!LQFVZZKOGdHcxLneTS:localhost"        # Operations and maintenance (ops)
+      - lobby       # Main coordination room
+      - dev         # Development tasks
+      - automation  # System automation
+      - ops         # Operations and maintenance
     num_history_runs: 5
 
   # Text summarization agent
@@ -89,9 +104,9 @@ agents:
       - "Indicate the level of detail in your summary."
       - "Preserve important quotes or specific data points."
     rooms:
-      - "!XeqkOykvpdhfoKCrQO:localhost"    # Main coordination room (lobby)
-      - "!dILWmRJrGmlMysZWtb:localhost" # Research collaboration (research)
-      - "!drRGiBxZGNlCODlPOv:localhost"     # Documentation and writing (docs)
+      - lobby     # Main coordination room
+      - research  # Research collaboration
+      - docs      # Documentation and writing
     num_history_runs: 5
 
   # Research agent for information gathering
@@ -110,10 +125,10 @@ agents:
       - "Provide balanced viewpoints on controversial topics."
       - "Summarize findings in a clear, organized manner."
     rooms:
-      - "!XeqkOykvpdhfoKCrQO:localhost"    # Main coordination room (lobby)
-      - "!dILWmRJrGmlMysZWtb:localhost" # Research collaboration (research)
-      - "!vHavUnTzTMmAUEveXo:localhost"  # Scientific research (science)
-      - "!RBzXsLHNRFtOVPvgGT:localhost"     # Current events research (news)
+      - lobby     # Main coordination room
+      - research  # Research collaboration
+      - science   # Scientific research
+      - news      # Current events research
     num_history_runs: 5
 
   # Financial data analysis agent
@@ -131,10 +146,10 @@ agents:
       - "Include relevant disclaimers about investment advice."
       - "Present data in a clear, organized format."
     rooms:
-      - "!XeqkOykvpdhfoKCrQO:localhost"     # Main coordination room (lobby)
-      - "!fZaLPNeaIfPtphCLSd:localhost"   # Financial analysis (finance)
-      - "!XiGCYUuFjGCzcOGQcS:localhost"  # Data analysis collaboration (analysis)
-      - "!RiaUjyDPSbzFKSkUDg:localhost"  # Business discussions (business)
+      - lobby     # Main coordination room
+      - finance   # Financial analysis
+      - analysis  # Data analysis collaboration
+      - business  # Business discussions
     num_history_runs: 5
 
   # News and current events agent
@@ -152,10 +167,10 @@ agents:
       - "Distinguish between news and opinion pieces."
       - "Highlight key developments and their significance."
     rooms:
-      - "!XeqkOykvpdhfoKCrQO:localhost"    # Main coordination room (lobby)
-      - "!RBzXsLHNRFtOVPvgGT:localhost"     # News and current events (news)
-      - "!dILWmRJrGmlMysZWtb:localhost" # Research collaboration (research)
-      - "!RiaUjyDPSbzFKSkUDg:localhost" # Business news (business)
+      - lobby     # Main coordination room
+      - news      # News and current events
+      - research  # Research collaboration
+      - business  # Business news
     num_history_runs: 5
 
   # Data analysis agent
@@ -173,11 +188,11 @@ agents:
       - "Provide actionable insights and recommendations."
       - "Handle missing or inconsistent data appropriately."
     rooms:
-      - "!XeqkOykvpdhfoKCrQO:localhost"     # Main coordination room (lobby)
-      - "!XiGCYUuFjGCzcOGQcS:localhost"  # Data analysis hub (analysis)
-      - "!vHavUnTzTMmAUEveXo:localhost"   # Scientific data analysis (science)
-      - "!fZaLPNeaIfPtphCLSd:localhost"   # Financial data analysis (finance)
-      - "!RiaUjyDPSbzFKSkUDg:localhost"  # Business analytics (business)
+      - lobby     # Main coordination room
+      - analysis  # Data analysis hub
+      - science   # Scientific data analysis
+      - finance   # Financial data analysis
+      - business  # Business analytics
     num_history_runs: 5
 
 # Configuration for agent defaults

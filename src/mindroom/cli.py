@@ -335,16 +335,19 @@ async def _create_all_rooms() -> None:
 
     # Load agent configuration to get all unique rooms
     config = load_config()
+    room_aliases = getattr(config, "room_aliases", {})
     all_rooms = set()
     room_to_agents: dict[str, list[str]] = {}
 
     # Collect all unique rooms and which agents belong to each
     for agent_name, agent_config in config.agents.items():
         for room in agent_config.rooms:
-            all_rooms.add(room)
-            if room not in room_to_agents:
-                room_to_agents[room] = []
-            room_to_agents[room].append(agent_name)
+            # Resolve room alias to actual room ID if needed
+            resolved_room = room_aliases.get(room, room)
+            all_rooms.add(resolved_room)
+            if resolved_room not in room_to_agents:
+                room_to_agents[resolved_room] = []
+            room_to_agents[resolved_room].append(agent_name)
 
     client = nio.AsyncClient(HOMESERVER, username)
 
