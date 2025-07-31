@@ -16,7 +16,7 @@ def mock_calculator_agent() -> AgentMatrixUser:
     """Create a mock calculator agent user."""
     return AgentMatrixUser(
         agent_name="calculator",
-        user_id="@mindroom_calculator:example.org",
+        user_id="@mindroom_calculator:localhost",
         display_name="CalculatorAgent",
         password="calc_pass",
         access_token="calc_token",
@@ -28,7 +28,7 @@ def mock_general_agent() -> AgentMatrixUser:
     """Create a mock general agent user."""
     return AgentMatrixUser(
         agent_name="general",
-        user_id="@mindroom_general:example.org",
+        user_id="@mindroom_general:localhost",
         display_name="GeneralAgent",
         password="gen_pass",
         access_token="gen_token",
@@ -52,7 +52,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
         await bot.start()
 
         # Create a message mentioning the calculator agent
-        message_body = "@mindroom_calculator: What's 15% of 200?"
+        message_body = "@mindroom_calculator:localhost What's 15% of 200?"
         message_event = nio.RoomMessageText(
             body=message_body,
             formatted_body=message_body,
@@ -211,13 +211,13 @@ async def test_orchestrator_manages_multiple_agents() -> None:
         mock_agents = {
             "calculator": AgentMatrixUser(
                 agent_name="calculator",
-                user_id="@mindroom_calculator:example.org",
+                user_id="@mindroom_calculator:localhost",
                 display_name="CalculatorAgent",
                 password="calc_pass",
             ),
             "general": AgentMatrixUser(
                 agent_name="general",
-                user_id="@mindroom_general:example.org",
+                user_id="@mindroom_general:localhost",
                 display_name="GeneralAgent",
                 password="gen_pass",
             ),
@@ -255,13 +255,13 @@ async def test_orchestrator_invites_agents_to_room() -> None:
         mock_agents = {
             "calculator": AgentMatrixUser(
                 agent_name="calculator",
-                user_id="@mindroom_calculator:example.org",
+                user_id="@mindroom_calculator:localhost",
                 display_name="CalculatorAgent",
                 password="calc_pass",
             ),
             "general": AgentMatrixUser(
                 agent_name="general",
-                user_id="@mindroom_general:example.org",
+                user_id="@mindroom_general:localhost",
                 display_name="GeneralAgent",
                 password="gen_pass",
             ),
@@ -280,8 +280,8 @@ async def test_orchestrator_invites_agents_to_room() -> None:
         invite_calls = mock_inviter_client.room_invite.call_args_list
         invited_users = {call[0][1] for call in invite_calls}
         assert invited_users == {
-            "@mindroom_calculator:example.org",
-            "@mindroom_general:example.org",
+            "@mindroom_calculator:localhost",
+            "@mindroom_general:localhost",
         }
 
 
