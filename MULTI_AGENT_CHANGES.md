@@ -27,7 +27,7 @@ Successfully transformed Mindroom from a single bot account system to a multi-ag
 
 #### `src/mindroom/matrix_room_manager.py` (NEW)
 - Manages Matrix room configuration and persistence
-- Room information stored in `matrix_rooms.yaml`
+- Room information stored in `matrix_users.yaml` (combined with user data)
 - Key functions:
   - `get_room_aliases()`: Get mapping of room aliases to IDs
   - `add_room()`: Add new rooms to configuration
@@ -43,13 +43,13 @@ Successfully transformed Mindroom from a single bot account system to a multi-ag
 ### 4. Room Management
 - Agents can be assigned to multiple rooms in `agents.yaml`
 - Rooms use simple aliases (e.g., `lobby`, `dev`, `science`)
-- Room IDs dynamically resolved from `matrix_rooms.yaml`
+- Room IDs dynamically resolved from `matrix_users.yaml`
 - CLI commands for room creation and agent invitation
 
 ### 5. Credential & Configuration Management
 - Automatic generation of secure passwords
-- Credentials stored in `matrix_users.yaml` (gitignored)
-- Room configuration in `matrix_rooms.yaml` (gitignored)
+- Credentials and room configuration stored in `matrix_users.yaml` (gitignored)
+- Single file for both user credentials and room configuration
 - Example structure:
   ```yaml
   # matrix_users.yaml
@@ -57,12 +57,16 @@ Successfully transformed Mindroom from a single bot account system to a multi-ag
     password: general_secure_password_65356d3d32270d2e
     username: mindroom_general
 
-  # matrix_rooms.yaml
+  agent_calculator:
+    password: calculator_secure_password_27a32533aea603f9
+    username: mindroom_calculator
+
   rooms:
     lobby:
       room_id: "!XeqkOykvpdhfoKCrQO:localhost"
       alias: "#lobby:localhost"
       name: "Main Lobby"
+      created_at: "2025-07-30T13:42:00Z"
   ```
 
 ### 6. Testing
@@ -77,6 +81,8 @@ Successfully transformed Mindroom from a single bot account system to a multi-ag
 - `mindroom create-agent-room <alias>`: Create a room and invite agents
 - `mindroom create-all-rooms`: Create all rooms from agents.yaml
 - `mindroom invite-agents <room_id>`: Invite agents to existing room
+- `mindroom info`: Shows agents, rooms, and server information
+- `mindroom test`: Creates a test room (currently outdated - invites old bot instead of agents)
 
 ## Benefits
 1. **Better UX**: Agents appear as real users with autocomplete support

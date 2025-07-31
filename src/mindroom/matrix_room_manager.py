@@ -3,6 +3,7 @@
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
@@ -17,15 +18,16 @@ class MatrixRoom(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
 
-MATRIX_ROOMS_FILE = Path(os.environ.get("MATRIX_ROOMS_FILE", "matrix_rooms.yaml"))
+# Use the same file as matrix users
+MATRIX_USERS_FILE = Path(os.environ.get("MATRIX_USERS_FILE", "matrix_users.yaml"))
 
 
 def load_rooms() -> dict[str, MatrixRoom]:
     """Load room configuration from YAML file."""
-    if not MATRIX_ROOMS_FILE.exists():
+    if not MATRIX_USERS_FILE.exists():
         return {}
 
-    with open(MATRIX_ROOMS_FILE) as f:
+    with open(MATRIX_USERS_FILE) as f:
         data = yaml.safe_load(f) or {}
 
     rooms = {}
@@ -37,28 +39,26 @@ def load_rooms() -> dict[str, MatrixRoom]:
 
 def save_rooms(rooms: dict[str, MatrixRoom]) -> None:
     """Save room configuration to YAML file."""
-    data = {
-        "rooms": {
-            key: {
-                "room_id": room.room_id,
-                "alias": room.alias,
-                "name": room.name,
-                "created_at": room.created_at,
-            }
-            for key, room in rooms.items()
+    # Load existing data to preserve user information
+    existing_data: dict[str, Any] = {}
+    if MATRIX_USERS_FILE.exists():
+        with open(MATRIX_USERS_FILE) as f:
+            existing_data = yaml.safe_load(f) or {}
+
+    # Update only the rooms section
+    existing_data["rooms"] = {
+        key: {
+            "room_id": room.room_id,
+            "alias": room.alias,
+            "name": room.name,
+            "created_at": room.created_at,
         }
+        for key, room in rooms.items()
     }
 
-    # Add header comment
-    yaml_content = """# Matrix room configuration
-# This file tracks all Matrix rooms created for the multi-agent system
-# It is automatically updated when rooms are created or deleted
-
-"""
-    yaml_content += yaml.dump(data, default_flow_style=False, sort_keys=False)
-
-    with open(MATRIX_ROOMS_FILE, "w") as f:
-        f.write(yaml_content)
+    # Save back with preserved user data
+    with open(MATRIX_USERS_FILE, "w") as f:
+        yaml.dump(existing_data, f, default_flow_style=False, sort_keys=False)
 
 
 def get_room_aliases() -> dict[str, str]:

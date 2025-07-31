@@ -444,6 +444,14 @@ def info():
     if agent_count == 0:
         console.print("  (No agents found)")
 
+    # Show rooms
+    if "rooms" in creds:
+        console.print("\n🏠 Rooms:")
+        for room_key, room_data in creds["rooms"].items():
+            room_alias = room_data.get("alias", room_key)
+            room_name = room_data.get("name", room_key)
+            console.print(f"  • {room_name} ({room_alias})")
+
     console.print(f"\n🌐 Server: {HOMESERVER}")
 
 

@@ -7,6 +7,7 @@ for each AI agent, allowing them to appear as separate users in chat rooms.
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import nio
 import yaml
@@ -185,13 +186,16 @@ def load_matrix_users() -> dict[str, dict[str, str]]:
     """Load existing matrix users from YAML file.
 
     Returns:
-        Dictionary of existing users
+        Dictionary of existing users (excluding rooms section)
     """
     if not MATRIX_USERS_FILE.exists():
         return {}
 
     with open(MATRIX_USERS_FILE) as f:
-        return yaml.safe_load(f) or {}
+        data = yaml.safe_load(f) or {}
+
+    # Filter out non-user entries (like 'rooms')
+    return {k: v for k, v in data.items() if isinstance(v, dict) and "username" in v}
 
 
 def save_matrix_users(users: dict[str, dict[str, str]]) -> None:
@@ -200,8 +204,23 @@ def save_matrix_users(users: dict[str, dict[str, str]]) -> None:
     Args:
         users: Dictionary of users to save
     """
+    # Load existing data to preserve rooms section
+    existing_data: dict[str, Any] = {}
+    if MATRIX_USERS_FILE.exists():
+        with open(MATRIX_USERS_FILE) as f:
+            existing_data = yaml.safe_load(f) or {}
+
+    # Remove the 'rooms' key from users if it exists (to avoid overwriting)
+    users_only = {k: v for k, v in users.items() if k != "rooms"}
+
+    # Merge user data with existing data, preserving rooms
+    rooms_data = existing_data.get("rooms", {})
+    merged_data = {**users_only}
+    if rooms_data:
+        merged_data["rooms"] = rooms_data
+
     with open(MATRIX_USERS_FILE, "w") as f:
-        yaml.dump(users, f, default_flow_style=False)
+        yaml.dump(merged_data, f, default_flow_style=False, sort_keys=False)
     logger.info(f"Saved matrix users to {MATRIX_USERS_FILE}")
 
 

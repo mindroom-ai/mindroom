@@ -31,3 +31,64 @@ bot:
 user:
   password: user_password_123
   username: mindroom_user
+rooms:
+  lobby:
+    room_id: '!XeqkOykvpdhfoKCrQO:localhost'
+    alias: '#lobby:localhost'
+    name: Main Lobby
+    created_at: '2025-07-30T13:42:00Z'
+  help:
+    room_id: '!ttzoOtKWdvbSfYPOcU:localhost'
+    alias: '#help:localhost'
+    name: Help Room
+    created_at: '2025-07-30T13:42:00Z'
+  dev:
+    room_id: '!BFEXDUSnIarGSxVbEJ:localhost'
+    alias: '#dev:localhost'
+    name: Development
+    created_at: '2025-07-30T13:42:00Z'
+  automation:
+    room_id: '!XxxyJwdbAswNTeayhc:localhost'
+    alias: '#automation:localhost'
+    name: Automation
+    created_at: '2025-07-30T13:42:00Z'
+  ops:
+    room_id: '!LQFVZZKOGdHcxLneTS:localhost'
+    alias: '#ops:localhost'
+    name: Ops
+    created_at: '2025-07-30T13:37:00Z'
+  research:
+    room_id: '!dILWmRJrGmlMysZWtb:localhost'
+    alias: '#research:localhost'
+    name: Research
+    created_at: '2025-07-30T13:42:00Z'
+  docs:
+    room_id: '!drRGiBxZGNlCODlPOv:localhost'
+    alias: '#docs:localhost'
+    name: Docs
+    created_at: '2025-07-30T13:37:00Z'
+  science:
+    room_id: '!vHavUnTzTMmAUEveXo:localhost'
+    alias: '#science:localhost'
+    name: Science
+    created_at: '2025-07-30T13:37:00Z'
+  news:
+    room_id: '!RBzXsLHNRFtOVPvgGT:localhost'
+    alias: '#news:localhost'
+    name: News
+    created_at: '2025-07-30T13:37:00Z'
+  finance:
+    room_id: '!fZaLPNeaIfPtphCLSd:localhost'
+    alias: '#finance:localhost'
+    name: Finance
+    created_at: '2025-07-30T13:37:00Z'
+  analysis:
+    room_id: '!XiGCYUuFjGCzcOGQcS:localhost'
+    alias: '#analysis:localhost'
+    name: Analysis
+    created_at: '2025-07-30T13:37:00Z'
+  business:
+    room_id: '!RiaUjyDPSbzFKSkUDg:localhost'
+    alias: '#business:localhost'
+    name: Business
+    created_at: '2025-07-30T13:37:00Z'
