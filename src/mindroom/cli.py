@@ -11,6 +11,7 @@ from rich.console import Console
 
 from mindroom.matrix import MATRIX_HOMESERVER
 from mindroom.matrix_config import MatrixConfig
+from mindroom.matrix_utils import matrix_client
 
 app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
 console = Console()
@@ -27,9 +28,7 @@ class InviteResult(NamedTuple):
 
 async def _register_user(username: str, password: str, display_name: str) -> None:
     """Register a new Matrix user."""
-    client = nio.AsyncClient(HOMESERVER)
-
-    try:
+    async with matrix_client(HOMESERVER) as client:
         # Try to register
         response = await client.register(
             username=username,
@@ -46,8 +45,6 @@ async def _register_user(username: str, password: str, display_name: str) -> Non
             console.print(f"ℹ️  User @{username}:localhost already exists")
         else:
             console.print(f"❌ Failed to register {username}: {response}")
-    finally:
-        await client.close()
 
 
 async def _get_room_members(client: nio.AsyncClient, room_id: str, room_key: str) -> set[str]:
@@ -243,9 +240,8 @@ async def _run() -> None:
 
         username = f"@{user_account.username}:localhost"
         password = user_account.password
-        client = nio.AsyncClient(HOMESERVER, username)
 
-        try:
+        async with matrix_client(HOMESERVER, username) as client:
             response = await client.login(password=password)
             if isinstance(response, nio.LoginResponse):
                 # Create any missing rooms
@@ -256,8 +252,6 @@ async def _run() -> None:
             else:
                 console.print(f"❌ Failed to login: {response}")
                 sys.exit(1)
-        finally:
-            await client.close()
 
     # Agent accounts are created automatically by the bot system
     console.print("\n🤖 Starting agents...")
@@ -325,16 +319,13 @@ async def _create_room(room_alias: str, room_name: str | None) -> None:
 
     username = f"@{user_account.username}:localhost"
     password = user_account.password
-    client = nio.AsyncClient(HOMESERVER, username)
 
-    try:
+    async with matrix_client(HOMESERVER, username) as client:
         response = await client.login(password=password)
         if isinstance(response, nio.LoginResponse):
             await _create_room_and_invite_agents(room_alias, room_name, client)
         else:
             console.print(f"❌ Failed to login: {response}")
-    finally:
-        await client.close()
 
 
 @app.command()
@@ -353,9 +344,8 @@ async def _invite_agents(room_id: str) -> None:
 
     username = f"@{user_account.username}:localhost"
     password = user_account.password
-    client = nio.AsyncClient(HOMESERVER, username)
 
-    try:
+    async with matrix_client(HOMESERVER, username) as client:
         response = await client.login(password=password)
         if isinstance(response, nio.LoginResponse):
             # Get room name/alias for agent selection
@@ -402,8 +392,6 @@ async def _invite_agents(room_id: str) -> None:
                 console.print(f"\n✨ Invited {agent_count} agents to room")
         else:
             console.print(f"❌ Failed to login: {response}")
-    finally:
-        await client.close()
 
 
 def main():

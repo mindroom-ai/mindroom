@@ -141,57 +141,56 @@ class TestMatrixRegistration:
     @pytest.mark.asyncio
     async def test_register_matrix_user_success(self) -> None:
         """Test successful user registration."""
-        with patch("nio.AsyncClient") as MockClient:
-            mock_client = AsyncMock()
-            MockClient.return_value = mock_client
+        mock_client = AsyncMock()
+        # Mock successful registration
+        mock_response = MagicMock(spec=nio.RegisterResponse)
+        mock_client.register.return_value = mock_response
+        mock_client.login.return_value = AsyncMock()
+        mock_client.set_displayname.return_value = AsyncMock()
 
-            # Mock successful registration
-            mock_response = MagicMock(spec=nio.RegisterResponse)
-            mock_client.register.return_value = mock_response
-            mock_client.login.return_value = AsyncMock()
-            mock_client.set_displayname.return_value = AsyncMock()
+        with patch("mindroom.matrix_agent_manager.matrix_client") as mock_matrix_client:
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             user_id = await register_matrix_user("test_user", "test_pass", "Test User")
 
             assert user_id == "@test_user:localhost"
             mock_client.register.assert_called_once()
             mock_client.set_displayname.assert_called_once_with("Test User")
-            mock_client.close.assert_called_once()
+            mock_matrix_client.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_register_matrix_user_already_exists(self) -> None:
         """Test registration when user already exists."""
-        with patch("nio.AsyncClient") as MockClient:
-            mock_client = AsyncMock()
-            MockClient.return_value = mock_client
+        mock_client = AsyncMock()
+        # Mock user already exists error
+        mock_response = MagicMock(spec=nio.ErrorResponse)
+        mock_response.status_code = "M_USER_IN_USE"
+        mock_client.register.return_value = mock_response
 
-            # Mock user already exists error
-            mock_response = MagicMock(spec=nio.ErrorResponse)
-            mock_response.status_code = "M_USER_IN_USE"
-            mock_client.register.return_value = mock_response
+        with patch("mindroom.matrix_agent_manager.matrix_client") as mock_matrix_client:
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             user_id = await register_matrix_user("existing_user", "test_pass", "Existing User")
 
             assert user_id == "@existing_user:localhost"
-            mock_client.close.assert_called_once()
+            mock_matrix_client.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_register_matrix_user_failure(self) -> None:
         """Test registration failure."""
-        with patch("nio.AsyncClient") as MockClient:
-            mock_client = AsyncMock()
-            MockClient.return_value = mock_client
+        mock_client = AsyncMock()
+        # Mock registration failure
+        mock_response = MagicMock()
+        mock_response.status_code = "M_FORBIDDEN"
+        mock_client.register.return_value = mock_response
 
-            # Mock registration failure
-            mock_response = MagicMock()
-            mock_response.status_code = "M_FORBIDDEN"
-            mock_client.register.return_value = mock_response
+        with patch("mindroom.matrix_agent_manager.matrix_client") as mock_matrix_client:
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             with pytest.raises(ValueError, match="Failed to register user"):
                 await register_matrix_user("test_user", "test_pass", "Test User")
 
-            # The close() is called twice: once in the try block and once in the except block
-            assert mock_client.close.call_count == 2
+            mock_matrix_client.assert_called_once()
 
 
 class TestAgentUserCreation:

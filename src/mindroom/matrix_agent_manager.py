@@ -13,6 +13,7 @@ from loguru import logger
 
 from .agent_loader import load_config
 from .matrix_config import MatrixConfig
+from .matrix_utils import matrix_client
 
 load_dotenv()
 
@@ -48,13 +49,11 @@ async def register_matrix_user(
     Raises:
         ValueError: If registration fails
     """
-    client = nio.AsyncClient(MATRIX_HOMESERVER)
-
     # Extract server name from homeserver URL
     server_name = MATRIX_HOMESERVER.split("://")[1].split(":")[0]
     user_id = f"@{username}:{server_name}"
 
-    try:
+    async with matrix_client(MATRIX_HOMESERVER) as client:
         # Try to register the user
         response = await client.register(
             username=username,
@@ -67,7 +66,6 @@ async def register_matrix_user(
             # Set display name
             await client.login(password)
             await client.set_displayname(display_name)
-            await client.close()
             return user_id
         elif (
             isinstance(response, nio.ErrorResponse)
@@ -75,14 +73,9 @@ async def register_matrix_user(
             and response.status_code == "M_USER_IN_USE"
         ):
             logger.info(f"User {user_id} already exists")
-            await client.close()
             return user_id
         else:
-            await client.close()
             raise ValueError(f"Failed to register user {username}: {response}")
-    except Exception as e:
-        await client.close()
-        raise ValueError(f"Error registering user {username}: {e}") from e
 
 
 async def create_agent_user(agent_name: str, agent_display_name: str) -> AgentMatrixUser:
