@@ -8,7 +8,7 @@ from agno.models.base import Model
 from agno.storage.sqlite import SqliteStorage
 from loguru import logger
 
-from .models import AgentConfig, AgentsConfig
+from .models import AgentsConfig
 from .tools import get_tool_by_name
 
 # Default path to agents configuration file
@@ -109,36 +109,6 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 
     return agent
-
-
-def list_agents(config_path: Path | None = None) -> list[str]:
-    """Get a list of all available agent names from configuration.
-
-    Args:
-        config_path: Optional path to configuration file
-
-    Returns:
-        Sorted list of agent names
-    """
-    config = load_config(config_path)
-    return config.list_agents()
-
-
-def get_agent_info(agent_name: str, config_path: Path | None = None) -> AgentConfig:
-    """Get information about a specific agent.
-
-    Args:
-        agent_name: Name of the agent
-        config_path: Optional path to configuration file
-
-    Returns:
-        AgentConfig for the requested agent
-
-    Raises:
-        ValueError: If agent_name is not found
-    """
-    config = load_config(config_path)
-    return config.get_agent(agent_name)
 
 
 def clear_cache() -> None:

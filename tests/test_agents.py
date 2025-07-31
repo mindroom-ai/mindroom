@@ -5,7 +5,7 @@ import pytest
 from agno.agent import Agent
 from agno.models.ollama import Ollama
 
-from mindroom.agent_loader import create_agent, get_agent_info, list_agents
+from mindroom.agent_loader import create_agent
 
 
 @patch("mindroom.agent_loader.SqliteStorage")
@@ -65,28 +65,3 @@ def test_get_agent_unknown(tmp_path: Path) -> None:
         create_agent("unknown", model, tmp_path)
     assert "Unknown agent: unknown" in str(exc_info.value)
     assert "Available agents:" in str(exc_info.value)
-
-
-def test_list_agents() -> None:
-    """Tests that list_agents returns all available agents."""
-    agents = list_agents()
-    assert isinstance(agents, list)
-    # Check core agents are present
-    assert "calculator" in agents
-    assert "general" in agents
-    assert "code" in agents
-    assert "shell" in agents
-    assert "summary" in agents
-    # We should have at least these 5 core agents, but may have more from YAML
-    assert len(agents) >= 5
-    # Check they are sorted
-    assert agents == sorted(agents)
-
-
-def test_get_agent_info() -> None:
-    """Tests that get_agent_info returns correct information."""
-    info = get_agent_info("calculator")
-    assert info.display_name == "CalculatorAgent"
-    assert info.role == "Solve mathematical problems."
-    assert info.tools == ["calculator"]
-    assert len(info.instructions) > 0
