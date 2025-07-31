@@ -22,7 +22,7 @@ from nio import (
     RoomMessageText,
 )
 
-from mindroom.minimal_bot import MinimalBot
+from mindroom.bot import MinimalBot
 
 from .test_helpers import mock_room_messages_empty, mock_room_messages_with_history
 

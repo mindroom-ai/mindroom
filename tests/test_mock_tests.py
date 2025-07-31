@@ -50,7 +50,7 @@ from nio import (
     SyncResponse,
 )
 
-from mindroom.minimal_bot import MinimalBot
+from mindroom.bot import MinimalBot
 
 TIMEOUT = 0.2
 
@@ -426,7 +426,7 @@ class TestBotMockingStrategy:
         room = MatrixRoom(room_id, bot.client.user_id)
 
         # WITHOUT HTTP mocking but WITH AI mocking - should fail
-        with patch("mindroom.minimal_bot.ai_response") as mock_ai:
+        with patch("mindroom.bot.ai_response") as mock_ai:
             mock_ai.return_value = "Bot response"
 
             # Process message - should try to send response
@@ -446,7 +446,7 @@ class TestBotMockingStrategy:
                 payload={"event_id": "$response:example.org"},
             )
 
-            with patch("mindroom.minimal_bot.ai_response") as mock_ai:
+            with patch("mindroom.bot.ai_response") as mock_ai:
                 mock_ai.return_value = "Bot response"
 
                 await bot._on_message(room, message)

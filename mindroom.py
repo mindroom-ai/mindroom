@@ -110,7 +110,7 @@ OLLAMA_HOST=http://pc.local:11434
 @app.command()
 def run():
     """Run the mindroom bot."""
-    from mindroom.minimal_bot import main
+    from mindroom.bot import main
 
     creds = load_credentials()
     if not creds or "bot" not in creds:

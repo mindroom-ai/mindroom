@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock
 
-from mindroom.minimal_bot import MinimalBot
+from mindroom.bot import MinimalBot
 
 
 def mock_room_messages_empty(bot: MinimalBot) -> None:

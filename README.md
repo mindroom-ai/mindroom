@@ -131,7 +131,7 @@ ANTHROPIC_API_KEY=your-key-here
 
 1. **Start the bot**:
    ```bash
-   python minimal_bot.py
+   python bot.py
    ```
 
 2. **Interact in Matrix**:

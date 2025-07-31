@@ -15,7 +15,7 @@ from nio import (
     RoomMessageText,
 )
 
-from mindroom.minimal_bot import MinimalBot
+from mindroom.bot import MinimalBot
 
 from .test_helpers import mock_room_messages_empty
 
@@ -80,7 +80,7 @@ async def test_bot_processes_message_and_sends_response() -> None:
                 )
 
                 # Mock the AI response
-                with patch("mindroom.minimal_bot.ai_response") as mock_ai:
+                with patch("mindroom.bot.ai_response") as mock_ai:
                     mock_ai.return_value = "I'd be happy to help!"
 
                     # Process the message
@@ -245,7 +245,7 @@ async def test_bot_preserves_thread_context() -> None:
                     callback=capture_request,
                 )
 
-                with patch("mindroom.minimal_bot.ai_response") as mock_ai:
+                with patch("mindroom.bot.ai_response") as mock_ai:
                     mock_ai.return_value = "Python is a programming language."
 
                     # Mock room_messages to return empty thread history
@@ -301,7 +301,7 @@ async def test_bot_ignores_own_messages() -> None:
             with aioresponses() as m:  # noqa: SIM117
                 # No HTTP mocks needed - bot should ignore the message
 
-                with patch("mindroom.minimal_bot.ai_response") as mock_ai:
+                with patch("mindroom.bot.ai_response") as mock_ai:
                     await bot._on_message(room, self_message)
 
                     # Verify AI was NOT called
@@ -364,7 +364,7 @@ async def test_bot_routes_to_different_agents() -> None:
                     )
                     message.sender = "@user:example.org"
 
-                    with patch("mindroom.minimal_bot.ai_response") as mock_ai:
+                    with patch("mindroom.bot.ai_response") as mock_ai:
                         mock_ai.return_value = f"Response from {expected_agent}"
 
                         await bot._on_message(room, message)

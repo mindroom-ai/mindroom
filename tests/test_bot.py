@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from nio import RoomMessageText
 
+from mindroom.bot import MinimalBot
 from mindroom.matrix import parse_message
-from mindroom.minimal_bot import MinimalBot
 
 from .test_helpers import mock_room_messages_empty
 
@@ -40,7 +40,7 @@ def test_parse_message_no_mention() -> None:
 
 
 @pytest.mark.asyncio
-@patch("mindroom.minimal_bot.ai_response", new_callable=AsyncMock)
+@patch("mindroom.bot.ai_response", new_callable=AsyncMock)
 async def test_on_message_thread_reply(mock_ai_response: AsyncMock) -> None:
     """Tests that the bot replies in a thread."""
     # Arrange

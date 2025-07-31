@@ -71,7 +71,7 @@ async def main():
     print(f"AI model: {os.getenv('AGNO_MODEL')}")
 
     # Import and run the bot
-    from minimal_bot import main as run_bot
+    from bot import main as run_bot
 
     try:
         await run_bot()
