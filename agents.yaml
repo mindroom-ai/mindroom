@@ -1,21 +1,7 @@
 # Agent Configuration File
 # This file defines all available agents and their configurations
 # Users can add custom agents by adding new entries to this file
-
-# Room aliases for better readability
-room_aliases:
-  lobby: "!XeqkOykvpdhfoKCrQO:localhost"
-  help: "!ttzoOtKWdvbSfYPOcU:localhost"
-  dev: "!BFEXDUSnIarGSxVbEJ:localhost"
-  automation: "!XxxyJwdbAswNTeayhc:localhost"
-  ops: "!LQFVZZKOGdHcxLneTS:localhost"
-  research: "!dILWmRJrGmlMysZWtb:localhost"
-  docs: "!drRGiBxZGNlCODlPOv:localhost"
-  science: "!vHavUnTzTMmAUEveXo:localhost"
-  news: "!RBzXsLHNRFtOVPvgGT:localhost"
-  finance: "!fZaLPNeaIfPtphCLSd:localhost"
-  analysis: "!XiGCYUuFjGCzcOGQcS:localhost"
-  business: "!RiaUjyDPSbzFKSkUDg:localhost"
+# Room assignments use aliases that are resolved from matrix_rooms.yaml
 
 agents:
   # General conversation agent

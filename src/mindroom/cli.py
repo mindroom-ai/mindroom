@@ -288,6 +288,11 @@ async def _create_agent_room(room_alias: str, room_name: str | None, invite_agen
             room_id = response.room_id
             console.print(f"✅ Created room: {room_name} (#{room_alias}:localhost) -> {room_id}")
 
+            # Save room to matrix_rooms.yaml
+            from mindroom.matrix_room_manager import add_room
+
+            add_room(room_alias, room_id, f"#{room_alias}:localhost", room_name)
+
             if invite_agents:
                 # Invite all agents
                 agent_count = 0
@@ -335,7 +340,9 @@ async def _create_all_rooms() -> None:
 
     # Load agent configuration to get all unique rooms
     config = load_config()
-    room_aliases = getattr(config, "room_aliases", {})
+    from mindroom.matrix_room_manager import get_room_aliases
+
+    room_aliases = get_room_aliases()
     all_rooms = set()
     room_to_agents: dict[str, list[str]] = {}
 

@@ -12,6 +12,7 @@ from .ai import ai_response
 from .logging_config import setup_logging
 from .matrix import fetch_thread_history, prepare_response_content
 from .matrix_agent_manager import AgentMatrixUser, ensure_all_agent_users, login_agent_user
+from .matrix_room_manager import get_room_aliases
 
 setup_logging(level="INFO")
 
@@ -173,8 +174,8 @@ class MultiAgentOrchestrator:
         # Ensure all agents have Matrix accounts
         agent_users = await ensure_all_agent_users()
 
-        # Get room aliases mapping if available
-        room_aliases = getattr(config, "room_aliases", {})
+        # Get room aliases mapping from matrix_rooms.yaml
+        room_aliases = get_room_aliases()
 
         # Create bot instances for each agent
         for agent_name, agent_user in agent_users.items():

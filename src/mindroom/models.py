@@ -29,7 +29,6 @@ class AgentsConfig(BaseModel):
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
-    room_aliases: dict[str, str] = Field(default_factory=dict, description="Mapping of room aliases to room IDs")
 
     def get_agent(self, agent_name: str) -> AgentConfig:
         """Get an agent configuration by name.
