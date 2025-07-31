@@ -38,7 +38,7 @@ urls.documentation = "https://github.com/basnijholt/mindroom"
 urls.homepage = "https://github.com/basnijholt/mindroom"
 urls.repository = "https://github.com/basnijholt/mindroom"
 
-scripts.mindroom = "mindroom.cli:app"
+scripts.mindroom = "mindroom.cli:main"
 
 [dependency-groups]
 dev = [

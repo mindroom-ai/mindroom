@@ -111,13 +111,13 @@ source .venv/bin/activate
 
 ### Configuration
 
-Create a `.env` file:
+1. **Configure your agents** in `agents.yaml` (already included with defaults)
+
+2. **Create a `.env` file** (optional - for custom AI providers):
 
 ```env
-# Matrix configuration
-MATRIX_HOMESERVER=https://your-homeserver.com
-MATRIX_USER_ID=@bot:your-homeserver.com
-MATRIX_PASSWORD=your-bot-password
+# Matrix configuration (optional - defaults to localhost:8008)
+MATRIX_HOMESERVER=http://localhost:8008
 
 # AI configuration
 AGNO_MODEL=openai:gpt-4  # or anthropic:claude-3-opus, ollama:llama3.2, etc.
@@ -125,43 +125,73 @@ AGNO_MODEL=openai:gpt-4  # or anthropic:claude-3-opus, ollama:llama3.2, etc.
 # Optional API keys
 OPENAI_API_KEY=your-key-here
 ANTHROPIC_API_KEY=your-key-here
+OLLAMA_HOST=http://localhost:11434  # for local models
 ```
+
+### Running Mindroom
+
+Just one command:
+
+```bash
+mindroom run
+```
+
+This automatically:
+- ✅ Creates your Matrix user account
+- ✅ Creates accounts for all agents in `agents.yaml`
+- ✅ Creates all rooms defined in `agents.yaml`
+- ✅ Invites agents to their configured rooms
+- ✅ Starts the multi-agent system
 
 ### Basic Usage
 
-1. **Start the bot**:
-   ```bash
-   python bot.py
-   ```
-
-2. **Interact in Matrix**:
-   - Direct mention: `@bot: How can you help me?`
-   - Agent-specific: `@calculator: What is 15% of 200?`
-   - In threads: All messages automatically processed
+In your Matrix client (Element, etc.):
+- **Direct mention**: `@mindroom_calculator What is 15% of 200?`
+- **Multiple agents**: `@mindroom_research @mindroom_analyst What are the latest AI trends?`
+- **In threads**: Agents respond to all messages automatically
 
 ## Usage Examples
 
 ### Multi-Agent Collaboration
 ```
-You: @research @analyst What are the latest trends in renewable energy?
+You: @mindroom_research @mindroom_analyst What are the latest trends in renewable energy?
 ResearchAgent: I'll gather recent data on renewable energy trends...
 AnalystAgent: Based on the research, here's my analysis of the key patterns...
 ```
 
 ### Memory Persistence
 ```
-You: @assistant Remember that my project deadline is next Friday
-Assistant: I've noted your project deadline for next Friday.
+You: @mindroom_general Remember that my project deadline is next Friday
+GeneralAgent: I've noted your project deadline for next Friday.
 [Days later in a different conversation]
-You: @assistant What do you know about my schedule?
-Assistant: You have a project deadline this Friday (in 2 days).
+You: @mindroom_general What do you know about my schedule?
+GeneralAgent: You have a project deadline this Friday (in 2 days).
 ```
 
 ### Room-Based Context
 ```
-[In "Open Source Projects" room]
-You: @code How should we structure the authentication module?
+[In "dev" room]
+You: @mindroom_code How should we structure the authentication module?
 CodeAgent: Based on our previous discussions in this room about the FastAPI backend...
+```
+
+## CLI Commands
+
+```bash
+# Show help (also works with just 'mindroom' or 'mindroom -h')
+mindroom --help
+
+# Run the multi-agent system (auto-setup everything)
+mindroom run
+
+# Show current status (agents, rooms, etc.)
+mindroom info
+
+# Create a new room manually
+mindroom create-room testing --room-name "Testing Room"
+
+# Invite agents to an existing room
+mindroom invite-agents !room_id:localhost
 ```
 
 ## Architecture

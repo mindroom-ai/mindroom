@@ -77,12 +77,25 @@ Successfully transformed Mindroom from a single bot account system to a multi-ag
 - All tests passing with proper mocking of Matrix API calls
 - Removed legacy test files that tested old architecture
 
-### 7. CLI Enhancements
-- `mindroom create-agent-room <alias>`: Create a room and invite agents
-- `mindroom create-all-rooms`: Create all rooms from agents.yaml
-- `mindroom invite-agents <room_id>`: Invite agents to existing room
-- `mindroom info`: Shows agents, rooms, and server information
-- `mindroom test`: Creates a test room (currently outdated - invites old bot instead of agents)
+### 7. CLI - Simplified Workflow
+- `mindroom run`: One command to start everything - automatically:
+  - Creates user account if needed
+  - Creates all agent accounts
+  - Creates all rooms from agents.yaml
+  - Invites agents to their configured rooms
+  - Starts the multi-agent system
+- `mindroom info`: Shows agents, rooms, and server status
+- `mindroom create-room <alias>`: Create additional rooms manually
+- `mindroom invite-agents <room_id>`: Invite agents to existing rooms
+- `mindroom` or `mindroom -h`: Show help
+
+## Simplified User Experience
+
+The new workflow requires only:
+1. An `agents.yaml` file (included with sensible defaults)
+2. Running `mindroom run`
+
+Everything else is automatic - no manual setup, no credential management, no room creation commands needed.
 
 ## Benefits
 1. **Better UX**: Agents appear as real users with autocomplete support
@@ -92,6 +105,7 @@ Successfully transformed Mindroom from a single bot account system to a multi-ag
 5. **Automatic Management**: No manual account or room setup required
 6. **Multi-Room Support**: Agents can participate in multiple rooms
 7. **Dynamic Configuration**: Room and user management separated from code
+8. **Zero Setup**: Just run `mindroom run` and start chatting
 
 ## Removed Legacy Code
 - Removed `parse_message()` and `handle_message_parsing()` functions

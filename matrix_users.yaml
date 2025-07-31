@@ -31,6 +31,7 @@ bot:
 user:
   password: user_password_123
   username: mindroom_user
+
 rooms:
   lobby:
     room_id: '!XeqkOykvpdhfoKCrQO:localhost'
