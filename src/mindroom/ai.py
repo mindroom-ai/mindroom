@@ -22,20 +22,12 @@ AGNO_MODEL_STR = os.getenv("AGNO_MODEL")
 # Configure caching
 ENABLE_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
 
-# Cache will be initialized per storage_path
-_cache_instances: dict[Path, diskcache.Cache | None] = {}
-
 
 def get_cache(storage_path: Path) -> diskcache.Cache | None:
     """Get or create a cache instance for the given storage path."""
     if not ENABLE_CACHE:
         return None
-
-    if storage_path not in _cache_instances:
-        cache_dir = os.path.join(storage_path, ".ai_cache")
-        _cache_instances[storage_path] = diskcache.Cache(cache_dir)
-
-    return _cache_instances[storage_path]
+    return diskcache.Cache(storage_path / ".ai_cache")
 
 
 def get_model_instance() -> Model:
