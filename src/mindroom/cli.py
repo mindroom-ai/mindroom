@@ -3,6 +3,7 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 from typing import NamedTuple
 
 import nio
@@ -212,8 +213,8 @@ def run(
         help="Set the logging level (DEBUG, INFO, WARNING, ERROR)",
         case_sensitive=False,
     ),
-    storage_path: str = typer.Option(
-        "tmp",
+    storage_path: Path = typer.Option(  # noqa: B008
+        Path("tmp"),
         "--storage-path",
         "-s",
         help="Base directory for storing agent data (response tracking, etc.)",
@@ -230,7 +231,7 @@ def run(
     asyncio.run(_run(log_level=log_level.upper(), storage_path=storage_path))
 
 
-async def _run(log_level: str = "INFO", storage_path: str = "tmp") -> None:
+async def _run(log_level: str, storage_path: Path) -> None:
     """Run the multi-agent system with automatic setup."""
     from mindroom.agent_loader import load_config
     from mindroom.bot import main

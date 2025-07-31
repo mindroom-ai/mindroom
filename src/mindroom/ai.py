@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Any
 
 import diskcache
@@ -10,7 +11,7 @@ from agno.run.response import RunResponse
 from dotenv import load_dotenv
 from loguru import logger
 
-from .agent_loader import create_agent as get_agent
+from .agent_loader import create_agent
 
 # Load environment variables from .env file
 load_dotenv()
@@ -22,10 +23,10 @@ AGNO_MODEL_STR = os.getenv("AGNO_MODEL")
 ENABLE_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
 
 # Cache will be initialized per storage_path
-_cache_instances: dict[str, diskcache.Cache | None] = {}
+_cache_instances: dict[Path, diskcache.Cache | None] = {}
 
 
-def get_cache(storage_path: str = "tmp") -> diskcache.Cache | None:
+def get_cache(storage_path: Path) -> diskcache.Cache | None:
     """Get or create a cache instance for the given storage path."""
     if not ENABLE_CACHE:
         return None
@@ -61,8 +62,8 @@ async def _cached_agent_run(
     prompt: str,
     session_id: str,
     model: Model,
+    storage_path: Path,
     thread_history: list[dict[str, Any]] | None = None,
-    storage_path: str = "tmp",
 ) -> RunResponse:
     """Cached wrapper for agent.arun() calls."""
     # Format thread history into context
@@ -78,7 +79,7 @@ async def _cached_agent_run(
     cache = get_cache(storage_path)
     if cache is None:
         # If caching is disabled, run directly
-        agent = get_agent(agent_name, model, None, storage_path)
+        agent = create_agent(agent_name, model, storage_path)
         return await agent.arun(full_prompt, session_id=session_id)  # type: ignore[no-any-return]
 
     # Create a cache key based on agent name, prompt, and model
@@ -91,7 +92,7 @@ async def _cached_agent_run(
         return cached_result  # type: ignore[no-any-return]
 
     # If not in cache, run the agent and cache the result
-    agent = get_agent(agent_name, model, storage_path=storage_path)
+    agent = create_agent(agent_name, model, storage_path=storage_path)
     response = await agent.arun(full_prompt, session_id=session_id)
 
     # Cache the result
@@ -105,14 +106,14 @@ async def ai_response(
     agent_name: str,
     prompt: str,
     session_id: str,
+    storage_path: Path,
     thread_history: list[dict[str, Any]] | None = None,
-    storage_path: str = "tmp",
 ) -> str:
     """Generates a response using the specified agno Agent."""
     logger.info(f"Routing to agent '{agent_name}' for prompt: '{prompt}'")
     try:
         model = get_model_instance()
-        response = await _cached_agent_run(agent_name, prompt, session_id, model, thread_history, storage_path)
+        response = await _cached_agent_run(agent_name, prompt, session_id, model, storage_path, thread_history)
         return response.content or ""
     except Exception as e:
         logger.exception(f"Error generating AI response: {e}")

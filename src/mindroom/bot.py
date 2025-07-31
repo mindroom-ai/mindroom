@@ -1,8 +1,8 @@
 """Multi-agent bot implementation where each agent has its own Matrix user account."""
 
 import asyncio
-import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import nio
 from loguru import logger
@@ -25,7 +25,7 @@ class AgentBot:
 
     agent_user: AgentMatrixUser
     rooms: list[str] = field(default_factory=list)
-    storage_path: str = field(default="tmp")
+    storage_path: Path = field(default=Path("tmp"))
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
@@ -215,7 +215,7 @@ class AgentBot:
 class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
-    storage_path: str = field(default="tmp")
+    storage_path: Path = field(default=Path("tmp"))
     agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
 
@@ -288,12 +288,12 @@ class MultiAgentOrchestrator:
                 logger.error(f"Failed to invite agent {agent_name} to room {room_id}: {e}")
 
 
-async def main(log_level: str = "INFO", storage_path: str = "tmp") -> None:
+async def main(log_level: str, storage_path: Path) -> None:
     """Main entry point for the multi-agent bot system.
 
     Args:
         log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
-        storage_path: The base directory for storing agent data (default: "tmp")
+        storage_path: The base directory for storing agent data
     """
     from .logging_config import setup_logging
 
@@ -301,8 +301,7 @@ async def main(log_level: str = "INFO", storage_path: str = "tmp") -> None:
     setup_logging(level=log_level)
 
     # Create storage directory if it doesn't exist
-    if not os.path.exists(storage_path):
-        os.makedirs(storage_path)
+    storage_path.mkdir(parents=True, exist_ok=True)
 
     orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
     try:
@@ -311,7 +310,3 @@ async def main(log_level: str = "INFO", storage_path: str = "tmp") -> None:
         logger.info("Multi-agent bot system stopped by user")
     finally:
         await orchestrator.stop()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

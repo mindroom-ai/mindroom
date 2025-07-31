@@ -1,6 +1,7 @@
 """End-to-end tests for the multi-agent bot system."""
 
 import re
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -95,6 +96,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
                     "@mindroom_calculator:localhost What's 15% of 200?",
                     test_room_id,
                     thread_history=[],
+                    storage_path=Path("tmp"),
                 )
 
                 # Verify message was sent
@@ -198,6 +200,7 @@ async def test_agent_responds_in_threads_without_mention(mock_calculator_agent: 
                 "What about 20% of 300?",
                 f"{test_room_id}:{thread_root_id}",
                 thread_history=[],
+                storage_path=Path("tmp"),
             )
 
             # Verify thread response format

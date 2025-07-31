@@ -191,7 +191,7 @@ class TestAgentBot:
             "@mindroom_calculator:localhost: What's 2+2?",
             "!test:localhost",
             thread_history=[],
-            storage_path="tmp",
+            storage_path=Path("tmp"),
         )
 
         # Verify message was sent
