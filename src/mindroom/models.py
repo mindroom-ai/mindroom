@@ -10,6 +10,7 @@ class AgentConfig(BaseModel):
     role: str = Field(default="", description="Description of the agent's purpose")
     tools: list[str] = Field(default_factory=list, description="List of tool names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
+    rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
     num_history_runs: int | None = Field(default=None, description="Number of history runs to include")
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
     add_history_to_messages: bool | None = Field(default=None, description="Whether to add history to messages")

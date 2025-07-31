@@ -56,6 +56,35 @@ rc_login:
     per_second: 10000
     burst_count: 10000
 
+rc_joins:
+  local:
+    per_second: 10000
+    burst_count: 10000
+  remote:
+    per_second: 10000
+    burst_count: 10000
+
+rc_invites:
+  per_room:
+    per_second: 10000
+    burst_count: 10000
+  per_user:
+    per_second: 10000
+    burst_count: 10000
+
+# Disable all rate limiting for development
+rc_admin_redaction:
+  per_second: 10000
+  burst_count: 10000
+
+rc_joins_per_room:
+  per_second: 10000
+  burst_count: 10000
+
+rc_3pid_validation:
+  per_second: 10000
+  burst_count: 10000
+
 # Security
 macaroon_secret_key: "mindroom_dev_secret_change_in_production"
 form_secret: "mindroom_form_secret_change_in_production"

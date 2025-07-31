@@ -180,3 +180,6 @@ temp/
 # Log files
 logs/
 *.log
+
+# Matrix configuration files (contain sensitive data)
+matrix_users.yaml

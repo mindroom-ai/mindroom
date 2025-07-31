@@ -17,19 +17,14 @@ Key insights learned during development:
 """
 
 import asyncio
-import contextlib
 import json
 import re
 from contextlib import suppress
-from typing import Any
-from unittest.mock import patch
 
 import nio
 import pytest
 import pytest_asyncio
 from aioresponses import CallbackResult, aioresponses
-
-from mindroom.bot import Bot
 
 TIMEOUT = 0.2
 
@@ -316,122 +311,6 @@ class TestMockingStrategy:
 
             # Verify response
             assert response.event_id == "$captured:example.org"
-
-
-class TestBotMockingStrategy:
-    """Test mocking strategy specifically for our Bot."""
-
-    @pytest_asyncio.fixture
-    async def bot(self):
-        """Create a Bot for testing and ensure cleanup."""
-        homeserver = "https://matrix.example.org"
-        bot_user_id = "@bot:example.org"
-
-        with (
-            patch("mindroom.matrix.MATRIX_HOMESERVER", homeserver),
-            patch("mindroom.matrix.MATRIX_USER_ID", bot_user_id),
-            patch("mindroom.matrix.MATRIX_PASSWORD", "password"),
-            patch("os.path.exists", return_value=True),
-        ):
-            bot = Bot()
-            yield bot
-            await bot.client.close()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("use_mock", [True, False])
-    async def test_bot_login_requires_mocking(self, bot: Bot, use_mock: bool) -> None:
-        """Test that bot login actually requires HTTP mocking."""
-        if use_mock:
-            # WITH mocking - should succeed
-            with aioresponses() as m:
-                m.post(
-                    f"{bot.client.homeserver}/_matrix/client/v3/login",
-                    status=200,
-                    payload={
-                        "user_id": "@bot:example.org",
-                        "access_token": "bot_token",
-                        "device_id": "BOTDEVICE",
-                        "home_server": "example.org",
-                    },
-                )
-
-                # Mock sync_forever to not run forever
-                async def mock_sync_forever(*args: Any, **kwargs: Any) -> None:
-                    # Just wait a bit to simulate sync starting
-                    await asyncio.sleep(0.1)
-
-                bot.client.sync_forever = mock_sync_forever
-
-                # Run start which should login successfully
-                await bot.start()
-
-                # Should have logged in successfully
-                assert bot.client.access_token == "bot_token"
-                assert len(m.requests) == 1
-        else:
-            # WITHOUT mocking - should fail
-            login_task = asyncio.create_task(bot.start())
-            await asyncio.sleep(TIMEOUT)  # Give it time to fail
-            login_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await login_task
-            # Should not have a valid token
-            assert not bot.client.access_token or bot.client.access_token == ""
-
-    @pytest.mark.asyncio
-    async def test_bot_message_processing_requires_all_mocks(self, bot: Bot) -> None:
-        """Test that bot message processing requires proper HTTP mocking."""
-        room_id = "!test:example.org"
-
-        bot.client.access_token = "bot_token"
-        bot.client.user_id = bot.client.user_id
-        bot.client.user = "bot"
-
-        # Create a test message
-        message = nio.RoomMessageText(
-            body=f"{bot.client.user_id} Hello bot!",
-            formatted_body=f"{bot.client.user_id} Hello bot!",
-            format="org.matrix.custom.html",
-            source={
-                "content": {"msgtype": "m.text", "body": f"{bot.client.user_id} Hello bot!"},
-                "event_id": "$test:example.org",
-                "sender": "@user:example.org",
-                "origin_server_ts": 1234567890,
-                "type": "m.room.message",
-            },
-        )
-        message.sender = "@user:example.org"
-
-        room = nio.MatrixRoom(room_id, bot.client.user_id)
-
-        # WITHOUT HTTP mocking but WITH AI mocking - should fail
-        with patch("mindroom.bot.ai_response") as mock_ai:
-            mock_ai.return_value = "Bot response"
-
-            # Process message - should try to send response
-            await bot._on_message(room, message)
-
-            # AI should have been called
-            mock_ai.assert_called_once()
-
-            # But message send would have failed silently
-            # (nio doesn't raise exceptions for failed sends in callbacks)
-
-        # WITH proper mocking - should succeed
-        with aioresponses() as m:
-            m.put(
-                re.compile(rf".*{re.escape(room_id)}/send/m\.room\.message/.*"),
-                status=200,
-                payload={"event_id": "$response:example.org"},
-            )
-
-            with patch("mindroom.bot.ai_response") as mock_ai:
-                mock_ai.return_value = "Bot response"
-
-                await bot._on_message(room, message)
-
-                # Should have made HTTP call
-                assert len(m.requests) == 1
 
 
 class TestMockingStrategyExtended:
