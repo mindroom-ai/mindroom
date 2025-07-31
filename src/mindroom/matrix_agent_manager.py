@@ -140,7 +140,23 @@ async def login_agent_user(agent_user: AgentMatrixUser) -> nio.AsyncClient:
     Raises:
         ValueError: If login fails
     """
-    client = nio.AsyncClient(MATRIX_HOMESERVER, agent_user.user_id)
+    # Create a store path for this agent to persist sync tokens
+    # This prevents the agent from processing old messages on restart
+    store_path = os.path.join("tmp", "stores", agent_user.agent_name)
+    os.makedirs(store_path, exist_ok=True)
+
+    # Configure client to store sync tokens
+    # This ensures the agent remembers which messages it has already seen
+    config = nio.AsyncClientConfig(
+        store_sync_tokens=True,
+    )
+
+    client = nio.AsyncClient(
+        MATRIX_HOMESERVER,
+        agent_user.user_id,
+        store_path=store_path,
+        config=config,
+    )
 
     response = await client.login(agent_user.password)
     if isinstance(response, nio.LoginResponse):

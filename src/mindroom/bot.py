@@ -81,7 +81,10 @@ class AgentBot:
 
         logger.info(f"{colorize(self.agent_name)} Starting sync_forever")
         try:
-            await self.client.sync_forever(timeout=30000)
+            # Use full_state=True to work with stored sync tokens
+            # This ensures we don't reprocess old messages after restart
+            # The library will automatically use timeout=0 for the first sync
+            await self.client.sync_forever(timeout=30000, full_state=True)
         except Exception as e:
             logger.error(f"{colorize(self.agent_name)} Sync error: {e}")
             self.running = False
