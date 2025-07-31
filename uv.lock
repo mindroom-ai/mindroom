@@ -1094,7 +1094,9 @@ dependencies = [
     { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "rich" },
     { name = "tavily-python" },
+    { name = "typer" },
     { name = "wikipedia" },
 ]
 
@@ -1127,7 +1129,9 @@ requires-dist = [
     { name = "pypdf" },
     { name = "python-dotenv", specifier = ">=1" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "rich", specifier = ">=13.10.5" },
     { name = "tavily-python" },
+    { name = "typer", specifier = ">=0.16.0" },
     { name = "wikipedia" },
 ]
 

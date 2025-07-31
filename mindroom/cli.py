@@ -193,7 +193,7 @@ def info():
         console.print(f"\n🤖 Bot: @{creds['bot']['username']}:localhost")
 
     if "user" in creds:
-        console.print(f"👤 User: {creds['user']['username']} (password: {creds['user']['password']})")
+        console.print(f"👤 User: {creds['user']['username']} (password: {creds['user']['password']}")
 
     console.print(f"\n🌐 Server: {HOMESERVER}")
 

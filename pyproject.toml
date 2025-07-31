@@ -18,24 +18,27 @@ classifiers = [
 ]
 dependencies = [
   "agno[anthropic,google,ollama,openai,sql,ddg,arxiv,wikipedia,yfinance,newspaper,github,docker,duckdb]>=1.7.6",
-  # Tool dependencies
-  "arxiv",               # for Arxiv tool
+  "arxiv",                                                                                                       # for Arxiv tool
   "diskcache>=5.6.3",
-  "googlesearch-python", # for Google tool
+  "googlesearch-python",                                                                                         # for Google tool
   "loguru>=0.7.3",
   "matrix-nio>=0.24",
-  "pycountry",           # for Google tool
+  "pycountry",                                                                                                   # for Google tool
   "pydantic>=2",
-  "pypdf",               # for Arxiv tool
+  "pypdf",                                                                                                       # for Arxiv tool
   "python-dotenv>=1",
   "pyyaml>=6",
-  "tavily-python",       # for Tavily tool
-  "wikipedia",           # for Wikipedia tool
+  "rich>=13.10.5",                                                                                               # for CLI output
+  "tavily-python",                                                                                               # for Tavily tool
+  "typer>=0.16",
+  "wikipedia",                                                                                                   # for Wikipedia tool
 ]
 
 urls.documentation = "https://github.com/basnijholt/mindroom"
 urls.homepage = "https://github.com/basnijholt/mindroom"
 urls.repository = "https://github.com/basnijholt/mindroom"
+
+scripts.mindroom = "mindroom.cli:app"
 
 [dependency-groups]
 dev = [
