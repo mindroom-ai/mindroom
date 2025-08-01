@@ -19,7 +19,7 @@ from .matrix import (
     prepare_response_content,
 )
 from .response_tracker import ResponseTracker
-from .router_agent import RouterAgent, should_router_handle
+from .routing import suggest_agent_for_message
 from .thread_utils import extract_agent_name, get_agents_in_thread, get_mentioned_agents
 
 logger = get_logger(__name__)
@@ -186,9 +186,9 @@ class AgentBot:
                 should_respond = True
                 reason = "only agent in thread"
             else:
-                # Multiple agents, none mentioned -> let router decide
+                # Multiple agents, none mentioned -> use AI routing
                 should_respond = False
-                reason = "multiple agents in thread, router will handle"
+                reason = "multiple agents in thread, will route using AI"
         else:
             # Not in thread, not mentioned
             should_respond = False
@@ -198,6 +198,10 @@ class AgentBot:
             logger.debug(f"{emoji(self.agent_name)} Will respond: {reason}")
         else:
             logger.debug(f"{emoji(self.agent_name)} Not responding: {reason}")
+
+            # Handle AI routing for multi-agent threads
+            if is_thread and agent_count > 1 and not mentioned_agents:
+                await self._handle_ai_routing(room, event, thread_history)
             return
 
         # Check if we've already responded to this specific event
@@ -253,133 +257,47 @@ class AgentBot:
             else:
                 logger.error(f"{emoji(self.agent_name)} Failed to send response: {response}")
 
-
-@dataclass
-class RouterBot:
-    """Special bot that handles routing decisions for multi-agent threads."""
-
-    agent_user: AgentMatrixUser
-    storage_path: Path
-    rooms: list[str] = field(default_factory=list)
-    client: nio.AsyncClient | None = field(default=None, init=False)
-    router: RouterAgent = field(default_factory=RouterAgent, init=False)
-
-    async def start(self) -> None:
-        """Start the router bot."""
-        try:
-            self.client = await login_agent_user(self.agent_user)
-
-            # Register event callbacks
-            logger.debug("🚦 Router: Registering event callbacks")
-            self.client.add_event_callback(self._on_message, nio.RoomMessageText)
-
-            logger.info(f"🚦 Router: Started router bot ({self.agent_user.user_id})")
-
-            # Join configured rooms
-            for room_id in self.rooms:
-                try:
-                    response = await self.client.join(room_id)
-                    if isinstance(response, nio.JoinResponse):
-                        logger.info(f"🚦 Router: Joined room {room_id}")
-                except Exception as e:
-                    logger.error(f"🚦 Router: Error joining room {room_id}: {e}")
-
-        except Exception as e:
-            logger.error(f"🚦 Router: Failed to start: {e}")
-            raise
-
-    async def sync_forever(self) -> None:
-        """Run the sync loop forever."""
-        if not self.client:
-            return
-
-        logger.info("🚦 Router: Starting sync_forever")
-        try:
-            await self.client.sync_forever(timeout=30000, full_state=True)
-        except Exception as e:
-            logger.error(f"🚦 Router: Error in sync_forever: {e}")
-            raise
-
-    async def stop(self) -> None:
-        """Stop the router bot."""
-        if self.client:
-            await self.client.close()
-        logger.info("🚦 Router: Stopped router bot")
-
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        """Handle messages that need routing."""
-        # Don't respond to own messages or other agents
-        if event.sender == self.agent_user.user_id:
-            return
-
-        if is_sender_other_agent(event.sender, self.agent_user.user_id):
-            return
-
-        # Extract mentions and thread info
-        mentions = event.source.get("content", {}).get("m.mentions", {})
-        mentioned_agents = get_mentioned_agents(mentions)
-
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
-        thread_id = relates_to.get("event_id") if is_thread else None
-
-        if not is_thread or not thread_id or not self.client:
-            return
-
-        # Fetch thread history
-        thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-        agents_in_thread = get_agents_in_thread(thread_history)
-
-        # Check if router should handle
-        if not should_router_handle(mentioned_agents, agents_in_thread, is_thread):
-            return
-
-        logger.info(f"🚦 Router: Analyzing message for routing: {event.body[:50]}...")
-
-        # Get available agents in room
-        room_members = list(room.users.keys()) if hasattr(room, "users") else []
+    async def _handle_ai_routing(
+        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
+    ) -> None:
+        """Handle AI routing for multi-agent threads."""
+        # Only let one agent do the routing (first one alphabetically)
+        room_members = list(room.user_names()) if hasattr(room, "user_names") else list(room.users.keys())
         available_agents = []
         for member in room_members:
             agent_name = extract_agent_name(member)
-            if agent_name and agent_name != "router":
+            if agent_name:
                 available_agents.append(agent_name)
 
-        if not available_agents:
-            logger.warning("🚦 Router: No available agents in room")
+        available_agents.sort()  # Consistent ordering
+        if not available_agents or available_agents[0] != self.agent_name:
+            return  # Not the routing agent
+
+        logger.info(f"{emoji(self.agent_name)} Handling AI routing for: {event.body[:50]}...")
+
+        # Get AI suggestion
+        suggested_agent = await suggest_agent_for_message(event.body, available_agents, thread_history)
+        if not suggested_agent:
             return
 
-        # Get routing suggestion
-        suggestion = await self.router.suggest_agent(event.body, available_agents, thread_history, self.storage_path)
+        # Send mention to suggested agent
+        suggested_user_id = f"@mindroom_{suggested_agent}:localhost"
+        response_text = f"@{suggested_agent}, could you help with this?"
 
-        if not suggestion:
-            logger.error("🚦 Router: Failed to get routing suggestion")
-            return
-
-        # Send a message mentioning the suggested agent
-        suggested_user_id = f"@mindroom_{suggestion.agent_name}:localhost"
-        response_text = f"@{suggestion.agent_name}, could you help with this? ({suggestion.reasoning})"
-
-        content = {"msgtype": "m.text", "body": response_text, "m.mentions": {"user_ids": [suggested_user_id]}}
-
-        # Add thread relation
-        content["m.relates_to"] = {
-            "rel_type": "m.thread",
-            "event_id": thread_id,
-            "m.in_reply_to": {"event_id": event.event_id},
+        content = {
+            "msgtype": "m.text",
+            "body": response_text,
+            "m.mentions": {"user_ids": [suggested_user_id]},
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": event.source.get("content", {}).get("m.relates_to", {}).get("event_id"),
+                "m.in_reply_to": {"event_id": event.event_id},
+            },
         }
 
-        logger.info(f"🚦 Router: Routing to {suggestion.agent_name} (confidence: {suggestion.confidence:.2f})")
-
-        response = await self.client.room_send(
-            room_id=room.room_id,
-            message_type="m.room.message",
-            content=content,
-        )
-
-        if isinstance(response, nio.RoomSendResponse):
-            logger.info("🚦 Router: Sent routing message")
-        else:
-            logger.error(f"🚦 Router: Failed to send routing message: {response}")
+        if self.client:
+            await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
+            logger.info(f"{emoji(self.agent_name)} Routed to {suggested_agent}")
 
 
 @dataclass
@@ -388,7 +306,6 @@ class MultiAgentOrchestrator:
 
     storage_path: Path
     agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
-    router_bot: RouterBot | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
 
     async def initialize(self) -> None:
@@ -420,17 +337,6 @@ class MultiAgentOrchestrator:
             bot = AgentBot(agent_user, self.storage_path, rooms=resolved_rooms)
             self.agent_bots[agent_name] = bot
 
-        # Check if router is configured
-        if "router" in agent_users:
-            router_user = agent_users["router"]
-            # Router should be in all rooms where there are multiple agents
-            all_rooms = set()
-            for bot in self.agent_bots.values():
-                all_rooms.update(bot.rooms)
-
-            self.router_bot = RouterBot(router_user, self.storage_path, rooms=list(all_rooms))
-            logger.info("Initialized router bot")
-
         logger.info(f"Initialized {len(self.agent_bots)} agent bots")
 
     async def start(self) -> None:
@@ -440,30 +346,18 @@ class MultiAgentOrchestrator:
 
         # Start each agent bot
         start_tasks = [bot.start() for bot in self.agent_bots.values()]
-        if self.router_bot:
-            start_tasks.append(self.router_bot.start())
-
         await asyncio.gather(*start_tasks)
         self.running = True
         logger.info("All agent bots started successfully")
 
         # Run sync loops for all agents concurrently
         sync_tasks = [bot.sync_forever() for bot in self.agent_bots.values()]
-        if self.router_bot:
-            sync_tasks.append(self.router_bot.sync_forever())
-
         await asyncio.gather(*sync_tasks)
 
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
-        stop_tasks = []
-        for bot in self.agent_bots.values():
-            stop_tasks.append(bot.stop())
-
-        if self.router_bot:
-            stop_tasks.append(self.router_bot.stop())
-
+        stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         logger.info("All agent bots stopped")
 
