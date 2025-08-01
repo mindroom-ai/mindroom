@@ -8,6 +8,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.matrix import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
+from mindroom.thread_utils import has_any_agent_mentions_in_thread
 
 
 class TestAIRouting:
@@ -127,8 +128,6 @@ class TestThreadUtils:
 
     def test_has_any_agent_mentions_in_thread_with_mentions(self) -> None:
         """Test detecting agent mentions in thread."""
-        from mindroom.thread_utils import has_any_agent_mentions_in_thread
-
         thread_history = [
             {
                 "sender": "@user:example.org",
@@ -146,8 +145,6 @@ class TestThreadUtils:
 
     def test_has_any_agent_mentions_in_thread_no_mentions(self) -> None:
         """Test thread with no agent mentions."""
-        from mindroom.thread_utils import has_any_agent_mentions_in_thread
-
         thread_history = [
             {
                 "sender": "@user:example.org",
@@ -165,8 +162,6 @@ class TestThreadUtils:
 
     def test_has_any_agent_mentions_in_thread_user_mentions(self) -> None:
         """Test thread with only user mentions (not agents)."""
-        from mindroom.thread_utils import has_any_agent_mentions_in_thread
-
         thread_history = [
             {
                 "sender": "@user:example.org",

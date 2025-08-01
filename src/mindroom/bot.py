@@ -8,7 +8,7 @@ import nio
 
 from .agent_loader import load_config
 from .ai import ai_response
-from .logging_config import emoji, get_logger
+from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
     AgentMatrixUser,
@@ -385,8 +385,6 @@ async def main(log_level: str, storage_path: Path) -> None:
         log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
         storage_path: The base directory for storing agent data
     """
-    from .logging_config import setup_logging
-
     # Set up logging with the specified level
     setup_logging(level=log_level)
 
