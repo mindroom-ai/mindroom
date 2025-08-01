@@ -181,6 +181,7 @@ agents:
       - business  # Business analytics
     num_history_runs: 5
 
+
 # Configuration for agent defaults
 defaults:
   num_history_runs: 5

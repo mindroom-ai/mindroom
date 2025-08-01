@@ -85,7 +85,7 @@ class TestAgentBot:
 
         assert bot.running
         assert bot.client == mock_client
-        mock_login.assert_called_once_with(mock_agent_user)
+        mock_login.assert_called_once_with("http://localhost:8008", mock_agent_user)
         assert mock_client.add_event_callback.call_count == 2  # invite and message callbacks
 
     @pytest.mark.asyncio

@@ -70,7 +70,7 @@ class TestMatrixUserManagement:
 
     def test_load_matrix_users(self, temp_matrix_users_file: Path) -> None:
         """Test loading matrix users from file."""
-        with patch("mindroom.matrix_config.MATRIX_USERS_FILE", temp_matrix_users_file):
+        with patch("mindroom.matrix.config.MATRIX_USERS_FILE", temp_matrix_users_file):
             config = MatrixConfig.load()
 
         assert "bot" in config.accounts
@@ -78,7 +78,7 @@ class TestMatrixUserManagement:
         assert "user" in config.accounts
         assert config.accounts["user"].username == "mindroom_user"
 
-    @patch("mindroom.matrix_config.MATRIX_USERS_FILE")
+    @patch("mindroom.matrix.config.MATRIX_USERS_FILE")
     def test_load_matrix_users_no_file(self, mock_file: MagicMock) -> None:
         """Test loading matrix users when file doesn't exist."""
         mock_file.exists.return_value = False
@@ -90,7 +90,7 @@ class TestMatrixUserManagement:
         """Test saving matrix users to file."""
         file_path = tmp_path / "test_users.yaml"
 
-        with patch("mindroom.matrix_config.MATRIX_USERS_FILE", file_path):
+        with patch("mindroom.matrix.config.MATRIX_USERS_FILE", file_path):
             config = MatrixConfig()
             config.add_account("agent_test", "mindroom_test", "test_pass")
             config.save()
@@ -102,7 +102,7 @@ class TestMatrixUserManagement:
         assert "agent_test" in saved_data["accounts"]
         assert saved_data["accounts"]["agent_test"]["username"] == "mindroom_test"
 
-    @patch("mindroom.matrix_config.MatrixConfig.load")
+    @patch("mindroom.matrix.config.MatrixConfig.load")
     def test_get_agent_credentials(self, mock_load: MagicMock) -> None:
         """Test getting agent credentials."""
         mock_config = MatrixConfig()
@@ -118,8 +118,8 @@ class TestMatrixUserManagement:
         creds = get_agent_credentials("nonexistent")
         assert creds is None
 
-    @patch("mindroom.matrix_config.MatrixConfig.save")
-    @patch("mindroom.matrix_config.MatrixConfig.load")
+    @patch("mindroom.matrix.config.MatrixConfig.save")
+    @patch("mindroom.matrix.config.MatrixConfig.load")
     def test_save_agent_credentials(self, mock_load: MagicMock, mock_save: MagicMock) -> None:
         """Test saving agent credentials."""
         mock_config = MatrixConfig()
@@ -148,7 +148,7 @@ class TestMatrixRegistration:
         mock_client.login.return_value = AsyncMock()
         mock_client.set_displayname.return_value = AsyncMock()
 
-        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             user_id = await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
@@ -167,7 +167,7 @@ class TestMatrixRegistration:
         mock_response.status_code = "M_USER_IN_USE"
         mock_client.register.return_value = mock_response
 
-        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             user_id = await register_user("http://localhost:8008", "existing_user", "test_pass", "Existing User")
@@ -184,7 +184,7 @@ class TestMatrixRegistration:
         mock_response.status_code = "M_FORBIDDEN"
         mock_client.register.return_value = mock_response
 
-        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             with pytest.raises(ValueError, match="Failed to register user"):
@@ -210,7 +210,7 @@ class TestAgentUserCreation:
         mock_get_creds.return_value = None  # No existing credentials
         mock_register.return_value = "@mindroom_calculator:localhost"
 
-        agent_user = await create_agent_user("calculator", "CalculatorAgent")
+        agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent")
 
         assert agent_user.agent_name == "calculator"
         assert agent_user.user_id == "@mindroom_calculator:localhost"
@@ -237,7 +237,7 @@ class TestAgentUserCreation:
         }
         mock_register.return_value = "@mindroom_calculator:localhost"
 
-        agent_user = await create_agent_user("calculator", "CalculatorAgent")
+        agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent")
 
         assert agent_user.password == "existing_pass"
         mock_save_creds.assert_not_called()  # Should not save again
@@ -257,20 +257,16 @@ class TestAgentLogin:
             password="test_pass",
         )
 
-        with patch("nio.AsyncClient") as MockClient:
+        with patch("mindroom.matrix.users.login") as mock_login:
             mock_client = AsyncMock()
-            MockClient.return_value = mock_client
+            mock_client.access_token = "new_token"
+            mock_login.return_value = mock_client
 
-            # Mock successful login
-            mock_response = MagicMock(spec=nio.LoginResponse)
-            mock_response.access_token = "new_token"
-            mock_client.login.return_value = mock_response
-
-            client = await login_agent_user(agent_user)
+            client = await login_agent_user("http://localhost:8008", agent_user)
 
             assert client == mock_client
             assert agent_user.access_token == "new_token"
-            mock_client.login.assert_called_once_with("test_pass")
+            mock_login.assert_called_once_with("http://localhost:8008", agent_user.user_id, agent_user.password)
 
     @pytest.mark.asyncio
     async def test_login_agent_user_failure(self) -> None:
@@ -282,18 +278,12 @@ class TestAgentLogin:
             password="wrong_pass",
         )
 
-        with patch("nio.AsyncClient") as MockClient:
-            mock_client = AsyncMock()
-            MockClient.return_value = mock_client
-
+        with patch("mindroom.matrix.users.login") as mock_login:
             # Mock failed login
-            mock_response = MagicMock(spec=nio.LoginError)
-            mock_client.login.return_value = mock_response
+            mock_login.side_effect = ValueError("Failed to login @mindroom_calculator:localhost: Login error")
 
-            with pytest.raises(ValueError, match="Failed to login agent"):
-                await login_agent_user(agent_user)
-
-            mock_client.close.assert_called_once()
+            with pytest.raises(ValueError, match="Failed to login"):
+                await login_agent_user("http://localhost:8008", agent_user)
 
 
 class TestEnsureAllAgentUsers:
@@ -322,7 +312,7 @@ class TestEnsureAllAgentUsers:
             AgentMatrixUser("general", "@mindroom_general:localhost", "GeneralAgent", "pass2"),
         ]
 
-        agent_users = await ensure_all_agent_users()
+        agent_users = await ensure_all_agent_users("http://localhost:8008")
 
         assert len(agent_users) == 2
         assert "calculator" in agent_users
@@ -352,7 +342,7 @@ class TestEnsureAllAgentUsers:
             Exception("Failed to create user"),
         ]
 
-        agent_users = await ensure_all_agent_users()
+        agent_users = await ensure_all_agent_users("http://localhost:8008")
 
         # Should still return the successful one
         assert len(agent_users) == 1

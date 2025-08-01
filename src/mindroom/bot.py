@@ -8,7 +8,7 @@ import nio
 
 from .agent_loader import load_config
 from .ai import ai_response
-from .logging_config import emoji, get_logger
+from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
     AgentMatrixUser,
@@ -19,6 +19,13 @@ from .matrix import (
     prepare_response_content,
 )
 from .response_tracker import ResponseTracker
+from .routing import suggest_agent_for_message
+from .thread_utils import (
+    get_agents_in_thread,
+    get_available_agents_in_room,
+    get_mentioned_agents,
+    has_any_agent_mentions_in_thread,
+)
 
 logger = get_logger(__name__)
 
@@ -29,7 +36,8 @@ def is_sender_other_agent(sender: str, current_agent_user_id: str) -> bool:
         return False
 
     sender_username = sender.split(":")[0][1:] if sender.startswith("@") else ""
-    return sender_username.startswith("mindroom_") and sender_username != "mindroom_user"
+    # Check if it's a mindroom agent (not a regular user)
+    return sender_username.startswith("mindroom_") and not sender_username.startswith("mindroom_user")
 
 
 def has_other_agents_in_thread(thread_history: list[dict], current_agent_user_id: str) -> bool:
@@ -144,32 +152,68 @@ class AgentBot:
             f"Agent user_id: {self.agent_user.user_id}, display_name: {self.agent_user.display_name}"
         )
 
-        # Check if this agent is mentioned
+        # Extract mentions and thread info
         mentions = event.source.get("content", {}).get("m.mentions", {})
-        mentioned = self.agent_user.user_id in mentions.get("user_ids", [])
+        mentioned_agents = get_mentioned_agents(mentions)
+        am_i_mentioned = self.agent_name in mentioned_agents
 
-        # Check if we're in a thread
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
         is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
         thread_id = relates_to.get("event_id") if is_thread else None
 
-        # Decide whether to respond
+        # Fetch thread history if in thread
         thread_history = []
-
-        if mentioned:
-            # Always respond if explicitly mentioned
-            logger.debug(f"{emoji(self.agent_name)} Will respond: explicitly mentioned")
-        elif is_thread and thread_id and self.client:
-            # In threads, check if we're the only agent participating
+        if thread_id:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
-            if has_other_agents_in_thread(thread_history, self.agent_user.user_id):
-                logger.debug(f"{emoji(self.agent_name)} Not responding: multiple agents in thread, no explicit mention")
-                return
+        # Decision logic:
+        # 1. If I'm mentioned → I respond (always)
+        # 2. If any agent is mentioned in thread → Only mentioned agents respond
+        # 3. If NO agents are mentioned in thread:
+        #    - 0 agents have participated → Router picks who should start
+        #    - 1 agent has participated → That agent continues
+        #    - 2+ agents have participated → Nobody responds (users must mention who they want)
+        # 4. Not in thread → Don't respond
 
-            logger.debug(f"{emoji(self.agent_name)} Will respond: only agent in thread")
+        should_respond = False
+        use_router = False
+
+        if am_i_mentioned:
+            # Always respond if explicitly mentioned
+            should_respond = True
+            logger.debug(f"{emoji(self.agent_name)} Will respond: explicitly mentioned")
+        elif is_thread:
+            # In threads: check if any agent is mentioned anywhere
+            if has_any_agent_mentions_in_thread(thread_history):
+                # Someone is mentioned - only mentioned agents respond
+                logger.debug(f"{emoji(self.agent_name)} Not responding: other agents mentioned in thread")
+            else:
+                # No mentions - check agent participation
+                agents_in_thread = get_agents_in_thread(thread_history)
+                if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
+                    # I'm the only agent in thread - continue responding
+                    should_respond = True
+                    logger.debug(f"{emoji(self.agent_name)} Will respond: only agent in thread")
+                elif not agents_in_thread:
+                    # No agents yet - use router to pick first responder
+                    use_router = True
+                    logger.debug(f"{emoji(self.agent_name)} Not responding: no agents yet, will use router")
+                else:
+                    # Multiple agents - nobody responds
+                    logger.debug(
+                        f"{emoji(self.agent_name)} Not responding: multiple agents in thread, need explicit mention"
+                    )
         else:
-            logger.debug(f"{emoji(self.agent_name)} Not responding to message")
+            # Not in thread and not mentioned
+            logger.debug(f"{emoji(self.agent_name)} Not responding: not in thread or mentioned")
+
+        # Handle routing if needed
+        if use_router:
+            await self._handle_ai_routing(room, event, thread_history)
+            return
+
+        # Exit if not responding
+        if not should_respond:
             return
 
         # Check if we've already responded to this specific event
@@ -192,8 +236,7 @@ class AgentBot:
         session_id = f"{room.room_id}:{thread_id}" if thread_id else room.room_id
 
         # Fetch thread history if we haven't already
-        if is_thread and not thread_history:
-            assert thread_id is not None  # is_thread guarantees thread_id exists
+        if thread_id and not thread_history:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
         # Generate response
@@ -225,6 +268,45 @@ class AgentBot:
                 logger.info(f"{emoji(self.agent_name)} Sent response to room {room.room_id}")
             else:
                 logger.error(f"{emoji(self.agent_name)} Failed to send response: {response}")
+
+    async def _handle_ai_routing(
+        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
+    ) -> None:
+        """Handle AI routing for multi-agent threads."""
+        # Only let one agent do the routing to avoid duplicates
+        # All agents receive the message, but we need only one to handle routing
+        # We use the first agent alphabetically as a deterministic choice
+        # Example: If room has [calculator, general, shell], only calculator routes
+        available_agents = get_available_agents_in_room(room)
+        if not available_agents or available_agents[0] != self.agent_name:
+            # I'm not the first agent alphabetically, so I should not route
+            return  # Let the first agent handle routing
+
+        logger.info(f"{emoji(self.agent_name)} Handling AI routing for: {event.body[:50]}...")
+
+        # Get AI suggestion
+        suggested_agent = await suggest_agent_for_message(event.body, available_agents, thread_history)
+        if not suggested_agent:
+            return
+
+        # Send mention to suggested agent
+        suggested_user_id = f"@mindroom_{suggested_agent}:localhost"
+        response_text = f"@{suggested_agent}, could you help with this?"
+
+        content = {
+            "msgtype": "m.text",
+            "body": response_text,
+            "m.mentions": {"user_ids": [suggested_user_id]},
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": event.source.get("content", {}).get("m.relates_to", {}).get("event_id"),
+                "m.in_reply_to": {"event_id": event.event_id},
+            },
+        }
+
+        if self.client:
+            await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
+            logger.info(f"{emoji(self.agent_name)} Routed to {suggested_agent}")
 
 
 @dataclass
@@ -272,20 +354,19 @@ class MultiAgentOrchestrator:
             await self.initialize()
 
         # Start each agent bot
-        await asyncio.gather(*(bot.start() for bot in self.agent_bots.values()))
+        start_tasks = [bot.start() for bot in self.agent_bots.values()]
+        await asyncio.gather(*start_tasks)
         self.running = True
         logger.info("All agent bots started successfully")
 
         # Run sync loops for all agents concurrently
-        await asyncio.gather(*(bot.sync_forever() for bot in self.agent_bots.values()))
+        sync_tasks = [bot.sync_forever() for bot in self.agent_bots.values()]
+        await asyncio.gather(*sync_tasks)
 
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
-        stop_tasks = []
-        for bot in self.agent_bots.values():
-            stop_tasks.append(bot.stop())
-
+        stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         logger.info("All agent bots stopped")
 
@@ -311,8 +392,6 @@ async def main(log_level: str, storage_path: Path) -> None:
         log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
         storage_path: The base directory for storing agent data
     """
-    from .logging_config import setup_logging
-
     # Set up logging with the specified level
     setup_logging(level=log_level)
 

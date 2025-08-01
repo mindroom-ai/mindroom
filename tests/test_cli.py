@@ -84,7 +84,7 @@ class TestUserAccountManagement:
 
         with (
             patch("mindroom.cli.matrix_client", return_value=mock_context),
-            patch("mindroom.matrix_config.MATRIX_USERS_FILE", tmp_path / "matrix_users.yaml"),
+            patch("mindroom.matrix.config.MATRIX_USERS_FILE", tmp_path / "matrix_users.yaml"),
         ):
             config = await _ensure_user_account()
 
@@ -106,7 +106,7 @@ class TestUserAccountManagement:
         config = MatrixConfig()
         config.add_account("user", "existing_user", "existing_password")
 
-        with patch("mindroom.matrix_config.MATRIX_USERS_FILE", config_file):
+        with patch("mindroom.matrix.config.MATRIX_USERS_FILE", config_file):
             config.save()
 
             # Mock successful login with existing credentials
@@ -136,7 +136,7 @@ class TestUserAccountManagement:
         config = MatrixConfig()
         config.add_account("user", "invalid_user", "wrong_password")
 
-        with patch("mindroom.matrix_config.MATRIX_USERS_FILE", config_file):
+        with patch("mindroom.matrix.config.MATRIX_USERS_FILE", config_file):
             config.save()
 
             # Mock failed login
