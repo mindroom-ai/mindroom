@@ -168,6 +168,7 @@ class AgentBot:
 
         agents_in_thread = get_agents_in_thread(thread_history)
         agent_count = len(agents_in_thread)
+        any_agent_mentioned_in_thread = has_any_agent_mentions_in_thread(thread_history)
 
         # Decision logic
         should_respond = False
@@ -178,22 +179,22 @@ class AgentBot:
             should_respond = True
             reason = "explicitly mentioned"
         elif is_thread:
-            if mentioned_agents:
-                # Other agents mentioned in thread, I'm not one of them
+            if any_agent_mentioned_in_thread:
+                # Some agent is mentioned in the thread - only respond if I'm mentioned
                 should_respond = False
-                reason = "other agents mentioned"
+                reason = "other agents mentioned in thread"
             elif agent_count == 0:
                 # First agent to respond in thread
                 should_respond = True
                 reason = "first agent in thread"
             elif agent_count == 1 and self.agent_name in agents_in_thread:
-                # I'm the only agent in thread
+                # I'm the only agent in thread - continue responding
                 should_respond = True
                 reason = "only agent in thread"
             else:
-                # Multiple agents, none mentioned -> use AI routing
+                # Multiple agents, none mentioned in entire thread -> don't respond, let router handle
                 should_respond = False
-                reason = "multiple agents in thread, will route using AI"
+                reason = "multiple agents in thread, no mentions - router will handle"
         else:
             # Not in thread, not mentioned
             should_respond = False
