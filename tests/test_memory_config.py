@@ -116,9 +116,9 @@ class TestMemoryConfig:
         storage_path = Path("/tmp/test")
         instance = create_memory_instance(storage_path)
 
-        # Verify Memory was instantiated
-        mock_memory_class.assert_called_once()
-        assert instance == mock_memory_class.return_value
+        # Verify Memory.from_config was called
+        mock_memory_class.from_config.assert_called_once_with(mock_config)
+        assert instance == mock_memory_class.from_config.return_value
 
     def test_chroma_directory_creation(self, tmp_path):
         """Test that ChromaDB directory is created."""
