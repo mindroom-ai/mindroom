@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.agent_loader import describe_agent
 from mindroom.bot import AgentBot
 from mindroom.matrix import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
@@ -185,3 +186,31 @@ class TestThreadUtils:
         # Regular users should still be rejected
         assert extract_agent_name("@mindroom_user:localhost") is None
         assert extract_agent_name("@regular_user:localhost") is None
+
+
+class TestAgentDescription:
+    """Test agent description functionality."""
+
+    def test_describe_agent_with_tools(self) -> None:
+        """Test describing an agent with tools."""
+        description = describe_agent("calculator")
+
+        assert "CalculatorAgent" in description
+        assert "Solve mathematical problems" in description
+        assert "Tools: calculator" in description
+        assert "Use the calculator tools" in description
+
+    def test_describe_agent_without_tools(self) -> None:
+        """Test describing an agent without tools."""
+        description = describe_agent("general")
+
+        assert "GeneralAgent" in description
+        assert "general-purpose assistant" in description
+        assert "Tools:" not in description  # No tools section
+        assert "Always provide a clear" in description
+
+    def test_describe_unknown_agent(self) -> None:
+        """Test describing an unknown agent."""
+        description = describe_agent("nonexistent")
+
+        assert description == "nonexistent: Unknown agent"

@@ -113,6 +113,42 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
     return agent
 
 
+def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
+    """Generate a description of an agent based on its configuration.
+
+    Args:
+        agent_name: Name of the agent to describe
+        config_path: Optional path to configuration file
+
+    Returns:
+        Human-readable description of the agent
+    """
+    config = load_config(config_path)
+    try:
+        agent_config = config.get_agent(agent_name)
+    except ValueError:
+        return f"{agent_name}: Unknown agent"
+
+    # Start with display name and role
+    parts = [f"{agent_config.display_name}"]
+    if agent_config.role:
+        parts.append(f"- {agent_config.role}")
+
+    # Add tools if any
+    if agent_config.tools:
+        tool_list = ", ".join(agent_config.tools)
+        parts.append(f"- Tools: {tool_list}")
+
+    # Add key instructions if any
+    if agent_config.instructions:
+        # Take first instruction as it's usually the most descriptive
+        first_instruction = agent_config.instructions[0]
+        if len(first_instruction) < 100:  # Only include if reasonably short
+            parts.append(f"- {first_instruction}")
+
+    return "\n  ".join(parts)
+
+
 def clear_cache() -> None:
     """Clear all caches."""
     _config_cache.clear()

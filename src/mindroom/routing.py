@@ -5,6 +5,7 @@ from typing import Any
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
+from .agent_loader import describe_agent
 from .ai import get_model_instance
 from .logging_config import get_logger
 
@@ -25,25 +26,23 @@ async def suggest_agent_for_message(
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message."""
     try:
-        agents_list = ", ".join(available_agents)
+        # Build agent descriptions
+        agent_descriptions = []
+        for agent_name in available_agents:
+            description = describe_agent(agent_name)
+            agent_descriptions.append(f"{agent_name}:\n  {description}")
+
+        agents_info = "\n\n".join(agent_descriptions)
+
         prompt = f"""Decide which agent should respond to this message.
 
-Available agents: {agents_list}
+Available agents and their capabilities:
 
-Agent capabilities:
-- calculator: Math, calculations, numbers
-- general: General conversation, explanations
-- code: Programming, development
-- shell: System commands, terminal
-- summary: Text summarization
-- research: Information lookup
-- finance: Financial analysis
-- news: Current events
-- data_analyst: Data analysis
+{agents_info}
 
 Message: "{message}"
 
-Choose the most appropriate agent."""
+Choose the most appropriate agent based on their role, tools, and instructions."""
 
         if thread_context:
             context = "Previous messages:\n"
