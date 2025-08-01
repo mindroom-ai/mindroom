@@ -1,5 +1,7 @@
 # mindroom
 
+**Why trust ten AI platforms when you can trust zero? One conversation. Every AI model. Open source. Encrypted. Your data. Your control.**
+
 **A universal interface for AI agents with persistent memory, where every conversation has a home.**
 
 ## Vision
