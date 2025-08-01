@@ -1,42 +1,36 @@
 """Thread-specific agent invitation management."""
 
-import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
+from .invites_base import BaseInvite, BaseInviteManager, calculate_expiry, is_expired_by_time
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 @dataclass
-class ThreadInvite:
+class ThreadInvite(BaseInvite):
     """Represents a temporary agent invitation to a thread."""
 
     thread_id: str
     room_id: str
-    agent_name: str
-    invited_by: str
-    invited_at: datetime
     expires_at: datetime | None = None
 
     def is_expired(self) -> bool:
         """Check if the invitation has expired."""
-        if self.expires_at is None:
-            return False
-        return datetime.now() > self.expires_at
+        return is_expired_by_time(self.expires_at)
 
 
-class ThreadInviteManager:
+class ThreadInviteManager(BaseInviteManager[ThreadInvite]):
     """Manages temporary agent invitations for specific threads."""
 
     def __init__(self):
+        super().__init__()
         # Map of thread_id -> list of ThreadInvite
         self._invites: dict[str, list[ThreadInvite]] = {}
         # Map of (room_id, agent_name) -> set of thread_ids
         self._agent_threads: dict[tuple[str, str], set[str]] = {}
-        # Lock for thread-safe operations
-        self._lock = asyncio.Lock()
 
     async def add_invite(
         self,
@@ -59,9 +53,7 @@ class ThreadInviteManager:
             The created ThreadInvite
         """
         async with self._lock:
-            expires_at = None
-            if duration_hours:
-                expires_at = datetime.now() + timedelta(hours=duration_hours)
+            expires_at = calculate_expiry(duration_hours)
 
             invite = ThreadInvite(
                 thread_id=thread_id,
@@ -212,7 +204,7 @@ class ThreadInviteManager:
 
             return removed
 
-    async def cleanup_expired_invites(self) -> int:
+    async def cleanup_expired(self) -> int:
         """Remove all expired invitations.
 
         Returns:

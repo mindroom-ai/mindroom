@@ -111,6 +111,23 @@ class AgentBot:
             logger.error("Failed to start", agent=f"{emoji(self.agent_name)} {self.agent_name}", error=str(e))
             raise
 
+    async def _track_activity_if_alien(self, room_id: str, thread_id: str | None = None) -> None:
+        """Track activity if this agent is not native to the room."""
+        if room_id not in self.rooms:
+            from .thread_activity import alien_activity_tracker
+
+            await alien_activity_tracker.update_agent_activity(
+                agent_name=self.agent_name,
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+            logger.debug(
+                "Tracked alien agent activity",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+
     async def sync_forever(self) -> None:
         """Run the sync loop forever."""
         if not self.client:
@@ -419,20 +436,7 @@ class AgentBot:
                 )
 
                 # Track alien agent activity if this agent is not native to this room
-                if room.room_id not in self.rooms:
-                    from .thread_activity import alien_activity_tracker
-
-                    await alien_activity_tracker.update_agent_activity(
-                        agent_name=self.agent_name,
-                        room_id=room.room_id,
-                        thread_id=thread_id,
-                    )
-                    logger.debug(
-                        "Tracked alien agent activity",
-                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                        room_id=room.room_id,
-                        thread_id=thread_id,
-                    )
+                await self._track_activity_if_alien(room.room_id, thread_id)
             else:
                 logger.error(
                     "Failed to send response",
@@ -521,7 +525,7 @@ class AgentBot:
             elif to_room:
                 # Room invite
                 # Add room invitation
-                await room_invite_manager.add_room_invite(
+                await room_invite_manager.add_invite(
                     room_id=room.room_id,
                     agent_name=agent_name,
                     invited_by=event.sender,
@@ -539,11 +543,11 @@ class AgentBot:
                         else:
                             response_text = f"❌ Failed to invite @{agent_name}: {result}"
                             # Remove the invite record if Matrix invite failed
-                            await room_invite_manager.remove_room_invite(room.room_id, agent_name)
+                            await room_invite_manager.remove_invite(room.room_id, agent_name)
                 except Exception as e:
                     response_text = f"❌ Error inviting @{agent_name}: {str(e)}"
                     # Remove the invite record if Matrix invite failed
-                    await room_invite_manager.remove_room_invite(room.room_id, agent_name)
+                    await room_invite_manager.remove_invite(room.room_id, agent_name)
             else:
                 # Thread invite
                 if not thread_id:
@@ -704,7 +708,7 @@ class MultiAgentOrchestrator:
                 await asyncio.sleep(900)  # 15 minutes
 
                 # Clean up expired thread invitations
-                thread_removed = await thread_invite_manager.cleanup_expired_invites()
+                thread_removed = await thread_invite_manager.cleanup_expired()
                 if thread_removed > 0:
                     logger.info(f"Cleaned up {thread_removed} expired thread invitations")
 
@@ -714,7 +718,7 @@ class MultiAgentOrchestrator:
                 if "general" in self.agent_bots and self.agent_bots["general"].client:
                     client = self.agent_bots["general"].client
 
-                room_removed = await room_invite_manager.cleanup_inactive_invites(client)
+                room_removed = await room_invite_manager.cleanup_expired(client)
                 if room_removed > 0:
                     logger.info(f"Cleaned up {room_removed} inactive room invitations")
 

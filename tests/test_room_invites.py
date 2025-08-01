@@ -19,7 +19,7 @@ def invite_manager():
 @pytest.mark.asyncio
 async def test_add_room_invite(invite_manager):
     """Test adding a room invitation."""
-    invite = await invite_manager.add_room_invite(
+    invite = await invite_manager.add_invite(
         room_id="!room123",
         agent_name="calculator",
         invited_by="@user:example.com",
@@ -38,7 +38,7 @@ async def test_add_room_invite(invite_manager):
 async def test_record_agent_activity(invite_manager):
     """Test recording agent activity."""
     # Add invitation
-    await invite_manager.add_room_invite(
+    await invite_manager.add_invite(
         room_id="!room123",
         agent_name="calculator",
         invited_by="@user:example.com",
@@ -62,7 +62,7 @@ async def test_is_agent_invited_to_room(invite_manager):
     assert not await invite_manager.is_agent_invited_to_room("!room123", "calculator")
 
     # Add invitation
-    await invite_manager.add_room_invite(
+    await invite_manager.add_invite(
         room_id="!room123",
         agent_name="calculator",
         invited_by="@user:example.com",
@@ -78,17 +78,17 @@ async def test_is_agent_invited_to_room(invite_manager):
 async def test_get_room_invites(invite_manager):
     """Test getting all agents invited to a room."""
     # Add multiple invitations
-    await invite_manager.add_room_invite(
+    await invite_manager.add_invite(
         room_id="!room123",
         agent_name="calculator",
         invited_by="@user:example.com",
     )
-    await invite_manager.add_room_invite(
+    await invite_manager.add_invite(
         room_id="!room123",
         agent_name="research",
         invited_by="@user:example.com",
     )
-    await invite_manager.add_room_invite(
+    await invite_manager.add_invite(
         room_id="!other_room",
         agent_name="code",
         invited_by="@user:example.com",
@@ -109,19 +109,19 @@ async def test_get_room_invites(invite_manager):
 async def test_remove_room_invite(invite_manager):
     """Test removing a room invitation."""
     # Add invitations
-    await invite_manager.add_room_invite(
+    await invite_manager.add_invite(
         room_id="!room123",
         agent_name="calculator",
         invited_by="@user:example.com",
     )
-    await invite_manager.add_room_invite(
+    await invite_manager.add_invite(
         room_id="!room123",
         agent_name="research",
         invited_by="@user:example.com",
     )
 
     # Remove one invitation
-    removed = await invite_manager.remove_room_invite("!room123", "calculator")
+    removed = await invite_manager.remove_invite("!room123", "calculator")
     assert removed is True
 
     # Check remaining agents
@@ -129,7 +129,7 @@ async def test_remove_room_invite(invite_manager):
     assert agents == ["research"]
 
     # Try to remove non-existent invitation
-    removed = await invite_manager.remove_room_invite("!room123", "calculator")
+    removed = await invite_manager.remove_invite("!room123", "calculator")
     assert removed is False
 
 
@@ -164,7 +164,7 @@ async def test_inactive_invitations(invite_manager):
 async def test_cleanup_inactive_invites_no_client(invite_manager):
     """Test cleanup of inactive invitations without Matrix client."""
     # Add active invitation
-    await invite_manager.add_room_invite(
+    await invite_manager.add_invite(
         room_id="!room1",
         agent_name="active_agent",
         invited_by="@user:example.com",
@@ -183,7 +183,7 @@ async def test_cleanup_inactive_invites_no_client(invite_manager):
     invite_manager._room_invites["!room2"] = {"inactive_agent": inactive_invite}
 
     # Run cleanup without client
-    removed_count = await invite_manager.cleanup_inactive_invites()
+    removed_count = await invite_manager.cleanup_expired()
     assert removed_count == 1
 
     # Check that only active invitation remains
@@ -211,7 +211,7 @@ async def test_cleanup_inactive_invites_with_client(invite_manager):
     invite_manager._room_invites["!room123"] = {"calculator": inactive_invite}
 
     # Run cleanup with client
-    removed_count = await invite_manager.cleanup_inactive_invites(mock_client)
+    removed_count = await invite_manager.cleanup_expired(mock_client)
     assert removed_count == 1
 
     # Verify kick was called
@@ -251,7 +251,7 @@ async def test_concurrent_operations(invite_manager):
 
     async def add_invites(room_id: str, count: int):
         for i in range(count):
-            await invite_manager.add_room_invite(
+            await invite_manager.add_invite(
                 room_id=room_id,
                 agent_name=f"agent_{i}",
                 invited_by="@user:example.com",

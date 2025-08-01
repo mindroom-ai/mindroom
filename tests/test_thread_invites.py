@@ -214,7 +214,7 @@ async def test_cleanup_expired_invites(invite_manager):
     invite_manager._agent_threads[("!room456", "research")] = {"$thread2"}
 
     # Run cleanup
-    removed_count = await invite_manager.cleanup_expired_invites()
+    removed_count = await invite_manager.cleanup_expired()
     assert removed_count == 1
 
     # Check that only active invitations remain
