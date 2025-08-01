@@ -147,8 +147,8 @@ async def test_agent_ignores_other_agents(
 
 
 @pytest.mark.asyncio
-async def test_agent_responds_in_threads_only_when_mentioned(mock_calculator_agent: AgentMatrixUser) -> None:
-    """Test that agents respond in threads only when explicitly mentioned."""
+async def test_agent_responds_in_threads_based_on_participation(mock_calculator_agent: AgentMatrixUser) -> None:
+    """Test that agents respond in threads based on whether other agents are participating."""
     test_room_id = "!test:example.org"
     test_user_id = "@alice:example.org"
     thread_root_id = "$thread_root:example.org"
@@ -162,7 +162,7 @@ async def test_agent_responds_in_threads_only_when_mentioned(mock_calculator_age
         bot = AgentBot(mock_calculator_agent)
         await bot.start()
 
-        # Test 1: Thread message WITHOUT agent mention - should NOT respond
+        # Test 1: Thread with only this agent - should respond without mention
         message_event = nio.RoomMessageText(
             body="What about 20% of 300?",
             formatted_body="What about 20% of 300?",
@@ -187,13 +187,52 @@ async def test_agent_responds_in_threads_only_when_mentioned(mock_calculator_age
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
         with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
+            # Only this agent in the thread
+            mock_fetch.return_value = [
+                {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
+                {
+                    "sender": mock_calculator_agent.user_id,
+                    "body": "10% of 100 is 10",
+                    "timestamp": 124,
+                    "event_id": "msg2",
+                },
+            ]
+            mock_ai.return_value = "20% of 300 is 60"
+
             await bot._on_message(room, message_event)
 
-            # Should NOT process the message without mention
+            # Should process the message as only agent in thread
+            mock_ai.assert_called_once()
+            bot.client.room_send.assert_called_once()
+
+        # Test 2: Thread with multiple agents - should NOT respond without mention
+        bot.client.room_send.reset_mock()
+
+        with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
+            # Multiple agents in the thread
+            mock_fetch.return_value = [
+                {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
+                {
+                    "sender": mock_calculator_agent.user_id,
+                    "body": "10% of 100 is 10",
+                    "timestamp": 124,
+                    "event_id": "msg2",
+                },
+                {
+                    "sender": "@mindroom_general:localhost",
+                    "body": "I can also help",
+                    "timestamp": 125,
+                    "event_id": "msg3",
+                },
+            ]
+
+            await bot._on_message(room, message_event)
+
+            # Should NOT process without mention when multiple agents
             mock_ai.assert_not_called()
             bot.client.room_send.assert_not_called()
 
-        # Test 2: Thread message WITH agent mention - should respond
+        # Test 3: Thread with multiple agents WITH mention - should respond
         message_event_with_mention = nio.RoomMessageText(
             body="@mindroom_calculator:localhost What about 20% of 300?",
             formatted_body="@mindroom_calculator:localhost What about 20% of 300?",
@@ -217,17 +256,31 @@ async def test_agent_responds_in_threads_only_when_mentioned(mock_calculator_age
         message_event_with_mention.sender = test_user_id
 
         with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
-            mock_fetch.return_value = []
+            mock_fetch.return_value = [
+                {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
+                {
+                    "sender": mock_calculator_agent.user_id,
+                    "body": "10% of 100 is 10",
+                    "timestamp": 124,
+                    "event_id": "msg2",
+                },
+                {
+                    "sender": "@mindroom_general:localhost",
+                    "body": "I can also help",
+                    "timestamp": 125,
+                    "event_id": "msg3",
+                },
+            ]
             mock_ai.return_value = "20% of 300 is 60"
 
             await bot._on_message(room, message_event_with_mention)
 
-            # Should process the message with mention
+            # Should process the message with explicit mention
             mock_ai.assert_called_once_with(
                 "calculator",
                 "@mindroom_calculator:localhost What about 20% of 300?",
                 f"{test_room_id}:{thread_root_id}",
-                thread_history=[],
+                thread_history=mock_fetch.return_value,
             )
 
             # Verify thread response format

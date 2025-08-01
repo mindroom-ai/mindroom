@@ -93,6 +93,31 @@ class AgentBot:
             await self.client.close()
             logger.info(f"{colorize(self.agent_name)} Stopped agent bot: {self.agent_user.display_name}")
 
+    def _has_other_agents_in_thread(self, thread_history: list[dict]) -> bool:
+        """Check if other agents have participated in this thread.
+
+        Args:
+            thread_history: List of thread messages
+
+        Returns:
+            True if other agents (besides this one) have sent messages in the thread
+        """
+        for msg in thread_history:
+            sender = msg.get("sender", "")
+            # Extract username from sender ID
+            sender_username = sender.split(":")[0][1:] if sender.startswith("@") else ""
+
+            # Check if it's an agent (but not this agent)
+            if (
+                sender_username.startswith("mindroom_")
+                and sender_username != "mindroom_user"  # Not the user account
+                and sender != self.agent_user.user_id  # Not this agent
+            ):
+                logger.debug(f"{colorize(self.agent_name)} Found other agent in thread: {sender}")
+                return True
+
+        return False
+
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         """Handle room invitations."""
         logger.info(f"{colorize(self.agent_name)} Received invite to room: {room.display_name} ({room.room_id})")
@@ -140,8 +165,40 @@ class AgentBot:
             f"{colorize(self.agent_name)} Checking mentions - m.mentions field: {mentions}, Agent is mentioned: {mentioned}"
         )
 
-        if not mentioned:
-            logger.debug(f"{colorize(self.agent_name)} Not mentioned, ignoring message")
+        # Check if we're in a thread
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
+        thread_id = relates_to.get("event_id") if is_thread else None
+
+        # Initialize thread_history
+        thread_history = []
+
+        # Decide whether to respond
+        should_respond = False
+
+        if mentioned:
+            # Always respond if explicitly mentioned
+            should_respond = True
+            logger.debug(f"{colorize(self.agent_name)} Will respond: explicitly mentioned")
+        elif is_thread:
+            # In threads, check if we're the only agent participating
+            if thread_id and self.client:
+                thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
+
+            has_other_agents = self._has_other_agents_in_thread(thread_history)
+
+            if not has_other_agents:
+                # We're the only agent in this thread, so respond
+                should_respond = True
+                logger.debug(f"{colorize(self.agent_name)} Will respond: only agent in thread")
+            else:
+                # Multiple agents in thread, require explicit mention
+                logger.debug(
+                    f"{colorize(self.agent_name)} Not responding: multiple agents in thread, no explicit mention"
+                )
+
+        if not should_respond:
+            logger.debug(f"{colorize(self.agent_name)} Not responding to message")
             return
 
         logger.info(f"{colorize(self.agent_name)} WILL PROCESS message from {event.sender}: {event.body}")
@@ -154,16 +211,11 @@ class AgentBot:
             return
 
         # Create session ID with thread awareness
-        thread_id = None
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        if relates_to and relates_to.get("rel_type") == "m.thread":
-            thread_id = relates_to.get("event_id")
-
         session_id = f"{room.room_id}:{thread_id}" if thread_id else room.room_id
 
-        # Fetch thread history if in a thread
-        thread_history = []
-        if thread_id and self.client:
+        # Use the thread history we already fetched (if in a thread)
+        # If we're not in a thread or didn't fetch it yet, fetch now
+        if is_thread and not thread_history and thread_id and self.client:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
         # Generate response

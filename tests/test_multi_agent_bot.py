@@ -232,19 +232,25 @@ class TestAgentBot:
         mock_ai_response: AsyncMock,
         mock_agent_user: AgentMatrixUser,
     ) -> None:
-        """Test agent bot only responds to messages in threads when mentioned."""
-        mock_fetch_history.return_value = [
-            {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
-        ]
-        mock_ai_response.return_value = "Thread response"
-
+        """Test agent bot thread response behavior based on agent participation."""
         bot = AgentBot(mock_agent_user)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
 
-        # Test 1: Thread message without mention - should NOT respond
+        # Test 1: Thread with only this agent - should respond without mention
+        mock_fetch_history.return_value = [
+            {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
+            {
+                "sender": "@mindroom_calculator:localhost",
+                "body": "My previous response",
+                "timestamp": 124,
+                "event_id": "prev2",
+            },
+        ]
+        mock_ai_response.return_value = "Thread response"
+
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
         mock_event.body = "Thread message without mention"
@@ -260,11 +266,33 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event)
 
-        # Should NOT respond without mention
+        # Should respond as only agent in thread
+        mock_ai_response.assert_called_once()
+        bot.client.room_send.assert_called_once()
+
+        # Reset mocks
+        mock_ai_response.reset_mock()
+        bot.client.room_send.reset_mock()
+
+        # Test 2: Thread with multiple agents - should NOT respond without mention
+        mock_fetch_history.return_value = [
+            {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
+            {"sender": "@mindroom_calculator:localhost", "body": "My response", "timestamp": 124, "event_id": "prev2"},
+            {
+                "sender": "@mindroom_general:localhost",
+                "body": "Another agent response",
+                "timestamp": 125,
+                "event_id": "prev3",
+            },
+        ]
+
+        await bot._on_message(mock_room, mock_event)
+
+        # Should NOT respond when multiple agents in thread
         mock_ai_response.assert_not_called()
         bot.client.room_send.assert_not_called()
 
-        # Test 2: Thread message WITH mention - should respond
+        # Test 3: Thread with multiple agents WITH mention - should respond
         mock_event_with_mention = MagicMock()
         mock_event_with_mention.sender = "@user:localhost"
         mock_event_with_mention.body = "@mindroom_calculator:localhost What's 2+2?"
@@ -282,7 +310,7 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event_with_mention)
 
-        # Should respond when mentioned in thread
+        # Should respond when explicitly mentioned
         mock_ai_response.assert_called_once()
         bot.client.room_send.assert_called_once()
 
