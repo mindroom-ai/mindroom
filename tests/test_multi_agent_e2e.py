@@ -289,6 +289,7 @@ async def test_agent_responds_in_threads_based_on_participation(
                 session_id=f"{test_room_id}:{thread_root_id}",
                 thread_history=mock_fetch.return_value,
                 storage_path=tmp_path,
+                room_id=test_room_id,
             )
 
             # Verify thread response format

@@ -14,11 +14,8 @@ from dotenv import load_dotenv
 from .agent_loader import create_agent
 from .logging_config import get_logger
 from .memory import (
-    add_agent_memory,
-    add_room_memory,
-    format_memories_as_context,
-    search_agent_memories,
-    search_room_memories,
+    build_memory_enhanced_prompt,
+    store_conversation_memory,
 )
 
 logger = get_logger(__name__)
@@ -127,43 +124,15 @@ async def ai_response(
     try:
         model = get_model_instance()
 
-        # Search for relevant agent memories
-        agent_memories = search_agent_memories(prompt, agent_name, storage_path)
-
-        # Build enhanced prompt with memory context
-        enhanced_prompt = prompt
-        if agent_memories:
-            agent_context = format_memories_as_context(agent_memories, "agent")
-            enhanced_prompt = f"{agent_context}\n\n{prompt}"
-
-        # If room_id is provided, add room context
-        if room_id:
-            room_memories = search_room_memories(prompt, room_id, storage_path)
-            if room_memories:
-                room_context = format_memories_as_context(room_memories, "room")
-                enhanced_prompt = f"{room_context}\n\n{enhanced_prompt}"
+        # Build prompt enhanced with memory context
+        enhanced_prompt = build_memory_enhanced_prompt(prompt, agent_name, storage_path, room_id)
 
         # Generate response
         response = await _cached_agent_run(agent_name, enhanced_prompt, session_id, model, storage_path, thread_history)
         response_text = response.content or ""
 
-        # Store the response in agent memory
-        if response_text:
-            # Store a conversational summary
-            conversation_summary = f"User asked: {prompt[:200]}... I responded: {response_text[:200]}..."
-            add_agent_memory(
-                conversation_summary,
-                agent_name,
-                storage_path,
-                metadata={"type": "conversation", "session_id": session_id},
-            )
-
-            # Also add to room memory if room_id provided
-            if room_id:
-                room_summary = f"{agent_name} discussed: {response_text[:200]}..."
-                add_room_memory(
-                    room_summary, room_id, storage_path, agent_name=agent_name, metadata={"type": "conversation"}
-                )
+        # Store conversation in memory for future recall
+        store_conversation_memory(prompt, response_text, agent_name, storage_path, session_id, room_id)
 
         return response_text
     except Exception as e:

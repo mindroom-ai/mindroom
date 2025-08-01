@@ -141,3 +141,80 @@ def format_memories_as_context(memories: list[MemoryResult], context_type: str =
         context_parts.append(f"- {content}")
 
     return "\n".join(context_parts)
+
+
+def build_memory_enhanced_prompt(
+    prompt: str,
+    agent_name: str,
+    storage_path: Path,
+    room_id: str | None = None,
+) -> str:
+    """Build a prompt enhanced with relevant memories.
+
+    Args:
+        prompt: The original user prompt
+        agent_name: Name of the agent
+        storage_path: Path for memory storage
+        room_id: Optional room ID for room context
+
+    Returns:
+        Enhanced prompt with memory context
+    """
+    enhanced_prompt = prompt
+
+    # Search for relevant agent memories
+    agent_memories = search_agent_memories(prompt, agent_name, storage_path)
+    if agent_memories:
+        agent_context = format_memories_as_context(agent_memories, "agent")
+        enhanced_prompt = f"{agent_context}\n\n{prompt}"
+
+    # If room_id is provided, add room context
+    if room_id:
+        room_memories = search_room_memories(prompt, room_id, storage_path)
+        if room_memories:
+            room_context = format_memories_as_context(room_memories, "room")
+            enhanced_prompt = f"{room_context}\n\n{enhanced_prompt}"
+
+    return enhanced_prompt
+
+
+def store_conversation_memory(
+    prompt: str,
+    response: str,
+    agent_name: str,
+    storage_path: Path,
+    session_id: str,
+    room_id: str | None = None,
+) -> None:
+    """Store conversation in memory for future recall.
+
+    Args:
+        prompt: The user's prompt
+        response: The agent's response
+        agent_name: Name of the agent
+        storage_path: Path for memory storage
+        session_id: Session ID for the conversation
+        room_id: Optional room ID for room memory
+    """
+    if not response:
+        return
+
+    # Store a conversational summary in agent memory
+    conversation_summary = f"User asked: {prompt[:200]}... I responded: {response[:200]}..."
+    add_agent_memory(
+        conversation_summary,
+        agent_name,
+        storage_path,
+        metadata={"type": "conversation", "session_id": session_id},
+    )
+
+    # Also add to room memory if room_id provided
+    if room_id:
+        room_summary = f"{agent_name} discussed: {response[:200]}..."
+        add_room_memory(
+            room_summary,
+            room_id,
+            storage_path,
+            agent_name=agent_name,
+            metadata={"type": "conversation"},
+        )
