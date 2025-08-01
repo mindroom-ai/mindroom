@@ -124,10 +124,12 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
         Human-readable description of the agent
     """
     config = load_config(config_path)
-    try:
-        agent_config = config.get_agent(agent_name)
-    except ValueError:
+
+    # Check if agent exists
+    if agent_name not in config.agents:
         return f"{agent_name}: Unknown agent"
+
+    agent_config = config.agents[agent_name]
 
     # Start with display name and role
     parts = [f"{agent_config.display_name}"]
