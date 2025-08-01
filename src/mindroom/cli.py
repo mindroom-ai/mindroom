@@ -10,9 +10,7 @@ import nio
 import typer
 from rich.console import Console
 
-from mindroom.matrix import MATRIX_HOMESERVER
-from mindroom.matrix_config import MatrixConfig
-from mindroom.matrix_utils import matrix_client
+from mindroom.matrix import MATRIX_HOMESERVER, MatrixConfig, matrix_client
 
 app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
 console = Console()
@@ -84,7 +82,7 @@ async def _invite_agent_to_room(client: nio.AsyncClient, room_id: str, room_key:
 async def _ensure_agents_in_rooms(client: nio.AsyncClient, required_rooms: set[str]) -> None:
     """Ensure all agents are invited to their configured rooms."""
     from mindroom.agent_loader import load_config
-    from mindroom.matrix_room_manager import load_rooms
+    from mindroom.matrix import load_rooms
 
     console.print("\n🔄 Checking agent room access...")
 
@@ -130,7 +128,7 @@ async def _ensure_agents_in_rooms(client: nio.AsyncClient, required_rooms: set[s
 
 async def _create_room_and_invite_agents(room_key: str, room_name: str, user_client: nio.AsyncClient) -> str | None:
     """Create a room and invite all configured agents."""
-    from mindroom.matrix_room_manager import add_room
+    from mindroom.matrix import add_room
 
     # Create room
     response = await user_client.room_create(
@@ -208,7 +206,7 @@ async def _ensure_user_account() -> MatrixConfig:
 
 async def _create_missing_rooms(client: nio.AsyncClient, required_rooms: set[str]) -> None:
     """Create any missing rooms from the required set."""
-    from mindroom.matrix_room_manager import load_rooms
+    from mindroom.matrix import load_rooms
 
     existing_rooms = load_rooms()
     missing_rooms = required_rooms - set(existing_rooms.keys())
@@ -380,7 +378,7 @@ async def _invite_agents(room_id: str) -> None:
         response = await client.login(password=password)
         if isinstance(response, nio.LoginResponse):
             # Get room name/alias for agent selection
-            from mindroom.matrix_room_manager import load_rooms
+            from mindroom.matrix import load_rooms
 
             rooms = load_rooms()
             room_key = None

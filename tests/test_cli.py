@@ -7,7 +7,7 @@ import nio
 import pytest
 
 from mindroom.cli import _ensure_user_account, _register_user
-from mindroom.matrix_config import MatrixConfig
+from mindroom.matrix import MatrixConfig
 
 
 @pytest.fixture

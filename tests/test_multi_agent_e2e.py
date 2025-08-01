@@ -9,7 +9,7 @@ import pytest
 from aioresponses import aioresponses
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.matrix_agent_manager import AgentMatrixUser
+from mindroom.matrix import AgentMatrixUser
 
 
 @pytest.fixture
