@@ -38,11 +38,14 @@ async def _register_user(username: str, password: str, display_name: str) -> Non
         )
 
         if isinstance(response, nio.RegisterResponse):
-            # Set display name
-            await client.login(password=password)
+            # Set display name - use the user_id from the response
+            client.user = response.user_id
+            client.access_token = response.access_token
+            client.device_id = response.device_id
+            # No need to login again - we already have access token from registration
             await client.set_displayname(display_name)
             console.print(f"✅ Registered user: @{username}:localhost")
-        elif isinstance(response, nio.RegisterError) and response.status_code == "M_USER_IN_USE":
+        elif isinstance(response, nio.responses.RegisterErrorResponse) and response.status_code == "M_USER_IN_USE":
             console.print(f"ℹ️  User @{username}:localhost already exists")
         else:
             console.print(f"❌ Failed to register {username}: {response}")
@@ -134,7 +137,7 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
         name=room_name,
         alias=room_key,
         topic=f"Mindroom {room_name}",
-        preset="public_chat",
+        preset=nio.RoomPreset.public_chat,
     )
 
     if isinstance(response, nio.RoomCreateResponse):
@@ -171,21 +174,34 @@ async def _ensure_user_account() -> MatrixConfig:
     """Ensure a user account exists, creating one if necessary."""
     config = MatrixConfig.load()
 
-    if not config.get_account("user"):
-        console.print("📝 Creating user account...")
+    user_account = config.get_account("user")
 
-        # Generate credentials
-        user_username = "mindroom_user"
-        user_password = f"user_password_{os.urandom(8).hex()}"
+    # If we have stored credentials, try to login first
+    if user_account:
+        async with matrix_client(HOMESERVER, f"@{user_account.username}:localhost") as client:
+            response = await client.login(password=user_account.password)
+            if isinstance(response, nio.LoginResponse):
+                console.print(f"✅ User account ready: @{user_account.username}:localhost")
+                return config
+            else:
+                console.print("⚠️  Stored credentials invalid, creating new account...")
+                config.accounts.pop("user", None)
 
-        # Register user
-        await _register_user(user_username, user_password, "Mindroom User")
+    # No valid account, create a new one
+    console.print("📝 Creating user account...")
 
-        # Save credentials
-        config.add_account("user", user_username, user_password)
-        config.save()
+    # Generate credentials
+    user_username = "mindroom_user"
+    user_password = f"mindroom_password_{os.urandom(16).hex()}"
 
-        console.print(f"✅ User account ready: @{user_username}:localhost")
+    # Register user
+    await _register_user(user_username, user_password, "Mindroom User")
+
+    # Save credentials
+    config.add_account("user", user_username, user_password)
+    config.save()
+
+    console.print(f"✅ User account ready: @{user_username}:localhost")
 
     return config
 
