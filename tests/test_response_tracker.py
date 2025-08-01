@@ -1,5 +1,7 @@
 """Tests for the ResponseTracker class."""
 
+import json
+import time
 from pathlib import Path
 
 import pytest
@@ -20,8 +22,9 @@ class TestResponseTracker:
         tracker = ResponseTracker("test_agent", base_path=temp_dir)
 
         assert tracker.agent_name == "test_agent"
-        assert isinstance(tracker.responded_events, set)
-        assert len(tracker.responded_events) == 0
+        assert tracker.base_path == temp_dir
+        assert isinstance(tracker._responded_events, dict)
+        assert len(tracker._responded_events) == 0
 
     def test_has_responded_empty(self, temp_dir: Path) -> None:
         """Test has_responded when no events have been tracked."""
@@ -36,17 +39,24 @@ class TestResponseTracker:
         assert not tracker.has_responded("event123")
 
         # Mark as responded
+        before_time = time.time()
         tracker.mark_responded("event123")
+        after_time = time.time()
 
         # Now it should be marked as responded
         assert tracker.has_responded("event123")
-        assert "event123" in tracker.responded_events
+        assert "event123" in tracker._responded_events
+
+        # Check timestamp is reasonable
+        timestamp = tracker._responded_events["event123"]
+        assert before_time <= timestamp <= after_time
 
     def test_persistence(self, temp_dir: Path) -> None:
         """Test that responses are persisted to disk."""
         # Create tracker and mark some events
         tracker1 = ResponseTracker("test_agent", base_path=temp_dir)
         tracker1.mark_responded("event1")
+        time.sleep(0.1)  # Ensure different timestamps
         tracker1.mark_responded("event2")
 
         # Create new tracker instance - should load previous events
@@ -54,34 +64,127 @@ class TestResponseTracker:
 
         assert tracker2.has_responded("event1")
         assert tracker2.has_responded("event2")
-        assert len(tracker2.responded_events) == 2
+        assert len(tracker2._responded_events) == 2
 
-    def test_cleanup_old_events(self, temp_dir: Path) -> None:
-        """Test cleanup of old events."""
+        # Timestamps should be preserved
+        assert tracker1._responded_events["event1"] == tracker2._responded_events["event1"]
+        assert tracker1._responded_events["event2"] == tracker2._responded_events["event2"]
+
+    def test_cleanup_by_count(self, temp_dir: Path) -> None:
+        """Test cleanup keeps most recent events by count."""
         tracker = ResponseTracker("test_cleanup", base_path=temp_dir)
 
-        # Add many events
+        # Add events with known timestamps
+        base_time = time.time()
         for i in range(20):
-            tracker.mark_responded(f"event{i:03d}")
+            tracker._responded_events[f"event{i:03d}"] = base_time + i
 
-        assert len(tracker.responded_events) == 20
+        assert len(tracker._responded_events) == 20
 
         # Cleanup with max 10
         tracker.cleanup_old_events(max_events=10)
 
-        # Should keep only the last 10 (sorted by event ID)
-        assert len(tracker.responded_events) == 10
+        # Should keep only the last 10 (most recent by timestamp)
+        assert len(tracker._responded_events) == 10
         assert tracker.has_responded("event019")  # Latest should be kept
+        assert tracker.has_responded("event010")  # 10th most recent
+        assert not tracker.has_responded("event009")  # Should be removed
         assert not tracker.has_responded("event000")  # Oldest should be removed
 
-    def test_load_corrupted_file(self, temp_dir: Path) -> None:
-        """Test loading from a corrupted file."""
-        # Create tracker directory and write corrupted JSON
+    def test_cleanup_by_age(self, temp_dir: Path) -> None:
+        """Test cleanup removes events older than max age."""
+        tracker = ResponseTracker("test_age_cleanup", base_path=temp_dir)
+
+        current_time = time.time()
+
+        # Add some old events (40 days old)
+        for i in range(5):
+            tracker._responded_events[f"old_event{i}"] = current_time - (40 * 24 * 60 * 60)
+
+        # Add some recent events
+        for i in range(5):
+            tracker._responded_events[f"new_event{i}"] = current_time - (10 * 24 * 60 * 60)
+
+        assert len(tracker._responded_events) == 10
+
+        # Cleanup with 30 day max age
+        tracker.cleanup_old_events(max_events=100, max_age_days=30)
+
+        # Should keep only the recent events
+        assert len(tracker._responded_events) == 5
+        for i in range(5):
+            assert tracker.has_responded(f"new_event{i}")
+            assert not tracker.has_responded(f"old_event{i}")
+
+    def test_backward_compatibility(self, temp_dir: Path) -> None:
+        """Test loading old format (list) converts to new format (dict)."""
+        # Create old format file
         store_path = temp_dir / "response_tracking" / "test_agent"
         store_path.mkdir(parents=True, exist_ok=True)
         responses_file = store_path / "responded_events.json"
-        responses_file.write_text("not valid json")
 
-        # Should handle gracefully and start with empty set
+        old_data = {"event_ids": ["event1", "event2", "event3"]}
+        with open(responses_file, "w") as f:
+            json.dump(old_data, f)
+
+        # Load with new tracker
         tracker = ResponseTracker("test_agent", base_path=temp_dir)
-        assert len(tracker.responded_events) == 0
+
+        # Should convert to new format
+        assert len(tracker._responded_events) == 3
+        assert tracker.has_responded("event1")
+        assert tracker.has_responded("event2")
+        assert tracker.has_responded("event3")
+
+        # All should have timestamps
+        for event_id in ["event1", "event2", "event3"]:
+            assert isinstance(tracker._responded_events[event_id], float)
+
+    def test_get_stats(self, temp_dir: Path) -> None:
+        """Test getting statistics about tracked responses."""
+        tracker = ResponseTracker("test_stats", base_path=temp_dir)
+
+        # Empty tracker
+        stats = tracker.get_stats()
+        assert stats["total"] == 0
+        assert stats["oldest_age_hours"] == 0
+        assert stats["newest_age_hours"] == 0
+
+        # Add some events
+        current_time = time.time()
+        tracker._responded_events["old_event"] = current_time - (48 * 60 * 60)  # 48 hours ago
+        tracker._responded_events["new_event"] = current_time - (1 * 60 * 60)  # 1 hour ago
+
+        stats = tracker.get_stats()
+        assert stats["total"] == 2
+        assert 47 < stats["oldest_age_hours"] < 49
+        assert 0.9 < stats["newest_age_hours"] < 1.1
+
+    def test_concurrent_access(self, temp_dir: Path) -> None:
+        """Test that file locking prevents corruption during concurrent writes."""
+        import threading
+
+        tracker = ResponseTracker("test_concurrent", base_path=temp_dir)
+
+        def mark_events(start: int, count: int) -> None:
+            for i in range(start, start + count):
+                tracker.mark_responded(f"event_{i}")
+
+        # Create multiple threads marking events
+        threads = []
+        for i in range(0, 100, 25):
+            thread = threading.Thread(target=mark_events, args=(i, 25))
+            threads.append(thread)
+            thread.start()
+
+        # Wait for all threads
+        for thread in threads:
+            thread.join()
+
+        # All events should be marked
+        assert len(tracker._responded_events) == 100
+
+        # Verify file is valid JSON
+        with open(tracker._responses_file) as f:
+            data = json.load(f)
+            assert len(data["events"]) == 100
