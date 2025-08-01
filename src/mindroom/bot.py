@@ -17,6 +17,20 @@ from .response_tracker import ResponseTracker
 logger = get_logger(__name__)
 
 
+def is_sender_other_agent(sender: str, current_agent_user_id: str) -> bool:
+    """Check if sender is another agent (not the current agent, not the user)."""
+    if sender == current_agent_user_id:
+        return False
+
+    sender_username = sender.split(":")[0][1:] if sender.startswith("@") else ""
+    return sender_username.startswith("mindroom_") and sender_username != "mindroom_user"
+
+
+def has_other_agents_in_thread(thread_history: list[dict], current_agent_user_id: str) -> bool:
+    """Check if other agents have participated in this thread."""
+    return any(is_sender_other_agent(msg.get("sender", ""), current_agent_user_id) for msg in thread_history)
+
+
 @dataclass
 class AgentBot:
     """Represents a single agent bot with its own Matrix account."""
@@ -30,7 +44,7 @@ class AgentBot:
 
     @property
     def agent_name(self) -> str:
-        """Get the agent name from the user."""
+        """Get the agent name from username."""
         return self.agent_user.agent_name
 
     async def start(self) -> None:
@@ -49,60 +63,53 @@ class AgentBot:
 
             self.running = True
             logger.info(
-                f"{colorize(self.agent_name)} Started agent bot: {self.agent_user.display_name} ({self.agent_user.user_id})"
+                f"{colorize(self.agent_name)} Started agent bot: {self.agent_user.display_name} "
+                f"({self.agent_user.user_id})"
             )
 
-            # Auto-join configured rooms
-            if self.rooms:
-                await self._join_configured_rooms()
+            # Join configured rooms
+            for room_id in self.rooms:
+                try:
+                    response = await self.client.join(room_id)
+                    if isinstance(response, nio.JoinResponse):
+                        logger.info(f"{colorize(self.agent_name)} Joined room {room_id}")
+                    else:
+                        logger.warning(f"{colorize(self.agent_name)} Could not join room {room_id}: {response}")
+                except Exception as e:
+                    logger.error(f"{colorize(self.agent_name)} Error joining room {room_id}: {e}")
+
         except Exception as e:
-            logger.error(f"Failed to start agent bot {self.agent_name}: {e}")
+            logger.error(f"{colorize(self.agent_name)} Failed to start: {e}")
             raise
 
-    async def _join_configured_rooms(self) -> None:
-        """Join all configured rooms for this agent."""
-        if not self.client:
-            return
-
-        for room_id in self.rooms:
-            try:
-                # Try to join the room
-                response = await self.client.join(room_id)
-                if isinstance(response, nio.JoinResponse):
-                    logger.info(f"{colorize(self.agent_name)} Joined room: {room_id}")
-                else:
-                    logger.warning(f"{colorize(self.agent_name)} Could not join room {room_id}: {response}")
-            except Exception as e:
-                logger.error(f"{colorize(self.agent_name)} Error joining room {room_id}: {e}")
-
     async def sync_forever(self) -> None:
-        """Run the sync loop for this agent."""
-        if not self.client or not self.running:
-            logger.warning(
-                f"{colorize(self.agent_name)} Cannot sync: client={self.client is not None}, running={self.running}"
-            )
+        """Run the sync loop forever."""
+        if not self.client:
             return
 
         logger.info(f"{colorize(self.agent_name)} Starting sync_forever")
         try:
-            await self.client.sync_forever(timeout=30000)
+            await self.client.sync_forever(timeout=30000, full_state=True)
         except Exception as e:
-            logger.error(f"{colorize(self.agent_name)} Sync error: {e}")
-            self.running = False
+            logger.error(f"{colorize(self.agent_name)} Error in sync_forever: {e}")
+            raise
 
     async def stop(self) -> None:
         """Stop the agent bot."""
         self.running = False
         if self.client:
             await self.client.close()
-            logger.info(f"{colorize(self.agent_name)} Stopped agent bot: {self.agent_user.display_name}")
+        logger.info(f"{colorize(self.agent_name)} Stopped agent bot")
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         """Handle room invitations."""
-        logger.info(f"{colorize(self.agent_name)} Received invite to room: {room.display_name} ({room.room_id})")
+        logger.info(f"{colorize(self.agent_name)} Received invite to room {room.room_id} from {event.sender}")
         if self.client:
-            await self.client.join(room.room_id)
-            logger.info(f"{colorize(self.agent_name)} Joined room: {room.room_id}")
+            result = await self.client.join(room.room_id)
+            if isinstance(result, nio.JoinResponse):
+                logger.info(f"{colorize(self.agent_name)} Joined room {room.room_id}")
+            else:
+                logger.error(f"{colorize(self.agent_name)} Failed to join room {room.room_id}: {result}")
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle messages in rooms."""
@@ -121,15 +128,7 @@ class AgentBot:
             return
 
         # Don't respond to other agent messages (avoid agent loops)
-        # Extract username from sender ID (e.g., @mindroom_calculator:localhost -> mindroom_calculator)
-        sender_username = event.sender.split(":")[0][1:]  # Remove @ and domain
-
-        # Check if sender is another agent (but not the user account)
-        if (
-            sender_username.startswith("mindroom_")
-            and sender_username != "mindroom_user"  # Allow user messages
-            and event.sender != self.agent_user.user_id
-        ):  # Allow own messages (already filtered above)
+        if is_sender_other_agent(event.sender, self.agent_user.user_id):
             logger.debug(f"{colorize(self.agent_name)} Ignoring message from other agent: {event.sender}")
             return
 
@@ -139,23 +138,35 @@ class AgentBot:
             f"Agent user_id: {self.agent_user.user_id}, display_name: {self.agent_user.display_name}"
         )
 
-        # Check if this agent is mentioned using the proper Matrix m.mentions field
+        # Check if this agent is mentioned
         mentions = event.source.get("content", {}).get("m.mentions", {})
-        mentioned_users = mentions.get("user_ids", [])
-        mentioned = self.agent_user.user_id in mentioned_users
+        mentioned = self.agent_user.user_id in mentions.get("user_ids", [])
 
-        logger.debug(
-            f"{colorize(self.agent_name)} Checking mentions - m.mentions field: {mentions}, Agent is mentioned: {mentioned}"
-        )
+        # Check if we're in a thread
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
+        thread_id = relates_to.get("event_id") if is_thread else None
 
-        if not mentioned:
-            # In threads, respond to all messages
-            relates_to = event.source.get("content", {}).get("m.relates_to", {})
-            is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
-            logger.debug(f"{colorize(self.agent_name)} Thread check - is_thread: {is_thread}, relates_to: {relates_to}")
-            if not is_thread:
-                logger.debug(f"{colorize(self.agent_name)} Not mentioned and not in thread, ignoring message")
+        # Decide whether to respond
+        thread_history = []
+
+        if mentioned:
+            # Always respond if explicitly mentioned
+            logger.debug(f"{colorize(self.agent_name)} Will respond: explicitly mentioned")
+        elif is_thread and thread_id and self.client:
+            # In threads, check if we're the only agent participating
+            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
+
+            if has_other_agents_in_thread(thread_history, self.agent_user.user_id):
+                logger.debug(
+                    f"{colorize(self.agent_name)} Not responding: multiple agents in thread, no explicit mention"
+                )
                 return
+
+            logger.debug(f"{colorize(self.agent_name)} Will respond: only agent in thread")
+        else:
+            logger.debug(f"{colorize(self.agent_name)} Not responding to message")
+            return
 
         # Check if we've already responded to this specific event
         if self.response_tracker.has_responded(event.event_id):
@@ -174,16 +185,11 @@ class AgentBot:
             return
 
         # Create session ID with thread awareness
-        thread_id = None
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        if relates_to and relates_to.get("rel_type") == "m.thread":
-            thread_id = relates_to.get("event_id")
-
         session_id = f"{room.room_id}:{thread_id}" if thread_id else room.room_id
 
-        # Fetch thread history if in a thread
-        thread_history = []
-        if thread_id and self.client:
+        # Use the thread history we already fetched (if in a thread)
+        # If we're not in a thread or didn't fetch it yet, fetch now
+        if is_thread and not thread_history and thread_id and self.client:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
         # Generate response

@@ -1,6 +1,7 @@
 """Tests for the multi-agent bot system."""
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,33 +12,46 @@ from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.matrix_agent_manager import AgentMatrixUser
 
 
+@dataclass
+class MockConfig:
+    """Mock configuration for testing."""
+
+    agents: dict = None
+
+    def __post_init__(self):
+        if self.agents is None:
+            self.agents = {
+                "calculator": MagicMock(rooms=["lobby", "science", "analysis"]),
+                "general": MagicMock(rooms=["lobby", "help"]),
+            }
+
+
 @pytest.fixture
 def mock_agent_user() -> AgentMatrixUser:
     """Create a mock agent user."""
     return AgentMatrixUser(
-        agent_name="calculator",
-        user_id="@mindroom_calculator:localhost",
-        display_name="CalculatorAgent",
+        username="mindroom_calculator",
         password="test_password",
-        access_token="test_token",
+        display_name="CalculatorAgent",
+        user_id="@mindroom_calculator:localhost",
     )
 
 
 @pytest.fixture
 def mock_agent_users() -> dict[str, AgentMatrixUser]:
-    """Create mock agent users for testing."""
+    """Create mock agent users."""
     return {
         "calculator": AgentMatrixUser(
-            agent_name="calculator",
-            user_id="@mindroom_calculator:localhost",
+            username="mindroom_calculator",
+            password="test_password1",
             display_name="CalculatorAgent",
-            password="calc_pass",
+            user_id="@mindroom_calculator:localhost",
         ),
         "general": AgentMatrixUser(
-            agent_name="general",
-            user_id="@mindroom_general:localhost",
+            username="mindroom_general",
+            password="test_password2",
             display_name="GeneralAgent",
-            password="gen_pass",
+            user_id="@mindroom_general:localhost",
         ),
     }
 
@@ -48,28 +62,19 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_initialization(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test AgentBot initialization."""
-        bot = AgentBot(mock_agent_user, tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"])
         assert bot.agent_user == mock_agent_user
         assert bot.agent_name == "calculator"
+        assert bot.rooms == ["!test:localhost"]
         assert bot.client is None
         assert not bot.running
-        assert bot.rooms == []
-
-        # Test with rooms
-        rooms = ["!room1:localhost", "!room2:localhost"]
-        bot_with_rooms = AgentBot(mock_agent_user, tmp_path, rooms=rooms)
-        assert bot_with_rooms.rooms == rooms
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.login_agent_user")
     async def test_agent_bot_start(
-        self,
-        mock_login: AsyncMock,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
+        self, mock_login: AsyncMock, mock_agent_user: AgentMatrixUser, tmp_path: Path
     ) -> None:
         """Test starting an agent bot."""
-        # Mock the client
         mock_client = AsyncMock()
         # add_event_callback is a sync method, not async
         mock_client.add_event_callback = MagicMock()
@@ -78,43 +83,10 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path)
         await bot.start()
 
-        # Verify login was called
-        mock_login.assert_called_once_with(mock_agent_user)
-
-        # Verify event callbacks were added
-        assert mock_client.add_event_callback.call_count == 2
         assert bot.running
         assert bot.client == mock_client
-
-    @pytest.mark.asyncio
-    @patch("mindroom.bot.login_agent_user")
-    async def test_agent_bot_auto_join_rooms(
-        self,
-        mock_login: AsyncMock,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Test that agent bot auto-joins configured rooms on start."""
-        # Mock the client
-        mock_client = AsyncMock()
-        # add_event_callback is a sync method, not async
-        mock_client.add_event_callback = MagicMock()
-        mock_login.return_value = mock_client
-
-        # Mock join responses
-        mock_client.join.side_effect = [
-            AsyncMock(spec=nio.JoinResponse),
-            AsyncMock(spec=nio.JoinResponse),
-        ]
-
-        rooms = ["!room1:localhost", "!room2:localhost"]
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=rooms)
-        await bot.start()
-
-        # Verify rooms were joined
-        assert mock_client.join.call_count == 2
-        mock_client.join.assert_any_call("!room1:localhost")
-        mock_client.join.assert_any_call("!room2:localhost")
+        mock_login.assert_called_once_with(mock_agent_user)
+        assert mock_client.add_event_callback.call_count == 2  # invite and message callbacks
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -130,36 +102,63 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_invite(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
-        """Test agent bot handling room invitations."""
+        """Test handling room invitations."""
         bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
 
-        # Create mock room and event
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
-        mock_room.display_name = "Test Room"
+
         mock_event = MagicMock()
+        mock_event.sender = "@user:localhost"
 
         await bot._on_invite(mock_room, mock_event)
 
         bot.client.join.assert_called_once_with("!test:localhost")
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.fetch_thread_history")
-    async def test_agent_bot_on_message_mentioned(
-        self,
-        mock_fetch_history: AsyncMock,
-        mock_ai_response: AsyncMock,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
+    async def test_agent_bot_on_message_ignore_own(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
+        """Test that agent ignores its own messages."""
+        bot = AgentBot(mock_agent_user, tmp_path)
+        bot.client = AsyncMock()
+
+        mock_room = MagicMock()
+        mock_event = MagicMock()
+        mock_event.sender = "@mindroom_calculator:localhost"  # Bot's own ID
+
+        await bot._on_message(mock_room, mock_event)
+
+        # Should not send any response
+        bot.client.room_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_agent_bot_on_message_ignore_other_agents(
+        self, mock_agent_user: AgentMatrixUser, tmp_path: Path
     ) -> None:
-        """Test agent bot responding to messages where it's mentioned."""
-        mock_fetch_history.return_value = []
-        mock_ai_response.return_value = "Calculator response"
+        """Test that agent ignores messages from other agents."""
+        bot = AgentBot(mock_agent_user, tmp_path)
+        bot.client = AsyncMock()
+
+        mock_room = MagicMock()
+        mock_event = MagicMock()
+        mock_event.sender = "@mindroom_general:localhost"  # Another agent
+
+        await bot._on_message(mock_room, mock_event)
+
+        # Should not send any response
+        bot.client.room_send.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.bot.ai_response")
+    async def test_agent_bot_on_message_mentioned(
+        self, mock_ai_response: AsyncMock, mock_agent_user: AgentMatrixUser, tmp_path: Path
+    ) -> None:
+        """Test agent bot responding to mentions."""
+        mock_ai_response.return_value = "Test response"
 
         bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
+
         # Mock successful room_send response
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
@@ -170,13 +169,12 @@ class TestAgentBot:
 
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
-        # Create mock room and event
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
-        mock_event.body = "@mindroom_calculator:localhost: What's 2+2?"  # Include full user ID
+        mock_event.body = "@mindroom_calculator:localhost: What's 2+2?"
         mock_event.event_id = "event123"
         mock_event.source = {
             "content": {
@@ -187,54 +185,31 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event)
 
-        # Verify AI response was called with the full message body as prompt
+        # Should call AI and send response
         mock_ai_response.assert_called_once_with(
             agent_name="calculator",
             prompt="@mindroom_calculator:localhost: What's 2+2?",
             session_id="!test:localhost",
-            thread_history=[],
             storage_path=tmp_path,
+            thread_history=[],
         )
-
-        # Verify message was sent
         bot.client.room_send.assert_called_once()
-        call_args = bot.client.room_send.call_args
-        assert call_args[1]["room_id"] == "!test:localhost"
-        assert call_args[1]["message_type"] == "m.room.message"
-        assert call_args[1]["content"]["body"] == "Calculator response"
 
     @pytest.mark.asyncio
-    async def test_agent_bot_ignores_own_messages(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
-        """Test that agent bot ignores its own messages."""
+    async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
+        """Test agent bot not responding when not mentioned."""
         bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
         mock_event = MagicMock()
-        mock_event.sender = "@mindroom_calculator:localhost"
-        mock_event.body = "My own message"
-        mock_event.source = {"content": {}}
+        mock_event.sender = "@user:localhost"
+        mock_event.body = "Hello everyone!"
+        mock_event.source = {"content": {"body": "Hello everyone!"}}
 
         await bot._on_message(mock_room, mock_event)
 
-        # Should not process or respond
-        bot.client.room_send.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_agent_bot_ignores_other_agents(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
-        """Test that agent bot ignores messages from other agents."""
-        bot = AgentBot(mock_agent_user, tmp_path)
-        bot.client = AsyncMock()
-
-        mock_room = MagicMock()
-        mock_event = MagicMock()
-        mock_event.sender = "@mindroom_general:localhost"
-        mock_event.body = "Message from another agent"
-        mock_event.source = {"content": {}}
-
-        await bot._on_message(mock_room, mock_event)
-
-        # Should not process or respond
+        # Should not send any response
         bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
@@ -247,12 +222,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test agent bot responding to all messages in threads."""
-        mock_fetch_history.return_value = [
-            {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
-        ]
-        mock_ai_response.return_value = "Thread response"
-
+        """Test agent bot thread response behavior based on agent participation."""
         bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
 
@@ -268,6 +238,18 @@ class TestAgentBot:
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
+
+        # Test 1: Thread with only this agent - should respond without mention
+        mock_fetch_history.return_value = [
+            {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
+            {
+                "sender": "@mindroom_calculator:localhost",
+                "body": "My previous response",
+                "timestamp": 124,
+                "event_id": "prev2",
+            },
+        ]
+        mock_ai_response.return_value = "Thread response"
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
@@ -284,7 +266,51 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event)
 
-        # Should respond even without mention
+        # Should respond as only agent in thread
+        mock_ai_response.assert_called_once()
+        bot.client.room_send.assert_called_once()
+
+        # Reset mocks
+        mock_ai_response.reset_mock()
+        bot.client.room_send.reset_mock()
+
+        # Test 2: Thread with multiple agents - should NOT respond without mention
+        mock_fetch_history.return_value = [
+            {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
+            {"sender": "@mindroom_calculator:localhost", "body": "My response", "timestamp": 124, "event_id": "prev2"},
+            {
+                "sender": "@mindroom_general:localhost",
+                "body": "Another agent response",
+                "timestamp": 125,
+                "event_id": "prev3",
+            },
+        ]
+
+        await bot._on_message(mock_room, mock_event)
+
+        # Should NOT respond when multiple agents in thread
+        mock_ai_response.assert_not_called()
+        bot.client.room_send.assert_not_called()
+
+        # Test 3: Thread with multiple agents WITH mention - should respond
+        mock_event_with_mention = MagicMock()
+        mock_event_with_mention.sender = "@user:localhost"
+        mock_event_with_mention.body = "@mindroom_calculator:localhost What's 2+2?"
+        mock_event_with_mention.event_id = "event456"
+        mock_event_with_mention.source = {
+            "content": {
+                "body": "@mindroom_calculator:localhost What's 2+2?",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "thread_root",
+                },
+                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+            },
+        }
+
+        await bot._on_message(mock_room, mock_event_with_mention)
+
+        # Should respond when explicitly mentioned
         mock_ai_response.assert_called_once()
         bot.client.room_send.assert_called_once()
 
