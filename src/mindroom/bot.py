@@ -166,49 +166,43 @@ class AgentBot:
         if thread_id and self.client:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
-        agents_in_thread = get_agents_in_thread(thread_history)
-        agent_count = len(agents_in_thread)
-        any_agent_mentioned_in_thread = has_any_agent_mentions_in_thread(thread_history)
-
-        # Decision logic
+        # Simplified decision logic
         should_respond = False
-        reason = ""
+        use_router = False
 
         if am_i_mentioned:
-            # Rule 1: Always respond if mentioned
+            # Always respond if explicitly mentioned
             should_respond = True
-            reason = "explicitly mentioned"
+            logger.debug(f"{emoji(self.agent_name)} Will respond: explicitly mentioned")
         elif is_thread:
-            if any_agent_mentioned_in_thread:
-                # Some agent is mentioned in the thread - only respond if I'm mentioned
-                should_respond = False
-                reason = "other agents mentioned in thread"
-            elif agent_count == 0:
-                # First agent to respond in thread
-                should_respond = True
-                reason = "first agent in thread"
-            elif agent_count == 1 and self.agent_name in agents_in_thread:
-                # I'm the only agent in thread - continue responding
-                should_respond = True
-                reason = "only agent in thread"
+            # In threads: check if any agent is mentioned anywhere
+            if has_any_agent_mentions_in_thread(thread_history):
+                # Someone is mentioned - only mentioned agents respond
+                logger.debug(f"{emoji(self.agent_name)} Not responding: other agents mentioned in thread")
             else:
-                # Multiple agents, none mentioned in entire thread -> don't respond, let router handle
-                should_respond = False
-                reason = "multiple agents in thread, no mentions - router will handle"
+                # No mentions - check agent participation
+                agents_in_thread = get_agents_in_thread(thread_history)
+                if not agents_in_thread or (len(agents_in_thread) == 1 and self.agent_name in agents_in_thread):
+                    # Either first agent or only agent in thread
+                    should_respond = True
+                    logger.debug(
+                        f"{emoji(self.agent_name)} Will respond: {'first' if not agents_in_thread else 'only'} agent in thread"
+                    )
+                else:
+                    # Multiple agents, no mentions - use router
+                    use_router = True
+                    logger.debug(f"{emoji(self.agent_name)} Not responding: multiple agents, will use router")
         else:
-            # Not in thread, not mentioned
-            should_respond = False
-            reason = "not in thread or mentioned"
+            # Not in thread and not mentioned
+            logger.debug(f"{emoji(self.agent_name)} Not responding: not in thread or mentioned")
 
-        if should_respond:
-            logger.debug(f"{emoji(self.agent_name)} Will respond: {reason}")
-        else:
-            logger.debug(f"{emoji(self.agent_name)} Not responding: {reason}")
+        # Handle routing if needed
+        if use_router:
+            await self._handle_ai_routing(room, event, thread_history)
+            return
 
-            # Handle AI routing for multi-agent threads
-            # Only route if we're in a thread AND no agents are mentioned anywhere in the thread
-            if is_thread and not has_any_agent_mentions_in_thread(thread_history):
-                await self._handle_ai_routing(room, event, thread_history)
+        # Exit if not responding
+        if not should_respond:
             return
 
         # Check if we've already responded to this specific event
