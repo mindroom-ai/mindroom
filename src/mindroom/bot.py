@@ -16,6 +16,7 @@ from .matrix import (
     fetch_thread_history,
     get_room_aliases,
     login_agent_user,
+    mention_agent,
     prepare_response_content,
 )
 from .response_tracker import ResponseTracker
@@ -157,6 +158,12 @@ class AgentBot:
         mentioned_agents = get_mentioned_agents(mentions)
         am_i_mentioned = self.agent_name in mentioned_agents
 
+        # Log mention detection
+        if mentioned_agents:
+            logger.debug(f"{emoji(self.agent_name)} Detected mentions: {mentioned_agents}")
+        if am_i_mentioned:
+            logger.info(f"{emoji(self.agent_name)} I am mentioned in message: {event.body[:100]}...")
+
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
         is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
         thread_id = relates_to.get("event_id") if is_thread else None
@@ -291,19 +298,18 @@ class AgentBot:
             return
 
         # Send mention to suggested agent
-        suggested_user_id = f"@mindroom_{suggested_agent}:localhost"
-        response_text = f"@{suggested_agent}, could you help with this?"
+        response_text = "could you help with this?"
 
-        content = {
-            "msgtype": "m.text",
-            "body": response_text,
-            "m.mentions": {"user_ids": [suggested_user_id]},
-            "m.relates_to": {
-                "rel_type": "m.thread",
-                "event_id": event.source.get("content", {}).get("m.relates_to", {}).get("event_id"),
-                "m.in_reply_to": {"event_id": event.event_id},
-            },
-        }
+        # Get thread info if available
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        thread_event_id = relates_to.get("event_id") if relates_to else None
+
+        content = mention_agent(
+            agent_name=suggested_agent,
+            message=response_text,
+            thread_event_id=thread_event_id,
+            reply_to_event_id=event.event_id,
+        )
 
         if self.client:
             await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
