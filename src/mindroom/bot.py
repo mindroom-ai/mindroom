@@ -93,30 +93,17 @@ class AgentBot:
             await self.client.close()
             logger.info(f"{colorize(self.agent_name)} Stopped agent bot: {self.agent_user.display_name}")
 
+    def _is_sender_other_agent(self, sender: str) -> bool:
+        """Check if sender is another agent (not this one, not the user)."""
+        if sender == self.agent_user.user_id:
+            return False
+
+        sender_username = sender.split(":")[0][1:] if sender.startswith("@") else ""
+        return sender_username.startswith("mindroom_") and sender_username != "mindroom_user"
+
     def _has_other_agents_in_thread(self, thread_history: list[dict]) -> bool:
-        """Check if other agents have participated in this thread.
-
-        Args:
-            thread_history: List of thread messages
-
-        Returns:
-            True if other agents (besides this one) have sent messages in the thread
-        """
-        for msg in thread_history:
-            sender = msg.get("sender", "")
-            # Extract username from sender ID
-            sender_username = sender.split(":")[0][1:] if sender.startswith("@") else ""
-
-            # Check if it's an agent (but not this agent)
-            if (
-                sender_username.startswith("mindroom_")
-                and sender_username != "mindroom_user"  # Not the user account
-                and sender != self.agent_user.user_id  # Not this agent
-            ):
-                logger.debug(f"{colorize(self.agent_name)} Found other agent in thread: {sender}")
-                return True
-
-        return False
+        """Check if other agents have participated in this thread."""
+        return any(self._is_sender_other_agent(msg.get("sender", "")) for msg in thread_history)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         """Handle room invitations."""
@@ -138,15 +125,7 @@ class AgentBot:
             return
 
         # Don't respond to other agent messages (avoid agent loops)
-        # Extract username from sender ID (e.g., @mindroom_calculator:localhost -> mindroom_calculator)
-        sender_username = event.sender.split(":")[0][1:]  # Remove @ and domain
-
-        # Check if sender is another agent (but not the user account)
-        if (
-            sender_username.startswith("mindroom_")
-            and sender_username != "mindroom_user"  # Allow user messages
-            and event.sender != self.agent_user.user_id
-        ):  # Allow own messages (already filtered above)
+        if self._is_sender_other_agent(event.sender):
             logger.debug(f"{colorize(self.agent_name)} Ignoring message from other agent: {event.sender}")
             return
 
@@ -156,48 +135,33 @@ class AgentBot:
             f"Agent user_id: {self.agent_user.user_id}, display_name: {self.agent_user.display_name}"
         )
 
-        # Check if this agent is mentioned using the proper Matrix m.mentions field
+        # Check if this agent is mentioned
         mentions = event.source.get("content", {}).get("m.mentions", {})
-        mentioned_users = mentions.get("user_ids", [])
-        mentioned = self.agent_user.user_id in mentioned_users
-
-        logger.debug(
-            f"{colorize(self.agent_name)} Checking mentions - m.mentions field: {mentions}, Agent is mentioned: {mentioned}"
-        )
+        mentioned = self.agent_user.user_id in mentions.get("user_ids", [])
 
         # Check if we're in a thread
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
         is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
         thread_id = relates_to.get("event_id") if is_thread else None
 
-        # Initialize thread_history
-        thread_history = []
-
         # Decide whether to respond
-        should_respond = False
+        thread_history = []
 
         if mentioned:
             # Always respond if explicitly mentioned
-            should_respond = True
             logger.debug(f"{colorize(self.agent_name)} Will respond: explicitly mentioned")
-        elif is_thread:
+        elif is_thread and thread_id and self.client:
             # In threads, check if we're the only agent participating
-            if thread_id and self.client:
-                thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
+            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
-            has_other_agents = self._has_other_agents_in_thread(thread_history)
-
-            if not has_other_agents:
-                # We're the only agent in this thread, so respond
-                should_respond = True
-                logger.debug(f"{colorize(self.agent_name)} Will respond: only agent in thread")
-            else:
-                # Multiple agents in thread, require explicit mention
+            if self._has_other_agents_in_thread(thread_history):
                 logger.debug(
                     f"{colorize(self.agent_name)} Not responding: multiple agents in thread, no explicit mention"
                 )
+                return
 
-        if not should_respond:
+            logger.debug(f"{colorize(self.agent_name)} Will respond: only agent in thread")
+        else:
             logger.debug(f"{colorize(self.agent_name)} Not responding to message")
             return
 
