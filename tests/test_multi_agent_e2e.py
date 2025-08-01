@@ -97,6 +97,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
                     session_id=test_room_id,
                     thread_history=[],
                     storage_path=tmp_path,
+                    room_id=test_room_id,
                 )
 
                 # Verify message was sent

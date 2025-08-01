@@ -239,13 +239,14 @@ class AgentBot:
         if thread_id and not thread_history:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
-        # Generate response
+        # Generate response with room context
         response_text = await ai_response(
             agent_name=self.agent_name,
             prompt=prompt,
             session_id=session_id,
             storage_path=self.storage_path,
             thread_history=thread_history,
+            room_id=room.room_id,
         )
 
         # Prepare and send response

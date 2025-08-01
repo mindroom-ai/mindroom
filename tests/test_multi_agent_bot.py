@@ -192,6 +192,7 @@ class TestAgentBot:
             session_id="!test:localhost",
             storage_path=tmp_path,
             thread_history=[],
+            room_id="!test:localhost",
         )
         bot.client.room_send.assert_called_once()
 
