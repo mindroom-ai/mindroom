@@ -8,6 +8,7 @@ import nio
 
 from .agent_loader import load_config
 from .ai import ai_response
+from .commands import Command, CommandType, command_parser, get_command_help
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
@@ -20,6 +21,7 @@ from .matrix import (
 )
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
+from .thread_invites import thread_invite_manager
 from .thread_utils import (
     get_agents_in_thread,
     get_available_agents_in_room,
@@ -172,6 +174,13 @@ class AgentBot:
             )
             return
 
+        # Check for commands (only general agent handles commands)
+        if self.agent_name == "general":
+            command = command_parser.parse(event.body)
+            if command:
+                await self._handle_command(room, event, command)
+                return
+
         # Debug logging
         logger.debug(
             "Checking message",
@@ -210,14 +219,26 @@ class AgentBot:
         if thread_id:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
+        # Check if I'm invited to this thread (even if not in this room normally)
+        is_invited_to_thread = False
+        if thread_id:
+            is_invited_to_thread = await thread_invite_manager.is_agent_invited_to_thread(thread_id, self.agent_name)
+            if is_invited_to_thread:
+                logger.debug(
+                    "Agent is invited to this thread",
+                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                    thread_id=thread_id,
+                )
+
         # Decision logic:
         # 1. If I'm mentioned → I respond (always)
-        # 2. If any agent is mentioned in thread → Only mentioned agents respond
-        # 3. If NO agents are mentioned in thread:
+        # 2. If I'm invited to thread → I can participate
+        # 3. If any agent is mentioned in thread → Only mentioned agents respond
+        # 4. If NO agents are mentioned in thread:
         #    - 0 agents have participated → Router picks who should start
         #    - 1 agent has participated → That agent continues
         #    - 2+ agents have participated → Nobody responds (users must mention who they want)
-        # 4. Not in thread → Don't respond
+        # 5. Not in thread → Don't respond
 
         should_respond = False
         use_router = False
@@ -227,36 +248,63 @@ class AgentBot:
             should_respond = True
             logger.debug("Will respond: explicitly mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}")
         elif is_thread:
-            # In threads: check if any agent is mentioned anywhere
-            if has_any_agent_mentions_in_thread(thread_history):
-                # Someone is mentioned - only mentioned agents respond
-                logger.debug(
-                    "Not responding: other agents mentioned in thread",
-                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                )
-            else:
-                # No mentions - check agent participation
-                agents_in_thread = get_agents_in_thread(thread_history)
-                if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
-                    # I'm the only agent in thread - continue responding
-                    should_respond = True
+            # Check if I'm an invited agent who should participate
+            if is_invited_to_thread:
+                # I'm invited - check if I should respond
+                if has_any_agent_mentions_in_thread(thread_history):
+                    # Someone is mentioned - only respond if I'm mentioned
                     logger.debug(
-                        "Will respond: only agent in thread", agent=f"{emoji(self.agent_name)} {self.agent_name}"
-                    )
-                elif not agents_in_thread:
-                    # No agents yet - use router to pick first responder
-                    use_router = True
-                    logger.debug(
-                        "Not responding: no agents yet, will use router",
+                        "Invited but not responding: other agents mentioned",
                         agent=f"{emoji(self.agent_name)} {self.agent_name}",
                     )
                 else:
-                    # Multiple agents - nobody responds
+                    # No mentions - invited agents can participate
+                    agents_in_thread = get_agents_in_thread(thread_history)
+                    if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
+                        # I'm the only agent who has responded - continue
+                        should_respond = True
+                        logger.debug(
+                            "Will respond: invited and only agent in thread",
+                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                        )
+                    elif not agents_in_thread:
+                        # No agents yet but I'm invited - I can start
+                        should_respond = True
+                        logger.debug(
+                            "Will respond: invited to thread with no agents yet",
+                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                        )
+            elif room.room_id in self.rooms:
+                # Not invited but in the room - standard logic
+                if has_any_agent_mentions_in_thread(thread_history):
+                    # Someone is mentioned - only mentioned agents respond
                     logger.debug(
-                        "Not responding: multiple agents in thread, need explicit mention",
+                        "Not responding: other agents mentioned in thread",
                         agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                        agents_in_thread=agents_in_thread,
                     )
+                else:
+                    # No mentions - check agent participation
+                    agents_in_thread = get_agents_in_thread(thread_history)
+                    if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
+                        # I'm the only agent in thread - continue responding
+                        should_respond = True
+                        logger.debug(
+                            "Will respond: only agent in thread", agent=f"{emoji(self.agent_name)} {self.agent_name}"
+                        )
+                    elif not agents_in_thread:
+                        # No agents yet - use router to pick first responder
+                        use_router = True
+                        logger.debug(
+                            "Not responding: no agents yet, will use router",
+                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                        )
+                    else:
+                        # Multiple agents - nobody responds
+                        logger.debug(
+                            "Not responding: multiple agents in thread, need explicit mention",
+                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                            agents_in_thread=agents_in_thread,
+                        )
         else:
             # Not in thread and not mentioned
             logger.debug(
@@ -376,17 +424,17 @@ class AgentBot:
             event_id=event.event_id,
         )
 
-        # Get AI suggestion
-        suggested_agent = await suggest_agent_for_message(event.body, available_agents, thread_history)
+        # Get thread info if available
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        thread_event_id = relates_to.get("event_id") if relates_to else None
+
+        # Get AI suggestion (including invited agents)
+        suggested_agent = await suggest_agent_for_message(event.body, available_agents, thread_history, thread_event_id)
         if not suggested_agent:
             return
 
         # Send mention to suggested agent
         response_text = "could you help with this?"
-
-        # Get thread info if available
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        thread_event_id = relates_to.get("event_id") if relates_to else None
 
         # Use universal mention parser
         sender_domain = self.agent_user.user_id.split(":")[1] if ":" in self.agent_user.user_id else "localhost"
@@ -407,6 +455,104 @@ class AgentBot:
                 suggested_agent=suggested_agent,
                 room_id=room.room_id,
             )
+
+    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
+        """Handle user commands."""
+        logger.info(
+            "Handling command",
+            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+            command_type=command.type.value,
+            args=command.args,
+        )
+
+        # Get thread info
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
+        thread_id = relates_to.get("event_id") if is_thread else None
+
+        response_text = ""
+
+        if command.type == CommandType.INVITE:
+            # Handle invite command
+            if not thread_id:
+                response_text = "❌ The /invite command can only be used in a thread."
+            else:
+                agent_name = command.args["agent_name"]
+                duration_hours = command.args.get("duration_hours")
+
+                # Check if agent exists
+                config = load_config()
+                if agent_name not in config.agents:
+                    response_text = (
+                        f"❌ Unknown agent: {agent_name}. Available agents: {', '.join(config.agents.keys())}"
+                    )
+                else:
+                    # Add the invitation
+                    await thread_invite_manager.add_invite(
+                        thread_id=thread_id,
+                        room_id=room.room_id,
+                        agent_name=agent_name,
+                        invited_by=event.sender,
+                        duration_hours=duration_hours,
+                    )
+
+                    duration_text = f" for {duration_hours} hours" if duration_hours else " until thread ends"
+                    response_text = f"✅ Invited @{agent_name} to this thread{duration_text}. They can now participate even if not in this room."
+
+                    # Mention the agent so they know they're invited
+                    response_text += f"\n\n@{agent_name}, you've been invited to help in this thread!"
+
+        elif command.type == CommandType.UNINVITE:
+            # Handle uninvite command
+            if not thread_id:
+                response_text = "❌ The /uninvite command can only be used in a thread."
+            else:
+                agent_name = command.args["agent_name"]
+                removed = await thread_invite_manager.remove_invite(thread_id, agent_name)
+                if removed:
+                    response_text = f"✅ Removed @{agent_name} from this thread."
+                else:
+                    response_text = f"❌ @{agent_name} was not invited to this thread."
+
+        elif command.type == CommandType.LIST_INVITES:
+            # Handle list invites command
+            if not thread_id:
+                response_text = "❌ The /list_invites command can only be used in a thread."
+            else:
+                invited_agents = await thread_invite_manager.get_thread_agents(thread_id)
+                if invited_agents:
+                    agent_list = "\n".join([f"- @{agent}" for agent in invited_agents])
+                    response_text = f"**Invited agents in this thread:**\n{agent_list}"
+                else:
+                    response_text = "No agents are currently invited to this thread."
+
+        elif command.type == CommandType.HELP:
+            # Handle help command
+            topic = command.args.get("topic")
+            response_text = get_command_help(topic)
+
+        # Send response
+        if response_text:
+            sender_domain = self.agent_user.user_id.split(":")[1] if ":" in self.agent_user.user_id else "localhost"
+            content = create_mention_content_from_text(
+                response_text,
+                sender_domain=sender_domain,
+                thread_event_id=thread_id,
+                reply_to_event_id=event.event_id if thread_id else None,
+            )
+
+            if self.client:
+                response = await self.client.room_send(
+                    room_id=room.room_id,
+                    message_type="m.room.message",
+                    content=content,
+                )
+                if isinstance(response, nio.RoomSendResponse):
+                    logger.info(
+                        "Sent command response",
+                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                        command_type=command.type.value,
+                    )
 
 
 @dataclass
@@ -459,9 +605,15 @@ class MultiAgentOrchestrator:
         self.running = True
         logger.info("All agent bots started successfully")
 
+        # Create cleanup task for expired invitations
+        cleanup_task = asyncio.create_task(self._periodic_cleanup())
+
         # Run sync loops for all agents concurrently
         sync_tasks = [bot.sync_forever() for bot in self.agent_bots.values()]
-        await asyncio.gather(*sync_tasks)
+
+        # Run all tasks together
+        all_tasks = sync_tasks + [cleanup_task]
+        await asyncio.gather(*all_tasks)
 
     async def stop(self) -> None:
         """Stop all agent bots."""
@@ -469,6 +621,27 @@ class MultiAgentOrchestrator:
         stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         logger.info("All agent bots stopped")
+
+    async def _periodic_cleanup(self) -> None:
+        """Periodically clean up expired thread invitations."""
+        logger.info("Starting periodic cleanup task for thread invitations")
+
+        while self.running:
+            try:
+                # Wait for 15 minutes between cleanups
+                await asyncio.sleep(900)  # 15 minutes
+
+                # Clean up expired invitations
+                removed_count = await thread_invite_manager.cleanup_expired_invites()
+                if removed_count > 0:
+                    logger.info(f"Cleaned up {removed_count} expired thread invitations")
+
+            except asyncio.CancelledError:
+                logger.info("Cleanup task cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in cleanup task: {e}")
+                # Continue running even if cleanup fails
 
     async def invite_agents_to_room(self, room_id: str, inviter_client: nio.AsyncClient) -> None:
         """Invite all agent users to a room.
