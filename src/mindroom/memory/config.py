@@ -42,7 +42,7 @@ def get_memory_config(storage_path: Path) -> dict:
         embedder_config["config"]["api_key"] = os.environ.get("OPENAI_API_KEY")
     elif app_config.memory.embedder.provider == "ollama":
         # Add Ollama host if specified
-        host = app_config.memory.embedder.config.host if hasattr(app_config.memory.embedder.config, "host") else None
+        host = app_config.memory.embedder.config.host
         if not host:
             host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
         embedder_config["config"]["ollama_base_url"] = host
