@@ -80,16 +80,16 @@ class MindRoomE2ETest:
         if self.client:
             await self.client.close()
 
-    def check_memory_storage(self):
+    def check_memory_storage(self, storage_path):
         """Check if memory storage was created."""
-        chroma_path = Path("tmp/chroma")
+        chroma_path = storage_path / "chroma"
         if chroma_path.exists():
             files = list(chroma_path.rglob("*"))
             return True, len([f for f in files if f.is_file()])
         return False, 0
 
 
-async def run_test_sequence():
+async def run_test_sequence(storage_path):
     """Run a complete test sequence."""
     test = MindRoomE2ETest()
 
@@ -156,7 +156,7 @@ async def run_test_sequence():
 
         # Check memory
         print("\n💾 Memory System:")
-        exists, file_count = test.check_memory_storage()
+        exists, file_count = test.check_memory_storage(storage_path)
         if exists:
             print(f"  ✓ ChromaDB storage created with {file_count} files")
         else:
@@ -179,9 +179,12 @@ async def main():
 
     # Start mindroom
     print("🚀 Starting Mindroom...")
+    import tempfile
+
     from mindroom.cli import _run
 
-    bot_task = asyncio.create_task(_run(log_level="INFO", storage_path=Path("tmp")))
+    temp_dir = tempfile.mkdtemp(prefix="mindroom_test_")
+    bot_task = asyncio.create_task(_run(log_level="INFO", storage_path=Path(temp_dir)))
 
     # Wait for startup
     print("⏳ Waiting 15s for bot to start and sync...")
@@ -189,7 +192,7 @@ async def main():
 
     # Run tests
     try:
-        await run_test_sequence()
+        await run_test_sequence(Path(temp_dir))
         print("\n✅ Test completed successfully!")
     except Exception as e:
         print(f"\n❌ Test failed: {e}")
@@ -204,6 +207,11 @@ async def main():
             await bot_task
 
         subprocess.run(["pkill", "-f", "mindroom run"], capture_output=True)
+
+        # Clean up temp directory
+        import shutil
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
