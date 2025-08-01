@@ -28,7 +28,8 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - Multiple specialized agents can work together in a single conversation
 - Agents see each other's responses and coordinate intelligently
 - Router agent automatically suggests relevant specialists
-- Agents can invite other agents if they need help
+- Users can invite agents from other rooms to specific threads
+- Thread-specific invitations with optional time limits
 
 ### 💬 **Threads as Experiments**
 - Each thread maintains its own context and token count
@@ -92,12 +93,16 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - **Context Control**: Fine-grained memory permissions
 
 #### Slash Commands
-- `/link [thread-id]` - Link another thread's context
-- `/agents` - List available agents
-- `/context` - Show token usage
-- `/tag [name]` - Tag thread for memory sharing
-- `/branch` - Fork the conversation
-- `/schedule` - Manage agent automation
+- `/invite <agent> [from <room>] [for <hours>]` - Invite an agent to a thread
+- `/uninvite <agent>` - Remove an agent from a thread
+- `/list_invites` - List all invited agents for current thread
+- `/help [topic]` - Get help on available commands
+- `/link [thread-id]` - Link another thread's context (planned)
+- `/agents` - List available agents (planned)
+- `/context` - Show token usage (planned)
+- `/tag [name]` - Tag thread for memory sharing (planned)
+- `/branch` - Fork the conversation (planned)
+- `/schedule` - Manage agent automation (planned)
 - And many more...
 
 ## Quick Start

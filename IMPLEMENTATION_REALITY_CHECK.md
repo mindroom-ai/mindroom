@@ -25,6 +25,15 @@ After thorough testing and code review, here's the honest assessment of Mindroom
    - Thread-aware responses
    - Response deduplication
 
+### What's Recently Implemented
+
+1. **Thread-Specific Agent Invitations** ✅
+   - `/invite <agent>` - Invite agents to threads
+   - `/uninvite <agent>` - Remove agents from threads
+   - `/list_invites` - Show invited agents
+   - `/help` - Get command help
+   - Works with time limits and cross-room invitations
+
 ### What's Promised But Missing
 
 1. **Tag-Based Memory Sharing** ❌
@@ -36,9 +45,9 @@ After thorough testing and code review, here's the honest assessment of Mindroom
    - Claimed but not implemented
    - No UI/mechanism for users to rate memories
 
-3. **Slash Commands** ❌
+3. **Advanced Slash Commands** ❌
    - Listed in README (/tag, /link, /branch, etc.)
-   - No command parsing or handling
+   - Only basic commands implemented
 
 4. **Progress Widget** ❌
    - Mentioned as real-time feature
