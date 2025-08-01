@@ -1,6 +1,7 @@
 import os
 from typing import Any
 
+import markdown
 import nio
 from dotenv import load_dotenv
 
@@ -10,21 +11,51 @@ load_dotenv()
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
 
 
+def markdown_to_html(text: str) -> str:
+    """Convert markdown text to HTML for Matrix formatted messages.
+
+    Args:
+        text: The markdown text to convert
+
+    Returns:
+        HTML formatted text
+    """
+    # Configure markdown with common extensions
+    md = markdown.Markdown(
+        extensions=[
+            "markdown.extensions.fenced_code",
+            "markdown.extensions.codehilite",
+            "markdown.extensions.tables",
+            "markdown.extensions.nl2br",
+        ],
+        extension_configs={
+            "markdown.extensions.codehilite": {
+                "use_pygments": True,  # Don't use pygments for syntax highlighting
+                "noclasses": True,  # Use inline styles instead of CSS classes
+            }
+        },
+    )
+    html_text: str = md.convert(text)
+    return html_text
+
+
 def prepare_response_content(response_text: str, event: nio.RoomMessageText, agent_name: str = "") -> dict[str, Any]:
     """Prepares the content for the response message."""
-    from loguru import logger
+    from .logging_config import emoji, get_logger
 
-    from .logging_config import colorize
+    logger = get_logger(__name__)
 
-    # Enable colors in logger
-    logger = logger.opt(colors=True)
-
-    content: dict[str, Any] = {"msgtype": "m.text", "body": response_text}
+    content: dict[str, Any] = {
+        "msgtype": "m.text",
+        "body": response_text,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(response_text),
+    }
 
     relates_to = event.source.get("content", {}).get("m.relates_to")
     is_thread_reply = relates_to and relates_to.get("rel_type") == "m.thread"
 
-    agent_prefix = colorize(agent_name) if agent_name else ""
+    agent_prefix = emoji(agent_name) if agent_name else ""
 
     logger.debug(
         f"{agent_prefix} Preparing response content - Original event_id: {event.event_id}, "

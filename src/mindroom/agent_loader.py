@@ -1,16 +1,17 @@
 """Agent loader that reads agent configurations from YAML file."""
 
-import os
 from pathlib import Path
 
 import yaml
 from agno.agent import Agent
 from agno.models.base import Model
 from agno.storage.sqlite import SqliteStorage
-from loguru import logger
 
-from .models import AgentConfig, AgentsConfig
+from .logging_config import get_logger
+from .models import AgentsConfig
 from .tools import get_tool_by_name
+
+logger = get_logger(__name__)
 
 # Default path to agents configuration file
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "agents.yaml"
@@ -52,12 +53,13 @@ def load_config(config_path: Path | None = None) -> AgentsConfig:
     return config
 
 
-def create_agent(agent_name: str, model: Model, config_path: Path | None = None) -> Agent:
+def create_agent(agent_name: str, model: Model, storage_path: Path, config_path: Path | None = None) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
         agent_name: Name of the agent to create
         model: The AI model to use
+        storage_path: Base directory for storing agent data
         config_path: Optional path to configuration file
 
     Returns:
@@ -86,8 +88,8 @@ def create_agent(agent_name: str, model: Model, config_path: Path | None = None)
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
     # Create storage
-    os.makedirs("tmp", exist_ok=True)
-    storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=f"tmp/{agent_name}.db")
+    storage_path.mkdir(parents=True, exist_ok=True)
+    storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
 
     # Create agent with defaults applied
     agent = Agent(
@@ -109,36 +111,6 @@ def create_agent(agent_name: str, model: Model, config_path: Path | None = None)
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 
     return agent
-
-
-def list_agents(config_path: Path | None = None) -> list[str]:
-    """Get a list of all available agent names from configuration.
-
-    Args:
-        config_path: Optional path to configuration file
-
-    Returns:
-        Sorted list of agent names
-    """
-    config = load_config(config_path)
-    return config.list_agents()
-
-
-def get_agent_info(agent_name: str, config_path: Path | None = None) -> AgentConfig:
-    """Get information about a specific agent.
-
-    Args:
-        agent_name: Name of the agent
-        config_path: Optional path to configuration file
-
-    Returns:
-        AgentConfig for the requested agent
-
-    Raises:
-        ValueError: If agent_name is not found
-    """
-    config = load_config(config_path)
-    return config.get_agent(agent_name)
 
 
 def clear_cache() -> None:

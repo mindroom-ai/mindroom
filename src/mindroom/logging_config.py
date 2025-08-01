@@ -1,114 +1,89 @@
-"""Logging configuration for mindroom using loguru."""
+"""Logging configuration for mindroom using structlog."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
 import sys
-from types import FrameType
-from typing import TYPE_CHECKING
 
-from loguru import logger
+import structlog
 
-if TYPE_CHECKING:
-    from loguru import Logger
-
-__all__ = ["setup_logging", "colorize"]
+__all__ = ["setup_logging", "emoji", "get_logger"]
 
 
-def colorize(agent_name: str) -> str:
-    """Get a colorized agent name string with consistent color based on the name.
+def emoji(agent_name: str) -> str:
+    """Get an emoji-prefixed agent name string with consistent emoji based on the name.
 
     Args:
-        agent_name: The agent name to colorize
+        agent_name: The agent name to add emoji to
 
     Returns:
-        The agent name wrapped in color tags, e.g. "<cyan>[agent_name]</cyan>"
+        The agent name with a unique emoji prefix
     """
-    # List of available colors that work well in terminals
-    colors = [
-        "cyan",
-        "magenta",
-        "green",
-        "yellow",
-        "blue",
-        "red",
-        "light-cyan",
-        "light-magenta",
-        "light-green",
-        "light-yellow",
-        "light-blue",
-        "light-red",
+    # Emojis for different agents
+    emojis = [
+        "🤖",  # robot
+        "🧮",  # abacus
+        "💡",  # light bulb
+        "🔧",  # wrench
+        "📊",  # chart
+        "🎯",  # target
+        "🚀",  # rocket
+        "⚡",  # lightning
+        "🔍",  # magnifying glass
+        "📝",  # memo
+        "🎨",  # artist palette
+        "🧪",  # test tube
+        "🎪",  # circus tent
+        "🌟",  # star
+        "🔮",  # crystal ball
+        "🛠️",  # hammer and wrench
     ]
 
-    # Use hash to get consistent color for each agent
+    # Use hash to get consistent emoji for each agent
     hash_value = int(hashlib.md5(agent_name.encode()).hexdigest(), 16)
-    color_index = hash_value % len(colors)
-    color = colors[color_index]
+    emoji_index = hash_value % len(emojis)
+    emoji = emojis[emoji_index]
 
-    return f"<{color}>[{agent_name}]</{color}>"
-
-
-class InterceptHandler(logging.Handler):
-    """Handler to intercept standard logging and redirect to loguru."""
-
-    def emit(self, record: logging.LogRecord) -> None:
-        """Emit a log record to loguru.
-
-        Args:
-            record: The LogRecord instance containing log information
-        """
-        # Get corresponding Loguru level if it exists
-        level: str | int
-        try:
-            level = logger.level(record.levelname).name
-        except ValueError:
-            level = record.levelno
-
-        # Find caller from where originated the logged message
-        frame: FrameType | None = sys._getframe(6)
-        depth: int = 6
-        while frame and frame.f_code.co_filename == logging.__file__:
-            frame = frame.f_back
-            depth += 1
-
-        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+    return f"{emoji} {agent_name}"
 
 
-def setup_logging(level: str = "INFO", colorize: bool = True) -> Logger:
+def setup_logging(level: str = "INFO") -> None:
     """
-    Configure loguru for mindroom and intercept standard logging.
+    Configure structlog for mindroom.
 
     Args:
         level: Minimum logging level (e.g., "DEBUG", "INFO", "WARNING", "ERROR")
-        colorize: Whether to use colors in output
-
-    Returns:
-        The configured loguru logger instance
     """
-    # Remove default loguru handler
-    logger.remove()
-
-    # Add new handler with custom format
-    logger.add(
-        sys.stderr,
-        colorize=colorize,
-        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - {message}",
-        level=level,
+    # Configure structlog with built-in console renderer
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.StackInfoRenderer(),
+            structlog.dev.set_exc_info,
+            structlog.dev.ConsoleRenderer(colors=True),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level.upper(), logging.INFO)),
+        logger_factory=structlog.WriteLoggerFactory(),
+        cache_logger_on_first_use=True,
     )
 
-    # Intercept standard logging
-    logging.root.handlers = []
-    logging.root.setLevel(level)
-    logging.root.addHandler(InterceptHandler())
+    # Configure standard logging
+    logging.basicConfig(
+        format="%(message)s",
+        level=getattr(logging, level.upper(), logging.INFO),
+        stream=sys.stderr,
+    )
 
-    # Propagate all loggers to root
-    for name in logging.root.manager.loggerDict:
-        logging.getLogger(name).handlers = []
-        logging.getLogger(name).propagate = True
 
-    # Optional: Set specific levels for noisy libraries
-    # logging.getLogger("urllib3").setLevel(logging.WARNING)
-    # logging.getLogger("asyncio").setLevel(logging.WARNING)
+def get_logger(name: str = __name__) -> structlog.BoundLogger:
+    """Get a structlog logger instance.
 
-    return logger
+    Args:
+        name: Logger name (typically __name__)
+
+    Returns:
+        Configured structlog logger
+    """
+    return structlog.get_logger(name)  # type: ignore[no-any-return]

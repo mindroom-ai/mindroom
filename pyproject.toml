@@ -21,7 +21,7 @@ dependencies = [
   "arxiv",                                                                                                       # for Arxiv tool
   "diskcache>=5.6.3",
   "googlesearch-python",                                                                                         # for Google tool
-  "loguru>=0.7.3",
+  "markdown>=3.7",                                                                                               # for HTML formatting in Matrix messages
   "matrix-nio>=0.24",
   "pycountry",                                                                                                   # for Google tool
   "pydantic>=2",
@@ -29,6 +29,7 @@ dependencies = [
   "python-dotenv>=1",
   "pyyaml>=6",
   "rich>=13.10.5",                                                                                               # for CLI output
+  "structlog>=24.1",                                                                                             # for structured logging
   "tavily-python",                                                                                               # for Tavily tool
   "typer>=0.16",
   "wikipedia",                                                                                                   # for Wikipedia tool
@@ -54,6 +55,7 @@ dev = [
   "pytest-timeout>=2.4",
   "pytest-xdist>=3.8",
   "ruff>=0.12.5",
+  "types-markdown>=3.7",
 ]
 
 [tool.hatch.version]
