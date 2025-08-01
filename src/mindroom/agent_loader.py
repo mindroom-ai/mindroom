@@ -8,27 +8,27 @@ from agno.models.base import Model
 from agno.storage.sqlite import SqliteStorage
 
 from .logging_config import get_logger
-from .models import AgentsConfig
+from .models import Config
 from .tools import get_tool_by_name
 
 logger = get_logger(__name__)
 
 # Default path to agents configuration file
-DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "agents.yaml"
+DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 
 # Global caches
-_config_cache: dict[Path, AgentsConfig] = {}
+_config_cache: dict[Path, Config] = {}
 _agent_cache: dict[str, Agent] = {}
 
 
-def load_config(config_path: Path | None = None) -> AgentsConfig:
+def load_config(config_path: Path | None = None) -> Config:
     """Load agent configuration from YAML file.
 
     Args:
         config_path: Path to agents configuration file. If None, uses default.
 
     Returns:
-        AgentsConfig object
+        Config object
 
     Raises:
         FileNotFoundError: If configuration file not found
@@ -45,7 +45,7 @@ def load_config(config_path: Path | None = None) -> AgentsConfig:
     with open(path) as f:
         data = yaml.safe_load(f)
 
-    config = AgentsConfig(**data)
+    config = Config(**data)
     _config_cache[path] = config
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")

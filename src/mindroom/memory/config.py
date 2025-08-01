@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Any
 
 from mem0 import Memory  # type: ignore[import-untyped]
 
@@ -19,18 +20,29 @@ def get_memory_config(storage_path: Path) -> dict:
     Returns:
         Configuration dictionary for Mem0
     """
+    # Load configuration from config.yaml
+    from ..agent_loader import load_config
+
+    app_config = load_config()
+
     # Ensure storage directories exist
     chroma_path = storage_path / "chroma"
     chroma_path.mkdir(parents=True, exist_ok=True)
 
-    config = {
-        "embedder": {
-            "provider": "openai",
-            "config": {
-                "model": "text-embedding-3-small",
-                "api_key": os.environ.get("OPENAI_API_KEY"),
-            },
+    # Build embedder config from config.yaml
+    embedder_config: dict[str, Any] = {
+        "provider": app_config.memory.embedder.provider,
+        "config": {
+            "model": app_config.memory.embedder.config.model,
         },
+    }
+
+    # Add API key from environment if needed
+    if app_config.memory.embedder.provider == "openai":
+        embedder_config["config"]["api_key"] = os.environ.get("OPENAI_API_KEY")
+
+    config = {
+        "embedder": embedder_config,
         "vector_store": {
             "provider": "chroma",
             "config": {

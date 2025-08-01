@@ -178,7 +178,7 @@ class TestThreadUtils:
         """Test that unconfigured agents are not recognized."""
         from mindroom.thread_utils import extract_agent_name
 
-        # This should return None because "fake_agent" is not in agents.yaml
+        # This should return None because "fake_agent" is not in config.yaml
         assert extract_agent_name("@mindroom_fake_agent:localhost") is None
 
         # But real agents should work

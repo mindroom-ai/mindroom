@@ -145,7 +145,7 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
         # Save room info
         add_room(room_key, room_id, f"#{room_key}:localhost", room_name)
 
-        # Invite agents based on agents.yaml
+        # Invite agents based on config.yaml
         from mindroom.agent_loader import load_config
 
         config = load_config()
@@ -239,7 +239,7 @@ def run(
     This command automatically:
     - Creates a user account if needed
     - Creates all agent accounts
-    - Creates all rooms defined in agents.yaml
+    - Creates all rooms defined in config.yaml
     - Starts the multi-agent system
     """
     asyncio.run(_run(log_level=log_level.upper(), storage_path=storage_path))

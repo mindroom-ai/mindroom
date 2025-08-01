@@ -1,7 +1,33 @@
-# Agent Configuration File
+# Configuration File
 # This file defines all available agents and their configurations
 # Users can add custom agents by adding new entries to this file
 # Room assignments use aliases that are resolved from matrix_rooms.yaml
+
+# Memory embedder configuration
+memory:
+  embedder:
+    provider: "openai"  # Options: openai, huggingface, sentence-transformers
+    config:
+      model: "text-embedding-3-small"  # Model to use for embeddings
+      # api_key is loaded from OPENAI_API_KEY environment variable
+
+# Model configuration
+models:
+  default:  # Default model used when agent doesn't specify one
+    provider: "ollama"
+    id: "llama3.2"
+    # Add any provider-specific config here
+    # For ollama, you can add:
+    # host: "http://localhost:11434"
+
+  # Example of other model configurations:
+  # gpt4:
+  #   provider: "openai"
+  #   id: "gpt-4"
+  #
+  # claude:
+  #   provider: "anthropic"
+  #   id: "claude-3-opus-20240229"
 
 agents:
   # General conversation agent

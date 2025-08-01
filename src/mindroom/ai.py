@@ -23,9 +23,6 @@ logger = get_logger(__name__)
 # Load environment variables from .env file
 load_dotenv()
 
-# Load configuration from .env file
-AGNO_MODEL_STR = os.getenv("AGNO_MODEL")
-
 # Configure caching
 ENABLE_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
 
@@ -36,21 +33,42 @@ def get_cache(storage_path: Path) -> diskcache.Cache | None:
     return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_CACHE else None
 
 
-def get_model_instance() -> Model:
-    """Parses the AGNO_MODEL string and returns an instantiated model."""
-    if not AGNO_MODEL_STR:
-        msg = "AGNO_MODEL is not configured in the .env file."
+def get_model_instance(model_name: str = "default") -> Model:
+    """Get a model instance from config.yaml.
+
+    Args:
+        model_name: Name of the model configuration to use (default: "default")
+
+    Returns:
+        Instantiated model
+
+    Raises:
+        ValueError: If model not found or provider not supported
+    """
+    from .agent_loader import load_config
+
+    config = load_config()
+
+    if model_name not in config.models:
+        available = ", ".join(sorted(config.models.keys()))
+        msg = f"Unknown model: {model_name}. Available models: {available}"
         raise ValueError(msg)
 
-    provider, model_id = AGNO_MODEL_STR.split(":", 1)
-    logger.info(f"Using AI model from provider '{provider}' with ID '{model_id}'")
+    model_config = config.models[model_name]
+    provider = model_config.provider
+    model_id = model_config.id
 
+    logger.info(f"Using AI model '{model_name}' from provider '{provider}' with ID '{model_id}'")
+
+    # Create model instance based on provider
     if provider == "ollama":
-        return Ollama(id=model_id, host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+        host = model_config.host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        return Ollama(id=model_id, host=host)
     if provider == "openai":
         return OpenAIChat(id=model_id)
     if provider == "anthropic":
         return Claude(id=model_id)
+
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)
 
