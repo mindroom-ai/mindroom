@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.mindroom.matrix_config import MatrixConfig
+from src.mindroom.matrix import MatrixConfig
 
 load_dotenv()
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
