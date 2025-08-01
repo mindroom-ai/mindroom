@@ -141,13 +141,8 @@ class AgentBot:
         )
 
         if not mentioned:
-            # In threads, respond to all messages
-            relates_to = event.source.get("content", {}).get("m.relates_to", {})
-            is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
-            logger.debug(f"{colorize(self.agent_name)} Thread check - is_thread: {is_thread}, relates_to: {relates_to}")
-            if not is_thread:
-                logger.debug(f"{colorize(self.agent_name)} Not mentioned and not in thread, ignoring message")
-                return
+            logger.debug(f"{colorize(self.agent_name)} Not mentioned, ignoring message")
+            return
 
         logger.info(f"{colorize(self.agent_name)} WILL PROCESS message from {event.sender}: {event.body}")
 

@@ -147,8 +147,8 @@ async def test_agent_ignores_other_agents(
 
 
 @pytest.mark.asyncio
-async def test_agent_responds_in_threads_without_mention(mock_calculator_agent: AgentMatrixUser) -> None:
-    """Test that agents respond to all messages in threads even without mention."""
+async def test_agent_responds_in_threads_only_when_mentioned(mock_calculator_agent: AgentMatrixUser) -> None:
+    """Test that agents respond in threads only when explicitly mentioned."""
     test_room_id = "!test:example.org"
     test_user_id = "@alice:example.org"
     thread_root_id = "$thread_root:example.org"
@@ -162,7 +162,7 @@ async def test_agent_responds_in_threads_without_mention(mock_calculator_agent: 
         bot = AgentBot(mock_calculator_agent)
         await bot.start()
 
-        # Create a thread message without agent mention
+        # Test 1: Thread message WITHOUT agent mention - should NOT respond
         message_event = nio.RoomMessageText(
             body="What about 20% of 300?",
             formatted_body="What about 20% of 300?",
@@ -187,15 +187,45 @@ async def test_agent_responds_in_threads_without_mention(mock_calculator_agent: 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
         with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
+            await bot._on_message(room, message_event)
+
+            # Should NOT process the message without mention
+            mock_ai.assert_not_called()
+            bot.client.room_send.assert_not_called()
+
+        # Test 2: Thread message WITH agent mention - should respond
+        message_event_with_mention = nio.RoomMessageText(
+            body="@mindroom_calculator:localhost What about 20% of 300?",
+            formatted_body="@mindroom_calculator:localhost What about 20% of 300?",
+            format="org.matrix.custom.html",
+            source={
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "@mindroom_calculator:localhost What about 20% of 300?",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": thread_root_id,
+                    },
+                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                },
+                "event_id": "$test_event2:example.org",
+                "sender": test_user_id,
+                "origin_server_ts": 1234567890,
+                "type": "m.room.message",
+            },
+        )
+        message_event_with_mention.sender = test_user_id
+
+        with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
             mock_fetch.return_value = []
             mock_ai.return_value = "20% of 300 is 60"
 
-            await bot._on_message(room, message_event)
+            await bot._on_message(room, message_event_with_mention)
 
-            # Should process the message even without mention
+            # Should process the message with mention
             mock_ai.assert_called_once_with(
                 "calculator",
-                "What about 20% of 300?",
+                "@mindroom_calculator:localhost What about 20% of 300?",
                 f"{test_room_id}:{thread_root_id}",
                 thread_history=[],
             )

@@ -232,7 +232,7 @@ class TestAgentBot:
         mock_ai_response: AsyncMock,
         mock_agent_user: AgentMatrixUser,
     ) -> None:
-        """Test agent bot responding to all messages in threads."""
+        """Test agent bot only responds to messages in threads when mentioned."""
         mock_fetch_history.return_value = [
             {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
         ]
@@ -244,6 +244,7 @@ class TestAgentBot:
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
 
+        # Test 1: Thread message without mention - should NOT respond
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
         mock_event.body = "Thread message without mention"
@@ -259,7 +260,29 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event)
 
-        # Should respond even without mention
+        # Should NOT respond without mention
+        mock_ai_response.assert_not_called()
+        bot.client.room_send.assert_not_called()
+
+        # Test 2: Thread message WITH mention - should respond
+        mock_event_with_mention = MagicMock()
+        mock_event_with_mention.sender = "@user:localhost"
+        mock_event_with_mention.body = "@mindroom_calculator:localhost What's 2+2?"
+        mock_event_with_mention.event_id = "event456"
+        mock_event_with_mention.source = {
+            "content": {
+                "body": "@mindroom_calculator:localhost What's 2+2?",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "thread_root",
+                },
+                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+            },
+        }
+
+        await bot._on_message(mock_room, mock_event_with_mention)
+
+        # Should respond when mentioned in thread
         mock_ai_response.assert_called_once()
         bot.client.room_send.assert_called_once()
 
