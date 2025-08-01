@@ -6,10 +6,11 @@
 # Memory embedder configuration
 memory:
   embedder:
-    provider: "openai"  # Options: openai, huggingface, sentence-transformers
+    provider: "ollama"  # Options: openai, ollama, huggingface, sentence-transformers
     config:
-      model: "text-embedding-3-small"  # Model to use for embeddings
-      # api_key is loaded from OPENAI_API_KEY environment variable
+      model: "nomic-embed-text"  # Ollama embedding model
+      # For ollama embeddings, you can specify:
+      # host: "http://localhost:11434"  # defaults to OLLAMA_HOST env var or localhost:11434
 
 # Model configuration
 models:
