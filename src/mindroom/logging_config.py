@@ -8,10 +8,10 @@ import sys
 
 import structlog
 
-__all__ = ["setup_logging", "colorize", "get_logger"]
+__all__ = ["setup_logging", "emoji", "get_logger"]
 
 
-def colorize(agent_name: str) -> str:
+def emoji(agent_name: str) -> str:
     """Get an emoji-prefixed agent name string with consistent emoji based on the name.
 
     Args:

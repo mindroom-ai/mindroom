@@ -41,7 +41,7 @@ def markdown_to_html(text: str) -> str:
 
 def prepare_response_content(response_text: str, event: nio.RoomMessageText, agent_name: str = "") -> dict[str, Any]:
     """Prepares the content for the response message."""
-    from .logging_config import colorize, get_logger
+    from .logging_config import emoji, get_logger
 
     logger = get_logger(__name__)
 
@@ -55,7 +55,7 @@ def prepare_response_content(response_text: str, event: nio.RoomMessageText, age
     relates_to = event.source.get("content", {}).get("m.relates_to")
     is_thread_reply = relates_to and relates_to.get("rel_type") == "m.thread"
 
-    agent_prefix = colorize(agent_name) if agent_name else ""
+    agent_prefix = emoji(agent_name) if agent_name else ""
 
     logger.debug(
         f"{agent_prefix} Preparing response content - Original event_id: {event.event_id}, "
