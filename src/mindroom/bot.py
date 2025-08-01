@@ -12,12 +12,11 @@ from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
     AgentMatrixUser,
+    create_mention_content_from_text,
     ensure_all_agent_users,
     fetch_thread_history,
     get_room_aliases,
     login_agent_user,
-    mention_agent,
-    prepare_response_content,
 )
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
@@ -256,8 +255,17 @@ class AgentBot:
             room_id=room.room_id,
         )
 
-        # Prepare and send response
-        content = prepare_response_content(response_text, event, agent_name=self.agent_name)
+        # Prepare and send response with proper mention parsing
+        # Extract domain from agent's user_id
+        sender_domain = self.agent_user.user_id.split(":")[1] if ":" in self.agent_user.user_id else "localhost"
+
+        # Parse response for any agent mentions
+        content = create_mention_content_from_text(
+            response_text,
+            sender_domain=sender_domain,
+            thread_event_id=thread_id,
+            reply_to_event_id=event.event_id if thread_id else None,
+        )
 
         logger.debug(
             f"{emoji(self.agent_name)} Sending response - Room ID: {room.room_id}, "
@@ -304,9 +312,13 @@ class AgentBot:
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
         thread_event_id = relates_to.get("event_id") if relates_to else None
 
-        content = mention_agent(
-            agent_name=suggested_agent,
-            message=response_text,
+        # Use universal mention parser
+        sender_domain = self.agent_user.user_id.split(":")[1] if ":" in self.agent_user.user_id else "localhost"
+        full_message = f"@{suggested_agent} {response_text}"
+
+        content = create_mention_content_from_text(
+            full_message,
+            sender_domain=sender_domain,
             thread_event_id=thread_event_id,
             reply_to_event_id=event.event_id,
         )

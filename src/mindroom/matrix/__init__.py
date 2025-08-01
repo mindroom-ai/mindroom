@@ -16,7 +16,7 @@ from .client import (
     register_user,
 )
 from .config import MatrixAccount, MatrixConfig, MatrixRoom
-from .mentions import create_mention_content, mention_agent
+from .mentions import create_mention_content, create_mention_content_from_text, mention_agent
 from .rooms import (
     add_room,
     get_room_aliases,
@@ -62,6 +62,7 @@ __all__ = [
     "remove_room",
     # Mention functions
     "create_mention_content",
+    "create_mention_content_from_text",
     "mention_agent",
     # User functions
     "AgentMatrixUser",

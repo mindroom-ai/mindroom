@@ -115,6 +115,12 @@ async def run_test_sequence():
                 "wait": 3,
                 "description": "Cross-agent memory recall",
             },
+            {
+                "agent": "general",
+                "message": "can you ask @calculator to multiply the last result by 2?",
+                "wait": 5,
+                "description": "Agent mentioning another agent",
+            },
         ]
 
         # Run tests
