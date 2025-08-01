@@ -12,6 +12,7 @@ messages to the most appropriate specialist agent.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -34,8 +35,6 @@ class AgentSuggestion(BaseModel):
 @dataclass
 class RouterAgent:
     """Agent that routes messages to appropriate specialized agents."""
-
-    model: str = "claude-3-5-sonnet-20241022"
 
     def create_routing_prompt(
         self, message: str, available_agents: list[str], thread_context: list[dict[str, Any]] | None = None
@@ -86,49 +85,82 @@ Message to route: "{message}"
         return " | ".join(summaries)
 
     async def suggest_agent(
-        self, message: str, available_agents: list[str], thread_context: list[dict[str, Any]] | None = None
+        self,
+        message: str,
+        available_agents: list[str],
+        thread_context: list[dict[str, Any]] | None = None,
+        storage_path: Path | None = None,
     ) -> AgentSuggestion | None:
         """Suggest which agent should respond to the message."""
         try:
             # Import here to avoid circular dependencies
-            from .ai import get_client
+            import json
+            from pathlib import Path
 
-            prompt = self.create_routing_prompt(message, available_agents, thread_context)
+            from .ai import ai_response
 
-            client = get_client()
-            response = await client.messages.create(
-                model=self.model,
-                max_tokens=500,
-                temperature=0.3,
-                messages=[{"role": "user", "content": prompt}],
-                tools=[
-                    {
-                        "name": "suggest_agent",
-                        "description": "Suggest which agent should handle this message",
-                        "input_schema": AgentSuggestion.model_json_schema(),
-                    }
-                ],
-                tool_choice={"type": "tool", "name": "suggest_agent"},
+            # Create prompt that asks for JSON response
+            base_prompt = self.create_routing_prompt(message, available_agents, thread_context)
+            json_prompt = (
+                base_prompt
+                + """
+
+Please respond with a JSON object containing your routing decision:
+{
+  "agent_name": "name_of_suggested_agent",
+  "reasoning": "brief explanation of why this agent was chosen",
+  "confidence": 0.85
+}
+
+Only return the JSON object, no other text."""
             )
 
-            # Extract structured output from tool call
-            if not response.content:
-                logger.error("No content in router response")
-                return None
+            # Use the existing agent system
+            if not storage_path:
+                storage_path = Path.cwd() / "tmp"
+                storage_path.mkdir(exist_ok=True)
 
-            # Find the tool call in the response
-            tool_use = None
-            for block in response.content:
-                if hasattr(block, "type") and block.type == "tool_use":
-                    tool_use = block
-                    break
+            session_id = f"router_{hash(message) % 10000}"
+            response_text = await ai_response(
+                agent_name="router",
+                prompt=json_prompt,
+                session_id=session_id,
+                storage_path=storage_path,
+                thread_history=thread_context,
+            )
 
-            if not tool_use:
-                logger.error("No tool use found in router response")
-                return None
+            # Parse JSON response
+            response_text = response_text.strip()
+            if response_text.startswith("```json"):
+                response_text = response_text.replace("```json", "").replace("```", "").strip()
+            elif response_text.startswith("```"):
+                response_text = response_text.replace("```", "").strip()
 
-            # Parse the tool input as AgentSuggestion
-            suggestion = AgentSuggestion(**tool_use.input)
+            # Try to extract JSON from the response
+            try:
+                suggestion_data = json.loads(response_text)
+            except json.JSONDecodeError:
+                # Try to find JSON in the response
+                import re
+
+                json_match = re.search(r"\{[^}]+\}", response_text)
+                if json_match:
+                    suggestion_data = json.loads(json_match.group())
+                else:
+                    logger.error(f"Could not parse JSON from response: {response_text}")
+                    return None
+
+            # Validate the agent is in available list
+            if suggestion_data.get("agent_name") not in available_agents:
+                logger.warning(f"Router suggested unavailable agent: {suggestion_data.get('agent_name')}")
+                # Fall back to first available agent
+                suggestion_data["agent_name"] = available_agents[0]
+                suggestion_data["reasoning"] = (
+                    f"Fallback to {available_agents[0]} (original suggestion was unavailable)"
+                )
+                suggestion_data["confidence"] = 0.5
+
+            suggestion = AgentSuggestion(**suggestion_data)
 
             logger.info(f"Router suggested agent: {suggestion.agent_name} (confidence: {suggestion.confidence:.2f})")
 

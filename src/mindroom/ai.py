@@ -51,16 +51,6 @@ def get_model_instance() -> Model:
     raise ValueError(msg)
 
 
-def get_client():
-    """Get a raw Anthropic client for structured output.
-
-    Used by the router agent for structured responses.
-    """
-    from anthropic import AsyncAnthropic
-
-    return AsyncAnthropic()
-
-
 async def _cached_agent_run(
     agent_name: str,
     prompt: str,

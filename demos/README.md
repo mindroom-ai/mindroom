@@ -29,6 +29,7 @@ The router agent should:
 - **Stay silent** when an agent is explicitly mentioned or only one agent is in thread
 - **Route intelligently** by analyzing message content and suggesting appropriate agents
 - **Use structured output** with confidence scores and reasoning
+- **Work with any AI model** (Anthropic, OpenAI, Ollama) via existing infrastructure
 
 ## Key Files
 

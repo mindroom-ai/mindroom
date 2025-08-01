@@ -4,57 +4,30 @@
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.mindroom.router_agent import AgentSuggestion, RouterAgent
 
 
-class MockToolUse:
-    """Mock tool use block from Anthropic response."""
-
-    def __init__(self, input_data):
-        self.type = "tool_use"
-        self.input = input_data
-
-
-class MockTextBlock:
-    """Mock text block from Anthropic response."""
-
-    def __init__(self, text):
-        self.type = "text"
-        self.text = text
-
-
 async def test_router_structured_output():
-    """Test router agent with mocked structured output."""
+    """Test router agent with mocked AI response."""
     print("Testing RouterAgent structured output...")
 
     router = RouterAgent()
 
+    import json
     from unittest.mock import patch
 
-    # Create mock response
-    mock_client = AsyncMock()
-    mock_response = MagicMock()
-
-    # Create structured output
+    # Create mock JSON response
     suggestion_data = {
         "agent_name": "calculator",
         "reasoning": "The user is asking about compound interest calculation",
         "confidence": 0.85,
     }
+    mock_json_response = json.dumps(suggestion_data)
 
-    # Mock response content with tool use
-    mock_response.content = [
-        MockTextBlock("I'll analyze this message and suggest the appropriate agent."),
-        MockToolUse(suggestion_data),
-    ]
-
-    mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-    with patch("src.mindroom.ai.get_client", return_value=mock_client):
+    with patch("src.mindroom.ai.ai_response", return_value=mock_json_response):
         # Test the suggestion
         message = "Can you help me calculate the compound interest on my investment?"
         available = ["calculator", "general", "finance"]
@@ -69,16 +42,7 @@ async def test_router_structured_output():
 
         print(f"  ✓ Got suggestion: {suggestion.agent_name} (confidence: {suggestion.confidence})")
         print(f"  ✓ Reasoning: {suggestion.reasoning}")
-
-        # Verify the API was called correctly
-        mock_client.messages.create.assert_called_once()
-        call_args = mock_client.messages.create.call_args.kwargs
-
-        assert call_args["model"] == "claude-3-5-sonnet-20241022"
-        assert len(call_args["tools"]) == 1
-        assert call_args["tools"][0]["name"] == "suggest_agent"
-
-        print("  ✓ API called with correct parameters")
+        print("  ✓ Uses existing AI infrastructure (not hardcoded Anthropic)")
 
 
 async def test_router_error_handling():
@@ -89,14 +53,17 @@ async def test_router_error_handling():
 
     from unittest.mock import patch
 
-    # Test with API error
-    mock_client = AsyncMock()
-    mock_client.messages.create = AsyncMock(side_effect=Exception("API Error"))
-
-    with patch("src.mindroom.ai.get_client", return_value=mock_client):
+    # Test with AI response error
+    with patch("src.mindroom.ai.ai_response", side_effect=Exception("AI Error")):
         suggestion = await router.suggest_agent("test message", ["general"])
         assert suggestion is None, "Should return None on error"
-        print("  ✓ Handles API errors gracefully")
+        print("  ✓ Handles AI errors gracefully")
+
+    # Test with invalid JSON response
+    with patch("src.mindroom.ai.ai_response", return_value="Invalid JSON response"):
+        suggestion = await router.suggest_agent("test message", ["general"])
+        assert suggestion is None, "Should return None for invalid JSON"
+        print("  ✓ Handles invalid JSON gracefully")
 
 
 async def main():

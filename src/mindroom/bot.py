@@ -343,7 +343,7 @@ class RouterBot:
             return
 
         # Get routing suggestion
-        suggestion = await self.router.suggest_agent(event.body, available_agents, thread_history)
+        suggestion = await self.router.suggest_agent(event.body, available_agents, thread_history, self.storage_path)
 
         if not suggestion:
             logger.error("🚦 Router: Failed to get routing suggestion")
