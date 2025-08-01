@@ -9,9 +9,15 @@ import nio
 from .agent_loader import load_config
 from .ai import ai_response
 from .logging_config import emoji, get_logger
-from .matrix import fetch_thread_history, prepare_response_content
-from .matrix_agent_manager import AgentMatrixUser, ensure_all_agent_users, login_agent_user
-from .matrix_room_manager import get_room_aliases
+from .matrix import (
+    MATRIX_HOMESERVER,
+    AgentMatrixUser,
+    ensure_all_agent_users,
+    fetch_thread_history,
+    get_room_aliases,
+    login_agent_user,
+    prepare_response_content,
+)
 from .response_tracker import ResponseTracker
 from .router_agent import RouterAgent, should_router_handle
 from .thread_utils import extract_agent_name, get_agents_in_thread, get_mentioned_agents
@@ -53,7 +59,7 @@ class AgentBot:
     async def start(self) -> None:
         """Start the agent bot."""
         try:
-            self.client = await login_agent_user(self.agent_user)
+            self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
 
             # Initialize response tracker
             self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
@@ -393,7 +399,7 @@ class MultiAgentOrchestrator:
         config = load_config()
 
         # Ensure all agents have Matrix accounts
-        agent_users = await ensure_all_agent_users()
+        agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
 
         # Get room aliases mapping from matrix_rooms.yaml
         room_aliases = get_room_aliases()

@@ -7,16 +7,16 @@ import nio
 import pytest
 import yaml
 
-from mindroom.matrix_agent_manager import (
+from mindroom.matrix import (
     AgentMatrixUser,
+    MatrixConfig,
     create_agent_user,
     ensure_all_agent_users,
     get_agent_credentials,
     login_agent_user,
-    register_matrix_user,
+    register_user,
     save_agent_credentials,
 )
-from mindroom.matrix_config import MatrixConfig
 
 
 @pytest.fixture
@@ -139,7 +139,7 @@ class TestMatrixRegistration:
     """Test Matrix user registration functions."""
 
     @pytest.mark.asyncio
-    async def test_register_matrix_user_success(self) -> None:
+    async def test_register_user_success(self) -> None:
         """Test successful user registration."""
         mock_client = AsyncMock()
         # Mock successful registration
@@ -148,10 +148,10 @@ class TestMatrixRegistration:
         mock_client.login.return_value = AsyncMock()
         mock_client.set_displayname.return_value = AsyncMock()
 
-        with patch("mindroom.matrix_agent_manager.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            user_id = await register_matrix_user("test_user", "test_pass", "Test User")
+            user_id = await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
 
             assert user_id == "@test_user:localhost"
             mock_client.register.assert_called_once()
@@ -159,7 +159,7 @@ class TestMatrixRegistration:
             mock_matrix_client.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_register_matrix_user_already_exists(self) -> None:
+    async def test_register_user_already_exists(self) -> None:
         """Test registration when user already exists."""
         mock_client = AsyncMock()
         # Mock user already exists error
@@ -167,16 +167,16 @@ class TestMatrixRegistration:
         mock_response.status_code = "M_USER_IN_USE"
         mock_client.register.return_value = mock_response
 
-        with patch("mindroom.matrix_agent_manager.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            user_id = await register_matrix_user("existing_user", "test_pass", "Existing User")
+            user_id = await register_user("http://localhost:8008", "existing_user", "test_pass", "Existing User")
 
             assert user_id == "@existing_user:localhost"
             mock_matrix_client.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_register_matrix_user_failure(self) -> None:
+    async def test_register_user_failure(self) -> None:
         """Test registration failure."""
         mock_client = AsyncMock()
         # Mock registration failure
@@ -184,11 +184,11 @@ class TestMatrixRegistration:
         mock_response.status_code = "M_FORBIDDEN"
         mock_client.register.return_value = mock_response
 
-        with patch("mindroom.matrix_agent_manager.matrix_client") as mock_matrix_client:
+        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             with pytest.raises(ValueError, match="Failed to register user"):
-                await register_matrix_user("test_user", "test_pass", "Test User")
+                await register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
 
             mock_matrix_client.assert_called_once()
 
@@ -197,9 +197,9 @@ class TestAgentUserCreation:
     """Test agent user creation functions."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix_agent_manager.register_matrix_user")
-    @patch("mindroom.matrix_agent_manager.save_agent_credentials")
-    @patch("mindroom.matrix_agent_manager.get_agent_credentials")
+    @patch("mindroom.matrix.users.register_user")
+    @patch("mindroom.matrix.users.save_agent_credentials")
+    @patch("mindroom.matrix.users.get_agent_credentials")
     async def test_create_agent_user_new(
         self,
         mock_get_creds: MagicMock,
@@ -221,9 +221,9 @@ class TestAgentUserCreation:
         mock_register.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix_agent_manager.register_matrix_user")
-    @patch("mindroom.matrix_agent_manager.save_agent_credentials")
-    @patch("mindroom.matrix_agent_manager.get_agent_credentials")
+    @patch("mindroom.matrix.users.register_user")
+    @patch("mindroom.matrix.users.save_agent_credentials")
+    @patch("mindroom.matrix.users.get_agent_credentials")
     async def test_create_agent_user_existing(
         self,
         mock_get_creds: MagicMock,
@@ -300,8 +300,8 @@ class TestEnsureAllAgentUsers:
     """Test ensuring all agents have user accounts."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix_agent_manager.create_agent_user")
-    @patch("mindroom.matrix_agent_manager.load_config")
+    @patch("mindroom.matrix.users.create_agent_user")
+    @patch("mindroom.matrix.users.load_config")
     async def test_ensure_all_agent_users(
         self,
         mock_load_config: MagicMock,
@@ -330,8 +330,8 @@ class TestEnsureAllAgentUsers:
         assert mock_create_user.call_count == 2
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix_agent_manager.create_agent_user")
-    @patch("mindroom.matrix_agent_manager.load_config")
+    @patch("mindroom.matrix.users.create_agent_user")
+    @patch("mindroom.matrix.users.load_config")
     async def test_ensure_all_agent_users_with_error(
         self,
         mock_load_config: MagicMock,

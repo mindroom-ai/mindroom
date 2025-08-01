@@ -1,6 +1,6 @@
-"""Manager for Matrix room configuration and persistence."""
+"""Matrix room management functions."""
 
-from .matrix_config import MatrixConfig, MatrixRoom
+from .config import MatrixConfig, MatrixRoom
 
 
 def load_rooms() -> dict[str, MatrixRoom]:
