@@ -60,8 +60,8 @@ class TestAIRouting:
                 assert "Previous messages:" in prompt
 
     @pytest.mark.asyncio
-    async def test_suggest_agent_fallback_to_available(self) -> None:
-        """Test fallback when AI suggests unavailable agent."""
+    async def test_suggest_agent_unavailable_raises_assertion(self) -> None:
+        """Test that suggesting unavailable agent raises assertion error."""
         with patch("mindroom.routing.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -73,14 +73,15 @@ class TestAIRouting:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
+                # Should return None because of the exception handler
                 result = await suggest_agent_for_message(
                     "How do I write a Python function?",
                     ["calculator", "general"],  # code not available
                     None,
                 )
 
-                # Should fallback to first available
-                assert result == "calculator"
+                # The assertion error gets caught by the exception handler
+                assert result is None
 
     @pytest.mark.asyncio
     async def test_suggest_agent_error_handling(self) -> None:

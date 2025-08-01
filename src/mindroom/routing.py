@@ -63,12 +63,13 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         response = await agent.arun(prompt, session_id="routing")
         suggestion = response.content
 
-        if not isinstance(suggestion, AgentSuggestion):
-            return None
+        # With response_model, we should always get the correct type
+        assert isinstance(suggestion, AgentSuggestion), f"Expected AgentSuggestion, got {type(suggestion)}"
 
-        if suggestion.agent_name not in available_agents:
-            logger.warning(f"Suggested unavailable agent: {suggestion.agent_name}")
-            return available_agents[0]  # Fallback
+        # The AI should only suggest agents from the available list
+        assert suggestion.agent_name in available_agents, (
+            f"AI suggested {suggestion.agent_name} but available agents are {available_agents}"
+        )
 
         logger.info(f"Routing to {suggestion.agent_name}: {suggestion.reasoning}")
         return suggestion.agent_name
