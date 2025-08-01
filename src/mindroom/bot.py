@@ -187,9 +187,9 @@ class AgentBot:
         # Create session ID with thread awareness
         session_id = f"{room.room_id}:{thread_id}" if thread_id else room.room_id
 
-        # Use the thread history we already fetched (if in a thread)
-        # If we're not in a thread or didn't fetch it yet, fetch now
-        if is_thread and not thread_history and thread_id and self.client:
+        # Fetch thread history if we haven't already
+        if is_thread and not thread_history:
+            assert thread_id is not None  # is_thread guarantees thread_id exists
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
         # Generate response
