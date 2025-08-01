@@ -1,19 +1,5 @@
 # MindRoom Pitches
 
-## MindRoom: Where Trust Meets Intelligence (5-paragraph version)
-
-Today's AI landscape forces an impossible choice: scatter your data across dozens of AI services or miss out on AI's transformative power. Your emails live in one AI, your documents in another, your code in yet another. Each service is a new trust boundary, a new privacy policy, another company learning from your data. Meanwhile, we've built artificial barriers between artificial intelligences. MindRoom breaks down these walls by creating a unified conversational platform where all your AI agents work together.
-
-Built on the Matrix protocol with end-to-end encryption at its core, MindRoom recognizes that the most natural interface for AI is simply conversation - whether typed or spoken. Need to find that contract from three years ago? Ask in chat. Customer service bot needs human help? It pings you directly. Project deadline conflicting with your vacation? Your agents are already discussing solutions in a thread you can jump into.
-
-Our multi-agent architecture enables something powerful: intelligent trust boundaries. Share your personal emails and sensitive documents with a local Ollama model running on your own hardware, while routing general research queries to cost-effective cloud models. Each agent maintains its own long-term memory, building expertise over time while collaborating in threaded conversations. Your financial agent remembers your investment strategy, your writing agent knows your voice, your research agent tracks your interests - all working together with appropriate access levels you control.
-
-We offer both hosted and self-hosted options because different users have different preferences. Our hosted service provides instant setup with enterprise-grade security for those who want convenience. For the self-hosting enthusiasts and privacy advocates, our open-source codebase lets you run everything on your own infrastructure. Either way, you bring your own AI models and maintain complete control over which AI sees what data. This flexibility embodies why MindRoom is "the last AI you need to trust" - your data stays under your control while you access the full universe of AI models.
-
-MindRoom isn't just another AI tool. It's the realization that AI's future isn't about more apps or dashboards - it's about one conversation that connects everything, with intelligent boundaries between what you share and what you keep private. Every AI wants your data. MindRoom lets you decide which AI deserves it.
-
----
-
 ## 1 Paragraph Version
 
 MindRoom solves AI fragmentation by unifying all your AI interactions into a single, encrypted conversational platform. Instead of trusting your emails to one AI, documents to another, and code to yet another, MindRoom breaks down these artificial barriers between artificial intelligences through a Matrix-based system where specialized agents collaborate in threaded conversations while maintaining long-term memory. Whether self-hosted or using our managed service, you bring your own AI models and maintain complete control - sharing sensitive data with local models while routing general queries to cloud services. MindRoom is "the last AI you need to trust" because your data stays under your control while you access the full universe of AI models, making it not just another AI tool but the realization that AI's future is one conversation that connects everything.
@@ -25,6 +11,20 @@ MindRoom solves AI fragmentation by unifying all your AI interactions into a sin
 Today's AI landscape forces you to scatter your data across dozens of services - emails in one AI, documents in another, code in yet another - each a new trust boundary and privacy risk. We've built artificial barriers between artificial intelligences that can't share context or collaborate. MindRoom breaks down these walls by creating a unified conversational platform where all your AI agents work together, built on the Matrix protocol with end-to-end encryption at its core.
 
 Our multi-agent architecture enables intelligent trust boundaries: share personal data with local Ollama models while routing general queries to cloud services. Each agent maintains long-term memory and collaborates in threaded conversations - your financial agent remembers your strategy, your writing agent knows your voice, your research agent tracks your interests. Available as both hosted and self-hosted options, you bring your own AI models and maintain complete control. MindRoom is "the last AI you need to trust" - your data stays under your control while you access the full universe of AI models, making AI feel natural for the first time.
+
+---
+
+## 5 Paragraph Version - MindRoom: Where Trust Meets Intelligence
+
+Today's AI landscape forces an impossible choice: scatter your data across dozens of AI services or miss out on AI's transformative power. Your emails live in one AI, your documents in another, your code in yet another. Each service is a new trust boundary, a new privacy policy, another company learning from your data. Meanwhile, we've built artificial barriers between artificial intelligences. MindRoom breaks down these walls by creating a unified conversational platform where all your AI agents work together.
+
+Built on the Matrix protocol with end-to-end encryption at its core, MindRoom recognizes that the most natural interface for AI is simply conversation - whether typed or spoken. Need to find that contract from three years ago? Ask in chat. Customer service bot needs human help? It pings you directly. Project deadline conflicting with your vacation? Your agents are already discussing solutions in a thread you can jump into.
+
+Our multi-agent architecture enables something powerful: intelligent trust boundaries. Share your personal emails and sensitive documents with a local Ollama model running on your own hardware, while routing general research queries to cost-effective cloud models. Each agent maintains its own long-term memory, building expertise over time while collaborating in threaded conversations. Your financial agent remembers your investment strategy, your writing agent knows your voice, your research agent tracks your interests - all working together with appropriate access levels you control.
+
+We offer both hosted and self-hosted options because different users have different preferences. Our hosted service provides instant setup with enterprise-grade security for those who want convenience. For the self-hosting enthusiasts and privacy advocates, our open-source codebase lets you run everything on your own infrastructure. Either way, you bring your own AI models and maintain complete control over which AI sees what data. This flexibility embodies why MindRoom is "the last AI you need to trust" - your data stays under your control while you access the full universe of AI models.
+
+MindRoom isn't just another AI tool. It's the realization that AI's future isn't about more apps or dashboards - it's about one conversation that connects everything, with intelligent boundaries between what you share and what you keep private. Every AI wants your data. MindRoom lets you decide which AI deserves it.
 
 ---
 
