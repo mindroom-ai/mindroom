@@ -173,7 +173,7 @@ async def create_room(
         response = await client.room_create(**room_config)
         if isinstance(response, nio.RoomCreateResponse):
             logger.info(f"Created room: {name} ({response.room_id})")
-            return response.room_id
+            return str(response.room_id)
         else:
             logger.error(f"Failed to create room {name}: {response}")
             return None
