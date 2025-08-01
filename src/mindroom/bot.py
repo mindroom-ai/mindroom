@@ -262,7 +262,8 @@ class AgentBot:
     ) -> None:
         """Handle AI routing for multi-agent threads."""
         # Only let one agent do the routing (first one alphabetically)
-        room_members = list(room.user_names()) if hasattr(room, "user_names") else list(room.users.keys())
+        # Get room members - nio.MatrixRoom has users dict
+        room_members = list(room.users.keys()) if room.users else []
         available_agents = []
         for member in room_members:
             agent_name = extract_agent_name(member)
