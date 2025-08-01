@@ -50,7 +50,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path)
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id])
         await bot.start()
 
         # Create a message mentioning the calculator agent
@@ -122,7 +122,7 @@ async def test_agent_ignores_other_agents(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path)
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id])
         await bot.start()
 
         # Create a message from another agent
@@ -166,7 +166,7 @@ async def test_agent_responds_in_threads_based_on_participation(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path)
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id])
         await bot.start()
 
         # Test 1: Thread with only this agent - should respond without mention
@@ -390,7 +390,8 @@ async def test_orchestrator_invites_agents_to_room(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser, tmp_path: Path) -> None:
     """Test that agents properly handle room invitations."""
-    test_room_id = "!test:example.org"
+    initial_room = "!initial:example.org"
+    invite_room = "!invite:example.org"
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
         mock_client = AsyncMock()
@@ -398,17 +399,17 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path)
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[initial_room])
         await bot.start()
 
-        # Create invite event
+        # Create invite event for a different room
         mock_room = MagicMock()
-        mock_room.room_id = test_room_id
-        mock_room.display_name = "Test Room"
+        mock_room.room_id = invite_room
+        mock_room.display_name = "Invite Room"
         mock_event = MagicMock(spec=nio.InviteEvent)
         mock_event.sender = "@inviter:example.org"
 
         await bot._on_invite(mock_room, mock_event)
 
-        # Verify room was joined
-        bot.client.join.assert_called_once_with(test_room_id)
+        # Verify new room was joined (not the initial room)
+        bot.client.join.assert_called_with(invite_room)

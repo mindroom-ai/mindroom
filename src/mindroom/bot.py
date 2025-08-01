@@ -417,6 +417,22 @@ class AgentBot:
                     room_id=room.room_id,
                     response_event_id=response.event_id,
                 )
+
+                # Track alien agent activity if this agent is not native to this room
+                if room.room_id not in self.rooms:
+                    from .thread_activity import alien_activity_tracker
+
+                    await alien_activity_tracker.update_agent_activity(
+                        agent_name=self.agent_name,
+                        room_id=room.room_id,
+                        thread_id=thread_id,
+                    )
+                    logger.debug(
+                        "Tracked alien agent activity",
+                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                        room_id=room.room_id,
+                        thread_id=thread_id,
+                    )
             else:
                 logger.error(
                     "Failed to send response",

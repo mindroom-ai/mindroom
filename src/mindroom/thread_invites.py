@@ -198,6 +198,18 @@ class ThreadInviteManager:
                     agent=agent_name,
                 )
 
+                # Also remove from alien activity tracker
+                from mindroom.thread_activity import alien_activity_tracker
+
+                for inv in invites:
+                    if inv.agent_name == agent_name:
+                        await alien_activity_tracker.remove_thread_from_agent(
+                            agent_name=agent_name,
+                            room_id=inv.room_id,
+                            thread_id=thread_id,
+                        )
+                        break
+
             return removed
 
     async def cleanup_expired_invites(self) -> int:
@@ -228,13 +240,25 @@ class ThreadInviteManager:
                     removed_count += 1
 
                     # Clean up agent threads index for expired invites
+                    room_id = None
                     for inv in invites:
                         if inv.agent_name == agent_name and inv.is_expired():
                             key = (inv.room_id, agent_name)
+                            room_id = inv.room_id
                             if key in self._agent_threads:
                                 self._agent_threads[key].discard(thread_id)
                                 if not self._agent_threads[key]:
                                     del self._agent_threads[key]
+
+                    # Also remove from alien activity tracker
+                    if room_id:
+                        from mindroom.thread_activity import alien_activity_tracker
+
+                        await alien_activity_tracker.remove_thread_from_agent(
+                            agent_name=agent_name,
+                            room_id=room_id,
+                            thread_id=thread_id,
+                        )
 
                 # Clean up empty lists
                 if not self._invites[thread_id]:

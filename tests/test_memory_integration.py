@@ -69,7 +69,7 @@ class TestMemoryIntegration:
             patch("mindroom.ai._cached_agent_run", mock_agent_run),
             patch("mindroom.ai.get_model_instance", return_value=MagicMock()),
         ):
-            response = await ai_response(
+            await ai_response(
                 agent_name="general", prompt="Hello", session_id="test_session", storage_path=tmp_path, room_id=None
             )
 
@@ -104,7 +104,7 @@ class TestMemoryIntegration:
             patch("mindroom.ai.get_model_instance", return_value=MagicMock()),
         ):
             # First interaction
-            response1 = await ai_response(
+            await ai_response(
                 agent_name="test_agent", prompt="Remember this: A=1", session_id="session1", storage_path=tmp_path
             )
 
@@ -122,7 +122,7 @@ class TestMemoryIntegration:
                 "results": [{"memory": "User asked: Remember this: A=1 I responded: First response", "id": "1"}]
             }
 
-            response2 = await ai_response(
+            await ai_response(
                 agent_name="test_agent", prompt="What is A?", session_id="session2", storage_path=tmp_path
             )
 

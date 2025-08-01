@@ -156,7 +156,7 @@ class TestAgentBot:
         """Test agent bot responding to mentions."""
         mock_ai_response.return_value = "Test response"
 
-        bot = AgentBot(mock_agent_user, tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"])
         bot.client = AsyncMock()
 
         # Mock successful room_send response
@@ -224,7 +224,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Test agent bot thread response behavior based on agent participation."""
-        bot = AgentBot(mock_agent_user, tmp_path)
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"])
         bot.client = AsyncMock()
 
         # Mock successful room_send response
