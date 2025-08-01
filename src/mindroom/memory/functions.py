@@ -1,17 +1,26 @@
 """Simple memory management functions following Mem0 patterns."""
 
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from ..logging_config import get_logger
 from .config import create_memory_instance
 
+if TYPE_CHECKING:
+    from mem0 import Memory
 
-class MemoryResult(TypedDict):
-    """Type for memory search results."""
 
+class MemoryResult(TypedDict, total=False):
+    """Type for memory search results from Mem0."""
+
+    id: str
     memory: str
+    hash: str
     metadata: dict[str, Any] | None
+    score: float
+    created_at: str
+    updated_at: str | None
+    user_id: str
 
 
 logger = get_logger(__name__)
@@ -20,10 +29,11 @@ logger = get_logger(__name__)
 _memory_instance = None
 
 
-def get_memory(storage_path: Path) -> Any:
+def get_memory(storage_path: Path) -> "Memory":
     """Get or create the global memory instance."""
     global _memory_instance
     if _memory_instance is None:
+        logger.info(f"Creating memory instance with storage path: {storage_path}")
         _memory_instance = create_memory_instance(storage_path)
     return _memory_instance
 
@@ -51,8 +61,11 @@ def add_agent_memory(
     messages = [{"role": "assistant", "content": content}]
 
     # Use agent_name as user_id to namespace memories per agent
-    memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
-    logger.debug(f"Added memory for agent {agent_name}: {content[:50]}...")
+    try:
+        memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
+        logger.info(f"Successfully added memory for agent {agent_name}: {content[:50]}...")
+    except Exception as e:
+        logger.error(f"Failed to add memory for agent {agent_name}: {e}")
 
 
 def search_agent_memories(query: str, agent_name: str, storage_path: Path, limit: int = 3) -> list[MemoryResult]:
@@ -168,6 +181,7 @@ def build_memory_enhanced_prompt(
     Returns:
         Enhanced prompt with memory context
     """
+    logger.debug(f"Building memory enhanced prompt for agent {agent_name}")
     enhanced_prompt = prompt
 
     # Search for relevant agent memories
@@ -175,6 +189,7 @@ def build_memory_enhanced_prompt(
     if agent_memories:
         agent_context = format_memories_as_context(agent_memories, "agent")
         enhanced_prompt = f"{agent_context}\n\n{prompt}"
+        logger.debug(f"Added {len(agent_memories)} agent memories to prompt")
 
     # If room_id is provided, add room context
     if room_id:
@@ -182,6 +197,7 @@ def build_memory_enhanced_prompt(
         if room_memories:
             room_context = format_memories_as_context(room_memories, "room")
             enhanced_prompt = f"{room_context}\n\n{enhanced_prompt}"
+            logger.debug(f"Added {len(room_memories)} room memories to prompt")
 
     return enhanced_prompt
 
