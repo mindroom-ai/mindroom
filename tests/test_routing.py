@@ -120,3 +120,59 @@ class TestAIRouting:
 
             # Should not call routing since general is not first
             mock_suggest.assert_not_called()
+
+
+class TestThreadUtils:
+    """Test thread utility functions."""
+
+    def test_has_any_agent_mentions_in_thread_with_mentions(self) -> None:
+        """Test detecting agent mentions in thread."""
+        from mindroom.thread_utils import has_any_agent_mentions_in_thread
+
+        thread_history = [
+            {
+                "sender": "@user:example.org",
+                "body": "Hello",
+                "content": {},
+            },
+            {
+                "sender": "@user:example.org",
+                "body": "@calculator help me",
+                "content": {"m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]}},
+            },
+        ]
+
+        assert has_any_agent_mentions_in_thread(thread_history) is True
+
+    def test_has_any_agent_mentions_in_thread_no_mentions(self) -> None:
+        """Test thread with no agent mentions."""
+        from mindroom.thread_utils import has_any_agent_mentions_in_thread
+
+        thread_history = [
+            {
+                "sender": "@user:example.org",
+                "body": "Hello",
+                "content": {},
+            },
+            {
+                "sender": "@mindroom_calculator:localhost",
+                "body": "Hi there!",
+                "content": {},
+            },
+        ]
+
+        assert has_any_agent_mentions_in_thread(thread_history) is False
+
+    def test_has_any_agent_mentions_in_thread_user_mentions(self) -> None:
+        """Test thread with only user mentions (not agents)."""
+        from mindroom.thread_utils import has_any_agent_mentions_in_thread
+
+        thread_history = [
+            {
+                "sender": "@user:example.org",
+                "body": "@friend check this out",
+                "content": {"m.mentions": {"user_ids": ["@friend:example.org"]}},
+            },
+        ]
+
+        assert has_any_agent_mentions_in_thread(thread_history) is False

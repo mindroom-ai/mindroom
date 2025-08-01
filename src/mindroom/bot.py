@@ -20,7 +20,12 @@ from .matrix import (
 )
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
-from .thread_utils import extract_agent_name, get_agents_in_thread, get_mentioned_agents
+from .thread_utils import (
+    extract_agent_name,
+    get_agents_in_thread,
+    get_mentioned_agents,
+    has_any_agent_mentions_in_thread,
+)
 
 logger = get_logger(__name__)
 
@@ -200,7 +205,8 @@ class AgentBot:
             logger.debug(f"{emoji(self.agent_name)} Not responding: {reason}")
 
             # Handle AI routing for multi-agent threads
-            if is_thread and agent_count > 1 and not mentioned_agents:
+            # Only route if we're in a thread AND no agents are mentioned anywhere in the thread
+            if is_thread and not has_any_agent_mentions_in_thread(thread_history):
                 await self._handle_ai_routing(room, event, thread_history)
             return
 

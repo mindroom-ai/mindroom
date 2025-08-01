@@ -88,3 +88,20 @@ def get_available_agents_in_room(room_members: list[str]) -> list[str]:
             agents.append(agent_name)
 
     return sorted(agents)
+
+
+def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]]) -> bool:
+    """Check if any agents are mentioned anywhere in the thread.
+
+    Args:
+        thread_history: List of messages in thread
+
+    Returns:
+        True if any agent is mentioned in any message
+    """
+    for msg in thread_history:
+        content = msg.get("content", {})
+        mentions = content.get("m.mentions", {})
+        if get_mentioned_agents(mentions):
+            return True
+    return False
