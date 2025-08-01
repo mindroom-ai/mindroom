@@ -158,7 +158,7 @@ class AgentBot:
 
         # Fetch thread history if in thread
         thread_history = []
-        if is_thread and thread_id and self.client:
+        if thread_id and self.client:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
         agents_in_thread = get_agents_in_thread(thread_history)
@@ -224,7 +224,7 @@ class AgentBot:
         session_id = f"{room.room_id}:{thread_id}" if thread_id else room.room_id
 
         # Fetch thread history if we haven't already
-        if is_thread and not thread_history and thread_id and self.client:
+        if thread_id and not thread_history and self.client:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
         # Generate response
