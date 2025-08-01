@@ -166,7 +166,15 @@ class AgentBot:
         if thread_id and self.client:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
-        # Simplified decision logic
+        # Decision logic:
+        # 1. If I'm mentioned → I respond (always)
+        # 2. If any agent is mentioned in thread → Only mentioned agents respond
+        # 3. If NO agents are mentioned in thread:
+        #    - 0 agents have participated → Router picks who should start
+        #    - 1 agent has participated → That agent continues
+        #    - 2+ agents have participated → Nobody responds (users must mention who they want)
+        # 4. Not in thread → Don't respond
+
         should_respond = False
         use_router = False
 
@@ -182,16 +190,19 @@ class AgentBot:
             else:
                 # No mentions - check agent participation
                 agents_in_thread = get_agents_in_thread(thread_history)
-                if not agents_in_thread or (len(agents_in_thread) == 1 and self.agent_name in agents_in_thread):
-                    # Either first agent or only agent in thread
+                if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
+                    # I'm the only agent in thread - continue responding
                     should_respond = True
-                    logger.debug(
-                        f"{emoji(self.agent_name)} Will respond: {'first' if not agents_in_thread else 'only'} agent in thread"
-                    )
-                else:
-                    # Multiple agents, no mentions - use router
+                    logger.debug(f"{emoji(self.agent_name)} Will respond: only agent in thread")
+                elif not agents_in_thread:
+                    # No agents yet - use router to pick first responder
                     use_router = True
-                    logger.debug(f"{emoji(self.agent_name)} Not responding: multiple agents, will use router")
+                    logger.debug(f"{emoji(self.agent_name)} Not responding: no agents yet, will use router")
+                else:
+                    # Multiple agents - nobody responds
+                    logger.debug(
+                        f"{emoji(self.agent_name)} Not responding: multiple agents in thread, need explicit mention"
+                    )
         else:
             # Not in thread and not mentioned
             logger.debug(f"{emoji(self.agent_name)} Not responding: not in thread or mentioned")
