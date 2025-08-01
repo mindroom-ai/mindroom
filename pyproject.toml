@@ -19,10 +19,12 @@ classifiers = [
 dependencies = [
   "agno[anthropic,google,ollama,openai,sql,ddg,arxiv,wikipedia,yfinance,newspaper,github,docker,duckdb]>=1.7.6",
   "arxiv",                                                                                                       # for Arxiv tool
+  "chromadb>=1.0.15",
   "diskcache>=5.6.3",
   "googlesearch-python",                                                                                         # for Google tool
   "markdown>=3.7",                                                                                               # for HTML formatting in Matrix messages
   "matrix-nio>=0.24",
+  "mem0ai>=0.1.115",
   "pycountry",                                                                                                   # for Google tool
   "pydantic>=2",
   "pypdf",                                                                                                       # for Arxiv tool

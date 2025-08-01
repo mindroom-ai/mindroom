@@ -13,14 +13,15 @@ from dotenv import load_dotenv
 
 from .agent_loader import create_agent
 from .logging_config import get_logger
+from .memory import (
+    build_memory_enhanced_prompt,
+    store_conversation_memory,
+)
 
 logger = get_logger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
-
-# Load configuration from .env file
-AGNO_MODEL_STR = os.getenv("AGNO_MODEL")
 
 # Configure caching
 ENABLE_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
@@ -32,21 +33,42 @@ def get_cache(storage_path: Path) -> diskcache.Cache | None:
     return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_CACHE else None
 
 
-def get_model_instance() -> Model:
-    """Parses the AGNO_MODEL string and returns an instantiated model."""
-    if not AGNO_MODEL_STR:
-        msg = "AGNO_MODEL is not configured in the .env file."
+def get_model_instance(model_name: str = "default") -> Model:
+    """Get a model instance from config.yaml.
+
+    Args:
+        model_name: Name of the model configuration to use (default: "default")
+
+    Returns:
+        Instantiated model
+
+    Raises:
+        ValueError: If model not found or provider not supported
+    """
+    from .agent_loader import load_config
+
+    config = load_config()
+
+    if model_name not in config.models:
+        available = ", ".join(sorted(config.models.keys()))
+        msg = f"Unknown model: {model_name}. Available models: {available}"
         raise ValueError(msg)
 
-    provider, model_id = AGNO_MODEL_STR.split(":", 1)
-    logger.info(f"Using AI model from provider '{provider}' with ID '{model_id}'")
+    model_config = config.models[model_name]
+    provider = model_config.provider
+    model_id = model_config.id
 
+    logger.info(f"Using AI model '{model_name}' from provider '{provider}' with ID '{model_id}'")
+
+    # Create model instance based on provider
     if provider == "ollama":
-        return Ollama(id=model_id, host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+        host = model_config.host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        return Ollama(id=model_id, host=host)
     if provider == "openai":
         return OpenAIChat(id=model_id)
     if provider == "anthropic":
         return Claude(id=model_id)
+
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)
 
@@ -101,13 +123,36 @@ async def ai_response(
     session_id: str,
     storage_path: Path,
     thread_history: list[dict[str, Any]] | None = None,
+    room_id: str | None = None,
 ) -> str:
-    """Generates a response using the specified agno Agent."""
+    """Generates a response using the specified agno Agent with memory integration.
+
+    Args:
+        agent_name: Name of the agent to use
+        prompt: User prompt
+        session_id: Session ID for conversation tracking
+        storage_path: Path for storing agent data
+        thread_history: Optional thread history
+        room_id: Optional room ID for room memory access
+
+    Returns:
+        Agent response string
+    """
     logger.info(f"Routing to agent '{agent_name}' for prompt: '{prompt}'")
     try:
         model = get_model_instance()
-        response = await _cached_agent_run(agent_name, prompt, session_id, model, storage_path, thread_history)
-        return response.content or ""
+
+        # Build prompt enhanced with memory context
+        enhanced_prompt = build_memory_enhanced_prompt(prompt, agent_name, storage_path, room_id)
+
+        # Generate response
+        response = await _cached_agent_run(agent_name, enhanced_prompt, session_id, model, storage_path, thread_history)
+        response_text = response.content or ""
+
+        # Store conversation in memory for future recall
+        store_conversation_memory(prompt, response_text, agent_name, storage_path, session_id, room_id)
+
+        return response_text
     except Exception as e:
         logger.exception(f"Error generating AI response: {e}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"

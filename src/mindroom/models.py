@@ -1,4 +1,4 @@
-"""Pydantic models for agent configuration."""
+"""Pydantic models for configuration."""
 
 from pydantic import BaseModel, Field
 
@@ -24,11 +24,46 @@ class DefaultsConfig(BaseModel):
     add_history_to_messages: bool = Field(default=True, description="Default history setting")
 
 
-class AgentsConfig(BaseModel):
-    """Complete agent configuration from YAML."""
+class EmbedderConfig(BaseModel):
+    """Configuration for memory embedder."""
+
+    model: str = Field(default="text-embedding-3-small", description="Model name for embeddings")
+    api_key: str | None = Field(default=None, description="API key (usually from environment variable)")
+    host: str | None = Field(default=None, description="Host URL for self-hosted models like Ollama")
+
+
+class MemoryEmbedderConfig(BaseModel):
+    """Memory embedder configuration."""
+
+    provider: str = Field(default="openai", description="Embedder provider (openai, huggingface, etc)")
+    config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
+
+
+class MemoryConfig(BaseModel):
+    """Memory system configuration."""
+
+    embedder: MemoryEmbedderConfig = Field(
+        default_factory=MemoryEmbedderConfig, description="Embedder configuration for memory"
+    )
+
+
+class ModelConfig(BaseModel):
+    """Configuration for an AI model."""
+
+    provider: str = Field(description="Model provider (openai, anthropic, ollama, etc)")
+    id: str = Field(description="Model ID specific to the provider")
+    host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
+    api_key: str | None = Field(default=None, description="Optional API key (usually from env vars)")
+    # Add other provider-specific fields as needed
+
+
+class Config(BaseModel):
+    """Complete configuration from YAML."""
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
+    memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
+    models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
 
     def get_agent(self, agent_name: str) -> AgentConfig:
         """Get an agent configuration by name.

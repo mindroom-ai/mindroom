@@ -4,7 +4,7 @@ mindroom uses a YAML-based configuration system that makes it easy to customize 
 
 ## Configuration File
 
-The default agent configuration file is `agents.yaml` in the project root. You can also specify a custom configuration file when starting the bot.
+The default agent configuration file is `config.yaml` in the project root. You can also specify a custom configuration file when starting the bot.
 
 ## Available Agents
 
@@ -95,7 +95,7 @@ Agents can be assigned to specific rooms in your Matrix server. This allows you 
 
 ### How Rooms Work
 
-1. **Room Aliases**: In `agents.yaml`, you specify simple room aliases like `lobby`, `dev`, `research`
+1. **Room Aliases**: In `config.yaml`, you specify simple room aliases like `lobby`, `dev`, `research`
 2. **Automatic Creation**: When you run `mindroom run`, it automatically creates any missing rooms
 3. **Agent Assignment**: Agents are automatically invited to their configured rooms
 4. **Room Persistence**: Room information is stored in `matrix_users.yaml` (auto-generated)
@@ -299,7 +299,7 @@ Good instructions are specific and actionable:
 
 You can create multiple configuration files for different purposes:
 
-1. Create a new YAML file (e.g., `my_agents.yaml`)
+1. Create a new YAML file (e.g., `my_config.yaml`)
 2. Define your agents using the structure above
 3. Use the custom file when starting mindroom
 

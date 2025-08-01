@@ -113,18 +113,15 @@ source .venv/bin/activate
 
 ### Configuration
 
-1. **Configure your agents** in `agents.yaml` (already included with defaults)
+1. **Configure your agents and models** in `config.yaml` (already included with defaults)
 
-2. **Create a `.env` file** (optional - for custom AI providers):
+2. **Create a `.env` file** (optional - for API keys):
 
 ```env
 # Matrix configuration (optional - defaults to localhost:8008)
 MATRIX_HOMESERVER=http://localhost:8008
 
-# AI configuration
-AGNO_MODEL=openai:gpt-4  # or anthropic:claude-3-opus, ollama:llama3.2, etc.
-
-# Optional API keys
+# Optional API keys (if using OpenAI/Anthropic models)
 OPENAI_API_KEY=your-key-here
 ANTHROPIC_API_KEY=your-key-here
 OLLAMA_HOST=http://localhost:11434  # for local models
@@ -140,8 +137,8 @@ mindroom run
 
 This automatically:
 - ✅ Creates your Matrix user account
-- ✅ Creates accounts for all agents in `agents.yaml`
-- ✅ Creates all rooms defined in `agents.yaml`
+- ✅ Creates accounts for all agents in `config.yaml`
+- ✅ Creates all rooms defined in `config.yaml`
 - ✅ Invites agents to their configured rooms
 - ✅ Starts the multi-agent system
 
