@@ -1,7 +1,7 @@
 """Room-level agent invitation management with activity tracking."""
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import nio
 
@@ -238,9 +238,6 @@ class RoomInviteManager(BaseInviteManager[RoomInvite]):
         Returns:
             Number of invitations removed
         """
-        # Import here to avoid circular imports
-        from mindroom.thread_activity import alien_activity_tracker
-
         # Get inactive invites outside the lock to avoid holding it during Matrix operations
         inactive_invites = await self.get_inactive_invites()
 
@@ -250,24 +247,6 @@ class RoomInviteManager(BaseInviteManager[RoomInvite]):
         removed_count = 0
 
         for room_id, agent_name in inactive_invites:
-            # Check global alien agent activity before kicking
-            agent_activity = await alien_activity_tracker.get_agent_activity(agent_name, room_id)
-
-            # If agent has been active in any thread in this room in the last 24 hours, don't kick
-            if agent_activity:
-                cutoff = datetime.now() - timedelta(hours=24)
-                if agent_activity.last_active > cutoff:
-                    logger.info(
-                        "Skipping kick for agent due to recent thread activity",
-                        room_id=room_id,
-                        agent=agent_name,
-                        last_active=agent_activity.last_active.isoformat(),
-                        active_threads=agent_activity.active_threads,
-                    )
-                    # Update the room invite activity to prevent repeated checks
-                    await self.record_agent_activity(room_id, agent_name)
-                    continue
-
             # Remove the invitation
             if await self.remove_invite(room_id, agent_name):
                 removed_count += 1
@@ -291,8 +270,6 @@ class RoomInviteManager(BaseInviteManager[RoomInvite]):
                                 room_id=room_id,
                                 agent=agent_name,
                             )
-                            # Clean up alien activity tracking
-                            await alien_activity_tracker.cleanup_agent_activity(agent_name, room_id)
                         else:
                             logger.error(
                                 "Failed to kick agent from room",

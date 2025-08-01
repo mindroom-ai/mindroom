@@ -111,23 +111,6 @@ class AgentBot:
             logger.error("Failed to start", agent=f"{emoji(self.agent_name)} {self.agent_name}", error=str(e))
             raise
 
-    async def _track_activity_if_alien(self, room_id: str, thread_id: str | None = None) -> None:
-        """Track activity if this agent is not native to the room."""
-        if room_id not in self.rooms:
-            from .thread_activity import alien_activity_tracker
-
-            await alien_activity_tracker.update_agent_activity(
-                agent_name=self.agent_name,
-                room_id=room_id,
-                thread_id=thread_id,
-            )
-            logger.debug(
-                "Tracked alien agent activity",
-                agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                room_id=room_id,
-                thread_id=thread_id,
-            )
-
     async def sync_forever(self) -> None:
         """Run the sync loop forever."""
         if not self.client:
@@ -435,8 +418,6 @@ class AgentBot:
                     response_event_id=response.event_id,
                 )
 
-                # Track alien agent activity if this agent is not native to this room
-                await self._track_activity_if_alien(room.room_id, thread_id)
             else:
                 logger.error(
                     "Failed to send response",
@@ -699,28 +680,51 @@ class MultiAgentOrchestrator:
         logger.info("All agent bots stopped")
 
     async def _periodic_cleanup(self) -> None:
-        """Periodically clean up expired thread invitations and inactive room invites."""
-        logger.info("Starting periodic cleanup task for invitations")
+        """Periodically clean up expired invitations and check room invite activity."""
+        logger.info("Starting periodic cleanup task")
 
         while self.running:
             try:
-                # Wait for 15 minutes between cleanups
-                await asyncio.sleep(900)  # 15 minutes
+                # Wait for 1 minute between checks
+                await asyncio.sleep(60)  # 1 minute
 
                 # Clean up expired thread invitations
                 thread_removed = await thread_invite_manager.cleanup_expired()
                 if thread_removed > 0:
                     logger.info(f"Cleaned up {thread_removed} expired thread invitations")
 
-                # Clean up inactive room invitations
-                # Use the general agent's client for kicking if available
+                # Check room invitations for inactivity
                 client = None
                 if "general" in self.agent_bots and self.agent_bots["general"].client:
                     client = self.agent_bots["general"].client
 
-                room_removed = await room_invite_manager.cleanup_expired(client)
-                if room_removed > 0:
-                    logger.info(f"Cleaned up {room_removed} inactive room invitations")
+                # Get all room invites
+                inactive_count = 0
+                async with room_invite_manager._lock:
+                    for room_id, room_invites in list(room_invite_manager._room_invites.items()):
+                        for agent_name, invite in list(room_invites.items()):
+                            if invite.is_inactive():
+                                # Check if agent has active thread invites in this room
+                                thread_invites = await thread_invite_manager.get_agent_threads(room_id, agent_name)
+
+                                if thread_invites:
+                                    # Agent is active in threads, update their room activity
+                                    invite.update_activity()
+                                    logger.debug(
+                                        "Updated room activity due to thread participation",
+                                        agent=agent_name,
+                                        room_id=room_id,
+                                        active_threads=len(thread_invites),
+                                    )
+                                else:
+                                    # No thread activity, mark for removal
+                                    inactive_count += 1
+
+                # Now run the standard cleanup which will kick inactive agents
+                if inactive_count > 0:
+                    room_removed = await room_invite_manager.cleanup_expired(client)
+                    if room_removed > 0:
+                        logger.info(f"Kicked {room_removed} inactive agents from rooms")
 
             except asyncio.CancelledError:
                 logger.info("Cleanup task cancelled")

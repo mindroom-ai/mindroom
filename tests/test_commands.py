@@ -9,7 +9,6 @@ def test_invite_command_basic():
     assert command is not None
     assert command.type == CommandType.INVITE
     assert command.args["agent_name"] == "calculator"
-    assert command.args["from_room"] is None
     assert command.args["duration_hours"] is None
 
 
@@ -21,32 +20,12 @@ def test_invite_command_with_at_symbol():
     assert command.args["agent_name"] == "calculator"
 
 
-def test_invite_command_with_room():
-    """Test invite command with room specification."""
-    command = command_parser.parse("/invite research from science")
-    assert command is not None
-    assert command.type == CommandType.INVITE
-    assert command.args["agent_name"] == "research"
-    assert command.args["from_room"] == "science"
-    assert command.args["duration_hours"] is None
-
-
-def test_invite_command_with_room_hash():
-    """Test invite command with room hash symbol."""
-    command = command_parser.parse("/invite research from #science")
-    assert command is not None
-    assert command.type == CommandType.INVITE
-    assert command.args["agent_name"] == "research"
-    assert command.args["from_room"] == "science"
-
-
 def test_invite_command_with_duration():
     """Test invite command with duration."""
     command = command_parser.parse("/invite calculator for 2 hours")
     assert command is not None
     assert command.type == CommandType.INVITE
     assert command.args["agent_name"] == "calculator"
-    assert command.args["from_room"] is None
     assert command.args["duration_hours"] == 2
 
 
@@ -63,17 +42,6 @@ def test_invite_command_with_duration_variations():
     assert command.args["duration_hours"] == 3
 
 
-def test_invite_command_full():
-    """Test invite command with all parameters."""
-    command = command_parser.parse("/invite @summary from #docs for 4 hours")
-    assert command is not None
-    assert command.type == CommandType.INVITE
-    assert command.args["agent_name"] == "summary"
-    assert command.args["from_room"] == "docs"
-    assert command.args["duration_hours"] == 4
-    assert command.args["to_room"] is False
-
-
 def test_invite_command_to_room():
     """Test room invite command."""
     command = command_parser.parse("/invite calculator to room")
@@ -81,7 +49,6 @@ def test_invite_command_to_room():
     assert command.type == CommandType.INVITE
     assert command.args["agent_name"] == "calculator"
     assert command.args["to_room"] is True
-    assert command.args["from_room"] is None
     assert command.args["duration_hours"] is None
 
 
@@ -101,9 +68,8 @@ def test_invite_command_case_insensitive():
     assert command is not None
     assert command.type == CommandType.INVITE
 
-    command = command_parser.parse("/Invite calculator FROM science FOR 2 HOURS")
+    command = command_parser.parse("/Invite calculator FOR 2 HOURS")
     assert command is not None
-    assert command.args["from_room"] == "science"
 
 
 def test_uninvite_command():
@@ -161,7 +127,6 @@ def test_invalid_commands():
         "/invalid",
         "/invite",  # Missing agent name
         "/uninvite",  # Missing agent name
-        "/invite calculator from",  # Incomplete from clause
         "/invite calculator for",  # Incomplete duration
         "/invite calculator for hours",  # Invalid duration format
         "invite calculator",  # Missing slash

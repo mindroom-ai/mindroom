@@ -32,11 +32,10 @@ class CommandParser:
     """Parser for user commands in messages."""
 
     # Command patterns
-    # Match: /invite agent [to room] [from #channel] [for N hours]
+    # Match: /invite agent [to room] [for N hours]
     INVITE_PATTERN = re.compile(
         r"^/invite\s+@?(\w+)"  # agent name
         r"(?:\s+(to)\s+room)?"  # optional "to room" for room invite
-        r"(?:\s+from\s+#?(.+?))?"  # optional "from #channel"
         r"(?:\s+for\s+(\d+)\s*(?:hours?|h))?$",  # optional "for N hours"
         re.IGNORECASE,
     )
@@ -62,11 +61,10 @@ class CommandParser:
         # /invite command
         match = self.INVITE_PATTERN.match(message)
         if match:
-            agent_name, to_room, from_room, duration = match.groups()
+            agent_name, to_room, duration = match.groups()
             args = {
                 "agent_name": agent_name,
                 "to_room": to_room is not None,  # True if "to room" was specified
-                "from_room": from_room,  # Optional source room
                 "duration_hours": int(duration) if duration else None,
             }
             return Command(
@@ -121,12 +119,11 @@ def get_command_help(topic: str | None = None) -> str:
         return """**Invite Command**
 
 Usage:
-- `/invite <agent> [from <room>] [for <hours>]` - Invite to current thread
+- `/invite <agent> [for <hours>]` - Invite to current thread
 - `/invite <agent> to room [for <hours>]` - Invite to entire room
 
 Examples:
 - `/invite calculator` - Invite calculator agent to this thread
-- `/invite research from science` - Invite research agent from science room
 - `/invite summary for 2 hours` - Invite summary agent for 2 hours
 - `/invite calculator to room` - Invite calculator to the entire room (24h inactivity timeout)
 - `/invite code to room for 48 hours` - Invite code agent to room with 48h timeout
@@ -155,7 +152,7 @@ Shows all agents currently invited to this thread."""
         # General help
         return """**Available Commands**
 
-- `/invite <agent> [from <room>] [for <hours>]` - Invite an agent to this thread
+- `/invite <agent> [for <hours>]` - Invite an agent to this thread
 - `/uninvite <agent>` - Remove an agent from this thread
 - `/list_invites` - List all invited agents for this thread
 - `/help [topic]` - Show this help or help for a specific command
