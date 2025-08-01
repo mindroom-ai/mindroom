@@ -1,10 +1,24 @@
 """Utilities for thread analysis and agent detection."""
 
+from functools import lru_cache
 from typing import Any
+
+from .agent_loader import load_config
+
+
+@lru_cache(maxsize=128)
+def get_known_agent_names() -> set[str]:
+    """Get set of all configured agent names.
+
+    Returns:
+        Set of agent names from configuration
+    """
+    config = load_config()
+    return set(config.agents.keys())
 
 
 def extract_agent_name(sender_id: str) -> str | None:
-    """Extract agent name from sender ID.
+    """Extract agent name from sender ID if it's a known agent.
 
     Args:
         sender_id: Matrix user ID like @mindroom_calculator:localhost
@@ -22,8 +36,14 @@ def extract_agent_name(sender_id: str) -> str | None:
     if username.startswith("mindroom_user"):
         return None
 
-    # Extract agent name after mindroom_
-    return username.replace("mindroom_", "")
+    # Extract potential agent name after mindroom_
+    agent_name = username.replace("mindroom_", "")
+
+    # Check if this is actually a configured agent
+    if agent_name in get_known_agent_names():
+        return agent_name
+
+    return None
 
 
 def get_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:

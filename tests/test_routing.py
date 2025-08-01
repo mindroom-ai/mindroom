@@ -171,3 +171,17 @@ class TestThreadUtils:
         ]
 
         assert has_any_agent_mentions_in_thread(thread_history) is False
+
+    def test_extract_agent_name_rejects_unconfigured(self) -> None:
+        """Test that unconfigured agents are not recognized."""
+        from mindroom.thread_utils import extract_agent_name
+
+        # This should return None because "fake_agent" is not in agents.yaml
+        assert extract_agent_name("@mindroom_fake_agent:localhost") is None
+
+        # But real agents should work
+        assert extract_agent_name("@mindroom_calculator:localhost") == "calculator"
+
+        # Regular users should still be rejected
+        assert extract_agent_name("@mindroom_user:localhost") is None
+        assert extract_agent_name("@regular_user:localhost") is None
