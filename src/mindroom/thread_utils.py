@@ -66,11 +66,6 @@ def get_mentioned_agents(mentions: dict[str, Any]) -> list[str]:
     return agents
 
 
-def count_agents_in_thread(thread_history: list[dict[str, Any]]) -> int:
-    """Count unique agents in thread."""
-    return len(get_agents_in_thread(thread_history))
-
-
 def get_available_agents_in_room(room_members: list[str]) -> list[str]:
     """Get list of available agents in a room.
 

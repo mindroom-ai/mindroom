@@ -21,8 +21,8 @@ from .matrix import (
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .thread_utils import (
-    extract_agent_name,
     get_agents_in_thread,
+    get_available_agents_in_room,
     get_mentioned_agents,
     has_any_agent_mentions_in_thread,
 )
@@ -271,13 +271,7 @@ class AgentBot:
         # Only let one agent do the routing (first one alphabetically)
         # Get room members - nio.MatrixRoom has users dict
         room_members = list(room.users.keys()) if room.users else []
-        available_agents = []
-        for member in room_members:
-            agent_name = extract_agent_name(member)
-            if agent_name:
-                available_agents.append(agent_name)
-
-        available_agents.sort()  # Consistent ordering
+        available_agents = get_available_agents_in_room(room_members)
         if not available_agents or available_agents[0] != self.agent_name:
             return  # Not the routing agent
 
