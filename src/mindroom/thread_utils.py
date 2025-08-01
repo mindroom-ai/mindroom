@@ -86,16 +86,17 @@ def get_mentioned_agents(mentions: dict[str, Any]) -> list[str]:
     return agents
 
 
-def get_available_agents_in_room(room_members: list[str]) -> list[str]:
+def get_available_agents_in_room(room: Any) -> list[str]:
     """Get list of available agents in a room.
 
     Args:
-        room_members: List of user IDs in the room
+        room: MatrixRoom object
 
     Returns:
         List of agent names available in the room
     """
     agents = []
+    room_members = list(room.users.keys()) if room.users else []
 
     for member_id in room_members:
         agent_name = extract_agent_name(member_id)
