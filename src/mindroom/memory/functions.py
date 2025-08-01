@@ -68,9 +68,13 @@ def search_agent_memories(query: str, agent_name: str, storage_path: Path, limit
         List of relevant memories
     """
     memory = get_memory(storage_path)
-    results = memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
+    search_result = memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
+
+    # Extract results list from the response
+    results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
+
     logger.debug(f"Found {len(results)} memories for agent {agent_name}")
-    return results  # type: ignore[no-any-return]
+    return results
 
 
 def add_room_memory(
@@ -117,9 +121,13 @@ def search_room_memories(query: str, room_id: str, storage_path: Path, limit: in
     """
     memory = get_memory(storage_path)
     safe_room_id = room_id.replace(":", "_").replace("!", "")
-    results = memory.search(query, user_id=f"room_{safe_room_id}", limit=limit)
+    search_result = memory.search(query, user_id=f"room_{safe_room_id}", limit=limit)
+
+    # Extract results list from the response
+    results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
+
     logger.debug(f"Found {len(results)} memories for room {room_id}")
-    return results  # type: ignore[no-any-return]
+    return results
 
 
 def format_memories_as_context(memories: list[MemoryResult], context_type: str = "agent") -> str:
@@ -199,8 +207,8 @@ def store_conversation_memory(
     if not response:
         return
 
-    # Store a conversational summary in agent memory
-    conversation_summary = f"User asked: {prompt[:200]}... I responded: {response[:200]}..."
+    # Store the full conversation in agent memory
+    conversation_summary = f"User asked: {prompt} I responded: {response}"
     add_agent_memory(
         conversation_summary,
         agent_name,
@@ -210,11 +218,11 @@ def store_conversation_memory(
 
     # Also add to room memory if room_id provided
     if room_id:
-        room_summary = f"{agent_name} discussed: {response[:200]}..."
+        room_summary = f"{agent_name} discussed: {response}"
         add_room_memory(
             room_summary,
             room_id,
             storage_path,
             agent_name=agent_name,
-            metadata={"type": "conversation"},
+            metadata={"type": "conversation", "user_prompt": prompt},
         )

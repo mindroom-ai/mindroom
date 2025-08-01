@@ -9,8 +9,7 @@ memory:
     provider: "ollama"  # Options: openai, ollama, huggingface, sentence-transformers
     config:
       model: "nomic-embed-text"  # Ollama embedding model
-      # For ollama embeddings, you can specify:
-      # host: "http://localhost:11434"  # defaults to OLLAMA_HOST env var or localhost:11434
+      host: "http://localhost:11434"  # Ollama host URL
 
 # Model configuration
 models:
