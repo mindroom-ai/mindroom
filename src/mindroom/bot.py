@@ -273,10 +273,14 @@ class AgentBot:
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
     ) -> None:
         """Handle AI routing for multi-agent threads."""
-        # Only let one agent do the routing (first one alphabetically)
+        # Only let one agent do the routing to avoid duplicates
+        # All agents receive the message, but we need only one to handle routing
+        # We use the first agent alphabetically as a deterministic choice
+        # Example: If room has [calculator, general, shell], only calculator routes
         available_agents = get_available_agents_in_room(room)
         if not available_agents or available_agents[0] != self.agent_name:
-            return  # Not the routing agent
+            # I'm not the first agent alphabetically, so I should not route
+            return  # Let the first agent handle routing
 
         logger.info(f"{emoji(self.agent_name)} Handling AI routing for: {event.body[:50]}...")
 
