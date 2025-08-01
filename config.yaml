@@ -15,7 +15,7 @@ memory:
 models:
   default:  # Default model used when agent doesn't specify one
     provider: "ollama"
-    id: "llama3.2"
+    id: "devstral:24b"
     # Add any provider-specific config here
     # For ollama, you can add:
     # host: "http://localhost:11434"

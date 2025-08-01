@@ -105,23 +105,11 @@ def create_memory_instance(storage_path: Path) -> Memory:
     Returns:
         Configured Memory instance
     """
-    from mem0.configs.base import MemoryConfig  # type: ignore[import-untyped]
-    from mem0.embeddings.configs import EmbedderConfig  # type: ignore[import-untyped]
-    from mem0.llms.configs import LlmConfig  # type: ignore[import-untyped]
-    from mem0.vector_stores.configs import VectorStoreConfig  # type: ignore[import-untyped]
-
     config_dict = get_memory_config(storage_path)
 
-    # Create config objects
-    embedder_config = EmbedderConfig(**config_dict["embedder"])
-    vector_store_config = VectorStoreConfig(**config_dict["vector_store"])
-    llm_config = LlmConfig(**config_dict["llm"])
-
-    # Create MemoryConfig instance
-    mem_config = MemoryConfig(embedder=embedder_config, vector_store=vector_store_config, llm=llm_config)
-
-    # Create Memory instance with config
-    memory = Memory(config=mem_config)
+    # Create Memory instance with dictionary config directly
+    # Mem0 expects a dict for configuration, not config objects
+    memory = Memory.from_config(config_dict)
 
     logger.info(f"Created memory instance with ChromaDB at {storage_path}")
     return memory
