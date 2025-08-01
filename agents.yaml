@@ -181,6 +181,21 @@ agents:
       - business  # Business analytics
     num_history_runs: 5
 
+  # Router agent for multi-agent coordination
+  # NOTE: This is a SPECIAL agent - it uses structured output and has different behavior
+  # It doesn't respond like normal agents, instead it routes messages to other agents
+  router:
+    display_name: "RouterAgent"
+    role: "Route messages to the most appropriate agent in multi-agent threads."
+    tools: []
+    instructions:
+      - "Analyze messages to determine which agent is best suited to respond."
+      - "Consider the context of the thread when making routing decisions."
+      - "Only route messages when multiple agents are in a thread and none are mentioned."
+      - "Be brief in your routing messages."
+    rooms: []  # Router will join all rooms automatically
+    num_history_runs: 3
+
 # Configuration for agent defaults
 defaults:
   num_history_runs: 5
