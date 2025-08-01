@@ -189,9 +189,9 @@ class TestAgentBot:
 
         # Verify AI response was called with the full message body as prompt
         mock_ai_response.assert_called_once_with(
-            "calculator",
-            "@mindroom_calculator:localhost: What's 2+2?",
-            "!test:localhost",
+            agent_name="calculator",
+            prompt="@mindroom_calculator:localhost: What's 2+2?",
+            session_id="!test:localhost",
             thread_history=[],
             storage_path=tmp_path,
         )

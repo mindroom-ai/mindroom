@@ -10,9 +10,11 @@ from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.run.response import RunResponse
 from dotenv import load_dotenv
-from loguru import logger
 
 from .agent_loader import create_agent
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()

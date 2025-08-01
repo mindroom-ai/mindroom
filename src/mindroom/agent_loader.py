@@ -6,10 +6,12 @@ import yaml
 from agno.agent import Agent
 from agno.models.base import Model
 from agno.storage.sqlite import SqliteStorage
-from loguru import logger
 
+from .logging_config import get_logger
 from .models import AgentsConfig
 from .tools import get_tool_by_name
+
+logger = get_logger(__name__)
 
 # Default path to agents configuration file
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "agents.yaml"

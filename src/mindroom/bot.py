@@ -5,18 +5,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import nio
-from loguru import logger
 
 from .agent_loader import load_config
 from .ai import ai_response
-from .logging_config import colorize
+from .logging_config import colorize, get_logger
 from .matrix import fetch_thread_history, prepare_response_content
 from .matrix_agent_manager import AgentMatrixUser, ensure_all_agent_users, login_agent_user
 from .matrix_room_manager import get_room_aliases
 from .response_tracker import ResponseTracker
 
-# Enable colors in logger
-logger = logger.opt(colors=True)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -109,8 +107,12 @@ class AgentBot:
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         """Handle messages in rooms."""
         logger.debug(
-            f"{colorize(self.agent_name)} Message received - Room: {room.room_id} ({room.display_name}), "
-            f"Sender: {event.sender}, Body: '{event.body}', Event source: {event.source}"
+            f"{colorize(self.agent_name)} Message received",
+            room_id=room.room_id,
+            room_name=room.display_name,
+            sender=event.sender,
+            body=event.body,
+            event_id=event.event_id,
         )
 
         # Don't respond to own messages
@@ -185,7 +187,13 @@ class AgentBot:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
         # Generate response
-        response_text = await ai_response(self.agent_name, prompt, session_id, self.storage_path, thread_history)
+        response_text = await ai_response(
+            agent_name=self.agent_name,
+            prompt=prompt,
+            session_id=session_id,
+            storage_path=self.storage_path,
+            thread_history=thread_history,
+        )
 
         # Prepare and send response
         content = prepare_response_content(response_text, event, agent_name=self.agent_name)

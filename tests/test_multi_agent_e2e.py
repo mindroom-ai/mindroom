@@ -92,9 +92,9 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
 
                 # Verify AI was called with correct parameters (full message body as prompt)
                 mock_ai.assert_called_once_with(
-                    "calculator",
-                    "@mindroom_calculator:localhost What's 15% of 200?",
-                    test_room_id,
+                    agent_name="calculator",
+                    prompt="@mindroom_calculator:localhost What's 15% of 200?",
+                    session_id=test_room_id,
                     thread_history=[],
                     storage_path=tmp_path,
                 )
@@ -200,9 +200,9 @@ async def test_agent_responds_in_threads_without_mention(
 
             # Should process the message even without mention
             mock_ai.assert_called_once_with(
-                "calculator",
-                "What about 20% of 300?",
-                f"{test_room_id}:{thread_root_id}",
+                agent_name="calculator",
+                prompt="What about 20% of 300?",
+                session_id=f"{test_room_id}:{thread_root_id}",
                 thread_history=[],
                 storage_path=tmp_path,
             )
