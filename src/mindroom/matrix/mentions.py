@@ -121,25 +121,3 @@ def create_mention_content_from_text(
         thread_event_id=thread_event_id,
         reply_to_event_id=reply_to_event_id,
     )
-
-
-def mention_agent(agent_name: str, message: str, **kwargs: Any) -> dict[str, Any]:
-    """Create a mention for a specific agent.
-
-    DEPRECATED: Use create_mention_content_from_text() instead for universal mention support.
-
-    Args:
-        agent_name: Name of the agent (e.g., "calculator")
-        message: Message to send
-        **kwargs: Additional arguments for create_mention_content
-
-    Returns:
-        Content dict ready for room_send
-    """
-    # Ensure the agent is mentioned in the message
-    if f"@{agent_name}" not in message and f"@mindroom_{agent_name}" not in message:
-        message = f"@{agent_name} {message}"
-
-    # Use the universal function
-    sender_domain = kwargs.pop("sender_domain", "localhost")
-    return create_mention_content_from_text(message, sender_domain, **kwargs)
