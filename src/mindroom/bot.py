@@ -18,6 +18,20 @@ from .matrix_room_manager import get_room_aliases
 logger = logger.opt(colors=True)
 
 
+def is_sender_other_agent(sender: str, current_agent_user_id: str) -> bool:
+    """Check if sender is another agent (not the current agent, not the user)."""
+    if sender == current_agent_user_id:
+        return False
+
+    sender_username = sender.split(":")[0][1:] if sender.startswith("@") else ""
+    return sender_username.startswith("mindroom_") and sender_username != "mindroom_user"
+
+
+def has_other_agents_in_thread(thread_history: list[dict], current_agent_user_id: str) -> bool:
+    """Check if other agents have participated in this thread."""
+    return any(is_sender_other_agent(msg.get("sender", ""), current_agent_user_id) for msg in thread_history)
+
+
 @dataclass
 class AgentBot:
     """Represents a single agent bot with its own Matrix account."""
@@ -113,15 +127,7 @@ class AgentBot:
             return
 
         # Don't respond to other agent messages (avoid agent loops)
-        # Extract username from sender ID (e.g., @mindroom_calculator:localhost -> mindroom_calculator)
-        sender_username = event.sender.split(":")[0][1:]  # Remove @ and domain
-
-        # Check if sender is another agent (but not the user account)
-        if (
-            sender_username.startswith("mindroom_")
-            and sender_username != "mindroom_user"  # Allow user messages
-            and event.sender != self.agent_user.user_id
-        ):  # Allow own messages (already filtered above)
+        if is_sender_other_agent(event.sender, self.agent_user.user_id):
             logger.debug(f"{colorize(self.agent_name)} Ignoring message from other agent: {event.sender}")
             return
 
@@ -131,23 +137,35 @@ class AgentBot:
             f"Agent user_id: {self.agent_user.user_id}, display_name: {self.agent_user.display_name}"
         )
 
-        # Check if this agent is mentioned using the proper Matrix m.mentions field
+        # Check if this agent is mentioned
         mentions = event.source.get("content", {}).get("m.mentions", {})
-        mentioned_users = mentions.get("user_ids", [])
-        mentioned = self.agent_user.user_id in mentioned_users
+        mentioned = self.agent_user.user_id in mentions.get("user_ids", [])
 
-        logger.debug(
-            f"{colorize(self.agent_name)} Checking mentions - m.mentions field: {mentions}, Agent is mentioned: {mentioned}"
-        )
+        # Check if we're in a thread
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
+        thread_id = relates_to.get("event_id") if is_thread else None
 
-        if not mentioned:
-            # In threads, respond to all messages
-            relates_to = event.source.get("content", {}).get("m.relates_to", {})
-            is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
-            logger.debug(f"{colorize(self.agent_name)} Thread check - is_thread: {is_thread}, relates_to: {relates_to}")
-            if not is_thread:
-                logger.debug(f"{colorize(self.agent_name)} Not mentioned and not in thread, ignoring message")
+        # Decide whether to respond
+        thread_history = []
+
+        if mentioned:
+            # Always respond if explicitly mentioned
+            logger.debug(f"{colorize(self.agent_name)} Will respond: explicitly mentioned")
+        elif is_thread and thread_id and self.client:
+            # In threads, check if we're the only agent participating
+            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
+
+            if has_other_agents_in_thread(thread_history, self.agent_user.user_id):
+                logger.debug(
+                    f"{colorize(self.agent_name)} Not responding: multiple agents in thread, no explicit mention"
+                )
                 return
+
+            logger.debug(f"{colorize(self.agent_name)} Will respond: only agent in thread")
+        else:
+            logger.debug(f"{colorize(self.agent_name)} Not responding to message")
+            return
 
         logger.info(f"{colorize(self.agent_name)} WILL PROCESS message from {event.sender}: {event.body}")
 
@@ -159,16 +177,11 @@ class AgentBot:
             return
 
         # Create session ID with thread awareness
-        thread_id = None
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        if relates_to and relates_to.get("rel_type") == "m.thread":
-            thread_id = relates_to.get("event_id")
-
         session_id = f"{room.room_id}:{thread_id}" if thread_id else room.room_id
 
-        # Fetch thread history if in a thread
-        thread_history = []
-        if thread_id and self.client:
+        # Use the thread history we already fetched (if in a thread)
+        # If we're not in a thread or didn't fetch it yet, fetch now
+        if is_thread and not thread_history and thread_id and self.client:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
 
         # Generate response
