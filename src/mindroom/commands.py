@@ -32,8 +32,13 @@ class CommandParser:
     """Parser for user commands in messages."""
 
     # Command patterns
+    # Match: /invite agent [to room] [from #channel] [for N hours]
     INVITE_PATTERN = re.compile(
-        r"^/invite\s+@?(\w+)(?:\s+from\s+#?(.+?))?(?:\s+for\s+(\d+)\s*(?:hours?|h))?$", re.IGNORECASE
+        r"^/invite\s+@?(\w+)"  # agent name
+        r"(?:\s+(to)\s+room)?"  # optional "to room" for room invite
+        r"(?:\s+from\s+#?(.+?))?"  # optional "from #channel"
+        r"(?:\s+for\s+(\d+)\s*(?:hours?|h))?$",  # optional "for N hours"
+        re.IGNORECASE,
     )
     UNINVITE_PATTERN = re.compile(r"^/uninvite\s+@?(\w+)$", re.IGNORECASE)
     LIST_INVITES_PATTERN = re.compile(r"^/list[_-]?invites?$", re.IGNORECASE)
@@ -57,10 +62,11 @@ class CommandParser:
         # /invite command
         match = self.INVITE_PATTERN.match(message)
         if match:
-            agent_name, room_name, duration = match.groups()
+            agent_name, to_room, from_room, duration = match.groups()
             args = {
                 "agent_name": agent_name,
-                "from_room": room_name,  # Optional
+                "to_room": to_room is not None,  # True if "to room" was specified
+                "from_room": from_room,  # Optional source room
                 "duration_hours": int(duration) if duration else None,
             }
             return Command(
@@ -114,14 +120,19 @@ def get_command_help(topic: str | None = None) -> str:
     if topic == "invite":
         return """**Invite Command**
 
-Usage: `/invite <agent> [from <room>] [for <hours>]`
+Usage:
+- `/invite <agent> [from <room>] [for <hours>]` - Invite to current thread
+- `/invite <agent> to room [for <hours>]` - Invite to entire room
 
 Examples:
 - `/invite calculator` - Invite calculator agent to this thread
 - `/invite research from science` - Invite research agent from science room
 - `/invite summary for 2 hours` - Invite summary agent for 2 hours
+- `/invite calculator to room` - Invite calculator to the entire room (24h inactivity timeout)
+- `/invite code to room for 48 hours` - Invite code agent to room with 48h timeout
 
-The invited agent will be able to participate in this thread even if they're not normally in this room."""
+Thread invites: Agent can participate in specific thread only
+Room invites: Agent joins the room, auto-kicked after inactivity timeout"""
 
     elif topic == "uninvite":
         return """**Uninvite Command**

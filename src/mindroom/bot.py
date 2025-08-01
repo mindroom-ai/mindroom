@@ -20,6 +20,7 @@ from .matrix import (
     login_agent_user,
 )
 from .response_tracker import ResponseTracker
+from .room_invites import room_invite_manager
 from .routing import suggest_agent_for_message
 from .thread_invites import thread_invite_manager
 from .thread_utils import (
@@ -171,6 +172,25 @@ class AgentBot:
                 "Ignoring message from other agent",
                 agent=f"{emoji(self.agent_name)} {self.agent_name}",
                 sender=event.sender,
+            )
+            return
+
+        # Track activity for room invites (if I'm in this room due to invite)
+        is_room_invite = await room_invite_manager.is_agent_invited_to_room(room.room_id, self.agent_name)
+        if is_room_invite:
+            await room_invite_manager.record_agent_activity(room.room_id, self.agent_name)
+            logger.debug(
+                "Recorded activity for room invite",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                room_id=room.room_id,
+            )
+
+        # Check if I should be in this room (native or invited)
+        if room.room_id not in self.rooms and not is_room_invite:
+            logger.debug(
+                "Not in this room and not invited",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                room_id=room.room_id,
             )
             return
 
@@ -474,18 +494,44 @@ class AgentBot:
 
         if command.type == CommandType.INVITE:
             # Handle invite command
-            if not thread_id:
-                response_text = "❌ The /invite command can only be used in a thread."
-            else:
-                agent_name = command.args["agent_name"]
-                duration_hours = command.args.get("duration_hours")
+            agent_name = command.args["agent_name"]
+            to_room = command.args.get("to_room", False)
+            duration_hours = command.args.get("duration_hours")
 
-                # Check if agent exists
-                config = load_config()
-                if agent_name not in config.agents:
-                    response_text = (
-                        f"❌ Unknown agent: {agent_name}. Available agents: {', '.join(config.agents.keys())}"
-                    )
+            # Check if agent exists
+            config = load_config()
+            if agent_name not in config.agents:
+                response_text = f"❌ Unknown agent: {agent_name}. Available agents: {', '.join(config.agents.keys())}"
+            elif to_room:
+                # Room invite
+                # Add room invitation
+                await room_invite_manager.add_room_invite(
+                    room_id=room.room_id,
+                    agent_name=agent_name,
+                    invited_by=event.sender,
+                    inactivity_timeout_hours=duration_hours or 24,  # Default 24h
+                )
+
+                # Get the agent's user ID and invite to Matrix room
+                agent_user_id = f"@mindroom_{agent_name}:{self.agent_user.user_id.split(':')[1]}"
+                try:
+                    if self.client:
+                        result = await self.client.room_invite(room.room_id, agent_user_id)
+                        if isinstance(result, nio.RoomInviteResponse):
+                            timeout_text = f"{duration_hours} hours" if duration_hours else "24 hours"
+                            response_text = f"✅ Invited @{agent_name} to this room. They will be removed after {timeout_text} of inactivity."
+                        else:
+                            response_text = f"❌ Failed to invite @{agent_name}: {result}"
+                            # Remove the invite record if Matrix invite failed
+                            await room_invite_manager.remove_room_invite(room.room_id, agent_name)
+                except Exception as e:
+                    response_text = f"❌ Error inviting @{agent_name}: {str(e)}"
+                    # Remove the invite record if Matrix invite failed
+                    await room_invite_manager.remove_room_invite(room.room_id, agent_name)
+            else:
+                # Thread invite
+                if not thread_id:
+                    response_text = "❌ Thread invites can only be used in a thread. Use '/invite <agent> to room' for room invites."
                 else:
                     # Add the invitation
                     await thread_invite_manager.add_invite(
@@ -516,15 +562,25 @@ class AgentBot:
 
         elif command.type == CommandType.LIST_INVITES:
             # Handle list invites command
-            if not thread_id:
-                response_text = "❌ The /list_invites command can only be used in a thread."
+            response_parts = []
+
+            # Get room invites
+            room_invites = await room_invite_manager.get_room_invites(room.room_id)
+            if room_invites:
+                room_list = "\n".join([f"- @{agent} (room invite)" for agent in room_invites])
+                response_parts.append(f"**Room invites:**\n{room_list}")
+
+            # Get thread invites if in a thread
+            if thread_id:
+                thread_invites = await thread_invite_manager.get_thread_agents(thread_id)
+                if thread_invites:
+                    thread_list = "\n".join([f"- @{agent} (thread invite)" for agent in thread_invites])
+                    response_parts.append(f"**Thread invites:**\n{thread_list}")
+
+            if response_parts:
+                response_text = "\n\n".join(response_parts)
             else:
-                invited_agents = await thread_invite_manager.get_thread_agents(thread_id)
-                if invited_agents:
-                    agent_list = "\n".join([f"- @{agent}" for agent in invited_agents])
-                    response_text = f"**Invited agents in this thread:**\n{agent_list}"
-                else:
-                    response_text = "No agents are currently invited to this thread."
+                response_text = "No agents are currently invited to this room or thread."
 
         elif command.type == CommandType.HELP:
             # Handle help command
@@ -623,18 +679,28 @@ class MultiAgentOrchestrator:
         logger.info("All agent bots stopped")
 
     async def _periodic_cleanup(self) -> None:
-        """Periodically clean up expired thread invitations."""
-        logger.info("Starting periodic cleanup task for thread invitations")
+        """Periodically clean up expired thread invitations and inactive room invites."""
+        logger.info("Starting periodic cleanup task for invitations")
 
         while self.running:
             try:
                 # Wait for 15 minutes between cleanups
                 await asyncio.sleep(900)  # 15 minutes
 
-                # Clean up expired invitations
-                removed_count = await thread_invite_manager.cleanup_expired_invites()
-                if removed_count > 0:
-                    logger.info(f"Cleaned up {removed_count} expired thread invitations")
+                # Clean up expired thread invitations
+                thread_removed = await thread_invite_manager.cleanup_expired_invites()
+                if thread_removed > 0:
+                    logger.info(f"Cleaned up {thread_removed} expired thread invitations")
+
+                # Clean up inactive room invitations
+                # Use the general agent's client for kicking if available
+                client = None
+                if "general" in self.agent_bots and self.agent_bots["general"].client:
+                    client = self.agent_bots["general"].client
+
+                room_removed = await room_invite_manager.cleanup_inactive_invites(client)
+                if room_removed > 0:
+                    logger.info(f"Cleaned up {room_removed} inactive room invitations")
 
             except asyncio.CancelledError:
                 logger.info("Cleanup task cancelled")
