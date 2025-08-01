@@ -44,16 +44,7 @@ class ResponseTracker:
 
         with open(self._responses_file) as f:
             data = json.load(f)
-            # Handle both old format (list) and new format (dict with timestamps)
-            if isinstance(data.get("event_ids"), list):
-                # Old format: convert to new format with current timestamp
-                current_time = time.time()
-                return {event_id: current_time for event_id in data["event_ids"]}
-            elif isinstance(data.get("events"), dict):
-                # New format with timestamps
-                return data["events"]  # type: ignore[no-any-return]
-            else:
-                return {}
+            return data.get("events", {})  # type: ignore[no-any-return]
 
     def _save_responded_events(self) -> None:
         """Save the responded event IDs with timestamps to disk using file locking."""

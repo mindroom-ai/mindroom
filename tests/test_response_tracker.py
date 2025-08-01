@@ -116,30 +116,6 @@ class TestResponseTracker:
             assert tracker.has_responded(f"new_event{i}")
             assert not tracker.has_responded(f"old_event{i}")
 
-    def test_backward_compatibility(self, temp_dir: Path) -> None:
-        """Test loading old format (list) converts to new format (dict)."""
-        # Create old format file
-        store_path = temp_dir / "response_tracking" / "test_agent"
-        store_path.mkdir(parents=True, exist_ok=True)
-        responses_file = store_path / "responded_events.json"
-
-        old_data = {"event_ids": ["event1", "event2", "event3"]}
-        with open(responses_file, "w") as f:
-            json.dump(old_data, f)
-
-        # Load with new tracker
-        tracker = ResponseTracker("test_agent", base_path=temp_dir)
-
-        # Should convert to new format
-        assert len(tracker._responded_events) == 3
-        assert tracker.has_responded("event1")
-        assert tracker.has_responded("event2")
-        assert tracker.has_responded("event3")
-
-        # All should have timestamps
-        for event_id in ["event1", "event2", "event3"]:
-            assert isinstance(tracker._responded_events[event_id], float)
-
     def test_get_stats(self, temp_dir: Path) -> None:
         """Test getting statistics about tracked responses."""
         tracker = ResponseTracker("test_stats", base_path=temp_dir)

@@ -41,11 +41,9 @@ def markdown_to_html(text: str) -> str:
 
 def prepare_response_content(response_text: str, event: nio.RoomMessageText, agent_name: str = "") -> dict[str, Any]:
     """Prepares the content for the response message."""
-    from loguru import logger
+    from .logging_config import colorize, get_logger
 
-    from .logging_config import colorize
-
-    # Note: Using ANSI colors directly in colorize() function instead of loguru color tags
+    logger = get_logger(__name__)
 
     content: dict[str, Any] = {
         "msgtype": "m.text",

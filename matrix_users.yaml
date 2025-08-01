@@ -1,95 +1,65 @@
 accounts:
-  agent_calculator:
-    password: calculator_secure_password_27a32533aea603f9
-    username: mindroom_calculator
-  agent_code:
-    password: code_secure_password_b4970c6cd5f9fc7b
-    username: mindroom_code
-  agent_data_analyst:
-    password: data_analyst_secure_password_9f68639615b7484e
-    username: mindroom_data_analyst
-  agent_finance:
-    password: finance_secure_password_cfc48a9442340778
-    username: mindroom_finance
-  agent_general:
-    password: general_secure_password_65356d3d32270d2e
-    username: mindroom_general
-  agent_news:
-    password: news_secure_password_72847a9dec80a3fb
-    username: mindroom_news
-  agent_research:
-    password: research_secure_password_61c334a652b026d8
-    username: mindroom_research
-  agent_shell:
-    password: shell_secure_password_160ac178775718f7
-    username: mindroom_shell
-  agent_summary:
-    password: summary_secure_password_d6dfe6c5f24e9e1c
-    username: mindroom_summary
-  bot:
-    password: bot_password_123
-    username: mindroom_bot
   user:
-    password: user_password_123
-    username: mindroom_user
+    username: mindroom_user_8bdece33
+    password: password_8ae3379709979d1625728519ce56fc3e
 rooms:
-  lobby:
-    room_id: '!XeqkOykvpdhfoKCrQO:localhost'
-    alias: '#lobby:localhost'
-    name: Main Lobby
-    created_at: '2025-07-30T13:42:00Z'
-  help:
-    room_id: '!ttzoOtKWdvbSfYPOcU:localhost'
-    alias: '#help:localhost'
-    name: Help Room
-    created_at: '2025-07-30T13:42:00Z'
-  dev:
-    room_id: '!BFEXDUSnIarGSxVbEJ:localhost'
-    alias: '#dev:localhost'
-    name: Development
-    created_at: '2025-07-30T13:42:00Z'
-  automation:
-    room_id: '!XxxyJwdbAswNTeayhc:localhost'
-    alias: '#automation:localhost'
-    name: Automation
-    created_at: '2025-07-30T13:42:00Z'
-  ops:
-    room_id: '!LQFVZZKOGdHcxLneTS:localhost'
-    alias: '#ops:localhost'
-    name: Ops
-    created_at: '2025-07-30T13:37:00Z'
-  research:
-    room_id: '!dILWmRJrGmlMysZWtb:localhost'
-    alias: '#research:localhost'
-    name: Research
-    created_at: '2025-07-30T13:42:00Z'
-  docs:
-    room_id: '!drRGiBxZGNlCODlPOv:localhost'
-    alias: '#docs:localhost'
-    name: Docs
-    created_at: '2025-07-30T13:37:00Z'
-  science:
-    room_id: '!vHavUnTzTMmAUEveXo:localhost'
-    alias: '#science:localhost'
-    name: Science
-    created_at: '2025-07-30T13:37:00Z'
-  news:
-    room_id: '!RBzXsLHNRFtOVPvgGT:localhost'
-    alias: '#news:localhost'
-    name: News
-    created_at: '2025-07-30T13:37:00Z'
-  finance:
-    room_id: '!fZaLPNeaIfPtphCLSd:localhost'
-    alias: '#finance:localhost'
-    name: Finance
-    created_at: '2025-07-30T13:37:00Z'
   analysis:
-    room_id: '!XiGCYUuFjGCzcOGQcS:localhost'
+    room_id: '!gDslSfrvdzNWZWDNHc:localhost'
     alias: '#analysis:localhost'
     name: Analysis
-    created_at: '2025-07-30T13:37:00Z'
+    created_at: '2025-07-31T11:37:48.487936'
+  science:
+    room_id: '!izRPBDigTxKNKqnLlp:localhost'
+    alias: '#science:localhost'
+    name: Science
+    created_at: '2025-07-31T11:37:48.757559'
+  lobby:
+    room_id: '!XEGXEOrxwHPgnroazx:localhost'
+    alias: '#lobby:localhost'
+    name: Lobby
+    created_at: '2025-07-31T11:37:49.019924'
   business:
-    room_id: '!RiaUjyDPSbzFKSkUDg:localhost'
+    room_id: '!BUIFuDackzLIceZuKQ:localhost'
     alias: '#business:localhost'
     name: Business
-    created_at: '2025-07-30T13:37:00Z'
+    created_at: '2025-07-31T11:38:05.327812'
+  help:
+    room_id: '!nZqNOvSZkTGWXBUXem:localhost'
+    alias: '#help:localhost'
+    name: Help
+    created_at: '2025-07-31T11:38:15.327774'
+  dev:
+    room_id: '!ZEcIlNaGGssjVwCekf:localhost'
+    alias: '#dev:localhost'
+    name: Dev
+    created_at: '2025-07-31T11:38:18.661060'
+  news:
+    room_id: '!ZEiIrvnGmRwiCVRCBJ:localhost'
+    alias: '#news:localhost'
+    name: News
+    created_at: '2025-07-31T11:38:25.316151'
+  ops:
+    room_id: '!qXSSIoRWhbrRwHGqZj:localhost'
+    alias: '#ops:localhost'
+    name: Ops
+    created_at: '2025-07-31T11:38:31.990681'
+  finance:
+    room_id: '!JfpmXnIQXySAIveJAT:localhost'
+    alias: '#finance:localhost'
+    name: Finance
+    created_at: '2025-07-31T11:38:35.323012'
+  automation:
+    room_id: '!awocPpgihcYkGAwKOe:localhost'
+    alias: '#automation:localhost'
+    name: Automation
+    created_at: '2025-07-31T11:38:41.996812'
+  docs:
+    room_id: '!WHrZRCECIRafqmcBHE:localhost'
+    alias: '#docs:localhost'
+    name: Docs
+    created_at: '2025-07-31T11:38:48.676739'
+  research:
+    room_id: '!znLigAsCFYVRtHGrYA:localhost'
+    alias: '#research:localhost'
+    name: Research
+    created_at: '2025-07-31T11:38:51.993916'
