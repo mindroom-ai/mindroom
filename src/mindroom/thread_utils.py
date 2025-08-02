@@ -8,23 +8,15 @@ from .agent_loader import load_config
 
 @lru_cache(maxsize=128)
 def get_known_agent_names() -> set[str]:
-    """Get set of all configured agent names.
-
-    Returns:
-        Set of agent names from configuration
-    """
+    """Get set of all configured agent names."""
     config = load_config()
     return set(config.agents.keys())
 
 
 def extract_agent_name(sender_id: str) -> str | None:
-    """Extract agent name from sender ID if it's a known agent.
+    """Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
 
-    Args:
-        sender_id: Matrix user ID like @mindroom_calculator:localhost
-
-    Returns:
-        Agent name (e.g., 'calculator') or None if not an agent
+    Returns agent name (e.g., 'calculator') or None if not an agent.
     """
     if not sender_id.startswith("@mindroom_"):
         return None
@@ -47,14 +39,7 @@ def extract_agent_name(sender_id: str) -> str | None:
 
 
 def get_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
-    """Get list of unique agents that have participated in thread.
-
-    Args:
-        thread_history: List of messages in thread
-
-    Returns:
-        List of agent names (not including regular users)
-    """
+    """Get list of unique agents that have participated in thread."""
     agents = set()
 
     for msg in thread_history:
@@ -67,14 +52,7 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
 
 
 def get_mentioned_agents(mentions: dict[str, Any]) -> list[str]:
-    """Extract agent names from mentions.
-
-    Args:
-        mentions: The m.mentions object from message content
-
-    Returns:
-        List of mentioned agent names
-    """
+    """Extract agent names from mentions."""
     user_ids = mentions.get("user_ids", [])
     agents = []
 
@@ -87,14 +65,7 @@ def get_mentioned_agents(mentions: dict[str, Any]) -> list[str]:
 
 
 def get_available_agents_in_room(room: Any) -> list[str]:
-    """Get list of available agents in a room.
-
-    Args:
-        room: MatrixRoom object
-
-    Returns:
-        List of agent names available in the room
-    """
+    """Get list of available agents in a room."""
     agents = []
     room_members = list(room.users.keys()) if room.users else []
 
@@ -107,14 +78,7 @@ def get_available_agents_in_room(room: Any) -> list[str]:
 
 
 def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]]) -> bool:
-    """Check if any agents are mentioned anywhere in the thread.
-
-    Args:
-        thread_history: List of messages in thread
-
-    Returns:
-        True if any agent is mentioned in any message
-    """
+    """Check if any agents are mentioned anywhere in the thread."""
     for msg in thread_history:
         content = msg.get("content", {})
         mentions = content.get("m.mentions", {})

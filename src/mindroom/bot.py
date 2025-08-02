@@ -53,21 +53,7 @@ async def _handle_invite_command(
     agent_domain: str,
     client: nio.AsyncClient | None,
 ) -> str:
-    """Handle the invite command logic.
-
-    Args:
-        room_id: The room ID
-        thread_id: Optional thread ID
-        agent_name: Name of agent to invite
-        to_room: Whether this is a room invite
-        duration_hours: Optional duration in hours
-        sender: The sender of the command
-        agent_domain: Domain for constructing agent user ID
-        client: Matrix client for sending invites
-
-    Returns:
-        Response message text
-    """
+    """Handle the invite command logic."""
     # Check if agent exists
     config = load_config()
     if agent_name not in config.agents:
@@ -124,15 +110,7 @@ async def _handle_invite_command(
 
 
 async def _handle_list_invites_command(room_id: str, thread_id: str | None) -> str:
-    """Handle the list invites command.
-
-    Args:
-        room_id: The room ID
-        thread_id: Optional thread ID
-
-    Returns:
-        Response message text
-    """
+    """Handle the list invites command."""
     response_parts = []
 
     # Get room invites
@@ -155,7 +133,6 @@ async def _handle_list_invites_command(room_id: str, thread_id: str | None) -> s
 
 
 def _is_sender_other_agent(sender: str, current_agent_user_id: str) -> bool:
-    """Check if sender is another agent (not the current agent, not the user)."""
     if sender == current_agent_user_id:
         return False
 
@@ -164,15 +141,6 @@ def _is_sender_other_agent(sender: str, current_agent_user_id: str) -> bool:
 
 
 def _should_process_message(event_sender: str, agent_user_id: str) -> bool:
-    """Check if an agent should process a message.
-
-    Args:
-        event_sender: The sender of the message
-        agent_user_id: The agent's user ID
-
-    Returns:
-        True if the message should be processed, False otherwise
-    """
     # Don't respond to own messages
     if event_sender == agent_user_id:
         return False
@@ -264,7 +232,6 @@ class AgentBot:
         logger.info("Stopped agent bot", agent=f"{emoji(self.agent_name)} {self.agent_name}")
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
-        """Handle room invitations."""
         logger.info(
             "Received invite to room",
             agent=f"{emoji(self.agent_name)} {self.agent_name}",
@@ -284,7 +251,6 @@ class AgentBot:
                 )
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        """Handle messages in rooms."""
         logger.debug(
             f"{emoji(self.agent_name)} Message received",
             room_id=room.room_id,
@@ -348,23 +314,6 @@ class AgentBot:
         thread_history: list[dict],
         room_id: str,
     ) -> tuple[bool, bool]:
-        """Determine if this agent should respond to a message.
-
-        Returns:
-            tuple: (should_respond, use_router)
-                - should_respond: Whether this agent should generate a response
-                - use_router: Whether to use AI routing to pick an agent
-
-        Decision logic:
-        1. If I'm mentioned → I respond (always)
-        2. If I'm the ONLY agent in the thread → I continue responding
-        3. If I'm in the room (native or invited):
-           - If any agent is mentioned in thread → Only mentioned agents respond
-           - If NO agents are mentioned in thread:
-             - 0 agents have participated → Router picks who should start
-             - 2+ agents have participated → Nobody responds (users must mention who they want)
-        4. Not in thread → Don't respond
-        """
         decision = should_agent_respond(
             self.agent_name,
             am_i_mentioned,
@@ -407,7 +356,6 @@ class AgentBot:
         return decision.should_respond, decision.use_router
 
     async def _should_process_message(self, event: nio.RoomMessageText) -> bool:
-        """Check if we should process this message at all."""
         should_process = _should_process_message(event.sender, self.agent_user.user_id)
 
         if not should_process:
@@ -423,7 +371,6 @@ class AgentBot:
         return should_process
 
     async def _has_room_access(self, room_id: str) -> bool:
-        """Check if agent has access to this room."""
         has_access = await has_room_access(room_id, self.agent_name, self.rooms)
         if not has_access:
             logger.debug(
@@ -434,7 +381,6 @@ class AgentBot:
         return has_access
 
     async def _try_handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> bool:
-        """Try to handle command if this is the general agent. Returns True if handled."""
         if self.agent_name == "general":
             command = command_parser.parse(event.body)
             if command:
@@ -443,7 +389,6 @@ class AgentBot:
         return False
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> dict:
-        """Extract all relevant context from the message."""
         logger.debug(
             "Checking message",
             agent=f"{emoji(self.agent_name)} {self.agent_name}",
@@ -500,7 +445,6 @@ class AgentBot:
     async def _process_and_respond(
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
     ) -> None:
-        """Process the message and send a response."""
         logger.info(
             "WILL PROCESS message",
             agent=f"{emoji(self.agent_name)} {self.agent_name}",
@@ -533,7 +477,6 @@ class AgentBot:
     async def _send_response(
         self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None = None
     ) -> None:
-        """Send a response to the room."""
         # Extract domain from agent's user_id
         sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
 
@@ -578,7 +521,6 @@ class AgentBot:
     async def _handle_ai_routing(
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
     ) -> None:
-        """Handle AI routing for multi-agent threads."""
         # Only let one agent do the routing to avoid duplicates
         available_agents = get_available_agents_in_room(room)
         if not should_route_to_agent(self.agent_name, available_agents):
@@ -623,7 +565,6 @@ class AgentBot:
             )
 
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
-        """Handle user commands."""
         logger.info(
             "Handling command",
             agent=f"{emoji(self.agent_name)} {self.agent_name}",
@@ -767,7 +708,6 @@ class MultiAgentOrchestrator:
         logger.info("All agent bots stopped")
 
     async def _periodic_cleanup(self) -> None:
-        """Periodically clean up expired invitations and check room invite activity."""
         logger.info("Starting periodic cleanup task")
 
         while self.running:

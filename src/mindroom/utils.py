@@ -11,28 +11,14 @@ class ResponseDecision(NamedTuple):
 
 
 def extract_domain_from_user_id(user_id: str) -> str:
-    """Extract domain from a Matrix user ID.
-
-    Args:
-        user_id: Matrix user ID like "@user:example.com"
-
-    Returns:
-        Domain part (e.g., "example.com") or "localhost" if not found
-    """
+    """Extract domain from a Matrix user ID like "@user:example.com"."""
     if ":" in user_id:
         return user_id.split(":", 1)[1]
     return "localhost"
 
 
 def extract_username_from_user_id(user_id: str) -> str:
-    """Extract username from a Matrix user ID.
-
-    Args:
-        user_id: Matrix user ID like "@mindroom_calculator:example.com"
-
-    Returns:
-        Username without @ and domain (e.g., "mindroom_calculator")
-    """
+    """Extract username from a Matrix user ID like "@mindroom_calculator:example.com"."""
     if user_id.startswith("@"):
         username = user_id[1:]  # Remove @
         if ":" in username:
@@ -42,14 +28,7 @@ def extract_username_from_user_id(user_id: str) -> str:
 
 
 def extract_server_name_from_homeserver(homeserver: str) -> str:
-    """Extract server name from a homeserver URL.
-
-    Args:
-        homeserver: Homeserver URL like "http://localhost:8008"
-
-    Returns:
-        Server name (e.g., "localhost")
-    """
+    """Extract server name from a homeserver URL like "http://localhost:8008"."""
     # Remove protocol
     server_part = homeserver.split("://", 1)[1] if "://" in homeserver else homeserver
 
@@ -60,26 +39,14 @@ def extract_server_name_from_homeserver(homeserver: str) -> str:
 
 
 def construct_agent_user_id(agent_name: str, domain: str) -> str:
-    """Construct a Matrix user ID for an agent.
-
-    Args:
-        agent_name: Agent name (e.g., "calculator")
-        domain: Domain part (e.g., "localhost")
-
-    Returns:
-        Full Matrix user ID (e.g., "@mindroom_calculator:localhost")
-    """
+    """Construct a Matrix user ID for an agent like "@mindroom_calculator:localhost"."""
     return f"@mindroom_{agent_name}:{domain}"
 
 
 def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
     """Extract thread information from a Matrix event.
 
-    Args:
-        event_source: The event source dictionary
-
-    Returns:
-        Tuple of (is_thread, thread_id)
+    Returns (is_thread, thread_id).
     """
     relates_to = event_source.get("content", {}).get("m.relates_to", {})
     is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
@@ -90,12 +57,7 @@ def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
 def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str], bool]:
     """Check if an agent is mentioned in a message.
 
-    Args:
-        event_source: The event source dictionary
-        agent_name: The agent name to check for
-
-    Returns:
-        Tuple of (mentioned_agents, am_i_mentioned)
+    Returns (mentioned_agents, am_i_mentioned).
     """
     from .thread_utils import get_mentioned_agents
 
@@ -106,29 +68,12 @@ def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str
 
 
 def create_session_id(room_id: str, thread_id: str | None) -> str:
-    """Create a session ID with thread awareness.
-
-    Args:
-        room_id: The room ID
-        thread_id: Optional thread ID
-
-    Returns:
-        Session ID string
-    """
+    """Create a session ID with thread awareness."""
     return f"{room_id}:{thread_id}" if thread_id else room_id
 
 
 async def has_room_access(room_id: str, agent_name: str, configured_rooms: list[str]) -> bool:
-    """Check if an agent has access to a room.
-
-    Args:
-        room_id: The room ID to check
-        agent_name: The agent name
-        configured_rooms: List of rooms the agent is configured for
-
-    Returns:
-        True if the agent has access, False otherwise
-    """
+    """Check if an agent has access to a room."""
     from .room_invites import room_invite_manager
 
     is_room_invite = await room_invite_manager.is_agent_invited_to_room(room_id, agent_name)
@@ -146,17 +91,7 @@ def should_agent_respond(
 ) -> ResponseDecision:
     """Determine if an agent should respond to a message.
 
-    Args:
-        agent_name: The agent's name
-        am_i_mentioned: Whether the agent is mentioned
-        is_thread: Whether this is a thread
-        is_invited_to_thread: Whether agent is invited to thread
-        room_id: The room ID
-        configured_rooms: List of rooms agent is configured for
-        thread_history: Thread message history
-
-    Returns:
-        ResponseDecision: Named tuple with (should_respond, use_router)
+    Returns ResponseDecision with (should_respond, use_router).
     """
     from .thread_utils import get_agents_in_thread, has_any_agent_mentions_in_thread
 
@@ -193,13 +128,6 @@ def should_route_to_agent(agent_name: str, available_agents: list[str]) -> bool:
 
     Only one agent should handle routing to avoid duplicates.
     We use the first agent alphabetically as a deterministic choice.
-
-    Args:
-        agent_name: The current agent's name
-        available_agents: List of available agents in the room
-
-    Returns:
-        True if this agent should handle routing, False otherwise
     """
     if not available_agents:
         return False
