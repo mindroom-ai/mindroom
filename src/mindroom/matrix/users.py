@@ -8,7 +8,7 @@ import nio
 from ..agent_loader import load_config
 from ..logging_config import get_logger
 from .client import login, register_user
-from .config import MatrixConfig
+from .state import MatrixState
 
 logger = get_logger(__name__)
 
@@ -25,7 +25,7 @@ class AgentMatrixUser:
 
 
 def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
-    """Get credentials for a specific agent from matrix_users.yaml.
+    """Get credentials for a specific agent from matrix_state.yaml.
 
     Args:
         agent_name: The agent name
@@ -33,26 +33,26 @@ def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
     Returns:
         Dictionary with username and password, or None if not found
     """
-    config = MatrixConfig.load()
+    state = MatrixState.load()
     agent_key = f"agent_{agent_name}"
-    account = config.get_account(agent_key)
+    account = state.get_account(agent_key)
     if account:
         return {"username": account.username, "password": account.password}
     return None
 
 
 def save_agent_credentials(agent_name: str, username: str, password: str) -> None:
-    """Save credentials for a specific agent to matrix_users.yaml.
+    """Save credentials for a specific agent to matrix_state.yaml.
 
     Args:
         agent_name: The agent name
         username: The Matrix username
         password: The Matrix password
     """
-    config = MatrixConfig.load()
+    state = MatrixState.load()
     agent_key = f"agent_{agent_name}"
-    config.add_account(agent_key, username, password)
-    config.save()
+    state.add_account(agent_key, username, password)
+    state.save()
     logger.info(f"Saved credentials for agent {agent_name}")
 
 
@@ -71,19 +71,19 @@ async def create_agent_user(
     Returns:
         AgentMatrixUser object with account details
     """
-    # Check if credentials already exist in matrix_users.yaml
+    # Check if credentials already exist in matrix_state.yaml
     existing_creds = get_agent_credentials(agent_name)
 
     if existing_creds:
         username = existing_creds["username"]
         password = existing_creds["password"]
-        logger.info(f"Using existing credentials for agent {agent_name} from matrix_users.yaml")
+        logger.info(f"Using existing credentials for agent {agent_name} from matrix_state.yaml")
     else:
         # Generate new credentials
         username = f"mindroom_{agent_name}"
         password = f"{agent_name}_secure_password_{os.urandom(8).hex()}"
 
-        # Save to matrix_users.yaml
+        # Save to matrix_state.yaml
         save_agent_credentials(agent_name, username, password)
         logger.info(f"Generated new credentials for agent {agent_name}")
 

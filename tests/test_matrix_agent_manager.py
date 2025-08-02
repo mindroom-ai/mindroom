@@ -9,7 +9,7 @@ import yaml
 
 from mindroom.matrix import (
     AgentMatrixUser,
-    MatrixConfig,
+    MatrixState,
     create_agent_user,
     ensure_all_agent_users,
     get_agent_credentials,
@@ -21,8 +21,8 @@ from mindroom.matrix import (
 
 @pytest.fixture
 def temp_matrix_users_file(tmp_path: Path) -> Path:
-    """Create a temporary matrix_users.yaml file."""
-    file_path = tmp_path / "matrix_users.yaml"
+    """Create a temporary matrix_state.yaml file."""
+    file_path = tmp_path / "matrix_state.yaml"
     initial_data = {
         "accounts": {
             "bot": {"username": "mindroom_bot", "password": "bot_password_123"},
@@ -70,30 +70,30 @@ class TestMatrixUserManagement:
 
     def test_load_matrix_users(self, temp_matrix_users_file: Path) -> None:
         """Test loading matrix users from file."""
-        with patch("mindroom.matrix.config.MATRIX_USERS_FILE", temp_matrix_users_file):
-            config = MatrixConfig.load()
+        with patch("mindroom.matrix.state.MATRIX_STATE_FILE", temp_matrix_users_file):
+            state = MatrixState.load()
 
-        assert "bot" in config.accounts
-        assert config.accounts["bot"].username == "mindroom_bot"
-        assert "user" in config.accounts
-        assert config.accounts["user"].username == "mindroom_user"
+        assert "bot" in state.accounts
+        assert state.accounts["bot"].username == "mindroom_bot"
+        assert "user" in state.accounts
+        assert state.accounts["user"].username == "mindroom_user"
 
-    @patch("mindroom.matrix.config.MATRIX_USERS_FILE")
+    @patch("mindroom.matrix.state.MATRIX_STATE_FILE")
     def test_load_matrix_users_no_file(self, mock_file: MagicMock) -> None:
         """Test loading matrix users when file doesn't exist."""
         mock_file.exists.return_value = False
-        config = MatrixConfig.load()
-        assert config.accounts == {}
-        assert config.rooms == {}
+        state = MatrixState.load()
+        assert state.accounts == {}
+        assert state.rooms == {}
 
     def test_save_matrix_users(self, tmp_path: Path) -> None:
         """Test saving matrix users to file."""
         file_path = tmp_path / "test_users.yaml"
 
-        with patch("mindroom.matrix.config.MATRIX_USERS_FILE", file_path):
-            config = MatrixConfig()
-            config.add_account("agent_test", "mindroom_test", "test_pass")
-            config.save()
+        with patch("mindroom.matrix.state.MATRIX_STATE_FILE", file_path):
+            state = MatrixState()
+            state.add_account("agent_test", "mindroom_test", "test_pass")
+            state.save()
 
         # Verify the file was written correctly
         with open(file_path) as f:
@@ -102,12 +102,12 @@ class TestMatrixUserManagement:
         assert "agent_test" in saved_data["accounts"]
         assert saved_data["accounts"]["agent_test"]["username"] == "mindroom_test"
 
-    @patch("mindroom.matrix.config.MatrixConfig.load")
+    @patch("mindroom.matrix.state.MatrixState.load")
     def test_get_agent_credentials(self, mock_load: MagicMock) -> None:
         """Test getting agent credentials."""
-        mock_config = MatrixConfig()
-        mock_config.add_account("agent_calculator", "mindroom_calculator", "calc_pass")
-        mock_load.return_value = mock_config
+        mock_state = MatrixState()
+        mock_state.add_account("agent_calculator", "mindroom_calculator", "calc_pass")
+        mock_load.return_value = mock_state
 
         creds = get_agent_credentials("calculator")
         assert creds is not None
@@ -118,20 +118,20 @@ class TestMatrixUserManagement:
         creds = get_agent_credentials("nonexistent")
         assert creds is None
 
-    @patch("mindroom.matrix.config.MatrixConfig.save")
-    @patch("mindroom.matrix.config.MatrixConfig.load")
+    @patch("mindroom.matrix.state.MatrixState.save")
+    @patch("mindroom.matrix.state.MatrixState.load")
     def test_save_agent_credentials(self, mock_load: MagicMock, mock_save: MagicMock) -> None:
         """Test saving agent credentials."""
-        mock_config = MatrixConfig()
-        mock_config.add_account("bot", "bot", "pass")
-        mock_load.return_value = mock_config
+        mock_state = MatrixState()
+        mock_state.add_account("bot", "bot", "pass")
+        mock_load.return_value = mock_state
 
         save_agent_credentials("calculator", "mindroom_calculator", "calc_pass")
 
         # Verify the account was added
-        assert "agent_calculator" in mock_config.accounts
-        assert mock_config.accounts["agent_calculator"].username == "mindroom_calculator"
-        assert mock_config.accounts["agent_calculator"].password == "calc_pass"
+        assert "agent_calculator" in mock_state.accounts
+        assert mock_state.accounts["agent_calculator"].username == "mindroom_calculator"
+        assert mock_state.accounts["agent_calculator"].password == "calc_pass"
         mock_save.assert_called_once()
 
 
@@ -299,12 +299,12 @@ class TestEnsureAllAgentUsers:
     ) -> None:
         """Test ensuring all configured agents have users."""
         # Mock configuration
-        mock_config = MagicMock()
-        mock_config.agents = {
+        mock_state = MagicMock()
+        mock_state.agents = {
             "calculator": MagicMock(display_name="CalculatorAgent"),
             "general": MagicMock(display_name="GeneralAgent"),
         }
-        mock_load_config.return_value = mock_config
+        mock_load_config.return_value = mock_state
 
         # Mock user creation
         mock_create_user.side_effect = [
@@ -329,12 +329,12 @@ class TestEnsureAllAgentUsers:
     ) -> None:
         """Test handling errors when creating agent users."""
         # Mock configuration
-        mock_config = MagicMock()
-        mock_config.agents = {
+        mock_state = MagicMock()
+        mock_state.agents = {
             "calculator": MagicMock(display_name="CalculatorAgent"),
             "failing": MagicMock(display_name="FailingAgent"),
         }
-        mock_load_config.return_value = mock_config
+        mock_load_config.return_value = mock_state
 
         # Mock user creation with one failure
         mock_create_user.side_effect = [

@@ -98,7 +98,7 @@ Agents can be assigned to specific rooms in your Matrix server. This allows you 
 1. **Room Aliases**: In `config.yaml`, you specify simple room aliases like `lobby`, `dev`, `research`
 2. **Automatic Creation**: When you run `mindroom run`, it automatically creates any missing rooms
 3. **Agent Assignment**: Agents are automatically invited to their configured rooms
-4. **Room Persistence**: Room information is stored in `matrix_users.yaml` (auto-generated)
+4. **Room Persistence**: Room information is stored in `matrix_state.yaml` (auto-generated)
 
 ### Example Room Setup
 

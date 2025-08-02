@@ -1,4 +1,4 @@
-"""Pydantic models for Matrix configuration."""
+"""Pydantic models for Matrix state."""
 
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +7,7 @@ from typing import Self
 import yaml
 from pydantic import BaseModel, Field, field_serializer
 
-MATRIX_USERS_FILE = Path("matrix_users.yaml")
+MATRIX_STATE_FILE = Path("matrix_state.yaml")
 
 
 class MatrixAccount(BaseModel):
@@ -18,7 +18,7 @@ class MatrixAccount(BaseModel):
 
 
 class MatrixRoom(BaseModel):
-    """Represents a Matrix room configuration."""
+    """Represents a Matrix room state."""
 
     room_id: str
     alias: str
@@ -31,29 +31,29 @@ class MatrixRoom(BaseModel):
         return dt.isoformat()
 
 
-class MatrixConfig(BaseModel):
-    """Complete Matrix configuration including accounts and rooms."""
+class MatrixState(BaseModel):
+    """Complete Matrix state including accounts and rooms."""
 
     accounts: dict[str, MatrixAccount] = Field(default_factory=dict)
     rooms: dict[str, MatrixRoom] = Field(default_factory=dict)
 
     @classmethod
     def load(cls) -> Self:
-        """Load configuration from file."""
-        if not MATRIX_USERS_FILE.exists():
+        """Load state from file."""
+        if not MATRIX_STATE_FILE.exists():
             return cls()
 
-        with open(MATRIX_USERS_FILE) as f:
+        with open(MATRIX_STATE_FILE) as f:
             data = yaml.safe_load(f) or {}
 
         return cls.model_validate(data)
 
     def save(self) -> None:
-        """Save configuration to file."""
+        """Save state to file."""
         # Use Pydantic's model_dump with custom serializer for datetime
         data = self.model_dump(mode="json")
 
-        with open(MATRIX_USERS_FILE, "w") as f:
+        with open(MATRIX_STATE_FILE, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     def get_account(self, key: str) -> MatrixAccount | None:

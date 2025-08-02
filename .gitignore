@@ -181,5 +181,5 @@ temp/
 logs/
 *.log
 
-# Matrix configuration files (contain sensitive data)
-matrix_users.yaml
+# Matrix state files (contain sensitive data)
+matrix_state.yaml

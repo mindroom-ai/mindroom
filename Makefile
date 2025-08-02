@@ -29,6 +29,6 @@ test:
 
 clean:
 	docker compose down -v
-	rm -f matrix_users.yaml .env.python
+	rm -f matrix_state.yaml .env.python
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete

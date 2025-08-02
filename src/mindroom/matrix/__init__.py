@@ -15,7 +15,6 @@ from .client import (
     prepare_response_content,
     register_user,
 )
-from .config import MatrixAccount, MatrixConfig, MatrixRoom
 from .mentions import create_mention_content, create_mention_content_from_text
 from .rooms import (
     add_room,
@@ -24,6 +23,7 @@ from .rooms import (
     load_rooms,
     remove_room,
 )
+from .state import MatrixAccount, MatrixRoom, MatrixState
 from .users import (
     AgentMatrixUser,
     create_agent_user,
@@ -52,7 +52,7 @@ __all__ = [
     "register_user",
     # Config models
     "MatrixAccount",
-    "MatrixConfig",
+    "MatrixState",
     "MatrixRoom",
     # Room functions
     "add_room",
