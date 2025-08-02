@@ -7,6 +7,7 @@ import nio
 
 from ..agent_loader import load_config
 from ..logging_config import get_logger
+from ..utils import extract_server_name_from_homeserver
 from .client import login, register_user
 from .state import MatrixState
 
@@ -88,7 +89,7 @@ async def create_agent_user(
         logger.info(f"Generated new credentials for agent {agent_name}")
 
     # Extract server name from homeserver URL
-    server_name = homeserver.split("://")[1].split(":")[0]
+    server_name = extract_server_name_from_homeserver(homeserver)
     user_id = f"@{username}:{server_name}"
 
     # Try to register/verify the user

@@ -24,11 +24,13 @@ from .room_invites import room_invite_manager
 from .routing import suggest_agent_for_message
 from .thread_invites import thread_invite_manager
 from .thread_utils import (
+    extract_agent_name,
     get_agents_in_thread,
     get_available_agents_in_room,
     get_mentioned_agents,
     has_any_agent_mentions_in_thread,
 )
+from .utils import construct_agent_user_id, extract_domain_from_user_id
 
 logger = get_logger(__name__)
 
@@ -38,9 +40,8 @@ def is_sender_other_agent(sender: str, current_agent_user_id: str) -> bool:
     if sender == current_agent_user_id:
         return False
 
-    sender_username = sender.split(":")[0][1:] if sender.startswith("@") else ""
-    # Check if it's a mindroom agent (not a regular user)
-    return sender_username.startswith("mindroom_") and not sender_username.startswith("mindroom_user")
+    # Use existing extract_agent_name function which returns None for non-agents
+    return extract_agent_name(sender) is not None
 
 
 def has_other_agents_in_thread(thread_history: list[dict], current_agent_user_id: str) -> bool:
@@ -224,13 +225,14 @@ class AgentBot:
 
         Decision logic:
         1. If I'm mentioned → I respond (always)
-        2. If I'm invited to thread → I can participate
-        3. If any agent is mentioned in thread → Only mentioned agents respond
-        4. If NO agents are mentioned in thread:
-           - 0 agents have participated → Router picks who should start
-           - 1 agent has participated → That agent continues
-           - 2+ agents have participated → Nobody responds (users must mention who they want)
-        5. Not in thread → Don't respond
+        2. If I'm invited to thread → I ONLY respond if explicitly mentioned
+        3. If I'm native to the room (configured in config.yaml):
+           - If any agent is mentioned in thread → Only mentioned agents respond
+           - If NO agents are mentioned in thread:
+             - 0 agents have participated → Router picks who should start
+             - 1 agent has participated → That agent continues
+             - 2+ agents have participated → Nobody responds (users must mention who they want)
+        4. Not in thread → Don't respond
         """
         should_respond = False
         use_router = False
@@ -242,30 +244,12 @@ class AgentBot:
         elif is_thread:
             # Check if I'm an invited agent who should participate
             if is_invited_to_thread:
-                # I'm invited - check if I should respond
-                if has_any_agent_mentions_in_thread(thread_history):
-                    # Someone is mentioned - only respond if I'm mentioned
-                    logger.debug(
-                        "Invited but not responding: other agents mentioned",
-                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    )
-                else:
-                    # No mentions - invited agents can participate
-                    agents_in_thread = get_agents_in_thread(thread_history)
-                    if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
-                        # I'm the only agent who has responded - continue
-                        should_respond = True
-                        logger.debug(
-                            "Will respond: invited and only agent in thread",
-                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                        )
-                    elif not agents_in_thread:
-                        # No agents yet but I'm invited - I can start
-                        should_respond = True
-                        logger.debug(
-                            "Will respond: invited to thread with no agents yet",
-                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                        )
+                # I'm invited - but only respond if explicitly mentioned
+                # Invited agents don't participate automatically
+                logger.debug(
+                    "Invited to thread but not mentioned, not responding",
+                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                )
             elif room_id in self.rooms:
                 # Not invited but in the room - standard logic
                 if has_any_agent_mentions_in_thread(thread_history):
@@ -441,7 +425,7 @@ class AgentBot:
     ) -> None:
         """Send a response to the room."""
         # Extract domain from agent's user_id
-        sender_domain = self.agent_user.user_id.split(":")[1] if ":" in self.agent_user.user_id else "localhost"
+        sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
 
         # Parse response for any agent mentions
         content = create_mention_content_from_text(
@@ -514,7 +498,7 @@ class AgentBot:
         response_text = "could you help with this?"
 
         # Use universal mention parser
-        sender_domain = self.agent_user.user_id.split(":")[1] if ":" in self.agent_user.user_id else "localhost"
+        sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
         full_message = f"@{suggested_agent} {response_text}"
 
         content = create_mention_content_from_text(
@@ -570,7 +554,8 @@ class AgentBot:
                 )
 
                 # Get the agent's user ID and invite to Matrix room
-                agent_user_id = f"@mindroom_{agent_name}:{self.agent_user.user_id.split(':')[1]}"
+                agent_domain = extract_domain_from_user_id(self.agent_user.user_id)
+                agent_user_id = construct_agent_user_id(agent_name, agent_domain)
                 try:
                     if self.client:
                         result = await self.client.room_invite(room.room_id, agent_user_id)
@@ -646,7 +631,7 @@ class AgentBot:
 
         # Send response
         if response_text:
-            sender_domain = self.agent_user.user_id.split(":")[1] if ":" in self.agent_user.user_id else "localhost"
+            sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
             content = create_mention_content_from_text(
                 response_text,
                 sender_domain=sender_domain,

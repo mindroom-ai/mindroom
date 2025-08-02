@@ -8,6 +8,7 @@ import markdown
 import nio
 
 from ..logging_config import emoji, get_logger
+from ..utils import extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
 
@@ -90,7 +91,7 @@ async def register_user(
         ValueError: If registration fails
     """
     # Extract server name from homeserver URL
-    server_name = homeserver.split("://")[1].split(":")[0]
+    server_name = extract_server_name_from_homeserver(homeserver)
     user_id = f"@{username}:{server_name}"
 
     async with matrix_client(homeserver) as client:
