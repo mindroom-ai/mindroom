@@ -7,7 +7,7 @@ from pathlib import Path
 
 import nio
 
-from .agent_loader import load_config
+from .agent_config import load_config
 from .ai import ai_response
 from .commands import Command, CommandType, command_parser, get_command_help
 from .logging_config import emoji, get_logger, setup_logging
@@ -22,6 +22,7 @@ from .matrix import (
     extract_thread_info,
     fetch_thread_history,
     get_room_aliases,
+    join_room,
     login_agent_user,
 )
 from .response_tracker import ResponseTracker
@@ -141,11 +142,10 @@ class AgentBot:
 
         # Join configured rooms
         for room_id in self.rooms:
-            response = await self.client.join(room_id)
-            if isinstance(response, nio.JoinResponse):
+            if await join_room(self.client, room_id):
                 self.logger.info("Joined room", room_id=room_id)
             else:
-                self.logger.warning("Failed to join room", room_id=room_id, error=str(response))
+                self.logger.warning("Failed to join room", room_id=room_id)
 
     async def stop(self) -> None:
         """Stop the agent bot."""
@@ -155,11 +155,10 @@ class AgentBot:
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
-        result = await self.client.join(room.room_id)
-        if isinstance(result, nio.JoinResponse):
+        if await join_room(self.client, room.room_id):
             self.logger.info("Joined room", room_id=room.room_id)
         else:
-            self.logger.error("Failed to join room", room_id=room.room_id, error=str(result))
+            self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         if not _should_process_message(event.sender, self.agent_user.user_id):
@@ -216,11 +215,9 @@ class AgentBot:
         is_thread, thread_id = extract_thread_info(event.source)
 
         thread_history = []
-        if thread_id:
-            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-
         is_invited_to_thread = False
         if thread_id:
+            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
             is_invited_to_thread = await thread_invite_manager.is_agent_invited_to_thread(thread_id, self.agent_name)
 
         return MessageContext(

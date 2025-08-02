@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import nio
 
-from ..agent_loader import load_config
+from ..agent_config import load_config
 from ..logging_config import get_logger
 from .state import MatrixState
 
@@ -64,7 +64,7 @@ def extract_agent_name(sender_id: str) -> str | None:
     agent_name = username.replace("mindroom_", "")
 
     # Check if this is actually a configured agent
-    from ..agent_loader import load_config
+    from ..agent_config import load_config
 
     config = load_config()
     if agent_name in config.agents:

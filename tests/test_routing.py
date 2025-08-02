@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.agent_loader import describe_agent
+from mindroom.agent_config import describe_agent
 from mindroom.bot import AgentBot
 from mindroom.matrix import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
