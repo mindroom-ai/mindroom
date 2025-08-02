@@ -6,6 +6,7 @@ import nio
 import pytest
 
 from mindroom.bot import _handle_invite_command, _handle_list_invites_command, _should_process_message
+from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import should_route_to_agent
 
 
@@ -26,14 +27,17 @@ class TestBotHelpers:
     @pytest.mark.asyncio
     async def test_handle_invite_command_unknown_agent(self):
         """Test _handle_invite_command with unknown agent."""
+        mock_client = AsyncMock()
+        mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
+
         result = await _handle_invite_command(
             room_id="!room:localhost",
             thread_id="$thread123",
             agent_name="unknown_agent",
-            duration_hours=None,
             sender="@user:localhost",
             agent_domain="localhost",
-            client=None,
+            client=mock_client,
+            thread_invite_manager=mock_thread_mgr,
         )
 
         assert "❌ Unknown agent: unknown_agent" in result
@@ -51,17 +55,19 @@ class TestBotHelpers:
         with patch("mindroom.bot.load_config") as mock_config:
             mock_config.return_value.agents = {"calculator": MagicMock()}
 
+            mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
+
             result = await _handle_invite_command(
                 room_id="!room:localhost",
                 thread_id="$thread123",
                 agent_name="calculator",
-                duration_hours=12,
                 sender="@user:localhost",
                 agent_domain="localhost",
                 client=mock_client,
+                thread_invite_manager=mock_thread_mgr,
             )
 
-            assert "✅ Invited @calculator to this thread for 12 hours" in result
+            assert "✅ Invited @calculator to this thread" in result
 
     @pytest.mark.asyncio
     async def test_handle_invite_command_thread_invite(self):
@@ -76,41 +82,43 @@ class TestBotHelpers:
             mock_client.joined_members.return_value = mock_members_response
             mock_client.room_invite.return_value = MagicMock(spec=nio.RoomInviteResponse)
 
+            mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
+
             result = await _handle_invite_command(
                 room_id="!room:localhost",
                 thread_id="$thread123",
                 agent_name="calculator",
-                duration_hours=6,
                 sender="@user:localhost",
                 agent_domain="localhost",
                 client=mock_client,
+                thread_invite_manager=mock_thread_mgr,
             )
 
-            assert "✅ Invited @calculator to this thread for 6 hours" in result
+            assert "✅ Invited @calculator to this thread" in result
             assert "you've been invited to help in this thread!" in result
 
     @pytest.mark.asyncio
     async def test_handle_list_invites_command_empty(self):
         """Test list invites with no invites."""
-        with patch("mindroom.bot.thread_invite_manager") as mock_thread_mgr:
-            mock_thread_mgr.get_thread_agents = AsyncMock(return_value=[])
+        mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
+        mock_thread_mgr.get_thread_agents = AsyncMock(return_value=[])
 
-            result = await _handle_list_invites_command("!room:localhost", "$thread123")
+        result = await _handle_list_invites_command("!room:localhost", "$thread123", mock_thread_mgr)
 
-            assert result == "No agents are currently invited to this thread."
+        assert result == "No agents are currently invited to this thread."
 
     @pytest.mark.asyncio
     async def test_handle_list_invites_command_with_invites(self):
         """Test list invites with active invites."""
-        with patch("mindroom.bot.thread_invite_manager") as mock_thread_mgr:
-            mock_thread_mgr.get_thread_agents = AsyncMock(return_value=["calculator", "research", "code"])
+        mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
+        mock_thread_mgr.get_thread_agents = AsyncMock(return_value=["calculator", "research", "code"])
 
-            result = await _handle_list_invites_command("!room:localhost", "$thread123")
+        result = await _handle_list_invites_command("!room:localhost", "$thread123", mock_thread_mgr)
 
-            assert "**Invited agents in this thread:**" in result
-            assert "- @calculator" in result
-            assert "- @research" in result
-            assert "- @code" in result
+        assert "**Invited agents in this thread:**" in result
+        assert "- @calculator" in result
+        assert "- @research" in result
+        assert "- @code" in result
 
     def test_should_route_to_agent(self):
         """Test should_route_to_agent function."""

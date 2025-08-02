@@ -1,41 +1,23 @@
-"""Thread-specific agent invitation management."""
+"""Thread-specific agent invitation management using Matrix state events."""
 
-import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timedelta
+
+import nio
 
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
 
-
-@dataclass
-class ThreadInvite:
-    """Represents a temporary agent invitation to a thread."""
-
-    agent_name: str
-    invited_by: str
-    invited_at: datetime
-    thread_id: str
-    room_id: str
-    expires_at: datetime | None = None
-
-    def is_expired(self) -> bool:
-        """Check if the invitation has expired."""
-        if self.expires_at is None:
-            return False
-        return datetime.now() > self.expires_at
+THREAD_INVITE_EVENT_TYPE = "com.mindroom.thread.invite"
+DEFAULT_TIMEOUT_HOURS = 24
 
 
 class ThreadInviteManager:
-    """Manages temporary agent invitations for specific threads."""
+    def __init__(self, client: nio.AsyncClient):
+        self.client = client
 
-    def __init__(self):
-        self._lock = asyncio.Lock()
-        # Map of thread_id -> list of ThreadInvite
-        self._invites: dict[str, list[ThreadInvite]] = {}
-        # Map of (room_id, agent_name) -> set of thread_ids
-        self._agent_threads: dict[tuple[str, str], set[str]] = {}
+    def _get_state_key(self, thread_id: str, agent_name: str) -> str:
+        return f"{thread_id}:{agent_name}"
 
     async def add_invite(
         self,
@@ -43,210 +25,119 @@ class ThreadInviteManager:
         room_id: str,
         agent_name: str,
         invited_by: str,
-        duration_hours: int | None = None,
-    ) -> ThreadInvite:
-        """Add a temporary agent invitation to a thread.
+    ) -> None:
+        await self.client.room_put_state(
+            room_id=room_id,
+            event_type=THREAD_INVITE_EVENT_TYPE,
+            content={
+                "invited_by": invited_by,
+                "invited_at": datetime.now().isoformat(),
+            },
+            state_key=self._get_state_key(thread_id, agent_name),
+        )
 
-        Args:
-            thread_id: The thread event ID
-            room_id: The room ID where the thread exists
-            agent_name: Name of the agent being invited
-            invited_by: User ID who invited the agent
-            duration_hours: Optional duration in hours (None = until thread ends)
+    async def get_thread_agents(self, thread_id: str, room_id: str) -> list[str]:
+        response = await self.client.room_get_state(room_id)
+        if not isinstance(response, nio.RoomGetStateResponse):
+            return []
 
-        Returns:
-            The created ThreadInvite
-        """
-        async with self._lock:
-            expires_at = datetime.now() + timedelta(hours=duration_hours) if duration_hours else None
-
-            invite = ThreadInvite(
-                thread_id=thread_id,
-                room_id=room_id,
-                agent_name=agent_name,
-                invited_by=invited_by,
-                invited_at=datetime.now(),
-                expires_at=expires_at,
-            )
-
-            # Add to thread invites
-            if thread_id not in self._invites:
-                self._invites[thread_id] = []
-            self._invites[thread_id].append(invite)
-
-            # Add to agent threads index
-            key = (room_id, agent_name)
-            if key not in self._agent_threads:
-                self._agent_threads[key] = set()
-            self._agent_threads[key].add(thread_id)
-
-            logger.info(
-                "Added thread invitation",
-                thread_id=thread_id,
-                room_id=room_id,
-                agent=agent_name,
-                invited_by=invited_by,
-                expires_at=expires_at,
-            )
-
-            return invite
-
-    async def get_thread_agents(self, thread_id: str) -> list[str]:
-        """Get list of agents invited to a specific thread.
-
-        Args:
-            thread_id: The thread event ID
-
-        Returns:
-            List of agent names invited to the thread
-        """
-        async with self._lock:
-            invites = self._invites.get(thread_id, [])
-            # Filter out expired invites
-            active_invites = [inv for inv in invites if not inv.is_expired()]
-            return [inv.agent_name for inv in active_invites]
+        return [
+            event.get("state_key", "").split(":", 1)[1]
+            for event in response.events
+            if event.get("type") == THREAD_INVITE_EVENT_TYPE and event.get("state_key", "").startswith(f"{thread_id}:")
+        ]
 
     async def is_agent_invited_to_thread(
         self,
         thread_id: str,
-        agent_name: str,
-    ) -> bool:
-        """Check if an agent is invited to a specific thread.
-
-        Args:
-            thread_id: The thread event ID
-            agent_name: Name of the agent
-
-        Returns:
-            True if agent is invited and invitation is active
-        """
-        agents = await self.get_thread_agents(thread_id)
-        return agent_name in agents
-
-    async def get_agent_threads(
-        self,
         room_id: str,
         agent_name: str,
-    ) -> list[str]:
-        """Get list of threads an agent is invited to in a room.
+    ) -> bool:
+        response = await self.client.room_get_state_event(
+            room_id=room_id,
+            event_type=THREAD_INVITE_EVENT_TYPE,
+            state_key=self._get_state_key(thread_id, agent_name),
+        )
+        return isinstance(response, nio.RoomGetStateEventResponse)
 
-        Args:
-            room_id: The room ID
-            agent_name: Name of the agent
+    async def get_agent_threads(self, room_id: str, agent_name: str) -> list[str]:
+        response = await self.client.room_get_state(room_id)
+        if not isinstance(response, nio.RoomGetStateResponse):
+            return []
 
-        Returns:
-            List of thread IDs the agent is invited to
-        """
-        async with self._lock:
-            key = (room_id, agent_name)
-            thread_ids = self._agent_threads.get(key, set())
-
-            # Filter out threads with expired invites
-            active_threads = []
-            for thread_id in thread_ids:
-                invites = self._invites.get(thread_id, [])
-                if any(inv.agent_name == agent_name and not inv.is_expired() for inv in invites):
-                    active_threads.append(thread_id)
-
-            return active_threads
+        return [
+            event.get("state_key", "").rsplit(":", 1)[0]
+            for event in response.events
+            if event.get("type") == THREAD_INVITE_EVENT_TYPE and event.get("state_key", "").endswith(f":{agent_name}")
+        ]
 
     async def remove_invite(
         self,
         thread_id: str,
+        room_id: str,
         agent_name: str,
     ) -> bool:
-        """Remove an agent invitation from a thread.
+        if not await self.is_agent_invited_to_thread(thread_id, room_id, agent_name):
+            return False
 
-        Args:
-            thread_id: The thread event ID
-            agent_name: Name of the agent
+        response = await self.client.room_put_state(
+            room_id=room_id,
+            event_type=THREAD_INVITE_EVENT_TYPE,
+            content={},
+            state_key=self._get_state_key(thread_id, agent_name),
+        )
+        return isinstance(response, nio.RoomPutStateResponse)
 
-        Returns:
-            True if invitation was found and removed
-        """
-        async with self._lock:
-            if thread_id not in self._invites:
-                return False
+    async def cleanup_inactive_agents(self, room_id: str, timeout_hours: int = DEFAULT_TIMEOUT_HOURS) -> int:
+        """Remove agents who haven't responded in the room for timeout_hours."""
+        state_response = await self.client.room_get_state(room_id)
+        if not isinstance(state_response, nio.RoomGetStateResponse):
+            return 0
 
-            invites = self._invites[thread_id]
-            original_count = len(invites)
+        # Get invited agents with their invitation times
+        invited_agents = []
+        for event in state_response.events:
+            if event.get("type") == THREAD_INVITE_EVENT_TYPE:
+                state_key = event.get("state_key", "")
+                if ":" in state_key:
+                    agent_name = state_key.split(":", 1)[1]
+                    content = event.get("content", {})
+                    if invited_at_str := content.get("invited_at"):
+                        try:
+                            invited_at = datetime.fromisoformat(invited_at_str)
+                            invited_agents.append((state_key, agent_name, invited_at))
+                        except (ValueError, TypeError):
+                            pass
 
-            # Remove matching invites
-            self._invites[thread_id] = [inv for inv in invites if inv.agent_name != agent_name]
+        if not invited_agents:
+            return 0
 
-            # Clean up empty lists
-            if not self._invites[thread_id]:
-                del self._invites[thread_id]
+        # Get last activity from room messages
+        messages_response = await self.client.room_messages(room_id=room_id, start="", limit=1000)
+        if not isinstance(messages_response, nio.RoomMessagesResponse):
+            return 0
 
-            # Update agent threads index
-            for inv in invites:
-                if inv.agent_name == agent_name:
-                    key = (inv.room_id, agent_name)
-                    if key in self._agent_threads:
-                        self._agent_threads[key].discard(thread_id)
-                        if not self._agent_threads[key]:
-                            del self._agent_threads[key]
+        # Map agent -> last message timestamp
+        agent_last_activity = {}
+        for event in messages_response.chunk:
+            if isinstance(event, nio.RoomMessageText) and "@" in event.sender and ":mindroom.space" in event.sender:
+                agent_name = event.sender.split("@")[1].split(":")[0]
+                if agent_name not in agent_last_activity:
+                    agent_last_activity[agent_name] = datetime.fromtimestamp(event.server_timestamp / 1000)
 
-            removed = len(self._invites.get(thread_id, [])) != original_count
-            if removed:
-                logger.info(
-                    "Removed thread invitation",
-                    thread_id=thread_id,
-                    agent=agent_name,
-                )
+        # Remove inactive agents
+        removed_count = 0
+        now = datetime.now()
+        threshold = timedelta(hours=timeout_hours)
 
-            return removed
+        for state_key, agent_name, invited_at in invited_agents:
+            last_activity = agent_last_activity.get(agent_name, invited_at)
+            if now - last_activity > threshold and isinstance(
+                await self.client.room_kick(room_id, f"@{agent_name}:mindroom.space", "Inactive"),
+                nio.RoomKickResponse,
+            ):
+                # Successfully kicked agent and can remove invitation
+                await self.client.room_put_state(room_id, THREAD_INVITE_EVENT_TYPE, {}, state_key)
+                removed_count += 1
 
-    async def cleanup_expired(self) -> int:
-        """Remove all expired invitations.
-
-        Returns:
-            Number of invitations removed
-        """
-        async with self._lock:
-            removed_count = 0
-
-            # Collect threads to clean up
-            threads_to_clean = []
-            for thread_id, invites in self._invites.items():
-                expired_agents = [inv.agent_name for inv in invites if inv.is_expired()]
-                if expired_agents:
-                    threads_to_clean.append((thread_id, expired_agents))
-
-            # Clean up expired invites
-            for thread_id, expired_agents in threads_to_clean:
-                for agent_name in expired_agents:
-                    # Remove from thread invites
-                    self._invites[thread_id] = [
-                        inv
-                        for inv in self._invites[thread_id]
-                        if not (inv.agent_name == agent_name and inv.is_expired())
-                    ]
-                    removed_count += 1
-
-                    # Clean up agent threads index for expired invites
-                    for inv in invites:
-                        if inv.agent_name == agent_name and inv.is_expired():
-                            key = (inv.room_id, agent_name)
-                            if key in self._agent_threads:
-                                self._agent_threads[key].discard(thread_id)
-                                if not self._agent_threads[key]:
-                                    del self._agent_threads[key]
-
-                # Clean up empty lists
-                if not self._invites[thread_id]:
-                    del self._invites[thread_id]
-
-            # Clean up empty agent thread sets
-            empty_keys = [key for key, threads in self._agent_threads.items() if not threads]
-            for key in empty_keys:
-                del self._agent_threads[key]
-
-            if removed_count > 0:
-                logger.info(f"Cleaned up {removed_count} expired thread invitations")
-
-            return removed_count
-
-
-# Global thread invite manager instance
-thread_invite_manager = ThreadInviteManager()
+        return removed_count

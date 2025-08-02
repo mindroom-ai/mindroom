@@ -24,14 +24,14 @@ async def suggest_agent_for_message(
     available_agents: list[str],
     thread_context: list[dict[str, Any]] | None = None,
     thread_id: str | None = None,
+    room_id: str | None = None,
+    thread_invite_manager: Any = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message."""
     try:
-        # If we have a thread_id, include invited agents
-        if thread_id:
-            from .thread_invites import thread_invite_manager
-
-            invited_agents = await thread_invite_manager.get_thread_agents(thread_id)
+        # If we have a thread_id and room_id, include invited agents
+        if thread_id and room_id and thread_invite_manager:
+            invited_agents = await thread_invite_manager.get_thread_agents(thread_id, room_id)
             # Combine available and invited agents (deduplicated)
             all_agents = list(set(available_agents + invited_agents))
         else:
