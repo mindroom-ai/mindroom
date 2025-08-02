@@ -145,16 +145,12 @@ async def invite_to_room(
     Returns:
         True if successful, False otherwise
     """
-    try:
-        response = await client.room_invite(room_id, user_id)
-        if isinstance(response, nio.RoomInviteResponse):
-            logger.info(f"Invited {user_id} to room {room_id}")
-            return True
-        else:
-            logger.error(f"Failed to invite {user_id} to room {room_id}: {response}")
-            return False
-    except Exception as e:
-        logger.error(f"Error inviting {user_id} to room {room_id}: {e}")
+    response = await client.room_invite(room_id, user_id)
+    if isinstance(response, nio.RoomInviteResponse):
+        logger.info(f"Invited {user_id} to room {room_id}")
+        return True
+    else:
+        logger.error(f"Failed to invite {user_id} to room {room_id}: {response}")
         return False
 
 
@@ -175,22 +171,18 @@ async def create_room(
     Returns:
         Room ID if successful, None otherwise
     """
-    try:
-        room_config = {"name": name}
-        if alias:
-            room_config["room_alias_name"] = alias
-        if topic:
-            room_config["topic"] = topic
+    room_config = {"name": name}
+    if alias:
+        room_config["room_alias_name"] = alias
+    if topic:
+        room_config["topic"] = topic
 
-        response = await client.room_create(**room_config)
-        if isinstance(response, nio.RoomCreateResponse):
-            logger.info(f"Created room: {name} ({response.room_id})")
-            return str(response.room_id)
-        else:
-            logger.error(f"Failed to create room {name}: {response}")
-            return None
-    except Exception as e:
-        logger.error(f"Error creating room {name}: {e}")
+    response = await client.room_create(**room_config)
+    if isinstance(response, nio.RoomCreateResponse):
+        logger.info(f"Created room: {name} ({response.room_id})")
+        return str(response.room_id)
+    else:
+        logger.error(f"Failed to create room {name}: {response}")
         return None
 
 
@@ -204,16 +196,12 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    try:
-        response = await client.join(room_id)
-        if isinstance(response, nio.JoinResponse):
-            logger.info(f"Joined room: {room_id}")
-            return True
-        else:
-            logger.warning(f"Could not join room {room_id}: {response}")
-            return False
-    except Exception as e:
-        logger.error(f"Error joining room {room_id}: {e}")
+    response = await client.join(room_id)
+    if isinstance(response, nio.JoinResponse):
+        logger.info(f"Joined room: {room_id}")
+        return True
+    else:
+        logger.warning(f"Could not join room {room_id}: {response}")
         return False
 
 
@@ -227,15 +215,11 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
     Returns:
         Set of user IDs in the room
     """
-    try:
-        response = await client.joined_members(room_id)
-        if isinstance(response, nio.JoinedMembersResponse):
-            return {member.user_id for member in response.members}
-        else:
-            logger.warning(f"Could not check members for room {room_id}")
-            return set()
-    except Exception as e:
-        logger.error(f"Error checking members for room {room_id}: {e}")
+    response = await client.joined_members(room_id)
+    if isinstance(response, nio.JoinedMembersResponse):
+        return {member.user_id for member in response.members}
+    else:
+        logger.warning(f"Could not check members for room {room_id}")
         return set()
 
 

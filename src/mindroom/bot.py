@@ -78,8 +78,7 @@ async def _handle_invite_command(
 
     # Also invite to Matrix room if needed (for Matrix protocol compliance)
     agent_user_id = construct_agent_user_id(agent_name, agent_domain)
-    try:
-        assert client is not None, "Client should always be available"
+    if client is not None:
         # Check if already in room
         room_members = await client.joined_members(room_id)
         if isinstance(room_members, nio.JoinedMembersResponse) and agent_user_id not in [
@@ -89,8 +88,6 @@ async def _handle_invite_command(
             result = await client.room_invite(room_id, agent_user_id)
             if not isinstance(result, nio.RoomInviteResponse):
                 logger.warning(f"Failed to invite {agent_name} to Matrix room: {result}")
-    except Exception as e:
-        logger.warning(f"Error checking/inviting {agent_name} to Matrix room: {e}")
 
     duration_text = f" for {duration_hours} hours" if duration_hours else " until thread ends"
     response_text = f"✅ Invited @{agent_name} to this thread{duration_text}."
@@ -150,57 +147,41 @@ class AgentBot:
 
     async def start(self) -> None:
         """Start the agent bot."""
-        try:
-            self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
+        self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
 
-            # Initialize response tracker
-            self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
+        # Initialize response tracker
+        self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
 
-            # Register event callbacks
-            self.logger.debug("Registering event callbacks")
-            self.client.add_event_callback(self._on_invite, nio.InviteEvent)
-            self.client.add_event_callback(self._on_message, nio.RoomMessageText)
-            self.logger.debug("Event callbacks registered")
+        # Register event callbacks
+        self.logger.debug("Registering event callbacks")
+        self.client.add_event_callback(self._on_invite, nio.InviteEvent)
+        self.client.add_event_callback(self._on_message, nio.RoomMessageText)
+        self.logger.debug("Event callbacks registered")
 
-            self.running = True
-            self.logger.info(
-                "Started agent bot",
-                display_name=self.agent_user.display_name,
-                user_id=self.agent_user.user_id,
-            )
+        self.running = True
+        self.logger.info(
+            "Started agent bot",
+            display_name=self.agent_user.display_name,
+            user_id=self.agent_user.user_id,
+        )
 
-            # Join configured rooms
-            for room_id in self.rooms:
-                try:
-                    response = await self.client.join(room_id)
-                    if isinstance(response, nio.JoinResponse):
-                        self.logger.info("Joined room", room_id=room_id)
-                    else:
-                        self.logger.warning(
-                            "Could not join room",
-                            room_id=room_id,
-                            error=str(response),
-                        )
-                except Exception as e:
-                    self.logger.error(
-                        "Error joining room",
-                        room_id=room_id,
-                        error=str(e),
-                    )
-
-        except Exception as e:
-            self.logger.error("Failed to start", error=str(e))
-            raise
+        # Join configured rooms
+        for room_id in self.rooms:
+            response = await self.client.join(room_id)
+            if isinstance(response, nio.JoinResponse):
+                self.logger.info("Joined room", room_id=room_id)
+            else:
+                self.logger.warning(
+                    "Could not join room",
+                    room_id=room_id,
+                    error=str(response),
+                )
 
     async def sync_forever(self) -> None:
         """Run the sync loop forever."""
         self.logger.info("Starting sync_forever")
-        try:
-            assert self.client is not None, "Client should be initialized"
-            await self.client.sync_forever(timeout=30000, full_state=True)
-        except Exception as e:
-            self.logger.error("Error in sync_forever", error=str(e))
-            raise
+        assert self.client is not None, "Client should be initialized"
+        await self.client.sync_forever(timeout=30000, full_state=True)
 
     async def stop(self) -> None:
         """Stop the agent bot."""
@@ -715,11 +696,11 @@ class MultiAgentOrchestrator:
             inviter_client: An authenticated client with invite permissions
         """
         for agent_name, bot in self.agent_bots.items():
-            try:
-                await inviter_client.room_invite(room_id, bot.agent_user.user_id)
+            result = await inviter_client.room_invite(room_id, bot.agent_user.user_id)
+            if isinstance(result, nio.RoomInviteResponse):
                 logger.info("Invited agent to room", agent=agent_name, room_id=room_id)
-            except Exception as e:
-                logger.error("Failed to invite agent to room", agent=agent_name, room_id=room_id, error=str(e))
+            else:
+                logger.error("Failed to invite agent to room", agent=agent_name, room_id=room_id, error=str(result))
 
 
 async def main(log_level: str, storage_path: Path) -> None:

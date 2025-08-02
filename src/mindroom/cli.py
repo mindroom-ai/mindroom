@@ -51,31 +51,23 @@ async def _register_user(username: str, password: str, display_name: str) -> Non
 
 async def _get_room_members(client: nio.AsyncClient, room_id: str, room_key: str) -> set[str]:
     """Get the current members of a room."""
-    try:
-        members_response = await client.joined_members(room_id)
-        if isinstance(members_response, nio.JoinedMembersResponse):
-            # members is a list of RoomMember objects
-            return set(member.user_id for member in members_response.members)
-        else:
-            console.print(f"⚠️  Could not check members for {room_key}")
-            return set()
-    except Exception as e:
-        console.print(f"⚠️  Error checking members for {room_key}: {e}")
+    members_response = await client.joined_members(room_id)
+    if isinstance(members_response, nio.JoinedMembersResponse):
+        # members is a list of RoomMember objects
+        return set(member.user_id for member in members_response.members)
+    else:
+        console.print(f"⚠️  Could not check members for {room_key}")
         return set()
 
 
 async def _invite_agent_to_room(client: nio.AsyncClient, room_id: str, room_key: str, agent_id: str) -> InviteResult:
     """Invite an agent to a room. Returns InviteResult."""
-    try:
-        response = await client.room_invite(room_id, agent_id)
-        if isinstance(response, nio.RoomInviteResponse):
-            console.print(f"✅ Invited {agent_id} to {room_key}")
-            return InviteResult(success=True, already_member=False)
-        else:
-            console.print(f"❌ Failed to invite {agent_id} to {room_key}: {response}")
-            return InviteResult(success=False, already_member=False)
-    except Exception as e:
-        console.print(f"❌ Error inviting {agent_id} to {room_key}: {e}")
+    response = await client.room_invite(room_id, agent_id)
+    if isinstance(response, nio.RoomInviteResponse):
+        console.print(f"✅ Invited {agent_id} to {room_key}")
+        return InviteResult(success=True, already_member=False)
+    else:
+        console.print(f"❌ Failed to invite {agent_id} to {room_key}: {response}")
         return InviteResult(success=False, already_member=False)
 
 
@@ -154,11 +146,10 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
         for agent_name, agent_config in config.agents.items():
             if room_key in agent_config.rooms:
                 agent_id = f"@mindroom_{agent_name}:localhost"
-                try:
-                    await user_client.room_invite(room_id, agent_id)
+                invite_response = await user_client.room_invite(room_id, agent_id)
+                if isinstance(invite_response, nio.RoomInviteResponse):
                     invited_count += 1
-                except Exception:
-                    pass  # Agent might not exist yet
+                # Ignore failures - agent might not exist yet
 
         if invited_count > 0:
             console.print(f"   Invited {invited_count} agents to the room")
@@ -397,12 +388,12 @@ async def _invite_agents(room_id: str) -> None:
                 for agent_name, agent_cfg in agent_config.agents.items():
                     if room_key in agent_cfg.rooms:
                         agent_id = f"@mindroom_{agent_name}:localhost"
-                        try:
-                            await client.room_invite(room_id, agent_id)
+                        response = await client.room_invite(room_id, agent_id)
+                        if isinstance(response, nio.RoomInviteResponse):
                             console.print(f"✅ Invited {agent_id}")
                             invited_count += 1
-                        except Exception as e:
-                            console.print(f"❌ Failed to invite {agent_id}: {e}")
+                        else:
+                            console.print(f"❌ Failed to invite {agent_id}: {response}")
 
                 console.print(f"\n✨ Invited {invited_count} agents to room")
             else:
@@ -411,12 +402,12 @@ async def _invite_agents(room_id: str) -> None:
                 for key, account in state.accounts.items():
                     if key.startswith("agent_"):
                         agent_id = f"@{account.username}:localhost"
-                        try:
-                            await client.room_invite(room_id, agent_id)
+                        response = await client.room_invite(room_id, agent_id)
+                        if isinstance(response, nio.RoomInviteResponse):
                             console.print(f"✅ Invited {agent_id}")
                             agent_count += 1
-                        except Exception as e:
-                            console.print(f"❌ Failed to invite {agent_id}: {e}")
+                        else:
+                            console.print(f"❌ Failed to invite {agent_id}: {response}")
 
                 console.print(f"\n✨ Invited {agent_count} agents to room")
         else:

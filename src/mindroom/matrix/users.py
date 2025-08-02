@@ -216,6 +216,7 @@ async def ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
             agent_users[agent_name] = agent_user
             logger.info(f"Ensured Matrix user for agent: {agent_name} -> {agent_user.user_id}")
         except Exception as e:
+            # Continue with other agents even if one fails
             logger.error(f"Failed to create Matrix user for agent {agent_name}: {e}")
 
     return agent_users

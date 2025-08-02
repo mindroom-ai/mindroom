@@ -72,22 +72,21 @@ class TestAIRouting:
             )
             mock_agent.arun.return_value = mock_response
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
-                # Should return None because of the exception handler
-                result = await suggest_agent_for_message(
+            with (
+                patch("mindroom.routing.Agent", return_value=mock_agent),
+                pytest.raises(AssertionError, match="AI suggested code but available agents are"),
+            ):
+                await suggest_agent_for_message(
                     "How do I write a Python function?",
                     ["calculator", "general"],  # code not available
                     None,
                 )
 
-                # The assertion error gets caught by the exception handler
-                assert result is None
-
     @pytest.mark.asyncio
     async def test_suggest_agent_error_handling(self) -> None:
         """Test error handling in agent suggestion."""
         with patch("mindroom.routing.get_model_instance") as mock_model:
-            mock_model.side_effect = Exception("Model error")
+            mock_model.side_effect = ValueError("Model error")
 
             result = await suggest_agent_for_message("Test message", ["general"], None)
 

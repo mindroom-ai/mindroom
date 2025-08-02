@@ -154,5 +154,6 @@ async def ai_response(
 
         return response_text
     except Exception as e:
+        # AI models can fail for various reasons (network, API limits, etc)
         logger.exception(f"Error generating AI response: {e}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"

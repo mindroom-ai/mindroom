@@ -65,6 +65,7 @@ def add_agent_memory(
         memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
         logger.info(f"Successfully added memory for agent {agent_name}: {content[:50]}...")
     except Exception as e:
+        # Mem0 could fail for various reasons (DB issues, etc)
         logger.error(f"Failed to add memory for agent {agent_name}: {e}")
 
 
