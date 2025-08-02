@@ -8,9 +8,20 @@ import markdown
 import nio
 
 from ..logging_config import emoji, get_logger
-from ..utils import extract_server_name_from_homeserver, extract_thread_info
+from .users import extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
+
+
+def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
+    """Extract thread information from a Matrix event.
+
+    Returns (is_thread, thread_id).
+    """
+    relates_to = event_source.get("content", {}).get("m.relates_to", {})
+    is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
+    thread_id = relates_to.get("event_id") if is_thread else None
+    return is_thread, thread_id
 
 
 @asynccontextmanager

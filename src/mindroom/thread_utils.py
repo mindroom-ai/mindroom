@@ -1,9 +1,17 @@
 """Utilities for thread analysis and agent detection."""
 
 from functools import lru_cache
-from typing import Any
+from typing import Any, NamedTuple
 
 from .agent_loader import load_config
+from .matrix import extract_agent_name
+
+
+class ResponseDecision(NamedTuple):
+    """Decision about whether an agent should respond to a message."""
+
+    should_respond: bool
+    use_router: bool
 
 
 @lru_cache(maxsize=128)
@@ -13,29 +21,25 @@ def get_known_agent_names() -> set[str]:
     return set(config.agents.keys())
 
 
-def extract_agent_name(sender_id: str) -> str | None:
-    """Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
+def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str], bool]:
+    """Check if an agent is mentioned in a message.
 
-    Returns agent name (e.g., 'calculator') or None if not an agent.
+    Returns (mentioned_agents, am_i_mentioned).
     """
-    if not sender_id.startswith("@mindroom_"):
-        return None
+    mentions = event_source.get("content", {}).get("m.mentions", {})
+    mentioned_agents = get_mentioned_agents(mentions)
+    am_i_mentioned = agent_name in mentioned_agents
+    return mentioned_agents, am_i_mentioned
 
-    # Extract username part
-    username = sender_id.split(":")[0][1:]  # Remove @ and domain
 
-    # Skip regular users
-    if username.startswith("mindroom_user"):
-        return None
+def create_session_id(room_id: str, thread_id: str | None) -> str:
+    """Create a session ID with thread awareness."""
+    return f"{room_id}:{thread_id}" if thread_id else room_id
 
-    # Extract potential agent name after mindroom_
-    agent_name = username.replace("mindroom_", "")
 
-    # Check if this is actually a configured agent
-    if agent_name in get_known_agent_names():
-        return agent_name
-
-    return None
+async def has_room_access(room_id: str, agent_name: str, configured_rooms: list[str]) -> bool:
+    """Check if an agent has access to a room."""
+    return room_id in configured_rooms
 
 
 def get_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
@@ -85,3 +89,59 @@ def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]]) -> bo
         if get_mentioned_agents(mentions):
             return True
     return False
+
+
+def should_agent_respond(
+    agent_name: str,
+    am_i_mentioned: bool,
+    is_thread: bool,
+    is_invited_to_thread: bool,
+    room_id: str,
+    configured_rooms: list[str],
+    thread_history: list[dict],
+) -> ResponseDecision:
+    """Determine if an agent should respond to a message.
+
+    Returns ResponseDecision with (should_respond, use_router).
+    """
+    should_respond = False
+    use_router = False
+
+    # Agents ONLY respond in threads, never in main rooms
+    if not is_thread:
+        return ResponseDecision(False, False)
+
+    if am_i_mentioned:
+        # Respond if explicitly mentioned in a thread
+        should_respond = True
+    else:
+        # For threads, check if there's a single agent that should continue
+        agents_in_thread = get_agents_in_thread(thread_history)
+
+        # If I'm the only agent in the thread, I should continue responding
+        if len(agents_in_thread) == 1 and agent_name in agents_in_thread:
+            should_respond = True
+        # Standard logic for all agents (native or invited)
+        elif room_id in configured_rooms or is_invited_to_thread:
+            if has_any_agent_mentions_in_thread(thread_history):
+                # Someone is mentioned - only mentioned agents respond
+                pass
+            elif not agents_in_thread:
+                # No agents yet - use router to pick first responder
+                use_router = True
+            else:
+                # Multiple agents - nobody responds
+                pass
+
+    return ResponseDecision(should_respond, use_router)
+
+
+def should_route_to_agent(agent_name: str, available_agents: list[str]) -> bool:
+    """Determine if this agent should handle routing.
+
+    Only one agent should handle routing to avoid duplicates.
+    We use the first agent alphabetically as a deterministic choice.
+    """
+    if not available_agents:
+        return False
+    return available_agents[0] == agent_name

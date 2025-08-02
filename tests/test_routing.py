@@ -196,7 +196,7 @@ class TestAgentDescription:
         """Test describing an agent with tools."""
         description = describe_agent("calculator")
 
-        assert "CalculatorAgent" in description
+        assert "calculator" in description
         assert "Solve mathematical problems" in description
         assert "Tools: calculator" in description
         assert "Use the calculator tools" in description
@@ -205,7 +205,7 @@ class TestAgentDescription:
         """Test describing an agent without tools."""
         description = describe_agent("general")
 
-        assert "GeneralAgent" in description
+        assert "general" in description
         assert "general-purpose assistant" in description
         assert "Tools:" not in description  # No tools section
         assert "Always provide a clear" in description

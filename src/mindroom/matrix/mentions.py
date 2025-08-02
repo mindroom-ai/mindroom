@@ -3,7 +3,7 @@
 import re
 from typing import Any
 
-from ..thread_utils import get_known_agent_names
+from ..agent_loader import load_config
 
 
 def create_mention_content(
@@ -58,7 +58,8 @@ def parse_mentions_in_text(text: str, sender_domain: str = "localhost") -> tuple
     Returns:
         Tuple of (processed_text, list_of_mentioned_user_ids)
     """
-    known_agents = get_known_agent_names()
+    config = load_config()
+    known_agents = set(config.agents.keys())
     mentioned_user_ids = []
 
     # Pattern to match @agent_name (with optional @mindroom_ prefix)

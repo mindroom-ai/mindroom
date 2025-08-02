@@ -10,7 +10,7 @@ This module comprehensively tests all agent response rules:
 These tests ensure no regressions in the core response logic.
 """
 
-from mindroom.utils import should_agent_respond
+from mindroom.thread_utils import should_agent_respond
 
 
 class TestAgentResponseLogic:

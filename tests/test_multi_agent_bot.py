@@ -150,11 +150,17 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
+    @patch("mindroom.bot.fetch_thread_history")
     async def test_agent_bot_on_message_mentioned(
-        self, mock_ai_response: AsyncMock, mock_agent_user: AgentMatrixUser, tmp_path: Path
+        self,
+        mock_fetch_history: AsyncMock,
+        mock_ai_response: AsyncMock,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
     ) -> None:
         """Test agent bot responding to mentions."""
         mock_ai_response.return_value = "Test response"
+        mock_fetch_history.return_value = []
 
         bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"])
         bot.client = AsyncMock()
@@ -180,6 +186,7 @@ class TestAgentBot:
             "content": {
                 "body": "@mindroom_calculator:localhost: What's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root_id"},
             }
         }
 
@@ -189,7 +196,7 @@ class TestAgentBot:
         mock_ai_response.assert_called_once_with(
             agent_name="calculator",
             prompt="@mindroom_calculator:localhost: What's 2+2?",
-            session_id="!test:localhost",
+            session_id="!test:localhost:$thread_root_id",
             storage_path=tmp_path,
             thread_history=[],
             room_id="!test:localhost",
@@ -344,6 +351,7 @@ class TestAgentBot:
             "content": {
                 "body": "@mindroom_calculator:localhost: What's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root_id"},
             }
         }
 

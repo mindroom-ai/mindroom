@@ -14,8 +14,12 @@ from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
     AgentMatrixUser,
+    construct_agent_user_id,
     create_mention_content_from_text,
     ensure_all_agent_users,
+    extract_agent_name,
+    extract_domain_from_user_id,
+    extract_thread_info,
     fetch_thread_history,
     get_room_aliases,
     login_agent_user,
@@ -24,17 +28,11 @@ from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .thread_invites import thread_invite_manager
 from .thread_utils import (
-    extract_agent_name,
+    check_agent_mentioned,
+    create_session_id,
     get_agents_in_thread,
     get_available_agents_in_room,
     has_any_agent_mentions_in_thread,
-)
-from .utils import (
-    check_agent_mentioned,
-    construct_agent_user_id,
-    create_session_id,
-    extract_domain_from_user_id,
-    extract_thread_info,
     has_room_access,
     should_agent_respond,
     should_route_to_agent,

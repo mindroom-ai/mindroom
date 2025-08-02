@@ -197,7 +197,7 @@ class TestAgentUserCreation:
     """Test agent user creation functions."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix.users.register_user")
+    @patch("mindroom.matrix.client.register_user")
     @patch("mindroom.matrix.users.save_agent_credentials")
     @patch("mindroom.matrix.users.get_agent_credentials")
     async def test_create_agent_user_new(
@@ -221,7 +221,7 @@ class TestAgentUserCreation:
         mock_register.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix.users.register_user")
+    @patch("mindroom.matrix.client.register_user")
     @patch("mindroom.matrix.users.save_agent_credentials")
     @patch("mindroom.matrix.users.get_agent_credentials")
     async def test_create_agent_user_existing(
@@ -257,7 +257,7 @@ class TestAgentLogin:
             password="test_pass",
         )
 
-        with patch("mindroom.matrix.users.login") as mock_login:
+        with patch("mindroom.matrix.client.login") as mock_login:
             mock_client = AsyncMock()
             mock_client.access_token = "new_token"
             mock_login.return_value = mock_client
@@ -278,7 +278,7 @@ class TestAgentLogin:
             password="wrong_pass",
         )
 
-        with patch("mindroom.matrix.users.login") as mock_login:
+        with patch("mindroom.matrix.client.login") as mock_login:
             # Mock failed login
             mock_login.side_effect = ValueError("Failed to login @mindroom_calculator:localhost: Login error")
 

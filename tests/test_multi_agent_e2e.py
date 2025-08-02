@@ -37,8 +37,12 @@ def mock_general_agent() -> AgentMatrixUser:
 
 
 @pytest.mark.asyncio
-async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrixUser, tmp_path: Path) -> None:
+@patch("mindroom.bot.fetch_thread_history")
+async def test_agent_processes_direct_mention(
+    mock_fetch_history: AsyncMock, mock_calculator_agent: AgentMatrixUser, tmp_path: Path
+) -> None:
     """Test that an agent processes messages where it's directly mentioned."""
+    mock_fetch_history.return_value = []
     test_room_id = "!test:example.org"
     test_user_id = "@alice:example.org"
 
@@ -64,6 +68,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
                     "msgtype": "m.text",
                     "body": message_body,
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:example.org"},
                 },
                 "event_id": "$test_event:example.org",
                 "sender": test_user_id,
@@ -94,7 +99,7 @@ async def test_agent_processes_direct_mention(mock_calculator_agent: AgentMatrix
                 mock_ai.assert_called_once_with(
                     agent_name="calculator",
                     prompt="@mindroom_calculator:localhost What's 15% of 200?",
-                    session_id=test_room_id,
+                    session_id=f"{test_room_id}:$thread_root:example.org",
                     thread_history=[],
                     storage_path=tmp_path,
                     room_id=test_room_id,

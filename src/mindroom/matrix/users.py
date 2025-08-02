@@ -7,11 +7,70 @@ import nio
 
 from ..agent_loader import load_config
 from ..logging_config import get_logger
-from ..utils import extract_server_name_from_homeserver
-from .client import login, register_user
 from .state import MatrixState
 
 logger = get_logger(__name__)
+
+
+def extract_domain_from_user_id(user_id: str) -> str:
+    """Extract domain from a Matrix user ID like "@user:example.com"."""
+    if ":" in user_id:
+        return user_id.split(":", 1)[1]
+    return "localhost"
+
+
+def extract_username_from_user_id(user_id: str) -> str:
+    """Extract username from a Matrix user ID like "@mindroom_calculator:example.com"."""
+    if user_id.startswith("@"):
+        username = user_id[1:]  # Remove @
+        if ":" in username:
+            return username.split(":", 1)[0]
+        return username
+    return user_id
+
+
+def extract_server_name_from_homeserver(homeserver: str) -> str:
+    """Extract server name from a homeserver URL like "http://localhost:8008"."""
+    # Remove protocol
+    server_part = homeserver.split("://", 1)[1] if "://" in homeserver else homeserver
+
+    # Remove port if present
+    if ":" in server_part:
+        return server_part.split(":", 1)[0]
+    return server_part
+
+
+def construct_agent_user_id(agent_name: str, domain: str) -> str:
+    """Construct a Matrix user ID for an agent like "@mindroom_calculator:localhost"."""
+    return f"@mindroom_{agent_name}:{domain}"
+
+
+def extract_agent_name(sender_id: str) -> str | None:
+    """Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
+
+    Returns agent name (e.g., 'calculator') or None if not an agent.
+    """
+    if not sender_id.startswith("@mindroom_"):
+        return None
+
+    # Extract username part
+    username = sender_id.split(":")[0][1:]  # Remove @ and domain
+
+    # Skip regular users
+    if username.startswith("mindroom_user"):
+        return None
+
+    # Extract potential agent name after mindroom_
+    agent_name = username.replace("mindroom_", "")
+
+    # Check if this is actually a configured agent
+    from ..agent_loader import load_config
+
+    config = load_config()
+    if agent_name in config.agents:
+        return agent_name
+
+    return None
 
 
 @dataclass
@@ -94,6 +153,8 @@ async def create_agent_user(
 
     # Try to register/verify the user
     try:
+        from .client import register_user
+
         await register_user(
             homeserver=homeserver,
             username=username,
@@ -126,6 +187,8 @@ async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.
     Raises:
         ValueError: If login fails
     """
+    from .client import login
+
     client = await login(homeserver, agent_user.user_id, agent_user.password)
     agent_user.access_token = client.access_token
     return client

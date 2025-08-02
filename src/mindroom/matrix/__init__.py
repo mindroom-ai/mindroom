@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from .client import (
     create_room,
+    extract_thread_info,
     fetch_thread_history,
     get_room_members,
     invite_to_room,
@@ -26,8 +27,13 @@ from .rooms import (
 from .state import MatrixAccount, MatrixRoom, MatrixState
 from .users import (
     AgentMatrixUser,
+    construct_agent_user_id,
     create_agent_user,
     ensure_all_agent_users,
+    extract_agent_name,
+    extract_domain_from_user_id,
+    extract_server_name_from_homeserver,
+    extract_username_from_user_id,
     get_agent_credentials,
     login_agent_user,
     save_agent_credentials,
@@ -42,6 +48,7 @@ MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
 __all__ = [
     # Client functions
     "create_room",
+    "extract_thread_info",
     "fetch_thread_history",
     "get_room_members",
     "invite_to_room",
@@ -65,8 +72,13 @@ __all__ = [
     "create_mention_content_from_text",
     # User functions
     "AgentMatrixUser",
+    "construct_agent_user_id",
     "create_agent_user",
     "ensure_all_agent_users",
+    "extract_agent_name",
+    "extract_domain_from_user_id",
+    "extract_server_name_from_homeserver",
+    "extract_username_from_user_id",
     "get_agent_credentials",
     "login_agent_user",
     "save_agent_credentials",

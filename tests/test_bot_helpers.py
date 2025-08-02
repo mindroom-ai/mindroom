@@ -6,7 +6,7 @@ import nio
 import pytest
 
 from mindroom.bot import _handle_invite_command, _handle_list_invites_command, _is_sender_other_agent
-from mindroom.utils import should_route_to_agent
+from mindroom.thread_utils import should_route_to_agent
 
 
 class TestBotHelpers:
