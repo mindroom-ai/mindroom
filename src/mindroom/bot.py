@@ -75,12 +75,13 @@ async def _handle_invite_command(
     # Invite to Matrix room for protocol compliance
     agent_user_id = construct_agent_user_id(agent_name, agent_domain)
     room_members = await client.joined_members(room_id)
-    if isinstance(room_members, nio.JoinedMembersResponse) and agent_user_id not in [
-        m.user_id for m in room_members.members
-    ]:
-        result = await client.room_invite(room_id, agent_user_id)
-        if not isinstance(result, nio.RoomInviteResponse):
-            logger.warning("Failed to invite to room", agent=agent_name, error=str(result))
+    if isinstance(room_members, nio.JoinedMembersResponse):
+        if agent_user_id not in [m.user_id for m in room_members.members]:
+            result = await client.room_invite(room_id, agent_user_id)
+            if not isinstance(result, nio.RoomInviteResponse):
+                logger.warning("Failed to invite to room", agent=agent_name, error=str(result))
+    else:
+        logger.error("Failed to get room members", room_id=room_id, error=str(room_members))
 
     duration_text = f" for {duration_hours} hours" if duration_hours else " until thread ends"
     response_text = f"✅ Invited @{agent_name} to this thread{duration_text}."
@@ -300,8 +301,11 @@ class AgentBot:
             reply_to_event_id=event.event_id,
         )
 
-        await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
-        self.logger.info("Routed to agent", suggested_agent=suggested_agent)
+        response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
+        if isinstance(response, nio.RoomSendResponse):
+            self.logger.info("Routed to agent", suggested_agent=suggested_agent)
+        else:
+            self.logger.error("Failed to route to agent", agent=suggested_agent, error=str(response))
 
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
         self.logger.info("Handling command", command_type=command.type.value)

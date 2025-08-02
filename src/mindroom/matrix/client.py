@@ -116,8 +116,15 @@ async def register_user(
         if isinstance(response, nio.RegisterResponse):
             logger.info(f"Successfully registered user: {user_id}")
             # Set display name
-            await client.login(password)
-            await client.set_displayname(display_name)
+            login_response = await client.login(password)
+            if not isinstance(login_response, nio.LoginResponse):
+                logger.error(f"Failed to login after registration: {login_response}")
+                raise ValueError(f"Failed to login after registration: {login_response}")
+
+            display_response = await client.set_displayname(display_name)
+            if isinstance(display_response, nio.ErrorResponse):
+                logger.warning(f"Failed to set display name: {display_response}")
+
             return user_id
         elif (
             isinstance(response, nio.ErrorResponse)
@@ -249,6 +256,10 @@ async def fetch_thread_history(
             message_filter={"types": ["m.room.message"]},
             direction=nio.MessageDirection.back,
         )
+
+        if not hasattr(response, "chunk"):
+            logger.error("Failed to fetch thread history", room_id=room_id, error=str(response))
+            break
 
         for event in response.chunk:
             if hasattr(event, "source") and event.source.get("type") == "m.room.message":
