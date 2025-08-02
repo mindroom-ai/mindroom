@@ -1,20 +1,23 @@
 """Room-level agent invitation management with activity tracking."""
 
+import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import nio
 
-from .invites_base import BaseInvite, BaseInviteManager, is_inactive_by_timeout
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 @dataclass
-class RoomInvite(BaseInvite):
+class RoomInvite:
     """Represents a temporary agent invitation to a room."""
 
+    agent_name: str
+    invited_by: str
+    invited_at: datetime
     room_id: str
     last_activity: datetime
     inactivity_timeout_hours: int = 24  # Default 24 hours
@@ -25,18 +28,19 @@ class RoomInvite(BaseInvite):
 
     def is_inactive(self) -> bool:
         """Check if the invitation should expire due to inactivity."""
-        return is_inactive_by_timeout(self.last_activity, self.inactivity_timeout_hours)
+        timeout = timedelta(hours=self.inactivity_timeout_hours)
+        return datetime.now() - self.last_activity > timeout
 
     def update_activity(self) -> None:
         """Update the last activity timestamp."""
         self.last_activity = datetime.now()
 
 
-class RoomInviteManager(BaseInviteManager[RoomInvite]):
+class RoomInviteManager:
     """Manages temporary agent invitations to rooms with activity tracking."""
 
     def __init__(self):
-        super().__init__()
+        self._lock = asyncio.Lock()
         # Map of room_id -> agent_name -> RoomInvite
         self._room_invites: dict[str, dict[str, RoomInvite]] = {}
 

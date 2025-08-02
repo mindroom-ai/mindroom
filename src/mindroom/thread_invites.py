@@ -1,32 +1,37 @@
 """Thread-specific agent invitation management."""
 
+import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from .invites_base import BaseInvite, BaseInviteManager, calculate_expiry, is_expired_by_time
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 @dataclass
-class ThreadInvite(BaseInvite):
+class ThreadInvite:
     """Represents a temporary agent invitation to a thread."""
 
+    agent_name: str
+    invited_by: str
+    invited_at: datetime
     thread_id: str
     room_id: str
     expires_at: datetime | None = None
 
     def is_expired(self) -> bool:
         """Check if the invitation has expired."""
-        return is_expired_by_time(self.expires_at)
+        if self.expires_at is None:
+            return False
+        return datetime.now() > self.expires_at
 
 
-class ThreadInviteManager(BaseInviteManager[ThreadInvite]):
+class ThreadInviteManager:
     """Manages temporary agent invitations for specific threads."""
 
     def __init__(self):
-        super().__init__()
+        self._lock = asyncio.Lock()
         # Map of thread_id -> list of ThreadInvite
         self._invites: dict[str, list[ThreadInvite]] = {}
         # Map of (room_id, agent_name) -> set of thread_ids
@@ -53,7 +58,7 @@ class ThreadInviteManager(BaseInviteManager[ThreadInvite]):
             The created ThreadInvite
         """
         async with self._lock:
-            expires_at = calculate_expiry(duration_hours)
+            expires_at = datetime.now() + timedelta(hours=duration_hours) if duration_hours else None
 
             invite = ThreadInvite(
                 thread_id=thread_id,
