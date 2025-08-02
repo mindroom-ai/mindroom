@@ -7,7 +7,7 @@ import nio
 import pytest
 
 from mindroom.cli import _ensure_user_account, _register_user
-from mindroom.matrix import MatrixConfig
+from mindroom.matrix import MatrixState
 
 
 @pytest.fixture
@@ -84,14 +84,14 @@ class TestUserAccountManagement:
 
         with (
             patch("mindroom.cli.matrix_client", return_value=mock_context),
-            patch("mindroom.matrix.config.MATRIX_USERS_FILE", tmp_path / "matrix_users.yaml"),
+            patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
         ):
-            config = await _ensure_user_account()
+            state = await _ensure_user_account()
 
             # Check that user was created
-            assert "user" in config.accounts
-            assert config.accounts["user"].username == "mindroom_user"
-            assert config.accounts["user"].password.startswith("mindroom_password_")
+            assert "user" in state.accounts
+            assert state.accounts["user"].username == "mindroom_user"
+            assert state.accounts["user"].password.startswith("mindroom_password_")
 
             # Verify registration was called
             mock_client.register.assert_called_once()
@@ -102,12 +102,12 @@ class TestUserAccountManagement:
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config
-        config_file = tmp_path / "matrix_users.yaml"
-        config = MatrixConfig()
-        config.add_account("user", "existing_user", "existing_password")
+        config_file = tmp_path / "matrix_state.yaml"
+        state = MatrixState()
+        state.add_account("user", "existing_user", "existing_password")
 
-        with patch("mindroom.matrix.config.MATRIX_USERS_FILE", config_file):
-            config.save()
+        with patch("mindroom.matrix.state.MATRIX_STATE_FILE", config_file):
+            state.save()
 
             # Mock successful login with existing credentials
             mock_client.login.return_value = nio.LoginResponse(
@@ -132,12 +132,12 @@ class TestUserAccountManagement:
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config with invalid credentials
-        config_file = tmp_path / "matrix_users.yaml"
-        config = MatrixConfig()
-        config.add_account("user", "invalid_user", "wrong_password")
+        config_file = tmp_path / "matrix_state.yaml"
+        state = MatrixState()
+        state.add_account("user", "invalid_user", "wrong_password")
 
-        with patch("mindroom.matrix.config.MATRIX_USERS_FILE", config_file):
-            config.save()
+        with patch("mindroom.matrix.state.MATRIX_STATE_FILE", config_file):
+            state.save()
 
             # Mock failed login
             mock_client.login.return_value = nio.LoginError(

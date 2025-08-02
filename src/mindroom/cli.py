@@ -10,7 +10,7 @@ import nio
 import typer
 from rich.console import Console
 
-from mindroom.matrix import MATRIX_HOMESERVER, MatrixConfig, matrix_client
+from mindroom.matrix import MATRIX_HOMESERVER, MatrixState, matrix_client
 
 app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
 console = Console()
@@ -168,11 +168,11 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
     return None
 
 
-async def _ensure_user_account() -> MatrixConfig:
+async def _ensure_user_account() -> MatrixState:
     """Ensure a user account exists, creating one if necessary."""
-    config = MatrixConfig.load()
+    state = MatrixState.load()
 
-    user_account = config.get_account("user")
+    user_account = state.get_account("user")
 
     # If we have stored credentials, try to login first
     if user_account:
@@ -180,10 +180,10 @@ async def _ensure_user_account() -> MatrixConfig:
             response = await client.login(password=user_account.password)
             if isinstance(response, nio.LoginResponse):
                 console.print(f"✅ User account ready: @{user_account.username}:localhost")
-                return config
+                return state
             else:
                 console.print("⚠️  Stored credentials invalid, creating new account...")
-                config.accounts.pop("user", None)
+                state.accounts.pop("user", None)
 
     # No valid account, create a new one
     console.print("📝 Creating user account...")
@@ -196,12 +196,12 @@ async def _ensure_user_account() -> MatrixConfig:
     await _register_user(user_username, user_password, "Mindroom User")
 
     # Save credentials
-    config.add_account("user", user_username, user_password)
-    config.save()
+    state.add_account("user", user_username, user_password)
+    state.save()
 
     console.print(f"✅ User account ready: @{user_username}:localhost")
 
-    return config
+    return state
 
 
 async def _create_missing_rooms(client: nio.AsyncClient, required_rooms: set[str]) -> None:
@@ -253,7 +253,7 @@ async def _run(log_level: str, storage_path: Path) -> None:
     console.print(f"🚀 Starting Mindroom multi-agent system (log level: {log_level})...\n")
 
     # Ensure we have a user account
-    config = await _ensure_user_account()
+    state = await _ensure_user_account()
 
     # Load agent configuration and collect required rooms
     agent_config = load_config()
@@ -262,7 +262,7 @@ async def _run(log_level: str, storage_path: Path) -> None:
     # Handle room creation and agent invitations if needed
     if required_rooms:
         # Login as user for room operations
-        user_account = config.get_account("user")
+        user_account = state.get_account("user")
         if not user_account:
             console.print("❌ No user account found")
             sys.exit(1)
@@ -295,8 +295,8 @@ async def _run(log_level: str, storage_path: Path) -> None:
 @app.command()
 def info():
     """Show current system status."""
-    config = MatrixConfig.load()
-    if not config.accounts and not config.rooms:
+    state = MatrixState.load()
+    if not state.accounts and not state.rooms:
         console.print("❌ No configuration found. Run: mindroom run")
         return
 
@@ -304,12 +304,12 @@ def info():
     console.print("=" * 40)
 
     # User info
-    user_account = config.get_account("user")
+    user_account = state.get_account("user")
     if user_account:
         console.print(f"\n👤 User: @{user_account.username}:localhost")
 
     # Agent info
-    agent_accounts = [(key, acc) for key, acc in config.accounts.items() if key.startswith("agent_")]
+    agent_accounts = [(key, acc) for key, acc in state.accounts.items() if key.startswith("agent_")]
     if agent_accounts:
         console.print(f"\n🤖 Agents: {len(agent_accounts)} registered")
         for key, account in agent_accounts:
@@ -317,9 +317,9 @@ def info():
             console.print(f"  • {agent_name}: @{account.username}:localhost")
 
     # Room info
-    if config.rooms:
-        console.print(f"\n🏠 Rooms: {len(config.rooms)} created")
-        for _room_key, room in config.rooms.items():
+    if state.rooms:
+        console.print(f"\n🏠 Rooms: {len(state.rooms)} created")
+        for _room_key, room in state.rooms.items():
             console.print(f"  • {room.name} ({room.alias})")
 
     console.print(f"\n🌐 Server: {HOMESERVER}")
@@ -340,8 +340,8 @@ async def _create_room(room_alias: str, room_name: str | None) -> None:
         room_name = room_alias.replace("_", " ").title()
 
     # Ensure we have a user account
-    config = MatrixConfig.load()
-    user_account = config.get_account("user")
+    state = MatrixState.load()
+    user_account = state.get_account("user")
     if not user_account:
         console.print("❌ No user account found. Run: mindroom run")
         return
@@ -365,8 +365,8 @@ def invite_agents(room_id: str = typer.Argument(..., help="Room ID to invite age
 
 async def _invite_agents(room_id: str) -> None:
     """Invite agents to a room."""
-    config = MatrixConfig.load()
-    user_account = config.get_account("user")
+    state = MatrixState.load()
+    user_account = state.get_account("user")
     if not user_account:
         console.print("❌ No user account found. Run: mindroom run")
         return
@@ -408,7 +408,7 @@ async def _invite_agents(room_id: str) -> None:
             else:
                 # Invite all agents if room not in config
                 agent_count = 0
-                for key, account in config.accounts.items():
+                for key, account in state.accounts.items():
                     if key.startswith("agent_"):
                         agent_id = f"@{account.username}:localhost"
                         try:

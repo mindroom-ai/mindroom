@@ -29,7 +29,7 @@ class MindRoomE2ETest:
     async def setup(self):
         """Load credentials and setup client."""
         # Load user credentials
-        with open("matrix_users.yaml") as f:
+        with open("matrix_state.yaml") as f:
             users_data = yaml.safe_load(f)
 
         # Use the main user account
