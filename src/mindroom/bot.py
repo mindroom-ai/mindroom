@@ -225,14 +225,14 @@ class AgentBot:
 
         Decision logic:
         1. If I'm mentioned → I respond (always)
-        2. If I'm invited to thread → I ONLY respond if explicitly mentioned
-        3. If I'm native to the room (configured in config.yaml):
+        2. If I'm the ONLY agent in the thread → I continue responding
+        3. If I'm invited to thread → I ONLY respond if explicitly mentioned
+        4. If I'm native to the room (configured in config.yaml):
            - If any agent is mentioned in thread → Only mentioned agents respond
            - If NO agents are mentioned in thread:
              - 0 agents have participated → Router picks who should start
-             - 1 agent has participated → That agent continues
              - 2+ agents have participated → Nobody responds (users must mention who they want)
-        4. Not in thread → Don't respond
+        5. Not in thread → Don't respond
         """
         should_respond = False
         use_router = False
@@ -242,10 +242,17 @@ class AgentBot:
             should_respond = True
             logger.debug("Will respond: explicitly mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}")
         elif is_thread:
-            # Check if I'm an invited agent who should participate
-            if is_invited_to_thread:
+            # For threads, check if there's a single agent that should continue
+            agents_in_thread = get_agents_in_thread(thread_history)
+
+            # If I'm the only agent in the thread, I should continue responding
+            if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
+                should_respond = True
+                logger.debug("Will respond: only agent in thread", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+            # Check if I'm an invited agent
+            elif is_invited_to_thread:
                 # I'm invited - but only respond if explicitly mentioned
-                # Invited agents don't participate automatically
+                # Invited agents don't participate automatically unless they're the only one
                 logger.debug(
                     "Invited to thread but not mentioned, not responding",
                     agent=f"{emoji(self.agent_name)} {self.agent_name}",
@@ -258,29 +265,20 @@ class AgentBot:
                         "Not responding: other agents mentioned in thread",
                         agent=f"{emoji(self.agent_name)} {self.agent_name}",
                     )
+                elif not agents_in_thread:
+                    # No agents yet - use router to pick first responder
+                    use_router = True
+                    logger.debug(
+                        "Not responding: no agents yet, will use router",
+                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                    )
                 else:
-                    # No mentions - check agent participation
-                    agents_in_thread = get_agents_in_thread(thread_history)
-                    if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
-                        # I'm the only agent in thread - continue responding
-                        should_respond = True
-                        logger.debug(
-                            "Will respond: only agent in thread", agent=f"{emoji(self.agent_name)} {self.agent_name}"
-                        )
-                    elif not agents_in_thread:
-                        # No agents yet - use router to pick first responder
-                        use_router = True
-                        logger.debug(
-                            "Not responding: no agents yet, will use router",
-                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                        )
-                    else:
-                        # Multiple agents - nobody responds
-                        logger.debug(
-                            "Not responding: multiple agents in thread, need explicit mention",
-                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                            agents_in_thread=agents_in_thread,
-                        )
+                    # Multiple agents - nobody responds
+                    logger.debug(
+                        "Not responding: multiple agents in thread, need explicit mention",
+                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                        agents_in_thread=agents_in_thread,
+                    )
         else:
             # Not in thread and not mentioned
             logger.debug(
