@@ -216,7 +216,7 @@ async def test_cleanup_inactive_agents(invite_manager, mock_client):
         end="",
         room_id="!room456",
     )
-    
+
     # Run cleanup
     removed_count = await invite_manager.cleanup_inactive_agents("!room456", timeout_hours=24)
 
@@ -233,11 +233,11 @@ async def test_cleanup_inactive_agents(invite_manager, mock_client):
 async def test_cleanup_with_activity(invite_manager, mock_client):
     """Test cleanup correctly handles agents with recent activity."""
     from datetime import datetime, timedelta
-    
+
     # Mock room_get_state to return invitations
     now = datetime.now()
     old_time = (now - timedelta(hours=30)).isoformat()  # 30 hours ago
-    
+
     mock_client.room_get_state.return_value = nio.RoomGetStateResponse(
         events=[
             {
@@ -259,40 +259,40 @@ async def test_cleanup_with_activity(invite_manager, mock_client):
         ],
         room_id="!room456",
     )
-    
+
     # Mock room_messages to show active_agent sent a message 1 hour ago
     from unittest.mock import Mock
-    
+
     recent_timestamp = (now - timedelta(hours=1)).timestamp()
     old_timestamp = (now - timedelta(hours=26)).timestamp()
-    
+
     # Create mock messages that look like nio.RoomMessageText
     active_msg = Mock(spec=nio.RoomMessageText)
     active_msg.sender = "@active_agent:mindroom.space"
     active_msg.server_timestamp = recent_timestamp * 1000  # Convert to milliseconds
-    
+
     inactive_msg = Mock(spec=nio.RoomMessageText)
     inactive_msg.sender = "@inactive_agent:mindroom.space"
     inactive_msg.server_timestamp = old_timestamp * 1000  # Convert to milliseconds
-    
+
     mock_client.room_messages.return_value = nio.RoomMessagesResponse(
         chunk=[active_msg, inactive_msg],
         start="",
         end="",
         room_id="!room456",
     )
-    
+
     # Mock room_kick - should only kick inactive_agent
     mock_client.room_kick.return_value = nio.RoomKickResponse()
     mock_client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$remove1", room_id="!room456")
-    
+
     # Run cleanup
     removed_count = await invite_manager.cleanup_inactive_agents("!room456", timeout_hours=24)
-    
+
     # Should have removed only 1 agent (inactive_agent)
     assert removed_count == 1
     assert mock_client.room_kick.call_count == 1
-    
+
     # Check that only inactive_agent was kicked
     kick_call = mock_client.room_kick.call_args
     assert kick_call[0][1] == "@inactive_agent:mindroom.space"  # Second positional arg is user_id

@@ -9,7 +9,6 @@ def test_invite_command_basic():
     assert command is not None
     assert command.type == CommandType.INVITE
     assert command.args["agent_name"] == "calculator"
-    assert command.args["duration_hours"] is None
 
 
 def test_invite_command_with_at_symbol():
@@ -20,26 +19,11 @@ def test_invite_command_with_at_symbol():
     assert command.args["agent_name"] == "calculator"
 
 
-def test_invite_command_with_duration():
-    """Test invite command with duration."""
+def test_invite_command_invalid_format():
+    """Test invite command with invalid formats."""
+    # Test with extra text (no longer supports duration)
     command = command_parser.parse("/invite calculator for 2 hours")
-    assert command is not None
-    assert command.type == CommandType.INVITE
-    assert command.args["agent_name"] == "calculator"
-    assert command.args["duration_hours"] == 2
-
-
-def test_invite_command_with_duration_variations():
-    """Test invite command with different duration formats."""
-    # Test "hour" singular
-    command = command_parser.parse("/invite calculator for 1 hour")
-    assert command is not None
-    assert command.args["duration_hours"] == 1
-
-    # Test "h" abbreviation
-    command = command_parser.parse("/invite calculator for 3h")
-    assert command is not None
-    assert command.args["duration_hours"] == 3
+    assert command is None  # Should not parse with extra text
 
 
 def test_invite_command_case_insensitive():
@@ -48,8 +32,9 @@ def test_invite_command_case_insensitive():
     assert command is not None
     assert command.type == CommandType.INVITE
 
+    # With extra text it should not parse
     command = command_parser.parse("/Invite calculator FOR 2 HOURS")
-    assert command is not None
+    assert command is None
 
 
 def test_uninvite_command():
@@ -133,7 +118,7 @@ def test_get_command_help():
     invite_help = get_command_help("invite")
     assert "Invite Command" in invite_help
     assert "Usage:" in invite_help
-    assert "Examples:" in invite_help
+    assert "Example:" in invite_help  # Changed from "Examples:" to "Example:"
 
     uninvite_help = get_command_help("uninvite")
     assert "Uninvite Command" in uninvite_help

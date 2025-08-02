@@ -340,8 +340,8 @@ async def main():
     bot_task = asyncio.create_task(_run(log_level="INFO", storage_path=Path(temp_dir)))
 
     # Wait for startup
-    print("⏳ Waiting 30s for bot to start, create rooms, and sync...")
-    await asyncio.sleep(30)
+    print("⏳ Waiting 15s for bot to start, create rooms, and sync...")
+    await asyncio.sleep(15)
 
     # Run tests
     try:

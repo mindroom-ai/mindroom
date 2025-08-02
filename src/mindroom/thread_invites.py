@@ -40,12 +40,11 @@ class ThreadInviteManager:
         response = await self.client.room_get_state(room_id)
         if not isinstance(response, nio.RoomGetStateResponse):
             return []
-        
+
         return [
             event.get("state_key", "").split(":", 1)[1]
             for event in response.events
-            if event.get("type") == THREAD_INVITE_EVENT_TYPE
-            and event.get("state_key", "").startswith(f"{thread_id}:")
+            if event.get("type") == THREAD_INVITE_EVENT_TYPE and event.get("state_key", "").startswith(f"{thread_id}:")
         ]
 
     async def is_agent_invited_to_thread(
@@ -65,12 +64,11 @@ class ThreadInviteManager:
         response = await self.client.room_get_state(room_id)
         if not isinstance(response, nio.RoomGetStateResponse):
             return []
-        
+
         return [
             event.get("state_key", "").rsplit(":", 1)[0]
             for event in response.events
-            if event.get("type") == THREAD_INVITE_EVENT_TYPE
-            and event.get("state_key", "").endswith(f":{agent_name}")
+            if event.get("type") == THREAD_INVITE_EVENT_TYPE and event.get("state_key", "").endswith(f":{agent_name}")
         ]
 
     async def remove_invite(
@@ -89,7 +87,6 @@ class ThreadInviteManager:
             state_key=self._get_state_key(thread_id, agent_name),
         )
         return isinstance(response, nio.RoomPutStateResponse)
-
 
     async def cleanup_inactive_agents(self, room_id: str, timeout_hours: int = DEFAULT_TIMEOUT_HOURS) -> int:
         """Remove agents who haven't responded in the room for timeout_hours."""
@@ -135,10 +132,12 @@ class ThreadInviteManager:
 
         for state_key, agent_name, invited_at in invited_agents:
             last_activity = agent_last_activity.get(agent_name, invited_at)
-            if now - last_activity > threshold:
-                # Kick agent and remove invitation
-                if isinstance(await self.client.room_kick(room_id, f"@{agent_name}:mindroom.space", "Inactive"), nio.RoomKickResponse):
-                    await self.client.room_put_state(room_id, THREAD_INVITE_EVENT_TYPE, {}, state_key)
-                    removed_count += 1
+            if now - last_activity > threshold and isinstance(
+                await self.client.room_kick(room_id, f"@{agent_name}:mindroom.space", "Inactive"),
+                nio.RoomKickResponse,
+            ):
+                # Successfully kicked agent and can remove invitation
+                await self.client.room_put_state(room_id, THREAD_INVITE_EVENT_TYPE, {}, state_key)
+                removed_count += 1
 
         return removed_count
