@@ -241,86 +241,14 @@ class AgentBot:
                     thread_id=thread_id,
                 )
 
-        # Decision logic:
-        # 1. If I'm mentioned → I respond (always)
-        # 2. If I'm invited to thread → I can participate
-        # 3. If any agent is mentioned in thread → Only mentioned agents respond
-        # 4. If NO agents are mentioned in thread:
-        #    - 0 agents have participated → Router picks who should start
-        #    - 1 agent has participated → That agent continues
-        #    - 2+ agents have participated → Nobody responds (users must mention who they want)
-        # 5. Not in thread → Don't respond
-
-        should_respond = False
-        use_router = False
-
-        if am_i_mentioned:
-            # Always respond if explicitly mentioned
-            should_respond = True
-            logger.debug("Will respond: explicitly mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}")
-        elif is_thread:
-            # Check if I'm an invited agent who should participate
-            if is_invited_to_thread:
-                # I'm invited - check if I should respond
-                if has_any_agent_mentions_in_thread(thread_history):
-                    # Someone is mentioned - only respond if I'm mentioned
-                    logger.debug(
-                        "Invited but not responding: other agents mentioned",
-                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    )
-                else:
-                    # No mentions - invited agents can participate
-                    agents_in_thread = get_agents_in_thread(thread_history)
-                    if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
-                        # I'm the only agent who has responded - continue
-                        should_respond = True
-                        logger.debug(
-                            "Will respond: invited and only agent in thread",
-                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                        )
-                    elif not agents_in_thread:
-                        # No agents yet but I'm invited - I can start
-                        should_respond = True
-                        logger.debug(
-                            "Will respond: invited to thread with no agents yet",
-                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                        )
-            elif room.room_id in self.rooms:
-                # Not invited but in the room - standard logic
-                if has_any_agent_mentions_in_thread(thread_history):
-                    # Someone is mentioned - only mentioned agents respond
-                    logger.debug(
-                        "Not responding: other agents mentioned in thread",
-                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    )
-                else:
-                    # No mentions - check agent participation
-                    agents_in_thread = get_agents_in_thread(thread_history)
-                    if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
-                        # I'm the only agent in thread - continue responding
-                        should_respond = True
-                        logger.debug(
-                            "Will respond: only agent in thread", agent=f"{emoji(self.agent_name)} {self.agent_name}"
-                        )
-                    elif not agents_in_thread:
-                        # No agents yet - use router to pick first responder
-                        use_router = True
-                        logger.debug(
-                            "Not responding: no agents yet, will use router",
-                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                        )
-                    else:
-                        # Multiple agents - nobody responds
-                        logger.debug(
-                            "Not responding: multiple agents in thread, need explicit mention",
-                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                            agents_in_thread=agents_in_thread,
-                        )
-        else:
-            # Not in thread and not mentioned
-            logger.debug(
-                "Not responding: not in thread or mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}"
-            )
+        # Determine if this agent should respond to the message
+        should_respond, use_router = await self._should_respond_to_message(
+            am_i_mentioned=am_i_mentioned,
+            is_thread=is_thread,
+            is_invited_to_thread=is_invited_to_thread,
+            thread_history=thread_history,
+            room_id=room.room_id,
+        )
 
         # Handle routing if needed
         if use_router:
@@ -415,6 +343,104 @@ class AgentBot:
                     agent=f"{emoji(self.agent_name)} {self.agent_name}",
                     error=str(response),
                 )
+
+    async def _should_respond_to_message(
+        self,
+        am_i_mentioned: bool,
+        is_thread: bool,
+        is_invited_to_thread: bool,
+        thread_history: list[dict],
+        room_id: str,
+    ) -> tuple[bool, bool]:
+        """Determine if this agent should respond to a message.
+
+        Returns:
+            tuple: (should_respond, use_router)
+                - should_respond: Whether this agent should generate a response
+                - use_router: Whether to use AI routing to pick an agent
+
+        Decision logic:
+        1. If I'm mentioned → I respond (always)
+        2. If I'm invited to thread → I can participate
+        3. If any agent is mentioned in thread → Only mentioned agents respond
+        4. If NO agents are mentioned in thread:
+           - 0 agents have participated → Router picks who should start
+           - 1 agent has participated → That agent continues
+           - 2+ agents have participated → Nobody responds (users must mention who they want)
+        5. Not in thread → Don't respond
+        """
+        should_respond = False
+        use_router = False
+
+        if am_i_mentioned:
+            # Always respond if explicitly mentioned
+            should_respond = True
+            logger.debug("Will respond: explicitly mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+        elif is_thread:
+            # Check if I'm an invited agent who should participate
+            if is_invited_to_thread:
+                # I'm invited - check if I should respond
+                if has_any_agent_mentions_in_thread(thread_history):
+                    # Someone is mentioned - only respond if I'm mentioned
+                    logger.debug(
+                        "Invited but not responding: other agents mentioned",
+                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                    )
+                else:
+                    # No mentions - invited agents can participate
+                    agents_in_thread = get_agents_in_thread(thread_history)
+                    if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
+                        # I'm the only agent who has responded - continue
+                        should_respond = True
+                        logger.debug(
+                            "Will respond: invited and only agent in thread",
+                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                        )
+                    elif not agents_in_thread:
+                        # No agents yet but I'm invited - I can start
+                        should_respond = True
+                        logger.debug(
+                            "Will respond: invited to thread with no agents yet",
+                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                        )
+            elif room_id in self.rooms:
+                # Not invited but in the room - standard logic
+                if has_any_agent_mentions_in_thread(thread_history):
+                    # Someone is mentioned - only mentioned agents respond
+                    logger.debug(
+                        "Not responding: other agents mentioned in thread",
+                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                    )
+                else:
+                    # No mentions - check agent participation
+                    agents_in_thread = get_agents_in_thread(thread_history)
+                    if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
+                        # I'm the only agent in thread - continue responding
+                        should_respond = True
+                        logger.debug(
+                            "Will respond: only agent in thread", agent=f"{emoji(self.agent_name)} {self.agent_name}"
+                        )
+                    elif not agents_in_thread:
+                        # No agents yet - use router to pick first responder
+                        use_router = True
+                        logger.debug(
+                            "Not responding: no agents yet, will use router",
+                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                        )
+                    else:
+                        # Multiple agents - nobody responds
+                        logger.debug(
+                            "Not responding: multiple agents in thread, need explicit mention",
+                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                            agents_in_thread=agents_in_thread,
+                        )
+        else:
+            # Not in thread and not mentioned
+            logger.debug(
+                "Not responding: not in thread or mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}"
+            )
+
+        return should_respond, use_router
 
     async def _handle_ai_routing(
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
