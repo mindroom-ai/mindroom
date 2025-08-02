@@ -32,10 +32,9 @@ class CommandParser:
     """Parser for user commands in messages."""
 
     # Command patterns
-    # Match: /invite agent [to room] [for N hours]
+    # Match: /invite agent [for N hours]
     INVITE_PATTERN = re.compile(
         r"^/invite\s+@?(\w+)"  # agent name
-        r"(?:\s+(to)\s+room)?"  # optional "to room" for room invite
         r"(?:\s+for\s+(\d+)\s*(?:hours?|h))?$",  # optional "for N hours"
         re.IGNORECASE,
     )
@@ -61,10 +60,9 @@ class CommandParser:
         # /invite command
         match = self.INVITE_PATTERN.match(message)
         if match:
-            agent_name, to_room, duration = match.groups()
+            agent_name, duration = match.groups()
             args = {
                 "agent_name": agent_name,
-                "to_room": to_room is not None,  # True if "to room" was specified
                 "duration_hours": int(duration) if duration else None,
             }
             return Command(
@@ -118,18 +116,13 @@ def get_command_help(topic: str | None = None) -> str:
     if topic == "invite":
         return """**Invite Command**
 
-Usage:
-- `/invite <agent> [for <hours>]` - Invite to current thread
-- `/invite <agent> to room [for <hours>]` - Invite to entire room
+Usage: `/invite <agent> [for <hours>]` - Invite an agent to this thread
 
 Examples:
 - `/invite calculator` - Invite calculator agent to this thread
-- `/invite summary for 2 hours` - Invite summary agent for 2 hours
-- `/invite calculator to room` - Invite calculator to the entire room (24h inactivity timeout)
-- `/invite code to room for 48 hours` - Invite code agent to room with 48h timeout
+- `/invite summary for 2 hours` - Invite summary agent for 2 hours only
 
-Thread invites: Agent can participate in specific thread only
-Room invites: Agent joins the room, auto-kicked after inactivity timeout"""
+Note: Invites only work in threads. The agent will be able to participate in this thread only."""
 
     elif topic == "uninvite":
         return """**Uninvite Command**

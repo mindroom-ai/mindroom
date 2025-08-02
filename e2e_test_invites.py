@@ -190,38 +190,40 @@ async def test_thread_invitations(test):
     return thread_id
 
 
-async def test_room_invitations(test):
-    """Test room-level agent invitations."""
-    print("\n\n🧪 Testing Room Invitations")
+async def test_no_response_outside_threads(test):
+    """Test that agents don't respond outside threads."""
+    print("\n\n🧪 Testing No Response Outside Threads")
     print("=" * 40)
 
-    if not test.science_room_id:
-        print("   ⚠️  Science room not configured, skipping room invite test")
-        return
-
-    # Invite calculator to science room temporarily
-    print("\n1️⃣ Inviting calculator to science room for 1 hour...")
-    await test.send_message(test.science_room_id, "/invite calculator to room for 1 hour")
-    await asyncio.sleep(3)
-
-    # Ask calculator something in the room (not in thread)
-    print("\n2️⃣ Testing calculator in science room...")
-    await test.send_mention(test.science_room_id, "calculator", "what is the square root of 144?")
+    # Try to mention an agent in main room (not in thread)
+    print("\n1️⃣ Mentioning calculator in main room (not in thread)...")
+    await test.send_mention(test.lobby_room_id, "calculator", "what is 2+2?")
     await asyncio.sleep(5)
 
     # Check room messages
-    print("\n3️⃣ Checking room responses...")
-    messages = await test.get_recent_messages(test.science_room_id, limit=20)
+    print("\n2️⃣ Checking that no response was sent...")
+    messages = await test.get_recent_messages(test.lobby_room_id, limit=10)
 
     recent = [m for m in messages if m["timestamp"] > (time.time() - 30) * 1000]
-    print(f"\n   Last {len(recent)} messages:")
-    for msg in recent[-5:]:
-        sender = msg["sender"]
-        body = msg["body"][:150] + "..." if len(msg["body"]) > 150 else msg["body"]
-        if sender.startswith("mindroom_"):
-            print(f"   🤖 {sender}: {body}")
-        else:
-            print(f"   👤 {sender}: {body}")
+    calculator_responded = any(m["sender"] == "@mindroom_calculator:localhost" for m in recent)
+
+    if calculator_responded:
+        print("   ❌ ERROR: Calculator responded outside of thread!")
+    else:
+        print("   ✅ Correct: Calculator did not respond outside thread")
+
+    # Try invite command outside thread
+    print("\n3️⃣ Trying invite command outside thread...")
+    await test.send_message(test.lobby_room_id, "/invite research")
+    await asyncio.sleep(3)
+
+    messages = await test.get_recent_messages(test.lobby_room_id, limit=5)
+    invite_error = any("only work" in m["body"] and "thread" in m["body"] for m in messages)
+
+    if invite_error:
+        print("   ✅ Correct: Got error message about threads")
+    else:
+        print("   ❌ ERROR: No error message about thread requirement")
 
 
 async def test_help_command(test):
@@ -262,7 +264,7 @@ async def run_test_sequence():
 
         # Run test sequences
         await test_thread_invitations(test)
-        await test_room_invitations(test)
+        await test_no_response_outside_threads(test)
         await test_help_command(test)
 
         print("\n\n✅ All invitation tests completed!")

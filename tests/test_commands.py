@@ -42,26 +42,6 @@ def test_invite_command_with_duration_variations():
     assert command.args["duration_hours"] == 3
 
 
-def test_invite_command_to_room():
-    """Test room invite command."""
-    command = command_parser.parse("/invite calculator to room")
-    assert command is not None
-    assert command.type == CommandType.INVITE
-    assert command.args["agent_name"] == "calculator"
-    assert command.args["to_room"] is True
-    assert command.args["duration_hours"] is None
-
-
-def test_invite_command_to_room_with_duration():
-    """Test room invite command with duration."""
-    command = command_parser.parse("/invite research to room for 48 hours")
-    assert command is not None
-    assert command.type == CommandType.INVITE
-    assert command.args["agent_name"] == "research"
-    assert command.args["to_room"] is True
-    assert command.args["duration_hours"] == 48
-
-
 def test_invite_command_case_insensitive():
     """Test invite command is case insensitive."""
     command = command_parser.parse("/INVITE calculator")
