@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 import nio
@@ -133,6 +134,11 @@ class AgentBot:
         """Get the agent name from username."""
         return self.agent_user.agent_name
 
+    @cached_property
+    def logger(self):
+        """Get a logger with agent context bound."""
+        return logger.bind(agent=f"{emoji(self.agent_name)} {self.agent_name}")
+
     async def start(self) -> None:
         """Start the agent bot."""
         try:
@@ -142,15 +148,14 @@ class AgentBot:
             self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
 
             # Register event callbacks
-            logger.debug("Registering event callbacks", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+            self.logger.debug("Registering event callbacks")
             self.client.add_event_callback(self._on_invite, nio.InviteEvent)
             self.client.add_event_callback(self._on_message, nio.RoomMessageText)
-            logger.debug("Event callbacks registered", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+            self.logger.debug("Event callbacks registered")
 
             self.running = True
-            logger.info(
+            self.logger.info(
                 "Started agent bot",
-                agent=f"{emoji(self.agent_name)} {self.agent_name}",
                 display_name=self.agent_user.display_name,
                 user_id=self.agent_user.user_id,
             )
@@ -160,34 +165,32 @@ class AgentBot:
                 try:
                     response = await self.client.join(room_id)
                     if isinstance(response, nio.JoinResponse):
-                        logger.info("Joined room", agent=f"{emoji(self.agent_name)} {self.agent_name}", room_id=room_id)
+                        self.logger.info("Joined room", room_id=room_id)
                     else:
-                        logger.warning(
+                        self.logger.warning(
                             "Could not join room",
-                            agent=f"{emoji(self.agent_name)} {self.agent_name}",
                             room_id=room_id,
                             error=str(response),
                         )
                 except Exception as e:
-                    logger.error(
+                    self.logger.error(
                         "Error joining room",
-                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
                         room_id=room_id,
                         error=str(e),
                     )
 
         except Exception as e:
-            logger.error("Failed to start", agent=f"{emoji(self.agent_name)} {self.agent_name}", error=str(e))
+            self.logger.error("Failed to start", error=str(e))
             raise
 
     async def sync_forever(self) -> None:
         """Run the sync loop forever."""
-        logger.info("Starting sync_forever", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+        self.logger.info("Starting sync_forever")
         try:
             assert self.client is not None, "Client should be initialized"
             await self.client.sync_forever(timeout=30000, full_state=True)
         except Exception as e:
-            logger.error("Error in sync_forever", agent=f"{emoji(self.agent_name)} {self.agent_name}", error=str(e))
+            self.logger.error("Error in sync_forever", error=str(e))
             raise
 
     async def stop(self) -> None:
@@ -195,30 +198,28 @@ class AgentBot:
         self.running = False
         if self.client:
             await self.client.close()
-        logger.info("Stopped agent bot", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+        self.logger.info("Stopped agent bot")
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
-        logger.info(
+        self.logger.info(
             "Received invite to room",
-            agent=f"{emoji(self.agent_name)} {self.agent_name}",
             room_id=room.room_id,
             sender=event.sender,
         )
         assert self.client is not None, "Client should be initialized"
         result = await self.client.join(room.room_id)
         if isinstance(result, nio.JoinResponse):
-            logger.info("Joined room", agent=f"{emoji(self.agent_name)} {self.agent_name}", room_id=room.room_id)
+            self.logger.info("Joined room", room_id=room.room_id)
         else:
-            logger.error(
+            self.logger.error(
                 "Failed to join room",
-                agent=f"{emoji(self.agent_name)} {self.agent_name}",
                 room_id=room.room_id,
                 error=str(result),
             )
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        logger.debug(
-            f"{emoji(self.agent_name)} Message received",
+        self.logger.debug(
+            "Message received",
             room_id=room.room_id,
             room_name=room.display_name,
             sender=event.sender,
@@ -293,9 +294,9 @@ class AgentBot:
         # Log decision
         if decision.should_respond:
             if am_i_mentioned:
-                logger.debug("Will respond: explicitly mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+                self.logger.debug("Will respond: explicitly mentioned")
             else:
-                logger.debug("Will respond: only agent in thread", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+                self.logger.debug("Will respond: only agent in thread")
         elif decision.use_router:
             logger.debug(
                 "Not responding: no agents yet, will use router",
@@ -326,7 +327,7 @@ class AgentBot:
 
         if not should_process:
             if event.sender == self.agent_user.user_id:
-                logger.debug("Ignoring own message", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+                self.logger.debug("Ignoring own message")
             else:
                 logger.debug(
                     "Ignoring message from other agent",
