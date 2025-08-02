@@ -30,7 +30,7 @@ from .thread_utils import (
     get_mentioned_agents,
     has_any_agent_mentions_in_thread,
 )
-from .utils import construct_agent_user_id, extract_domain_from_user_id
+from .utils import construct_agent_user_id, extract_domain_from_user_id, extract_thread_info
 
 logger = get_logger(__name__)
 
@@ -44,9 +44,22 @@ def is_sender_other_agent(sender: str, current_agent_user_id: str) -> bool:
     return extract_agent_name(sender) is not None
 
 
-def has_other_agents_in_thread(thread_history: list[dict], current_agent_user_id: str) -> bool:
-    """Check if other agents have participated in this thread."""
-    return any(is_sender_other_agent(msg.get("sender", ""), current_agent_user_id) for msg in thread_history)
+def _should_process_message(event_sender: str, agent_user_id: str) -> bool:
+    """Check if an agent should process a message.
+
+    Args:
+        event_sender: The sender of the message
+        agent_user_id: The agent's user ID
+
+    Returns:
+        True if the message should be processed, False otherwise
+    """
+    # Don't respond to own messages
+    if event_sender == agent_user_id:
+        return False
+
+    # Don't respond to other agent messages (avoid agent loops)
+    return not is_sender_other_agent(event_sender, agent_user_id)
 
 
 @dataclass
@@ -289,21 +302,19 @@ class AgentBot:
 
     async def _should_process_message(self, event: nio.RoomMessageText) -> bool:
         """Check if we should process this message at all."""
-        # Don't respond to own messages
-        if event.sender == self.agent_user.user_id:
-            logger.debug("Ignoring own message", agent=f"{emoji(self.agent_name)} {self.agent_name}")
-            return False
+        should_process = _should_process_message(event.sender, self.agent_user.user_id)
 
-        # Don't respond to other agent messages (avoid agent loops)
-        if is_sender_other_agent(event.sender, self.agent_user.user_id):
-            logger.debug(
-                "Ignoring message from other agent",
-                agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                sender=event.sender,
-            )
-            return False
+        if not should_process:
+            if event.sender == self.agent_user.user_id:
+                logger.debug("Ignoring own message", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+            else:
+                logger.debug(
+                    "Ignoring message from other agent",
+                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                    sender=event.sender,
+                )
 
-        return True
+        return should_process
 
     async def _has_room_access(self, room_id: str) -> bool:
         """Check if agent has access to this room."""
@@ -357,9 +368,7 @@ class AgentBot:
             )
 
         # Extract thread info
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
-        thread_id = relates_to.get("event_id") if is_thread else None
+        is_thread, thread_id = extract_thread_info(event.source)
 
         # Fetch thread history if in thread
         thread_history = []
@@ -484,8 +493,7 @@ class AgentBot:
         )
 
         # Get thread info if available
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        thread_event_id = relates_to.get("event_id") if relates_to else None
+        _, thread_event_id = extract_thread_info(event.source)
 
         # Get AI suggestion (including invited agents)
         suggested_agent = await suggest_agent_for_message(event.body, available_agents, thread_history, thread_event_id)
@@ -525,9 +533,7 @@ class AgentBot:
         )
 
         # Get thread info
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
-        thread_id = relates_to.get("event_id") if is_thread else None
+        is_thread, thread_id = extract_thread_info(event.source)
 
         response_text = ""
 

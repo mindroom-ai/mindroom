@@ -8,7 +8,7 @@ import markdown
 import nio
 
 from ..logging_config import emoji, get_logger
-from ..utils import extract_server_name_from_homeserver
+from ..utils import extract_server_name_from_homeserver, extract_thread_info
 
 logger = get_logger(__name__)
 
@@ -325,8 +325,8 @@ def prepare_response_content(
         "formatted_body": markdown_to_html(response_text),
     }
 
+    is_thread_reply, thread_id = extract_thread_info(event.source)
     relates_to = event.source.get("content", {}).get("m.relates_to")
-    is_thread_reply = relates_to and relates_to.get("rel_type") == "m.thread"
 
     agent_prefix = emoji(agent_name) if agent_name else ""
 

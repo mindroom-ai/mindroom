@@ -61,3 +61,18 @@ def construct_agent_user_id(agent_name: str, domain: str) -> str:
         Full Matrix user ID (e.g., "@mindroom_calculator:localhost")
     """
     return f"@mindroom_{agent_name}:{domain}"
+
+
+def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
+    """Extract thread information from a Matrix event.
+
+    Args:
+        event_source: The event source dictionary
+
+    Returns:
+        Tuple of (is_thread, thread_id)
+    """
+    relates_to = event_source.get("content", {}).get("m.relates_to", {})
+    is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
+    thread_id = relates_to.get("event_id") if is_thread else None
+    return is_thread, thread_id
