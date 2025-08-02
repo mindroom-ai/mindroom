@@ -15,8 +15,8 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 ### 🧠 **Persistent Memory Everywhere**
 - Every agent maintains long-term memory across all conversations
 - Every room has its own persistent memory and context
-- Memories are ratable - users can mark quality and relevance
-- Tag-based memory sharing allows knowledge clustering across topics
+- Memories are ratable - users can mark quality and relevance (planned)
+- Tag-based memory sharing allows knowledge clustering across topics (planned)
 
 ### 🏠 **Rooms as Contexts**
 - Each Matrix room represents a dedicated context (Private Life, Open Source, Research, etc.)
@@ -28,7 +28,8 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - Multiple specialized agents can work together in a single conversation
 - Agents see each other's responses and coordinate intelligently
 - Router agent automatically suggests relevant specialists
-- Agents can invite other agents if they need help
+- Users can invite agents to specific threads even if they're not native to the room
+- Thread-specific invitations with optional time limits
 
 ### 💬 **Threads as Experiments**
 - Each thread maintains its own context and token count
@@ -63,7 +64,7 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - Builds expertise over time
 - Accessible across all rooms
 
-#### Tag-Based Memory Sharing
+#### Tag-Based Memory Sharing (planned)
 - Tag threads with keywords/topics
 - All threads with the same tag share memory
 - Creates topic-specific knowledge clusters
@@ -71,13 +72,13 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 
 ### Real-Time Features
 
-#### Progress Widget
+#### Progress Widget (planned)
 - See all agents currently processing
 - Monitor long-running research tasks
 - Real-time progress indicators
 - Cancel operations mid-flight
 
-#### Scheduled Interactions
+#### Scheduled Interactions (planned)
 - Agents can run scheduled tasks (daily check-ins, reminders)
 - Example: Mindfulness agent asking "What are you grateful for today?"
 - Configurable per-room schedules
@@ -86,18 +87,22 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 ### Advanced Capabilities
 
 #### Thread Management
-- **Branching**: Fork conversations to explore alternatives
-- **Linking**: Connect related threads for context expansion
-- **Editing**: Modify AI responses for better context
-- **Context Control**: Fine-grained memory permissions
+- **Branching**: Fork conversations to explore alternatives (planned)
+- **Linking**: Connect related threads for context expansion (planned)
+- **Editing**: Modify AI responses for better context (planned)
+- **Context Control**: Fine-grained memory permissions (planned)
 
 #### Slash Commands
-- `/link [thread-id]` - Link another thread's context
-- `/agents` - List available agents
-- `/context` - Show token usage
-- `/tag [name]` - Tag thread for memory sharing
-- `/branch` - Fork the conversation
-- `/schedule` - Manage agent automation
+- `/invite <agent> [for <hours>]` - Invite an agent to a thread (only works in threads)
+- `/uninvite <agent>` - Remove an agent from a thread
+- `/list_invites` - List all invited agents in current thread
+- `/help [topic]` - Get help on available commands
+- `/link [thread-id]` - Link another thread's context (planned)
+- `/agents` - List available agents (planned)
+- `/context` - Show token usage (planned)
+- `/tag [name]` - Tag thread for memory sharing (planned)
+- `/branch` - Fork the conversation (planned)
+- `/schedule` - Manage agent automation (planned)
 - And many more...
 
 ## Quick Start
@@ -147,7 +152,23 @@ This automatically:
 In your Matrix client (Element, etc.):
 - **Direct mention**: `@mindroom_calculator What is 15% of 200?`
 - **Multiple agents**: `@mindroom_research @mindroom_analyst What are the latest AI trends?`
-- **In threads**: Agents respond to all messages automatically
+- **In threads**: Agents follow smart response rules (see below)
+
+### Agent Response Rules
+
+Agents ONLY respond in threads - never in main room messages. Within threads, they follow these intelligent rules:
+
+1. **Mentioned agents always respond** - If you @mention an agent in a thread, it will respond
+2. **Single agent continues conversation** - If only one agent is in a thread, it continues responding without mentions
+3. **Multiple agents need direction** - When 2+ agents are in a thread, you must @mention who you want
+4. **Smart routing for new threads** - If no agents have participated in the thread, the system picks the most suitable one
+5. **Invited agents act like natives** - Agents invited via `/invite` follow the same rules as room natives
+
+These rules ensure:
+- No agent response storms (multiple agents responding to everything)
+- Natural conversations (single agent threads flow smoothly)
+- User control (you decide who responds when multiple agents are present)
+- Intelligent routing (best agent selected for new questions)
 
 ## Usage Examples
 
@@ -243,6 +264,26 @@ def create_your_agent(model):
 pytest
 pre-commit run --all-files
 ```
+
+## Current Status
+
+### ✅ Implemented Features
+- Multi-agent system with specialized agents (calculator, code, research, etc.)
+- Basic memory system with room and agent contexts
+- Thread-based conversations
+- Cross-room agent invitations with time limits
+- Agent response routing based on context
+- Slash commands: `/invite`, `/uninvite`, `/list_invites`, `/help`
+- Multiple AI model support (OpenAI, Anthropic, Ollama, etc.)
+- End-to-end encryption via Matrix
+
+### 🚧 In Development
+- Memory rating and quality feedback
+- Thread tagging and memory sharing
+- Progress widget for real-time monitoring
+- Scheduled agent interactions
+- Thread branching and linking
+- Context management commands
 
 ## Roadmap
 

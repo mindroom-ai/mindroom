@@ -1,0 +1,273 @@
+"""Tests for agent response decision logic.
+
+This module comprehensively tests all agent response rules:
+1. Mentioned agents always respond
+2. Single agent continues conversation
+3. Multiple agents need explicit mentions
+4. Smart routing for new threads
+5. Invited agents behave like native agents
+
+These tests ensure no regressions in the core response logic.
+"""
+
+from mindroom.thread_utils import should_agent_respond
+
+
+class TestAgentResponseLogic:
+    """Test the should_agent_respond logic."""
+
+    def test_mentioned_agent_always_responds(self):
+        """If an agent is mentioned, it should always respond."""
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=True,
+            is_thread=True,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=[],
+        )
+        assert decision.should_respond is True
+        assert decision.use_router is False
+
+    def test_only_agent_in_thread_continues(self):
+        """If agent is the only one in thread, it continues."""
+        thread_history = [
+            {"sender": "@mindroom_calculator:localhost", "body": "2+2=4"},
+            {"sender": "@user:localhost", "body": "What about 3+3?"},
+        ]
+
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=thread_history,
+        )
+        assert decision.should_respond is True
+        assert decision.use_router is False
+
+    def test_invited_agent_behaves_like_native_agent(self):
+        """Invited agents should follow the same rules as native agents."""
+        # Test 1: Invited agent with no agents in thread - should use router
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=True,
+            room_id="!room:localhost",
+            configured_rooms=[],  # Not native to room
+            thread_history=[],
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is True
+
+        # Test 2: Invited agent as only agent in thread - should continue
+        thread_history = [
+            {"sender": "@mindroom_calculator:localhost", "body": "2+2=4"},
+            {"sender": "@user:localhost", "body": "What about 3+3?"},
+        ]
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=True,
+            room_id="!room:localhost",
+            configured_rooms=[],  # Not native to room
+            thread_history=thread_history,
+        )
+        assert decision.should_respond is True
+        assert decision.use_router is False
+
+        # Test 3: Invited agent with multiple agents - nobody responds
+        thread_history = [
+            {"sender": "@mindroom_calculator:localhost", "body": "2+2=4"},
+            {"sender": "@mindroom_general:localhost", "body": "Let me help"},
+            {"sender": "@user:localhost", "body": "What about 3+3?"},
+        ]
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=True,
+            room_id="!room:localhost",
+            configured_rooms=[],  # Not native to room
+            thread_history=thread_history,
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is False
+
+    def test_no_agents_in_thread_uses_router(self):
+        """If no agents have participated, use router."""
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=[],
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is True
+
+    def test_multiple_agents_nobody_responds(self):
+        """If multiple agents in thread, nobody responds unless mentioned."""
+        thread_history = [
+            {"sender": "@mindroom_calculator:localhost", "body": "2+2=4"},
+            {"sender": "@mindroom_general:localhost", "body": "Let me help"},
+            {"sender": "@user:localhost", "body": "What about 3+3?"},
+        ]
+
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=thread_history,
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is False
+
+    def test_not_in_thread_no_response(self):
+        """If not in a thread, don't respond."""
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=False,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=[],
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is False
+
+    def test_agent_not_in_room_no_response(self):
+        """If agent is not in room (native or invited), don't respond."""
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!other_room:localhost"],  # Different room
+            thread_history=[],
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is False
+
+    def test_mentioned_outside_thread(self):
+        """Agents NEVER respond outside threads, even if mentioned."""
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=True,
+            is_thread=False,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=[],
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is False
+
+    def test_agent_mentioned_in_thread_history(self):
+        """When any agent is mentioned in thread, only mentioned agents respond."""
+        # Thread history with agent mentions
+        thread_history = [
+            {
+                "sender": "@user:localhost",
+                "body": "@mindroom_calculator help",
+                "content": {"m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]}},
+            },
+            {"sender": "@mindroom_calculator:localhost", "body": "2+2=4"},
+            {"sender": "@user:localhost", "body": "what about 3+3?"},
+        ]
+
+        # Non-mentioned agent should not respond
+        decision = should_agent_respond(
+            agent_name="general",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=thread_history,
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is False
+
+    def test_router_selection_scenarios(self):
+        """Test various scenarios where router should be used."""
+        # Scenario 1: Empty thread, native agent
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=[],
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is True
+
+        # Scenario 2: Thread with only user messages
+        thread_history = [
+            {"sender": "@user:localhost", "body": "I need help with math"},
+            {"sender": "@user:localhost", "body": "Can someone help?"},
+        ]
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=thread_history,
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is True
+
+    def test_edge_case_empty_configured_rooms(self):
+        """Test agent with no configured rooms but invited to thread."""
+        # Should behave same as native agent when invited
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=True,
+            room_id="!room:localhost",
+            configured_rooms=[],  # No native rooms
+            thread_history=[],
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is True
+
+    def test_mixed_agent_and_user_messages(self):
+        """Test thread with interleaved agent and user messages."""
+        thread_history = [
+            {"sender": "@user:localhost", "body": "Help with math"},
+            {"sender": "@mindroom_calculator:localhost", "body": "I can help!"},
+            {"sender": "@user:localhost", "body": "Great, what's 2+2?"},
+            {"sender": "@mindroom_calculator:localhost", "body": "2+2=4"},
+            {"sender": "@mindroom_general:localhost", "body": "I can also help"},
+            {"sender": "@user:localhost", "body": "What about 3+3?"},
+        ]
+
+        # Multiple agents present, nobody should respond without mention
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=thread_history,
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is False

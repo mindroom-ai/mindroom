@@ -8,8 +8,20 @@ import markdown
 import nio
 
 from ..logging_config import emoji, get_logger
+from .users import extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
+
+
+def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
+    """Extract thread information from a Matrix event.
+
+    Returns (is_thread, thread_id).
+    """
+    relates_to = event_source.get("content", {}).get("m.relates_to", {})
+    is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
+    thread_id = relates_to.get("event_id") if is_thread else None
+    return is_thread, thread_id
 
 
 @asynccontextmanager
@@ -90,7 +102,7 @@ async def register_user(
         ValueError: If registration fails
     """
     # Extract server name from homeserver URL
-    server_name = homeserver.split("://")[1].split(":")[0]
+    server_name = extract_server_name_from_homeserver(homeserver)
     user_id = f"@{username}:{server_name}"
 
     async with matrix_client(homeserver) as client:
@@ -104,8 +116,15 @@ async def register_user(
         if isinstance(response, nio.RegisterResponse):
             logger.info(f"Successfully registered user: {user_id}")
             # Set display name
-            await client.login(password)
-            await client.set_displayname(display_name)
+            login_response = await client.login(password)
+            if not isinstance(login_response, nio.LoginResponse):
+                logger.error(f"Failed to login after registration: {login_response}")
+                raise ValueError(f"Failed to login after registration: {login_response}")
+
+            display_response = await client.set_displayname(display_name)
+            if isinstance(display_response, nio.ErrorResponse):
+                logger.warning(f"Failed to set display name: {display_response}")
+
             return user_id
         elif (
             isinstance(response, nio.ErrorResponse)
@@ -133,16 +152,12 @@ async def invite_to_room(
     Returns:
         True if successful, False otherwise
     """
-    try:
-        response = await client.room_invite(room_id, user_id)
-        if isinstance(response, nio.RoomInviteResponse):
-            logger.info(f"Invited {user_id} to room {room_id}")
-            return True
-        else:
-            logger.error(f"Failed to invite {user_id} to room {room_id}: {response}")
-            return False
-    except Exception as e:
-        logger.error(f"Error inviting {user_id} to room {room_id}: {e}")
+    response = await client.room_invite(room_id, user_id)
+    if isinstance(response, nio.RoomInviteResponse):
+        logger.info(f"Invited {user_id} to room {room_id}")
+        return True
+    else:
+        logger.error(f"Failed to invite {user_id} to room {room_id}: {response}")
         return False
 
 
@@ -163,22 +178,18 @@ async def create_room(
     Returns:
         Room ID if successful, None otherwise
     """
-    try:
-        room_config = {"name": name}
-        if alias:
-            room_config["room_alias_name"] = alias
-        if topic:
-            room_config["topic"] = topic
+    room_config = {"name": name}
+    if alias:
+        room_config["room_alias_name"] = alias
+    if topic:
+        room_config["topic"] = topic
 
-        response = await client.room_create(**room_config)
-        if isinstance(response, nio.RoomCreateResponse):
-            logger.info(f"Created room: {name} ({response.room_id})")
-            return response.room_id
-        else:
-            logger.error(f"Failed to create room {name}: {response}")
-            return None
-    except Exception as e:
-        logger.error(f"Error creating room {name}: {e}")
+    response = await client.room_create(**room_config)
+    if isinstance(response, nio.RoomCreateResponse):
+        logger.info(f"Created room: {name} ({response.room_id})")
+        return str(response.room_id)
+    else:
+        logger.error(f"Failed to create room {name}: {response}")
         return None
 
 
@@ -192,16 +203,12 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    try:
-        response = await client.join(room_id)
-        if isinstance(response, nio.JoinResponse):
-            logger.info(f"Joined room: {room_id}")
-            return True
-        else:
-            logger.warning(f"Could not join room {room_id}: {response}")
-            return False
-    except Exception as e:
-        logger.error(f"Error joining room {room_id}: {e}")
+    response = await client.join(room_id)
+    if isinstance(response, nio.JoinResponse):
+        logger.info(f"Joined room: {room_id}")
+        return True
+    else:
+        logger.warning(f"Could not join room {room_id}: {response}")
         return False
 
 
@@ -215,15 +222,11 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
     Returns:
         Set of user IDs in the room
     """
-    try:
-        response = await client.joined_members(room_id)
-        if isinstance(response, nio.JoinedMembersResponse):
-            return {member.user_id for member in response.members}
-        else:
-            logger.warning(f"Could not check members for room {room_id}")
-            return set()
-    except Exception as e:
-        logger.error(f"Error checking members for room {room_id}: {e}")
+    response = await client.joined_members(room_id)
+    if isinstance(response, nio.JoinedMembersResponse):
+        return {member.user_id for member in response.members}
+    else:
+        logger.warning(f"Could not check members for room {room_id}")
         return set()
 
 
@@ -253,6 +256,10 @@ async def fetch_thread_history(
             message_filter={"types": ["m.room.message"]},
             direction=nio.MessageDirection.back,
         )
+
+        if not hasattr(response, "chunk"):
+            logger.error("Failed to fetch thread history", room_id=room_id, error=str(response))
+            break
 
         for event in response.chunk:
             if hasattr(event, "source") and event.source.get("type") == "m.room.message":
@@ -324,8 +331,8 @@ def prepare_response_content(
         "formatted_body": markdown_to_html(response_text),
     }
 
+    is_thread_reply, thread_id = extract_thread_info(event.source)
     relates_to = event.source.get("content", {}).get("m.relates_to")
-    is_thread_reply = relates_to and relates_to.get("rel_type") == "m.thread"
 
     agent_prefix = emoji(agent_name) if agent_name else ""
 

@@ -21,7 +21,7 @@ def get_memory_config(storage_path: Path) -> dict:
         Configuration dictionary for Mem0
     """
     # Load configuration from config.yaml
-    from ..agent_loader import load_config
+    from ..agent_config import load_config
 
     app_config = load_config()
 

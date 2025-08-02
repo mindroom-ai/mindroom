@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.agent_loader import describe_agent
+from mindroom.agent_config import describe_agent
 from mindroom.bot import AgentBot
 from mindroom.matrix import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
@@ -72,22 +72,21 @@ class TestAIRouting:
             )
             mock_agent.arun.return_value = mock_response
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
-                # Should return None because of the exception handler
-                result = await suggest_agent_for_message(
+            with (
+                patch("mindroom.routing.Agent", return_value=mock_agent),
+                pytest.raises(AssertionError, match="AI suggested code but available agents are"),
+            ):
+                await suggest_agent_for_message(
                     "How do I write a Python function?",
                     ["calculator", "general"],  # code not available
                     None,
                 )
 
-                # The assertion error gets caught by the exception handler
-                assert result is None
-
     @pytest.mark.asyncio
     async def test_suggest_agent_error_handling(self) -> None:
         """Test error handling in agent suggestion."""
         with patch("mindroom.routing.get_model_instance") as mock_model:
-            mock_model.side_effect = Exception("Model error")
+            mock_model.side_effect = ValueError("Model error")
 
             result = await suggest_agent_for_message("Test message", ["general"], None)
 
@@ -196,7 +195,7 @@ class TestAgentDescription:
         """Test describing an agent with tools."""
         description = describe_agent("calculator")
 
-        assert "CalculatorAgent" in description
+        assert "calculator" in description
         assert "Solve mathematical problems" in description
         assert "Tools: calculator" in description
         assert "Use the calculator tools" in description
@@ -205,7 +204,7 @@ class TestAgentDescription:
         """Test describing an agent without tools."""
         description = describe_agent("general")
 
-        assert "GeneralAgent" in description
+        assert "general" in description
         assert "general-purpose assistant" in description
         assert "Tools:" not in description  # No tools section
         assert "Always provide a clear" in description
