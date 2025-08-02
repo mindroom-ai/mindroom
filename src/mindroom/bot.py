@@ -358,13 +358,12 @@ class AgentBot:
         Decision logic:
         1. If I'm mentioned → I respond (always)
         2. If I'm the ONLY agent in the thread → I continue responding
-        3. If I'm invited to thread → I ONLY respond if explicitly mentioned
-        4. If I'm native to the room (configured in config.yaml):
+        3. If I'm in the room (native or invited):
            - If any agent is mentioned in thread → Only mentioned agents respond
            - If NO agents are mentioned in thread:
              - 0 agents have participated → Router picks who should start
              - 2+ agents have participated → Nobody responds (users must mention who they want)
-        5. Not in thread → Don't respond
+        4. Not in thread → Don't respond
         """
         should_respond, use_router = should_agent_respond(
             self.agent_name,
@@ -388,12 +387,7 @@ class AgentBot:
                 agent=f"{emoji(self.agent_name)} {self.agent_name}",
             )
         elif is_thread:
-            if is_invited_to_thread:
-                logger.debug(
-                    "Invited to thread but not mentioned, not responding",
-                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                )
-            elif has_any_agent_mentions_in_thread(thread_history):
+            if has_any_agent_mentions_in_thread(thread_history):
                 logger.debug(
                     "Not responding: other agents mentioned in thread",
                     agent=f"{emoji(self.agent_name)} {self.agent_name}",

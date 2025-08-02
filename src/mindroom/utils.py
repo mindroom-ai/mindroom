@@ -164,13 +164,8 @@ def should_agent_respond(
         # If I'm the only agent in the thread, I should continue responding
         if len(agents_in_thread) == 1 and agent_name in agents_in_thread:
             should_respond = True
-        # Check if I'm an invited agent
-        elif is_invited_to_thread:
-            # I'm invited - but only respond if explicitly mentioned
-            # Invited agents don't participate automatically unless they're the only one
-            pass
-        elif room_id in configured_rooms:
-            # Not invited but in the room - standard logic
+        # Standard logic for all agents (native or invited)
+        elif room_id in configured_rooms or is_invited_to_thread:
             if has_any_agent_mentions_in_thread(thread_history):
                 # Someone is mentioned - only mentioned agents respond
                 pass
