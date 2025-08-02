@@ -161,98 +161,33 @@ class AgentBot:
             event_id=event.event_id,
         )
 
-        # Don't respond to own messages
-        if event.sender == self.agent_user.user_id:
-            logger.debug("Ignoring own message", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+        # Validate message sender
+        if not await self._should_process_message(event):
             return
 
-        # Don't respond to other agent messages (avoid agent loops)
-        if is_sender_other_agent(event.sender, self.agent_user.user_id):
-            logger.debug(
-                "Ignoring message from other agent",
-                agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                sender=event.sender,
-            )
+        # Check room permissions
+        if not await self._has_room_access(room.room_id):
             return
 
-        # Check if I should be in this room (native or invited)
-        is_room_invite = await room_invite_manager.is_agent_invited_to_room(room.room_id, self.agent_name)
-        if room.room_id not in self.rooms and not is_room_invite:
-            logger.debug(
-                "Not in this room and not invited",
-                agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                room_id=room.room_id,
-            )
+        # Handle commands (only general agent)
+        if await self._try_handle_command(room, event):
             return
 
-        # Check for commands (only general agent handles commands)
-        if self.agent_name == "general":
-            command = command_parser.parse(event.body)
-            if command:
-                await self._handle_command(room, event, command)
-                return
-
-        # Debug logging
-        logger.debug(
-            "Checking message",
-            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-            body=event.body,
-            user_id=self.agent_user.user_id,
-            display_name=self.agent_user.display_name,
-        )
-
-        # Extract mentions and thread info
-        mentions = event.source.get("content", {}).get("m.mentions", {})
-        mentioned_agents = get_mentioned_agents(mentions)
-        am_i_mentioned = self.agent_name in mentioned_agents
-
-        # Log mention detection
-        if mentioned_agents:
-            logger.debug(
-                "Detected mentions",
-                agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                mentioned_agents=mentioned_agents,
-            )
-        if am_i_mentioned:
-            logger.info(
-                "I am mentioned in message",
-                agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                body_preview=event.body[:100],
-                event_id=event.event_id,
-            )
-
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
-        thread_id = relates_to.get("event_id") if is_thread else None
-
-        # Fetch thread history if in thread
-        thread_history = []
-        if thread_id:
-            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-
-        # Check if I'm invited to this thread (even if not in this room normally)
-        is_invited_to_thread = False
-        if thread_id:
-            is_invited_to_thread = await thread_invite_manager.is_agent_invited_to_thread(thread_id, self.agent_name)
-            if is_invited_to_thread:
-                logger.debug(
-                    "Agent is invited to this thread",
-                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    thread_id=thread_id,
-                )
+        # Extract message context
+        context = await self._extract_message_context(room, event)
 
         # Determine if this agent should respond to the message
         should_respond, use_router = await self._should_respond_to_message(
-            am_i_mentioned=am_i_mentioned,
-            is_thread=is_thread,
-            is_invited_to_thread=is_invited_to_thread,
-            thread_history=thread_history,
+            am_i_mentioned=context["am_i_mentioned"],
+            is_thread=context["is_thread"],
+            is_invited_to_thread=context["is_invited_to_thread"],
+            thread_history=context["thread_history"],
             room_id=room.room_id,
         )
 
         # Handle routing if needed
         if use_router:
-            await self._handle_ai_routing(room, event, thread_history)
+            await self._handle_ai_routing(room, event, context["thread_history"])
             return
 
         # Exit if not responding
@@ -269,80 +204,8 @@ class AgentBot:
             )
             return
 
-        logger.info(
-            "WILL PROCESS message",
-            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-            sender=event.sender,
-            body=event.body,
-            event_id=event.event_id,
-        )
-
-        # For now, use the full message body as the prompt
-        # The actual mention text might not be in the body with modern Matrix clients
-        prompt = event.body.strip()
-
-        if not prompt:
-            return
-
-        # Create session ID with thread awareness
-        session_id = f"{room.room_id}:{thread_id}" if thread_id else room.room_id
-
-        # Fetch thread history if we haven't already
-        if thread_id and not thread_history:
-            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-
-        # Generate response with room context
-        response_text = await ai_response(
-            agent_name=self.agent_name,
-            prompt=prompt,
-            session_id=session_id,
-            storage_path=self.storage_path,
-            thread_history=thread_history,
-            room_id=room.room_id,
-        )
-
-        # Prepare and send response with proper mention parsing
-        # Extract domain from agent's user_id
-        sender_domain = self.agent_user.user_id.split(":")[1] if ":" in self.agent_user.user_id else "localhost"
-
-        # Parse response for any agent mentions
-        content = create_mention_content_from_text(
-            response_text,
-            sender_domain=sender_domain,
-            thread_event_id=thread_id,
-            reply_to_event_id=event.event_id if thread_id else None,
-        )
-
-        logger.debug(
-            "Sending response",
-            agent=f"{emoji(self.agent_name)} {self.agent_name}",
-            room_id=room.room_id,
-            message_type="m.room.message",
-            content=content,
-        )
-
-        if self.client:
-            response = await self.client.room_send(
-                room_id=room.room_id,
-                message_type="m.room.message",
-                content=content,
-            )
-            if isinstance(response, nio.RoomSendResponse):
-                # Mark this event as responded to
-                self.response_tracker.mark_responded(event.event_id)
-                logger.info(
-                    "Sent response to room",
-                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    room_id=room.room_id,
-                    response_event_id=response.event_id,
-                )
-
-            else:
-                logger.error(
-                    "Failed to send response",
-                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    error=str(response),
-                )
+        # Process and send response
+        await self._process_and_respond(room, event, context["thread_id"], context["thread_history"])
 
     async def _should_respond_to_message(
         self,
@@ -441,6 +304,182 @@ class AgentBot:
             )
 
         return should_respond, use_router
+
+    async def _should_process_message(self, event: nio.RoomMessageText) -> bool:
+        """Check if we should process this message at all."""
+        # Don't respond to own messages
+        if event.sender == self.agent_user.user_id:
+            logger.debug("Ignoring own message", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+            return False
+
+        # Don't respond to other agent messages (avoid agent loops)
+        if is_sender_other_agent(event.sender, self.agent_user.user_id):
+            logger.debug(
+                "Ignoring message from other agent",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                sender=event.sender,
+            )
+            return False
+
+        return True
+
+    async def _has_room_access(self, room_id: str) -> bool:
+        """Check if agent has access to this room."""
+        is_room_invite = await room_invite_manager.is_agent_invited_to_room(room_id, self.agent_name)
+        if room_id not in self.rooms and not is_room_invite:
+            logger.debug(
+                "Not in this room and not invited",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                room_id=room_id,
+            )
+            return False
+        return True
+
+    async def _try_handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> bool:
+        """Try to handle command if this is the general agent. Returns True if handled."""
+        if self.agent_name == "general":
+            command = command_parser.parse(event.body)
+            if command:
+                await self._handle_command(room, event, command)
+                return True
+        return False
+
+    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> dict:
+        """Extract all relevant context from the message."""
+        logger.debug(
+            "Checking message",
+            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+            body=event.body,
+            user_id=self.agent_user.user_id,
+            display_name=self.agent_user.display_name,
+        )
+
+        # Extract mentions
+        mentions = event.source.get("content", {}).get("m.mentions", {})
+        mentioned_agents = get_mentioned_agents(mentions)
+        am_i_mentioned = self.agent_name in mentioned_agents
+
+        # Log mention detection
+        if mentioned_agents:
+            logger.debug(
+                "Detected mentions",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                mentioned_agents=mentioned_agents,
+            )
+        if am_i_mentioned:
+            logger.info(
+                "I am mentioned in message",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                body_preview=event.body[:100],
+                event_id=event.event_id,
+            )
+
+        # Extract thread info
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
+        thread_id = relates_to.get("event_id") if is_thread else None
+
+        # Fetch thread history if in thread
+        thread_history = []
+        if thread_id:
+            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
+
+        # Check if I'm invited to this thread
+        is_invited_to_thread = False
+        if thread_id:
+            is_invited_to_thread = await thread_invite_manager.is_agent_invited_to_thread(thread_id, self.agent_name)
+            if is_invited_to_thread:
+                logger.debug(
+                    "Agent is invited to this thread",
+                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                    thread_id=thread_id,
+                )
+
+        return {
+            "am_i_mentioned": am_i_mentioned,
+            "is_thread": is_thread,
+            "thread_id": thread_id,
+            "thread_history": thread_history,
+            "is_invited_to_thread": is_invited_to_thread,
+        }
+
+    async def _process_and_respond(
+        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
+    ) -> None:
+        """Process the message and send a response."""
+        logger.info(
+            "WILL PROCESS message",
+            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+            sender=event.sender,
+            body=event.body,
+            event_id=event.event_id,
+        )
+
+        # Extract prompt
+        prompt = event.body.strip()
+        if not prompt:
+            return
+
+        # Create session ID with thread awareness
+        session_id = f"{room.room_id}:{thread_id}" if thread_id else room.room_id
+
+        # Generate response
+        response_text = await ai_response(
+            agent_name=self.agent_name,
+            prompt=prompt,
+            session_id=session_id,
+            storage_path=self.storage_path,
+            thread_history=thread_history,
+            room_id=room.room_id,
+        )
+
+        # Send response
+        await self._send_response(room.room_id, event.event_id, response_text, thread_id)
+
+    async def _send_response(
+        self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None = None
+    ) -> None:
+        """Send a response to the room."""
+        # Extract domain from agent's user_id
+        sender_domain = self.agent_user.user_id.split(":")[1] if ":" in self.agent_user.user_id else "localhost"
+
+        # Parse response for any agent mentions
+        content = create_mention_content_from_text(
+            response_text,
+            sender_domain=sender_domain,
+            thread_event_id=thread_id,
+            reply_to_event_id=reply_to_event_id if thread_id else None,
+        )
+
+        logger.debug(
+            "Sending response",
+            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
+
+        if self.client:
+            response = await self.client.room_send(
+                room_id=room_id,
+                message_type="m.room.message",
+                content=content,
+            )
+            if isinstance(response, nio.RoomSendResponse):
+                # Mark this event as responded to
+                self.response_tracker.mark_responded(reply_to_event_id)
+                logger.info(
+                    "Sent response to room",
+                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                    room_id=room_id,
+                    response_event_id=response.event_id,
+                )
+            else:
+                logger.error(
+                    "Failed to send response",
+                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                    error=str(response),
+                )
 
     async def _handle_ai_routing(
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
