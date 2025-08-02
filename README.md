@@ -161,7 +161,7 @@ Agents follow intelligent rules to avoid chaos while remaining helpful:
 1. **Mentioned agents always respond** - If you @mention an agent, it will respond regardless of context
 2. **Single agent continues conversation** - If only one agent is in a thread, it continues responding without mentions
 3. **Multiple agents need direction** - When 2+ agents are in a thread, you must @mention who you want
-4. **Smart routing for new threads** - If no agent has responded yet, the system picks the most suitable one
+4. **Smart routing for new threads** - If no agents have participated in the thread, the system picks the most suitable one
 5. **Invited agents act like natives** - Agents invited via `/invite` follow the same rules as room natives
 
 These rules ensure:
