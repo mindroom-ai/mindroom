@@ -54,7 +54,6 @@ async def _handle_invite_command(
     room_id: str,
     thread_id: str,
     agent_name: str,
-    duration_hours: int | None,
     sender: str,
     agent_domain: str,
     client: nio.AsyncClient,
@@ -70,7 +69,6 @@ async def _handle_invite_command(
         room_id=room_id,
         agent_name=agent_name,
         invited_by=sender,
-        duration_hours=duration_hours,
     )
 
     # Invite to Matrix room for protocol compliance
@@ -83,8 +81,7 @@ async def _handle_invite_command(
         if not isinstance(result, nio.RoomInviteResponse):
             logger.warning("Failed to invite to room", agent=agent_name, error=str(result))
 
-    duration_text = f" for {duration_hours} hours" if duration_hours else " until thread ends"
-    response_text = f"✅ Invited @{agent_name} to this thread{duration_text}."
+    response_text = f"✅ Invited @{agent_name} to this thread."
     response_text += f"\n\n@{agent_name}, you've been invited to help in this thread!"
     return response_text
 
@@ -335,14 +332,12 @@ class AgentBot:
         if command.type == CommandType.INVITE:
             # Handle invite command
             agent_name = command.args["agent_name"]
-            duration_hours = command.args.get("duration_hours")
             agent_domain = extract_domain_from_user_id(self.agent_user.user_id)
 
             response_text = await _handle_invite_command(
                 room_id=room.room_id,
                 thread_id=thread_id,
                 agent_name=agent_name,
-                duration_hours=duration_hours,
                 sender=event.sender,
                 agent_domain=agent_domain,
                 client=self.client,
@@ -409,15 +404,9 @@ class MultiAgentOrchestrator:
         self.running = True
         logger.info("All agent bots started successfully")
 
-        # Create cleanup task for expired invitations
-        cleanup_task = asyncio.create_task(self._periodic_cleanup())
-
         # Run sync loops for all agents concurrently
         sync_tasks = [bot.client.sync_forever(timeout=30000, full_state=True) for bot in self.agent_bots.values()]
-
-        # Run all tasks together
-        all_tasks = sync_tasks + [cleanup_task]
-        await asyncio.gather(*all_tasks)
+        await asyncio.gather(*sync_tasks)
 
     async def stop(self) -> None:
         """Stop all agent bots."""
@@ -425,31 +414,6 @@ class MultiAgentOrchestrator:
         stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         logger.info("All agent bots stopped")
-
-    async def _periodic_cleanup(self) -> None:
-        while self.running:
-            try:
-                await asyncio.sleep(60)
-                # Cleanup expired invitations for all rooms across all agents
-                total_removed = 0
-                for bot in self.agent_bots.values():
-                    for room_id in bot.rooms:
-                        try:
-                            removed = await bot.thread_invite_manager.cleanup_expired(room_id)
-                            total_removed += removed
-                        except Exception as e:
-                            logger.error(
-                                "Failed to cleanup invitations for room",
-                                agent=bot.agent_name,
-                                room_id=room_id,
-                                error=str(e),
-                            )
-                if total_removed > 0:
-                    logger.info("Cleaned up expired invitations", count=total_removed)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("Cleanup task error", error=str(e))
 
     async def invite_agents_to_room(self, room_id: str, inviter_client: nio.AsyncClient) -> None:
         """Invite all agent users to a room.
