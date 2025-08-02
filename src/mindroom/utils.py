@@ -1,5 +1,14 @@
 """Common utility functions used across the codebase."""
 
+from typing import NamedTuple
+
+
+class ResponseDecision(NamedTuple):
+    """Decision about whether an agent should respond to a message."""
+
+    should_respond: bool
+    use_router: bool
+
 
 def extract_domain_from_user_id(user_id: str) -> str:
     """Extract domain from a Matrix user ID.
@@ -134,7 +143,7 @@ def should_agent_respond(
     room_id: str,
     configured_rooms: list[str],
     thread_history: list[dict],
-) -> tuple[bool, bool]:
+) -> ResponseDecision:
     """Determine if an agent should respond to a message.
 
     Args:
@@ -147,7 +156,7 @@ def should_agent_respond(
         thread_history: Thread message history
 
     Returns:
-        tuple: (should_respond, use_router)
+        ResponseDecision: Named tuple with (should_respond, use_router)
     """
     from .thread_utils import get_agents_in_thread, has_any_agent_mentions_in_thread
 
@@ -176,7 +185,7 @@ def should_agent_respond(
                 # Multiple agents - nobody responds
                 pass
 
-    return should_respond, use_router
+    return ResponseDecision(should_respond, use_router)
 
 
 def should_route_to_agent(agent_name: str, available_agents: list[str]) -> bool:

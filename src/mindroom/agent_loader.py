@@ -131,8 +131,8 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
 
     agent_config = config.agents[agent_name]
 
-    # Start with display name and role
-    parts = [f"{agent_config.display_name}"]
+    # Start with agent name (not display name, for routing consistency)
+    parts = [f"{agent_name}"]
     if agent_config.role:
         parts.append(f"- {agent_config.role}")
 

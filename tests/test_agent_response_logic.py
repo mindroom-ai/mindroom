@@ -18,7 +18,7 @@ class TestAgentResponseLogic:
 
     def test_mentioned_agent_always_responds(self):
         """If an agent is mentioned, it should always respond."""
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=True,
@@ -27,8 +27,8 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=[],
         )
-        assert should_respond is True
-        assert use_router is False
+        assert decision.should_respond is True
+        assert decision.use_router is False
 
     def test_only_agent_in_thread_continues(self):
         """If agent is the only one in thread, it continues."""
@@ -37,7 +37,7 @@ class TestAgentResponseLogic:
             {"sender": "@user:localhost", "body": "What about 3+3?"},
         ]
 
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -46,13 +46,13 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
         )
-        assert should_respond is True
-        assert use_router is False
+        assert decision.should_respond is True
+        assert decision.use_router is False
 
     def test_invited_agent_behaves_like_native_agent(self):
         """Invited agents should follow the same rules as native agents."""
         # Test 1: Invited agent with no agents in thread - should use router
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -61,15 +61,15 @@ class TestAgentResponseLogic:
             configured_rooms=[],  # Not native to room
             thread_history=[],
         )
-        assert should_respond is False
-        assert use_router is True
+        assert decision.should_respond is False
+        assert decision.use_router is True
 
         # Test 2: Invited agent as only agent in thread - should continue
         thread_history = [
             {"sender": "@mindroom_calculator:localhost", "body": "2+2=4"},
             {"sender": "@user:localhost", "body": "What about 3+3?"},
         ]
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -78,8 +78,8 @@ class TestAgentResponseLogic:
             configured_rooms=[],  # Not native to room
             thread_history=thread_history,
         )
-        assert should_respond is True
-        assert use_router is False
+        assert decision.should_respond is True
+        assert decision.use_router is False
 
         # Test 3: Invited agent with multiple agents - nobody responds
         thread_history = [
@@ -87,7 +87,7 @@ class TestAgentResponseLogic:
             {"sender": "@mindroom_general:localhost", "body": "Let me help"},
             {"sender": "@user:localhost", "body": "What about 3+3?"},
         ]
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -96,12 +96,12 @@ class TestAgentResponseLogic:
             configured_rooms=[],  # Not native to room
             thread_history=thread_history,
         )
-        assert should_respond is False
-        assert use_router is False
+        assert decision.should_respond is False
+        assert decision.use_router is False
 
     def test_no_agents_in_thread_uses_router(self):
         """If no agents have participated, use router."""
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -110,8 +110,8 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=[],
         )
-        assert should_respond is False
-        assert use_router is True
+        assert decision.should_respond is False
+        assert decision.use_router is True
 
     def test_multiple_agents_nobody_responds(self):
         """If multiple agents in thread, nobody responds unless mentioned."""
@@ -121,7 +121,7 @@ class TestAgentResponseLogic:
             {"sender": "@user:localhost", "body": "What about 3+3?"},
         ]
 
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -130,12 +130,12 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
         )
-        assert should_respond is False
-        assert use_router is False
+        assert decision.should_respond is False
+        assert decision.use_router is False
 
     def test_not_in_thread_no_response(self):
         """If not in a thread, don't respond."""
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=False,
@@ -144,12 +144,12 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=[],
         )
-        assert should_respond is False
-        assert use_router is False
+        assert decision.should_respond is False
+        assert decision.use_router is False
 
     def test_agent_not_in_room_no_response(self):
         """If agent is not in room (native or invited), don't respond."""
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -158,12 +158,12 @@ class TestAgentResponseLogic:
             configured_rooms=["!other_room:localhost"],  # Different room
             thread_history=[],
         )
-        assert should_respond is False
-        assert use_router is False
+        assert decision.should_respond is False
+        assert decision.use_router is False
 
     def test_mentioned_outside_thread(self):
         """Mentioned agents respond even outside threads."""
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=False,
@@ -172,8 +172,8 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=[],
         )
-        assert should_respond is True
-        assert use_router is False
+        assert decision.should_respond is True
+        assert decision.use_router is False
 
     def test_agent_mentioned_in_thread_history(self):
         """When any agent is mentioned in thread, only mentioned agents respond."""
@@ -189,7 +189,7 @@ class TestAgentResponseLogic:
         ]
 
         # Non-mentioned agent should not respond
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="general",
             am_i_mentioned=False,
             is_thread=True,
@@ -198,13 +198,13 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
         )
-        assert should_respond is False
-        assert use_router is False
+        assert decision.should_respond is False
+        assert decision.use_router is False
 
     def test_router_selection_scenarios(self):
         """Test various scenarios where router should be used."""
         # Scenario 1: Empty thread, native agent
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -213,15 +213,15 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=[],
         )
-        assert should_respond is False
-        assert use_router is True
+        assert decision.should_respond is False
+        assert decision.use_router is True
 
         # Scenario 2: Thread with only user messages
         thread_history = [
             {"sender": "@user:localhost", "body": "I need help with math"},
             {"sender": "@user:localhost", "body": "Can someone help?"},
         ]
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -230,13 +230,13 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
         )
-        assert should_respond is False
-        assert use_router is True
+        assert decision.should_respond is False
+        assert decision.use_router is True
 
     def test_edge_case_empty_configured_rooms(self):
         """Test agent with no configured rooms but invited to thread."""
         # Should behave same as native agent when invited
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -245,8 +245,8 @@ class TestAgentResponseLogic:
             configured_rooms=[],  # No native rooms
             thread_history=[],
         )
-        assert should_respond is False
-        assert use_router is True
+        assert decision.should_respond is False
+        assert decision.use_router is True
 
     def test_mixed_agent_and_user_messages(self):
         """Test thread with interleaved agent and user messages."""
@@ -260,7 +260,7 @@ class TestAgentResponseLogic:
         ]
 
         # Multiple agents present, nobody should respond without mention
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
@@ -269,5 +269,5 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
         )
-        assert should_respond is False
-        assert use_router is False
+        assert decision.should_respond is False
+        assert decision.use_router is False

@@ -365,7 +365,7 @@ class AgentBot:
              - 2+ agents have participated → Nobody responds (users must mention who they want)
         4. Not in thread → Don't respond
         """
-        should_respond, use_router = should_agent_respond(
+        decision = should_agent_respond(
             self.agent_name,
             am_i_mentioned,
             is_thread,
@@ -376,12 +376,12 @@ class AgentBot:
         )
 
         # Log decision
-        if should_respond:
+        if decision.should_respond:
             if am_i_mentioned:
                 logger.debug("Will respond: explicitly mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}")
             else:
                 logger.debug("Will respond: only agent in thread", agent=f"{emoji(self.agent_name)} {self.agent_name}")
-        elif use_router:
+        elif decision.use_router:
             logger.debug(
                 "Not responding: no agents yet, will use router",
                 agent=f"{emoji(self.agent_name)} {self.agent_name}",
@@ -404,7 +404,7 @@ class AgentBot:
                 "Not responding: not in thread or mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}"
             )
 
-        return should_respond, use_router
+        return decision.should_respond, decision.use_router
 
     async def _should_process_message(self, event: nio.RoomMessageText) -> bool:
         """Check if we should process this message at all."""
