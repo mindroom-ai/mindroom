@@ -83,24 +83,6 @@ class TestBotHelpers:
             assert "you've been invited to help in this thread!" in result
 
     @pytest.mark.asyncio
-    async def test_handle_invite_command_thread_invite_no_thread_id(self):
-        """Test thread invite without thread ID."""
-        with patch("mindroom.bot.load_config") as mock_config:
-            mock_config.return_value.agents = {"calculator": MagicMock()}
-
-            result = await _handle_invite_command(
-                room_id="!room:localhost",
-                thread_id=None,
-                agent_name="calculator",
-                duration_hours=None,
-                sender="@user:localhost",
-                agent_domain="localhost",
-                client=None,
-            )
-
-            assert "❌ Invites can only be used in a thread" in result
-
-    @pytest.mark.asyncio
     async def test_handle_list_invites_command_empty(self):
         """Test list invites with no invites."""
         with patch("mindroom.bot.thread_invite_manager") as mock_thread_mgr:

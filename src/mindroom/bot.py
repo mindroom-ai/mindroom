@@ -44,7 +44,7 @@ logger = get_logger(__name__)
 
 async def _handle_invite_command(
     room_id: str,
-    thread_id: str | None,
+    thread_id: str,
     agent_name: str,
     duration_hours: int | None,
     sender: str,
@@ -56,10 +56,6 @@ async def _handle_invite_command(
     config = load_config()
     if agent_name not in config.agents:
         return f"❌ Unknown agent: {agent_name}. Available agents: {', '.join(config.agents.keys())}"
-
-    # Thread invites only
-    if not thread_id:
-        return "❌ Invites can only be used in a thread. Start a thread to invite agents."
 
     # Add the invitation
     await thread_invite_manager.add_invite(
@@ -93,14 +89,13 @@ async def _handle_invite_command(
     return response_text
 
 
-async def _handle_list_invites_command(room_id: str, thread_id: str | None) -> str:
+async def _handle_list_invites_command(room_id: str, thread_id: str) -> str:
     """Handle the list invites command."""
-    # Get thread invites if in a thread
-    if thread_id:
-        thread_invites = await thread_invite_manager.get_thread_agents(thread_id)
-        if thread_invites:
-            thread_list = "\n".join([f"- @{agent}" for agent in thread_invites])
-            return f"**Invited agents in this thread:**\n{thread_list}"
+    # Get thread invites
+    thread_invites = await thread_invite_manager.get_thread_agents(thread_id)
+    if thread_invites:
+        thread_list = "\n".join([f"- @{agent}" for agent in thread_invites])
+        return f"**Invited agents in this thread:**\n{thread_list}"
 
     return "No agents are currently invited to this thread."
 
@@ -545,6 +540,12 @@ class AgentBot:
 
         # Get thread info
         is_thread, thread_id = extract_thread_info(event.source)
+
+        # Commands only work in threads
+        if not is_thread or not thread_id:
+            response_text = "❌ Commands only work within threads. Please start a thread first."
+            await self._send_response(room, event, response_text)
+            return
 
         response_text = ""
 
