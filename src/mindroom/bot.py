@@ -27,15 +27,134 @@ from .thread_utils import (
     extract_agent_name,
     get_agents_in_thread,
     get_available_agents_in_room,
-    get_mentioned_agents,
     has_any_agent_mentions_in_thread,
 )
-from .utils import construct_agent_user_id, extract_domain_from_user_id, extract_thread_info
+from .utils import (
+    check_agent_mentioned,
+    construct_agent_user_id,
+    create_session_id,
+    extract_domain_from_user_id,
+    extract_thread_info,
+    has_room_access,
+    should_agent_respond,
+    should_route_to_agent,
+)
 
 logger = get_logger(__name__)
 
 
-def is_sender_other_agent(sender: str, current_agent_user_id: str) -> bool:
+async def _handle_invite_command(
+    room_id: str,
+    thread_id: str | None,
+    agent_name: str,
+    to_room: bool,
+    duration_hours: int | None,
+    sender: str,
+    agent_domain: str,
+    client: nio.AsyncClient | None,
+) -> str:
+    """Handle the invite command logic.
+
+    Args:
+        room_id: The room ID
+        thread_id: Optional thread ID
+        agent_name: Name of agent to invite
+        to_room: Whether this is a room invite
+        duration_hours: Optional duration in hours
+        sender: The sender of the command
+        agent_domain: Domain for constructing agent user ID
+        client: Matrix client for sending invites
+
+    Returns:
+        Response message text
+    """
+    # Check if agent exists
+    config = load_config()
+    if agent_name not in config.agents:
+        return f"❌ Unknown agent: {agent_name}. Available agents: {', '.join(config.agents.keys())}"
+
+    if to_room:
+        # Room invite
+        await room_invite_manager.add_invite(
+            room_id=room_id,
+            agent_name=agent_name,
+            invited_by=sender,
+            inactivity_timeout_hours=duration_hours or 24,  # Default 24h
+        )
+
+        # Get the agent's user ID and invite to Matrix room
+        agent_user_id = construct_agent_user_id(agent_name, agent_domain)
+        try:
+            if client:
+                result = await client.room_invite(room_id, agent_user_id)
+                if isinstance(result, nio.RoomInviteResponse):
+                    timeout_text = f"{duration_hours} hours" if duration_hours else "24 hours"
+                    return f"✅ Invited @{agent_name} to this room. They will be removed after {timeout_text} of inactivity."
+                else:
+                    # Remove the invite record if Matrix invite failed
+                    await room_invite_manager.remove_invite(room_id, agent_name)
+                    return f"❌ Failed to invite @{agent_name}: {result}"
+            else:
+                # No client available
+                await room_invite_manager.remove_invite(room_id, agent_name)
+                return "❌ No Matrix client available to send invite"
+        except Exception as e:
+            # Remove the invite record if Matrix invite failed
+            await room_invite_manager.remove_invite(room_id, agent_name)
+            return f"❌ Error inviting @{agent_name}: {str(e)}"
+    else:
+        # Thread invite
+        if not thread_id:
+            return "❌ Thread invites can only be used in a thread. Use '/invite <agent> to room' for room invites."
+
+        # Add the invitation
+        await thread_invite_manager.add_invite(
+            thread_id=thread_id,
+            room_id=room_id,
+            agent_name=agent_name,
+            invited_by=sender,
+            duration_hours=duration_hours,
+        )
+
+        duration_text = f" for {duration_hours} hours" if duration_hours else " until thread ends"
+        response_text = f"✅ Invited @{agent_name} to this thread{duration_text}. They can now participate even if not in this room."
+        # Mention the agent so they know they're invited
+        response_text += f"\n\n@{agent_name}, you've been invited to help in this thread!"
+        return response_text
+
+
+async def _handle_list_invites_command(room_id: str, thread_id: str | None) -> str:
+    """Handle the list invites command.
+
+    Args:
+        room_id: The room ID
+        thread_id: Optional thread ID
+
+    Returns:
+        Response message text
+    """
+    response_parts = []
+
+    # Get room invites
+    room_invites = await room_invite_manager.get_room_invites(room_id)
+    if room_invites:
+        room_list = "\n".join([f"- @{agent} (room invite)" for agent in room_invites])
+        response_parts.append(f"**Room invites:**\n{room_list}")
+
+    # Get thread invites if in a thread
+    if thread_id:
+        thread_invites = await thread_invite_manager.get_thread_agents(thread_id)
+        if thread_invites:
+            thread_list = "\n".join([f"- @{agent} (thread invite)" for agent in thread_invites])
+            response_parts.append(f"**Thread invites:**\n{thread_list}")
+
+    if response_parts:
+        return "\n\n".join(response_parts)
+    else:
+        return "No agents are currently invited to this room or thread."
+
+
+def _is_sender_other_agent(sender: str, current_agent_user_id: str) -> bool:
     """Check if sender is another agent (not the current agent, not the user)."""
     if sender == current_agent_user_id:
         return False
@@ -59,7 +178,7 @@ def _should_process_message(event_sender: str, agent_user_id: str) -> bool:
         return False
 
     # Don't respond to other agent messages (avoid agent loops)
-    return not is_sender_other_agent(event_sender, agent_user_id)
+    return not _is_sender_other_agent(event_sender, agent_user_id)
 
 
 @dataclass
@@ -247,53 +366,46 @@ class AgentBot:
              - 2+ agents have participated → Nobody responds (users must mention who they want)
         5. Not in thread → Don't respond
         """
-        should_respond = False
-        use_router = False
+        should_respond, use_router = should_agent_respond(
+            self.agent_name,
+            am_i_mentioned,
+            is_thread,
+            is_invited_to_thread,
+            room_id,
+            self.rooms,
+            thread_history,
+        )
 
-        if am_i_mentioned:
-            # Always respond if explicitly mentioned
-            should_respond = True
-            logger.debug("Will respond: explicitly mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}")
-        elif is_thread:
-            # For threads, check if there's a single agent that should continue
-            agents_in_thread = get_agents_in_thread(thread_history)
-
-            # If I'm the only agent in the thread, I should continue responding
-            if len(agents_in_thread) == 1 and self.agent_name in agents_in_thread:
-                should_respond = True
+        # Log decision
+        if should_respond:
+            if am_i_mentioned:
+                logger.debug("Will respond: explicitly mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}")
+            else:
                 logger.debug("Will respond: only agent in thread", agent=f"{emoji(self.agent_name)} {self.agent_name}")
-            # Check if I'm an invited agent
-            elif is_invited_to_thread:
-                # I'm invited - but only respond if explicitly mentioned
-                # Invited agents don't participate automatically unless they're the only one
+        elif use_router:
+            logger.debug(
+                "Not responding: no agents yet, will use router",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
+            )
+        elif is_thread:
+            if is_invited_to_thread:
                 logger.debug(
                     "Invited to thread but not mentioned, not responding",
                     agent=f"{emoji(self.agent_name)} {self.agent_name}",
                 )
-            elif room_id in self.rooms:
-                # Not invited but in the room - standard logic
-                if has_any_agent_mentions_in_thread(thread_history):
-                    # Someone is mentioned - only mentioned agents respond
-                    logger.debug(
-                        "Not responding: other agents mentioned in thread",
-                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    )
-                elif not agents_in_thread:
-                    # No agents yet - use router to pick first responder
-                    use_router = True
-                    logger.debug(
-                        "Not responding: no agents yet, will use router",
-                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    )
-                else:
-                    # Multiple agents - nobody responds
-                    logger.debug(
-                        "Not responding: multiple agents in thread, need explicit mention",
-                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                        agents_in_thread=agents_in_thread,
-                    )
+            elif has_any_agent_mentions_in_thread(thread_history):
+                logger.debug(
+                    "Not responding: other agents mentioned in thread",
+                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                )
+            else:
+                agents_in_thread = get_agents_in_thread(thread_history)
+                logger.debug(
+                    "Not responding: multiple agents in thread, need explicit mention",
+                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                    agents_in_thread=agents_in_thread,
+                )
         else:
-            # Not in thread and not mentioned
             logger.debug(
                 "Not responding: not in thread or mentioned", agent=f"{emoji(self.agent_name)} {self.agent_name}"
             )
@@ -318,15 +430,14 @@ class AgentBot:
 
     async def _has_room_access(self, room_id: str) -> bool:
         """Check if agent has access to this room."""
-        is_room_invite = await room_invite_manager.is_agent_invited_to_room(room_id, self.agent_name)
-        if room_id not in self.rooms and not is_room_invite:
+        has_access = await has_room_access(room_id, self.agent_name, self.rooms)
+        if not has_access:
             logger.debug(
                 "Not in this room and not invited",
                 agent=f"{emoji(self.agent_name)} {self.agent_name}",
                 room_id=room_id,
             )
-            return False
-        return True
+        return has_access
 
     async def _try_handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> bool:
         """Try to handle command if this is the general agent. Returns True if handled."""
@@ -348,9 +459,7 @@ class AgentBot:
         )
 
         # Extract mentions
-        mentions = event.source.get("content", {}).get("m.mentions", {})
-        mentioned_agents = get_mentioned_agents(mentions)
-        am_i_mentioned = self.agent_name in mentioned_agents
+        mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
 
         # Log mention detection
         if mentioned_agents:
@@ -412,7 +521,7 @@ class AgentBot:
             return
 
         # Create session ID with thread awareness
-        session_id = f"{room.room_id}:{thread_id}" if thread_id else room.room_id
+        session_id = create_session_id(room.room_id, thread_id)
 
         # Generate response
         response_text = await ai_response(
@@ -477,13 +586,9 @@ class AgentBot:
     ) -> None:
         """Handle AI routing for multi-agent threads."""
         # Only let one agent do the routing to avoid duplicates
-        # All agents receive the message, but we need only one to handle routing
-        # We use the first agent alphabetically as a deterministic choice
-        # Example: If room has [calculator, general, shell], only calculator routes
         available_agents = get_available_agents_in_room(room)
-        if not available_agents or available_agents[0] != self.agent_name:
-            # I'm not the first agent alphabetically, so I should not route
-            return  # Let the first agent handle routing
+        if not should_route_to_agent(self.agent_name, available_agents):
+            return  # Let another agent handle routing
 
         logger.info(
             "Handling AI routing",
@@ -542,57 +647,18 @@ class AgentBot:
             agent_name = command.args["agent_name"]
             to_room = command.args.get("to_room", False)
             duration_hours = command.args.get("duration_hours")
+            agent_domain = extract_domain_from_user_id(self.agent_user.user_id)
 
-            # Check if agent exists
-            config = load_config()
-            if agent_name not in config.agents:
-                response_text = f"❌ Unknown agent: {agent_name}. Available agents: {', '.join(config.agents.keys())}"
-            elif to_room:
-                # Room invite
-                # Add room invitation
-                await room_invite_manager.add_invite(
-                    room_id=room.room_id,
-                    agent_name=agent_name,
-                    invited_by=event.sender,
-                    inactivity_timeout_hours=duration_hours or 24,  # Default 24h
-                )
-
-                # Get the agent's user ID and invite to Matrix room
-                agent_domain = extract_domain_from_user_id(self.agent_user.user_id)
-                agent_user_id = construct_agent_user_id(agent_name, agent_domain)
-                try:
-                    if self.client:
-                        result = await self.client.room_invite(room.room_id, agent_user_id)
-                        if isinstance(result, nio.RoomInviteResponse):
-                            timeout_text = f"{duration_hours} hours" if duration_hours else "24 hours"
-                            response_text = f"✅ Invited @{agent_name} to this room. They will be removed after {timeout_text} of inactivity."
-                        else:
-                            response_text = f"❌ Failed to invite @{agent_name}: {result}"
-                            # Remove the invite record if Matrix invite failed
-                            await room_invite_manager.remove_invite(room.room_id, agent_name)
-                except Exception as e:
-                    response_text = f"❌ Error inviting @{agent_name}: {str(e)}"
-                    # Remove the invite record if Matrix invite failed
-                    await room_invite_manager.remove_invite(room.room_id, agent_name)
-            else:
-                # Thread invite
-                if not thread_id:
-                    response_text = "❌ Thread invites can only be used in a thread. Use '/invite <agent> to room' for room invites."
-                else:
-                    # Add the invitation
-                    await thread_invite_manager.add_invite(
-                        thread_id=thread_id,
-                        room_id=room.room_id,
-                        agent_name=agent_name,
-                        invited_by=event.sender,
-                        duration_hours=duration_hours,
-                    )
-
-                    duration_text = f" for {duration_hours} hours" if duration_hours else " until thread ends"
-                    response_text = f"✅ Invited @{agent_name} to this thread{duration_text}. They can now participate even if not in this room."
-
-                    # Mention the agent so they know they're invited
-                    response_text += f"\n\n@{agent_name}, you've been invited to help in this thread!"
+            response_text = await _handle_invite_command(
+                room_id=room.room_id,
+                thread_id=thread_id,
+                agent_name=agent_name,
+                to_room=to_room,
+                duration_hours=duration_hours,
+                sender=event.sender,
+                agent_domain=agent_domain,
+                client=self.client,
+            )
 
         elif command.type == CommandType.UNINVITE:
             # Handle uninvite command
@@ -608,25 +674,7 @@ class AgentBot:
 
         elif command.type == CommandType.LIST_INVITES:
             # Handle list invites command
-            response_parts = []
-
-            # Get room invites
-            room_invites = await room_invite_manager.get_room_invites(room.room_id)
-            if room_invites:
-                room_list = "\n".join([f"- @{agent} (room invite)" for agent in room_invites])
-                response_parts.append(f"**Room invites:**\n{room_list}")
-
-            # Get thread invites if in a thread
-            if thread_id:
-                thread_invites = await thread_invite_manager.get_thread_agents(thread_id)
-                if thread_invites:
-                    thread_list = "\n".join([f"- @{agent} (thread invite)" for agent in thread_invites])
-                    response_parts.append(f"**Thread invites:**\n{thread_list}")
-
-            if response_parts:
-                response_text = "\n\n".join(response_parts)
-            else:
-                response_text = "No agents are currently invited to this room or thread."
+            response_text = await _handle_list_invites_command(room.room_id, thread_id)
 
         elif command.type == CommandType.HELP:
             # Handle help command
