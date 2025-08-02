@@ -5,23 +5,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import _handle_invite_command, _handle_list_invites_command, _is_sender_other_agent
+from mindroom.bot import _handle_invite_command, _handle_list_invites_command, _should_process_message
 from mindroom.thread_utils import should_route_to_agent
 
 
 class TestBotHelpers:
     """Test bot helper functions."""
 
-    def test_is_sender_other_agent(self):
-        """Test _is_sender_other_agent function."""
-        # Test with same user ID (self)
-        assert not _is_sender_other_agent("@mindroom_calculator:localhost", "@mindroom_calculator:localhost")
+    def test_should_process_message(self):
+        """Test _should_process_message function."""
+        # Test with same user ID (self) - should not process
+        assert not _should_process_message("@mindroom_calculator:localhost", "@mindroom_calculator:localhost")
 
-        # Test with another agent
-        assert _is_sender_other_agent("@mindroom_general:localhost", "@mindroom_calculator:localhost")
+        # Test with another agent - should not process
+        assert not _should_process_message("@mindroom_general:localhost", "@mindroom_calculator:localhost")
 
-        # Test with regular user
-        assert not _is_sender_other_agent("@user:localhost", "@mindroom_calculator:localhost")
+        # Test with regular user - should process
+        assert _should_process_message("@user:localhost", "@mindroom_calculator:localhost")
 
     @pytest.mark.asyncio
     async def test_handle_invite_command_unknown_agent(self):

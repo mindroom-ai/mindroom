@@ -98,16 +98,10 @@ async def _handle_list_invites_command(room_id: str, thread_id: str) -> str:
     return "No agents are currently invited to this thread."
 
 
-def _is_sender_other_agent(sender: str, current_agent_user_id: str) -> bool:
-    if sender == current_agent_user_id:
-        return False
-    return extract_agent_name(sender) is not None
-
-
 def _should_process_message(event_sender: str, agent_user_id: str) -> bool:
     if event_sender == agent_user_id:
         return False
-    return not _is_sender_other_agent(event_sender, agent_user_id)
+    return extract_agent_name(event_sender) is None
 
 
 @dataclass
@@ -152,10 +146,6 @@ class AgentBot:
             else:
                 self.logger.warning("Failed to join room", room_id=room_id, error=str(response))
 
-    async def sync_forever(self) -> None:
-        """Run the sync loop forever."""
-        await self.client.sync_forever(timeout=30000, full_state=True)
-
     async def stop(self) -> None:
         """Stop the agent bot."""
         self.running = False
@@ -178,28 +168,36 @@ class AgentBot:
             return
 
         # Handle commands (only general agent)
-        if await self._try_handle_command(room, event):
-            return
+        if self.agent_name == "general":
+            command = command_parser.parse(event.body)
+            if command:
+                await self._handle_command(room, event, command)
+                return
 
         # Extract message context
         context = await self._extract_message_context(room, event)
 
         # Determine if this agent should respond to the message
-        should_respond, use_router = await self._should_respond_to_message(
-            am_i_mentioned=context.am_i_mentioned,
-            is_thread=context.is_thread,
-            is_invited_to_thread=context.is_invited_to_thread,
-            thread_history=context.thread_history,
-            room_id=room.room_id,
+        decision = should_agent_respond(
+            self.agent_name,
+            context.am_i_mentioned,
+            context.is_thread,
+            context.is_invited_to_thread,
+            room.room_id,
+            self.rooms,
+            context.thread_history,
         )
 
+        if decision.should_respond and not context.am_i_mentioned:
+            self.logger.info("Will respond: only agent in thread")
+
         # Handle routing if needed
-        if use_router:
+        if decision.use_router:
             await self._handle_ai_routing(room, event, context.thread_history)
             return
 
         # Exit if not responding
-        if not should_respond:
+        if not decision.should_respond:
             return
 
         if self.response_tracker.has_responded(event.event_id):
@@ -207,37 +205,6 @@ class AgentBot:
 
         # Process and send response
         await self._process_and_respond(room, event, context.thread_id, context.thread_history)
-
-    async def _should_respond_to_message(
-        self,
-        am_i_mentioned: bool,
-        is_thread: bool,
-        is_invited_to_thread: bool,
-        thread_history: list[dict],
-        room_id: str,
-    ) -> tuple[bool, bool]:
-        decision = should_agent_respond(
-            self.agent_name,
-            am_i_mentioned,
-            is_thread,
-            is_invited_to_thread,
-            room_id,
-            self.rooms,
-            thread_history,
-        )
-
-        if decision.should_respond and not am_i_mentioned:
-            self.logger.info("Will respond: only agent in thread")
-
-        return decision.should_respond, decision.use_router
-
-    async def _try_handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> bool:
-        if self.agent_name == "general":
-            command = command_parser.parse(event.body)
-            if command:
-                await self._handle_command(room, event, command)
-                return True
-        return False
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -342,7 +309,7 @@ class AgentBot:
         is_thread, thread_id = extract_thread_info(event.source)
         if not is_thread or not thread_id:
             response_text = "❌ Commands only work within threads. Please start a thread first."
-            await self._send_response(room, event, response_text)
+            await self._send_response(room.room_id, event.event_id, response_text)
             return
 
         response_text = ""
@@ -364,41 +331,22 @@ class AgentBot:
             )
 
         elif command.type == CommandType.UNINVITE:
-            # Handle uninvite command
-            if not thread_id:
-                response_text = "❌ The /uninvite command can only be used in a thread."
+            agent_name = command.args["agent_name"]
+            removed = await thread_invite_manager.remove_invite(thread_id, agent_name)
+            if removed:
+                response_text = f"✅ Removed @{agent_name} from this thread."
             else:
-                agent_name = command.args["agent_name"]
-                removed = await thread_invite_manager.remove_invite(thread_id, agent_name)
-                if removed:
-                    response_text = f"✅ Removed @{agent_name} from this thread."
-                else:
-                    response_text = f"❌ @{agent_name} was not invited to this thread."
+                response_text = f"❌ @{agent_name} was not invited to this thread."
 
         elif command.type == CommandType.LIST_INVITES:
-            # Handle list invites command
             response_text = await _handle_list_invites_command(room.room_id, thread_id)
 
         elif command.type == CommandType.HELP:
-            # Handle help command
             topic = command.args.get("topic")
             response_text = get_command_help(topic)
 
-        # Send response
         if response_text:
-            sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
-            content = create_mention_content_from_text(
-                response_text,
-                sender_domain=sender_domain,
-                thread_event_id=thread_id,
-                reply_to_event_id=event.event_id if thread_id else None,
-            )
-
-            await self.client.room_send(
-                room_id=room.room_id,
-                message_type="m.room.message",
-                content=content,
-            )
+            await self._send_response(room.room_id, event.event_id, response_text, thread_id)
 
 
 @dataclass
@@ -446,7 +394,7 @@ class MultiAgentOrchestrator:
         cleanup_task = asyncio.create_task(self._periodic_cleanup())
 
         # Run sync loops for all agents concurrently
-        sync_tasks = [bot.sync_forever() for bot in self.agent_bots.values()]
+        sync_tasks = [bot.client.sync_forever(timeout=30000, full_state=True) for bot in self.agent_bots.values()]
 
         # Run all tasks together
         all_tasks = sync_tasks + [cleanup_task]
