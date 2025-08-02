@@ -59,7 +59,7 @@ async def _handle_invite_command(
     duration_hours: int | None,
     sender: str,
     agent_domain: str,
-    client: nio.AsyncClient | None,
+    client: nio.AsyncClient,
 ) -> str:
     """Handle the invite command logic."""
     # Check if agent exists
@@ -78,16 +78,15 @@ async def _handle_invite_command(
 
     # Also invite to Matrix room if needed (for Matrix protocol compliance)
     agent_user_id = construct_agent_user_id(agent_name, agent_domain)
-    if client is not None:
-        # Check if already in room
-        room_members = await client.joined_members(room_id)
-        if isinstance(room_members, nio.JoinedMembersResponse) and agent_user_id not in [
-            m.user_id for m in room_members.members
-        ]:
-            # Need to invite to room for Matrix compliance
-            result = await client.room_invite(room_id, agent_user_id)
-            if not isinstance(result, nio.RoomInviteResponse):
-                logger.warning(f"Failed to invite {agent_name} to Matrix room: {result}")
+    # Check if already in room
+    room_members = await client.joined_members(room_id)
+    if isinstance(room_members, nio.JoinedMembersResponse) and agent_user_id not in [
+        m.user_id for m in room_members.members
+    ]:
+        # Need to invite to room for Matrix compliance
+        result = await client.room_invite(room_id, agent_user_id)
+        if not isinstance(result, nio.RoomInviteResponse):
+            logger.warning(f"Failed to invite {agent_name} to Matrix room: {result}")
 
     duration_text = f" for {duration_hours} hours" if duration_hours else " until thread ends"
     response_text = f"✅ Invited @{agent_name} to this thread{duration_text}."
@@ -131,7 +130,7 @@ class AgentBot:
     agent_user: AgentMatrixUser
     storage_path: Path
     rooms: list[str] = field(default_factory=list)
-    client: nio.AsyncClient | None = field(default=None, init=False)
+    client: nio.AsyncClient = field(init=False)
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
 
@@ -180,14 +179,12 @@ class AgentBot:
     async def sync_forever(self) -> None:
         """Run the sync loop forever."""
         self.logger.info("Starting sync_forever")
-        assert self.client is not None, "Client should be initialized"
         await self.client.sync_forever(timeout=30000, full_state=True)
 
     async def stop(self) -> None:
         """Stop the agent bot."""
         self.running = False
-        if self.client:
-            await self.client.close()
+        await self.client.close()
         self.logger.info("Stopped agent bot")
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
@@ -196,7 +193,6 @@ class AgentBot:
             room_id=room.room_id,
             sender=event.sender,
         )
-        assert self.client is not None, "Client should be initialized"
         result = await self.client.join(room.room_id)
         if isinstance(result, nio.JoinResponse):
             self.logger.info("Joined room", room_id=room.room_id)
@@ -453,7 +449,6 @@ class AgentBot:
             content=content,
         )
 
-        assert self.client is not None, "Client should be initialized"
         response = await self.client.room_send(
             room_id=room_id,
             message_type="m.room.message",
@@ -512,7 +507,6 @@ class AgentBot:
             reply_to_event_id=event.event_id,
         )
 
-        assert self.client is not None, "Client should be initialized"
         await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
         logger.info(
             "Routed to agent",
@@ -587,7 +581,6 @@ class AgentBot:
                 reply_to_event_id=event.event_id if thread_id else None,
             )
 
-            assert self.client is not None, "Client should be initialized"
             response = await self.client.room_send(
                 room_id=room.room_id,
                 message_type="m.room.message",

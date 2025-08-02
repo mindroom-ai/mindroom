@@ -66,7 +66,6 @@ class TestAgentBot:
         assert bot.agent_user == mock_agent_user
         assert bot.agent_name == "calculator"
         assert bot.rooms == ["!test:localhost"]
-        assert bot.client is None
         assert not bot.running
 
     @pytest.mark.asyncio

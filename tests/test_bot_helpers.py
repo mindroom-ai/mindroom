@@ -69,6 +69,13 @@ class TestBotHelpers:
         with patch("mindroom.bot.load_config") as mock_config:
             mock_config.return_value.agents = {"calculator": MagicMock()}
 
+            # Create mock client
+            mock_client = AsyncMock()
+            mock_members_response = MagicMock()
+            mock_members_response.members = []
+            mock_client.joined_members.return_value = mock_members_response
+            mock_client.room_invite.return_value = MagicMock(spec=nio.RoomInviteResponse)
+
             result = await _handle_invite_command(
                 room_id="!room:localhost",
                 thread_id="$thread123",
@@ -76,7 +83,7 @@ class TestBotHelpers:
                 duration_hours=6,
                 sender="@user:localhost",
                 agent_domain="localhost",
-                client=None,
+                client=mock_client,
             )
 
             assert "✅ Invited @calculator to this thread for 6 hours" in result
