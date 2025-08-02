@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Any, NamedTuple
 
-from .agent_loader import load_config
+from .agent_config import load_config
 from .matrix import extract_agent_name
 
 

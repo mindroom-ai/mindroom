@@ -9,7 +9,7 @@ from mindroom.memory.config import create_memory_instance, get_memory_config
 class TestMemoryConfig:
     """Test memory configuration."""
 
-    @patch("mindroom.agent_loader.load_config")
+    @patch("mindroom.agent_config.load_config")
     def test_get_memory_config_with_ollama(self, mock_load_config):
         """Test memory config creation with Ollama embedder."""
         # Mock config with Ollama embedder
@@ -46,7 +46,7 @@ class TestMemoryConfig:
         assert config["vector_store"]["config"]["collection_name"] == "mindroom_memories"
         assert str(storage_path / "chroma") in config["vector_store"]["config"]["path"]
 
-    @patch("mindroom.agent_loader.load_config")
+    @patch("mindroom.agent_config.load_config")
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
     def test_get_memory_config_with_openai(self, mock_load_config):
         """Test memory config creation with OpenAI embedder."""
@@ -78,7 +78,7 @@ class TestMemoryConfig:
         assert config["llm"]["config"]["model"] == "gpt-4"
         assert config["llm"]["config"]["api_key"] == "test-key"
 
-    @patch("mindroom.agent_loader.load_config")
+    @patch("mindroom.agent_config.load_config")
     @patch.dict("os.environ", {}, clear=True)
     def test_get_memory_config_no_model_fallback(self, mock_load_config):
         """Test memory config falls back to Ollama when no model configured."""
@@ -124,7 +124,7 @@ class TestMemoryConfig:
         """Test that ChromaDB directory is created."""
         from mindroom.memory.config import get_memory_config
 
-        with patch("mindroom.agent_loader.load_config") as mock_load_config:
+        with patch("mindroom.agent_config.load_config") as mock_load_config:
             # Mock minimal config
             mock_config = MagicMock()
             mock_config.memory.embedder.provider = "ollama"

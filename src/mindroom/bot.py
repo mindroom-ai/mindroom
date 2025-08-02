@@ -7,7 +7,7 @@ from pathlib import Path
 
 import nio
 
-from .agent_loader import load_config
+from .agent_config import load_config
 from .ai import ai_response
 from .commands import Command, CommandType, command_parser, get_command_help
 from .logging_config import emoji, get_logger, setup_logging
@@ -22,6 +22,7 @@ from .matrix import (
     extract_thread_info,
     fetch_thread_history,
     get_room_aliases,
+    join_room,
     login_agent_user,
 )
 from .response_tracker import ResponseTracker
@@ -74,12 +75,13 @@ async def _handle_invite_command(
     # Invite to Matrix room for protocol compliance
     agent_user_id = construct_agent_user_id(agent_name, agent_domain)
     room_members = await client.joined_members(room_id)
-    if isinstance(room_members, nio.JoinedMembersResponse) and agent_user_id not in [
-        m.user_id for m in room_members.members
-    ]:
-        result = await client.room_invite(room_id, agent_user_id)
-        if not isinstance(result, nio.RoomInviteResponse):
-            logger.warning("Failed to invite to room", agent=agent_name, error=str(result))
+    if isinstance(room_members, nio.JoinedMembersResponse):
+        if agent_user_id not in [m.user_id for m in room_members.members]:
+            result = await client.room_invite(room_id, agent_user_id)
+            if not isinstance(result, nio.RoomInviteResponse):
+                logger.warning("Failed to invite to room", agent=agent_name, error=str(result))
+    else:
+        logger.error("Failed to get room members", room_id=room_id, error=str(room_members))
 
     response_text = f"✅ Invited @{agent_name} to this thread."
     response_text += f"\n\n@{agent_name}, you've been invited to help in this thread!"
@@ -147,11 +149,10 @@ class AgentBot:
 
         # Join configured rooms
         for room_id in self.rooms:
-            response = await self.client.join(room_id)
-            if isinstance(response, nio.JoinResponse):
+            if await join_room(self.client, room_id):
                 self.logger.info("Joined room", room_id=room_id)
             else:
-                self.logger.warning("Failed to join room", room_id=room_id, error=str(response))
+                self.logger.warning("Failed to join room", room_id=room_id)
 
         # Start periodic cleanup task for the general agent only
         if self.agent_name == "general":
@@ -163,13 +164,16 @@ class AgentBot:
         await self.client.close()
         self.logger.info("Stopped agent bot")
 
+    async def sync_forever(self) -> None:
+        """Run the sync loop for this agent."""
+        await self.client.sync_forever(timeout=30000, full_state=True)
+
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
-        result = await self.client.join(room.room_id)
-        if isinstance(result, nio.JoinResponse):
+        if await join_room(self.client, room.room_id):
             self.logger.info("Joined room", room_id=room.room_id)
         else:
-            self.logger.error("Failed to join room", room_id=room.room_id, error=str(result))
+            self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         if not _should_process_message(event.sender, self.agent_user.user_id):
@@ -178,8 +182,9 @@ class AgentBot:
         if not await has_room_access(room.room_id, self.agent_name, self.rooms):
             return
 
-        # Handle commands (only general agent)
-        if self.agent_name == "general":
+        # Handle commands (only first agent alphabetically to avoid duplicates)
+        available_agents = get_available_agents_in_room(room)
+        if should_route_to_agent(self.agent_name, available_agents):
             command = command_parser.parse(event.body)
             if command:
                 await self._handle_command(room, event, command)
@@ -226,11 +231,9 @@ class AgentBot:
         is_thread, thread_id = extract_thread_info(event.source)
 
         thread_history = []
-        if thread_id:
-            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-
         is_invited_to_thread = False
         if thread_id:
+            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
             is_invited_to_thread = await self.thread_invite_manager.is_agent_invited_to_thread(
                 thread_id, room.room_id, self.agent_name
             )
@@ -320,8 +323,11 @@ class AgentBot:
             reply_to_event_id=event.event_id,
         )
 
-        await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
-        self.logger.info("Routed to agent", suggested_agent=suggested_agent)
+        response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
+        if isinstance(response, nio.RoomSendResponse):
+            self.logger.info("Routed to agent", suggested_agent=suggested_agent)
+        else:
+            self.logger.error("Failed to route to agent", agent=suggested_agent, error=str(response))
 
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
         self.logger.info("Handling command", command_type=command.type.value)
@@ -434,14 +440,20 @@ class MultiAgentOrchestrator:
         if not self.agent_bots:
             await self.initialize()
 
-        # Start each agent bot
+        # Start each agent bot (this registers callbacks and logs in)
         start_tasks = [bot.start() for bot in self.agent_bots.values()]
         await asyncio.gather(*start_tasks)
         self.running = True
         logger.info("All agent bots started successfully")
 
-        # Run sync loops for all agents concurrently
-        sync_tasks = [bot.client.sync_forever(timeout=30000, full_state=True) for bot in self.agent_bots.values()]
+        # Create sync tasks for each bot
+        sync_tasks = []
+        for bot in self.agent_bots.values():
+            # Create a task for each bot's sync loop
+            sync_task = asyncio.create_task(bot.sync_forever())
+            sync_tasks.append(sync_task)
+
+        # Run all sync tasks
         await asyncio.gather(*sync_tasks)
 
     async def stop(self) -> None:

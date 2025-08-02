@@ -145,7 +145,8 @@ class TestMatrixRegistration:
         # Mock successful registration
         mock_response = MagicMock(spec=nio.RegisterResponse)
         mock_client.register.return_value = mock_response
-        mock_client.login.return_value = AsyncMock()
+        mock_login_response = MagicMock(spec=nio.LoginResponse)
+        mock_client.login.return_value = mock_login_response
         mock_client.set_displayname.return_value = AsyncMock()
 
         with patch("mindroom.matrix.client.matrix_client") as mock_matrix_client:

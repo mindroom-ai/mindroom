@@ -3,7 +3,7 @@
 import re
 from typing import Any
 
-from ..agent_loader import load_config
+from ..agent_config import load_config
 
 
 def create_mention_content(

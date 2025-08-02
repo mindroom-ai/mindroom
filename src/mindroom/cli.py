@@ -73,7 +73,7 @@ async def _invite_agent_to_room(client: nio.AsyncClient, room_id: str, room_key:
 
 async def _ensure_agents_in_rooms(client: nio.AsyncClient, required_rooms: set[str]) -> None:
     """Ensure all agents are invited to their configured rooms."""
-    from mindroom.agent_loader import load_config
+    from mindroom.agent_config import load_config
     from mindroom.matrix import load_rooms
 
     console.print("\n🔄 Checking agent room access...")
@@ -138,7 +138,7 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
         add_room(room_key, room_id, f"#{room_key}:localhost", room_name)
 
         # Invite agents based on config.yaml
-        from mindroom.agent_loader import load_config
+        from mindroom.agent_config import load_config
 
         config = load_config()
 
@@ -238,7 +238,7 @@ def run(
 
 async def _run(log_level: str, storage_path: Path) -> None:
     """Run the multi-agent system with automatic setup."""
-    from mindroom.agent_loader import load_config
+    from mindroom.agent_config import load_config
     from mindroom.bot import main
 
     console.print(f"🚀 Starting Mindroom multi-agent system (log level: {log_level})...\n")
@@ -380,7 +380,7 @@ async def _invite_agents(room_id: str) -> None:
 
             if room_key:
                 # Invite agents based on configuration
-                from mindroom.agent_loader import load_config
+                from mindroom.agent_config import load_config
 
                 agent_config = load_config()
 

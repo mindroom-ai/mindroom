@@ -5,7 +5,7 @@ from typing import Any
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from .agent_loader import describe_agent
+from .agent_config import describe_agent
 from .ai import get_model_instance
 from .logging_config import get_logger
 
