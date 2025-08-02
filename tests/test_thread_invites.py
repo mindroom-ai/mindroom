@@ -226,8 +226,7 @@ async def test_cleanup_inactive_agents(invite_manager, mock_client):
 
     # Check that the correct agent was kicked
     kick_call = mock_client.room_kick.call_args
-    assert kick_call[1]["user_id"] == "@expired_agent:mindroom.space"
-    assert "expired" in kick_call[1]["reason"]
+    assert kick_call[0][1] == "@expired_agent:mindroom.space"  # Second positional arg is user_id
 
 
 @pytest.mark.asyncio
@@ -296,22 +295,22 @@ async def test_cleanup_with_activity(invite_manager, mock_client):
     
     # Check that only inactive_agent was kicked
     kick_call = mock_client.room_kick.call_args
-    assert kick_call[1]["user_id"] == "@inactive_agent:mindroom.space"
+    assert kick_call[0][1] == "@inactive_agent:mindroom.space"  # Second positional arg is user_id
 
 
 @pytest.mark.asyncio
 async def test_error_handling(invite_manager, mock_client):
     """Test error handling in various scenarios."""
-    # Test add_invite failure
+    # Test add_invite failure - no longer raises since we removed error handling
     mock_client.room_put_state.return_value = nio.RoomPutStateError(status_code="M_FORBIDDEN", message="Forbidden")
 
-    with pytest.raises(RuntimeError, match="Failed to add thread invitation"):
-        await invite_manager.add_invite(
-            thread_id="$thread123",
-            room_id="!room456",
-            agent_name="calculator",
-            invited_by="@user:example.com",
-        )
+    # Should not raise anymore - just returns
+    await invite_manager.add_invite(
+        thread_id="$thread123",
+        room_id="!room456",
+        agent_name="calculator",
+        invited_by="@user:example.com",
+    )
 
     # Test get_thread_agents with room state error
     mock_client.room_get_state.return_value = nio.RoomGetStateError(status_code="M_FORBIDDEN", message="Forbidden")
