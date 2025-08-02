@@ -71,19 +71,17 @@ async def _handle_invite_command(
         # Get the agent's user ID and invite to Matrix room
         agent_user_id = construct_agent_user_id(agent_name, agent_domain)
         try:
-            if client:
-                result = await client.room_invite(room_id, agent_user_id)
-                if isinstance(result, nio.RoomInviteResponse):
-                    timeout_text = f"{duration_hours} hours" if duration_hours else "24 hours"
-                    return f"✅ Invited @{agent_name} to this room. They will be removed after {timeout_text} of inactivity."
-                else:
-                    # Remove the invite record if Matrix invite failed
-                    await room_invite_manager.remove_invite(room_id, agent_name)
-                    return f"❌ Failed to invite @{agent_name}: {result}"
+            assert client is not None, "Client should always be available"
+            result = await client.room_invite(room_id, agent_user_id)
+            if isinstance(result, nio.RoomInviteResponse):
+                timeout_text = f"{duration_hours} hours" if duration_hours else "24 hours"
+                return (
+                    f"✅ Invited @{agent_name} to this room. They will be removed after {timeout_text} of inactivity."
+                )
             else:
-                # No client available
+                # Remove the invite record if Matrix invite failed
                 await room_invite_manager.remove_invite(room_id, agent_name)
-                return "❌ No Matrix client available to send invite"
+                return f"❌ Failed to invite @{agent_name}: {result}"
         except Exception as e:
             # Remove the invite record if Matrix invite failed
             await room_invite_manager.remove_invite(room_id, agent_name)
@@ -214,11 +212,9 @@ class AgentBot:
 
     async def sync_forever(self) -> None:
         """Run the sync loop forever."""
-        if not self.client:
-            return
-
         logger.info("Starting sync_forever", agent=f"{emoji(self.agent_name)} {self.agent_name}")
         try:
+            assert self.client is not None, "Client should be initialized"
             await self.client.sync_forever(timeout=30000, full_state=True)
         except Exception as e:
             logger.error("Error in sync_forever", agent=f"{emoji(self.agent_name)} {self.agent_name}", error=str(e))
@@ -238,17 +234,17 @@ class AgentBot:
             room_id=room.room_id,
             sender=event.sender,
         )
-        if self.client:
-            result = await self.client.join(room.room_id)
-            if isinstance(result, nio.JoinResponse):
-                logger.info("Joined room", agent=f"{emoji(self.agent_name)} {self.agent_name}", room_id=room.room_id)
-            else:
-                logger.error(
-                    "Failed to join room",
-                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    room_id=room.room_id,
-                    error=str(result),
-                )
+        assert self.client is not None, "Client should be initialized"
+        result = await self.client.join(room.room_id)
+        if isinstance(result, nio.JoinResponse):
+            logger.info("Joined room", agent=f"{emoji(self.agent_name)} {self.agent_name}", room_id=room.room_id)
+        else:
+            logger.error(
+                "Failed to join room",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                room_id=room.room_id,
+                error=str(result),
+            )
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         logger.debug(
@@ -496,27 +492,27 @@ class AgentBot:
             content=content,
         )
 
-        if self.client:
-            response = await self.client.room_send(
+        assert self.client is not None, "Client should be initialized"
+        response = await self.client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
+        if isinstance(response, nio.RoomSendResponse):
+            # Mark this event as responded to
+            self.response_tracker.mark_responded(reply_to_event_id)
+            logger.info(
+                "Sent response to room",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
                 room_id=room_id,
-                message_type="m.room.message",
-                content=content,
+                response_event_id=response.event_id,
             )
-            if isinstance(response, nio.RoomSendResponse):
-                # Mark this event as responded to
-                self.response_tracker.mark_responded(reply_to_event_id)
-                logger.info(
-                    "Sent response to room",
-                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    room_id=room_id,
-                    response_event_id=response.event_id,
-                )
-            else:
-                logger.error(
-                    "Failed to send response",
-                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                    error=str(response),
-                )
+        else:
+            logger.error(
+                "Failed to send response",
+                agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                error=str(response),
+            )
 
     async def _handle_ai_routing(
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
@@ -555,14 +551,14 @@ class AgentBot:
             reply_to_event_id=event.event_id,
         )
 
-        if self.client:
-            await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
-            logger.info(
-                "Routed to agent",
-                agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                suggested_agent=suggested_agent,
-                room_id=room.room_id,
-            )
+        assert self.client is not None, "Client should be initialized"
+        await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
+        logger.info(
+            "Routed to agent",
+            agent=f"{emoji(self.agent_name)} {self.agent_name}",
+            suggested_agent=suggested_agent,
+            room_id=room.room_id,
+        )
 
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
         logger.info(
@@ -626,18 +622,18 @@ class AgentBot:
                 reply_to_event_id=event.event_id if thread_id else None,
             )
 
-            if self.client:
-                response = await self.client.room_send(
-                    room_id=room.room_id,
-                    message_type="m.room.message",
-                    content=content,
+            assert self.client is not None, "Client should be initialized"
+            response = await self.client.room_send(
+                room_id=room.room_id,
+                message_type="m.room.message",
+                content=content,
+            )
+            if isinstance(response, nio.RoomSendResponse):
+                logger.info(
+                    "Sent command response",
+                    agent=f"{emoji(self.agent_name)} {self.agent_name}",
+                    command_type=command.type.value,
                 )
-                if isinstance(response, nio.RoomSendResponse):
-                    logger.info(
-                        "Sent command response",
-                        agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                        command_type=command.type.value,
-                    )
 
 
 @dataclass

@@ -223,39 +223,39 @@ class RoomInviteManager(BaseInviteManager[RoomInvite]):
             if await self.remove_invite(room_id, agent_name):
                 removed_count += 1
 
-                # If we have a client, actually kick the agent from the room
-                if client:
-                    try:
-                        # Get the agent's user ID
-                        agent_user_id = f"@mindroom_{agent_name}:localhost"  # Adjust domain as needed
+                # Kick the agent from the room
+                try:
+                    # Get the agent's user ID
+                    agent_user_id = f"@mindroom_{agent_name}:localhost"  # Adjust domain as needed
 
-                        # Kick from room
-                        result = await client.room_kick(
-                            room_id,
-                            agent_user_id,
-                            reason="Inactive for 24 hours - automatic removal",
-                        )
+                    # Kick from room
+                    assert client is not None, "Client should be provided for cleanup"
+                    result = await client.room_kick(
+                        room_id,
+                        agent_user_id,
+                        reason="Inactive for 24 hours - automatic removal",
+                    )
 
-                        if isinstance(result, nio.RoomKickResponse):
-                            logger.info(
-                                "Kicked inactive agent from room",
-                                room_id=room_id,
-                                agent=agent_name,
-                            )
-                        else:
-                            logger.error(
-                                "Failed to kick agent from room",
-                                room_id=room_id,
-                                agent=agent_name,
-                                error=str(result),
-                            )
-                    except Exception as e:
-                        logger.error(
-                            "Error kicking agent from room",
+                    if isinstance(result, nio.RoomKickResponse):
+                        logger.info(
+                            "Kicked inactive agent from room",
                             room_id=room_id,
                             agent=agent_name,
-                            error=str(e),
                         )
+                    else:
+                        logger.error(
+                            "Failed to kick agent from room",
+                            room_id=room_id,
+                            agent=agent_name,
+                            error=str(result),
+                        )
+                except Exception as e:
+                    logger.error(
+                        "Error kicking agent from room",
+                        room_id=room_id,
+                        agent=agent_name,
+                        error=str(e),
+                    )
 
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} inactive room invitations")

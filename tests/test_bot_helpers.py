@@ -41,25 +41,6 @@ class TestBotHelpers:
         assert "Available agents:" in result
 
     @pytest.mark.asyncio
-    async def test_handle_invite_command_room_invite_no_client(self):
-        """Test _handle_invite_command for room invite with no client."""
-        with patch("mindroom.bot.load_config") as mock_config:
-            mock_config.return_value.agents = {"calculator": MagicMock()}
-
-            result = await _handle_invite_command(
-                room_id="!room:localhost",
-                thread_id=None,
-                agent_name="calculator",
-                to_room=True,
-                duration_hours=24,
-                sender="@user:localhost",
-                agent_domain="localhost",
-                client=None,
-            )
-
-            assert result == "❌ No Matrix client available to send invite"
-
-    @pytest.mark.asyncio
     async def test_handle_invite_command_room_invite_success(self):
         """Test successful room invite."""
         mock_client = AsyncMock()
