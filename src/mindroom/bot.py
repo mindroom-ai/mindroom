@@ -26,7 +26,7 @@ from .matrix import (
 )
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
-from .thread_invites import thread_invite_manager
+from .thread_invites import ThreadInviteManager
 from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
@@ -58,6 +58,7 @@ async def _handle_invite_command(
     sender: str,
     agent_domain: str,
     client: nio.AsyncClient,
+    thread_invite_manager: ThreadInviteManager,
 ) -> str:
     """Handle the invite command logic."""
     config = load_config()
@@ -88,9 +89,13 @@ async def _handle_invite_command(
     return response_text
 
 
-async def _handle_list_invites_command(room_id: str, thread_id: str) -> str:
+async def _handle_list_invites_command(
+    room_id: str,
+    thread_id: str,
+    thread_invite_manager: ThreadInviteManager,
+) -> str:
     """Handle the list invites command."""
-    thread_invites = await thread_invite_manager.get_thread_agents(thread_id)
+    thread_invites = await thread_invite_manager.get_thread_agents(thread_id, room_id)
     if thread_invites:
         thread_list = "\n".join([f"- @{agent}" for agent in thread_invites])
         return f"**Invited agents in this thread:**\n{thread_list}"
@@ -114,6 +119,7 @@ class AgentBot:
     client: nio.AsyncClient = field(init=False)
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
+    thread_invite_manager: ThreadInviteManager = field(init=False)
 
     @property
     def agent_name(self) -> str:
@@ -131,6 +137,9 @@ class AgentBot:
 
         # Initialize response tracker
         self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
+
+        # Initialize thread invite manager
+        self.thread_invite_manager = ThreadInviteManager(self.client)
 
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
         self.client.add_event_callback(self._on_message, nio.RoomMessageText)
@@ -220,7 +229,9 @@ class AgentBot:
 
         is_invited_to_thread = False
         if thread_id:
-            is_invited_to_thread = await thread_invite_manager.is_agent_invited_to_thread(thread_id, self.agent_name)
+            is_invited_to_thread = await self.thread_invite_manager.is_agent_invited_to_thread(
+                thread_id, room.room_id, self.agent_name
+            )
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
@@ -285,7 +296,14 @@ class AgentBot:
         self.logger.info("Handling AI routing", event_id=event.event_id)
 
         _, thread_event_id = extract_thread_info(event.source)
-        suggested_agent = await suggest_agent_for_message(event.body, available_agents, thread_history, thread_event_id)
+        suggested_agent = await suggest_agent_for_message(
+            event.body,
+            available_agents,
+            thread_history,
+            thread_event_id,
+            room.room_id,
+            self.thread_invite_manager,
+        )
         if not suggested_agent:
             return
 
@@ -328,18 +346,19 @@ class AgentBot:
                 sender=event.sender,
                 agent_domain=agent_domain,
                 client=self.client,
+                thread_invite_manager=self.thread_invite_manager,
             )
 
         elif command.type == CommandType.UNINVITE:
             agent_name = command.args["agent_name"]
-            removed = await thread_invite_manager.remove_invite(thread_id, agent_name)
+            removed = await self.thread_invite_manager.remove_invite(thread_id, room.room_id, agent_name)
             if removed:
                 response_text = f"✅ Removed @{agent_name} from this thread."
             else:
                 response_text = f"❌ @{agent_name} was not invited to this thread."
 
         elif command.type == CommandType.LIST_INVITES:
-            response_text = await _handle_list_invites_command(room.room_id, thread_id)
+            response_text = await _handle_list_invites_command(room.room_id, thread_id, self.thread_invite_manager)
 
         elif command.type == CommandType.HELP:
             topic = command.args.get("topic")
@@ -411,9 +430,22 @@ class MultiAgentOrchestrator:
         while self.running:
             try:
                 await asyncio.sleep(60)
-                thread_removed = await thread_invite_manager.cleanup_expired()
-                if thread_removed > 0:
-                    logger.info("Cleaned up expired invitations", count=thread_removed)
+                # Cleanup expired invitations for all rooms across all agents
+                total_removed = 0
+                for bot in self.agent_bots.values():
+                    for room_id in bot.rooms:
+                        try:
+                            removed = await bot.thread_invite_manager.cleanup_expired(room_id)
+                            total_removed += removed
+                        except Exception as e:
+                            logger.error(
+                                "Failed to cleanup invitations for room",
+                                agent=bot.agent_name,
+                                room_id=room_id,
+                                error=str(e),
+                            )
+                if total_removed > 0:
+                    logger.info("Cleaned up expired invitations", count=total_removed)
             except asyncio.CancelledError:
                 break
             except Exception as e:
