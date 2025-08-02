@@ -32,10 +32,9 @@ class CommandParser:
     """Parser for user commands in messages."""
 
     # Command patterns
-    # Match: /invite agent [for N hours]
+    # Match: /invite agent
     INVITE_PATTERN = re.compile(
-        r"^/invite\s+@?(\w+)"  # agent name
-        r"(?:\s+for\s+(\d+)\s*(?:hours?|h))?$",  # optional "for N hours"
+        r"^/invite\s+@?(\w+)$",  # agent name
         re.IGNORECASE,
     )
     UNINVITE_PATTERN = re.compile(r"^/uninvite\s+@?(\w+)$", re.IGNORECASE)
@@ -60,10 +59,9 @@ class CommandParser:
         # /invite command
         match = self.INVITE_PATTERN.match(message)
         if match:
-            agent_name, duration = match.groups()
+            agent_name = match.group(1)
             args = {
                 "agent_name": agent_name,
-                "duration_hours": int(duration) if duration else None,
             }
             return Command(
                 type=CommandType.INVITE,
@@ -116,13 +114,13 @@ def get_command_help(topic: str | None = None) -> str:
     if topic == "invite":
         return """**Invite Command**
 
-Usage: `/invite <agent> [for <hours>]` - Invite an agent to this thread
+Usage: `/invite <agent>` - Invite an agent to this thread
 
-Examples:
+Example:
 - `/invite calculator` - Invite calculator agent to this thread
-- `/invite summary for 2 hours` - Invite summary agent for 2 hours only
 
-Note: Invites only work in threads. The agent will be able to participate in this thread only."""
+Note: Invites only work in threads. The agent will be able to participate in this thread only.
+Agents are automatically removed after 24 hours of inactivity."""
 
     elif topic == "uninvite":
         return """**Uninvite Command**
@@ -145,7 +143,7 @@ Shows all agents currently invited to this thread."""
         # General help
         return """**Available Commands**
 
-- `/invite <agent> [for <hours>]` - Invite an agent to this thread
+- `/invite <agent>` - Invite an agent to this thread
 - `/uninvite <agent>` - Remove an agent from this thread
 - `/list_invites` - List all invited agents
 - `/help [topic]` - Show this help or help for a specific command

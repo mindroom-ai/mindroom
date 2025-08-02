@@ -117,6 +117,7 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
     thread_invite_manager: ThreadInviteManager = field(init=False)
+    inactivity_hours: int = field(default=24)  # Configurable inactivity timeout
 
     @property
     def agent_name(self) -> str:
@@ -151,6 +152,10 @@ class AgentBot:
                 self.logger.info("Joined room", room_id=room_id)
             else:
                 self.logger.warning("Failed to join room", room_id=room_id, error=str(response))
+
+        # Start periodic cleanup task for the general agent only
+        if self.agent_name == "general":
+            asyncio.create_task(self._periodic_cleanup())
 
     async def stop(self) -> None:
         """Stop the agent bot."""
@@ -280,6 +285,14 @@ class AgentBot:
         if isinstance(response, nio.RoomSendResponse):
             self.response_tracker.mark_responded(reply_to_event_id)
             self.logger.info("Sent response", event_id=response.event_id)
+
+            # Update last response time if this is a thread response
+            if thread_id:
+                await self.thread_invite_manager.update_last_response(
+                    thread_id=thread_id,
+                    room_id=room_id,
+                    agent_name=self.agent_name,
+                )
         else:
             self.logger.error("Failed to send response", error=str(response))
 
@@ -361,6 +374,37 @@ class AgentBot:
 
         if response_text:
             await self._send_response(room.room_id, event.event_id, response_text, thread_id)
+
+    async def _periodic_cleanup(self) -> None:
+        """Periodically clean up expired thread invitations."""
+        while self.running:
+            try:
+                # Wait for 1 hour between cleanups
+                await asyncio.sleep(3600)
+
+                # Get all rooms the bot is in
+                joined_rooms_response = await self.client.joined_rooms()
+                if not isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
+                    self.logger.error("Failed to get joined rooms for cleanup")
+                    continue
+
+                total_removed = 0
+                for room_id in joined_rooms_response.rooms:
+                    try:
+                        removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
+                            room_id, inactivity_hours=self.inactivity_hours
+                        )
+                        total_removed += removed_count
+                    except Exception as e:
+                        self.logger.error(f"Failed to cleanup room {room_id}", error=str(e))
+
+                if total_removed > 0:
+                    self.logger.info(f"Periodic cleanup removed {total_removed} expired agents")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error("Error in periodic cleanup", error=str(e))
 
 
 @dataclass
