@@ -41,6 +41,17 @@ from .thread_utils import (
 logger = get_logger(__name__)
 
 
+@dataclass
+class MessageContext:
+    """Context extracted from a Matrix message event."""
+
+    am_i_mentioned: bool
+    is_thread: bool
+    thread_id: str | None
+    thread_history: list[dict]
+    is_invited_to_thread: bool
+
+
 async def _handle_invite_command(
     room_id: str,
     thread_id: str,
@@ -242,16 +253,16 @@ class AgentBot:
 
         # Determine if this agent should respond to the message
         should_respond, use_router = await self._should_respond_to_message(
-            am_i_mentioned=context["am_i_mentioned"],
-            is_thread=context["is_thread"],
-            is_invited_to_thread=context["is_invited_to_thread"],
-            thread_history=context["thread_history"],
+            am_i_mentioned=context.am_i_mentioned,
+            is_thread=context.is_thread,
+            is_invited_to_thread=context.is_invited_to_thread,
+            thread_history=context.thread_history,
             room_id=room.room_id,
         )
 
         # Handle routing if needed
         if use_router:
-            await self._handle_ai_routing(room, event, context["thread_history"])
+            await self._handle_ai_routing(room, event, context.thread_history)
             return
 
         # Exit if not responding
@@ -269,7 +280,7 @@ class AgentBot:
             return
 
         # Process and send response
-        await self._process_and_respond(room, event, context["thread_id"], context["thread_history"])
+        await self._process_and_respond(room, event, context.thread_id, context.thread_history)
 
     async def _should_respond_to_message(
         self,
@@ -353,7 +364,7 @@ class AgentBot:
                 return True
         return False
 
-    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> dict:
+    async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         logger.debug(
             "Checking message",
             agent=f"{emoji(self.agent_name)} {self.agent_name}",
@@ -399,13 +410,13 @@ class AgentBot:
                     thread_id=thread_id,
                 )
 
-        return {
-            "am_i_mentioned": am_i_mentioned,
-            "is_thread": is_thread,
-            "thread_id": thread_id,
-            "thread_history": thread_history,
-            "is_invited_to_thread": is_invited_to_thread,
-        }
+        return MessageContext(
+            am_i_mentioned=am_i_mentioned,
+            is_thread=is_thread,
+            thread_id=thread_id,
+            thread_history=thread_history,
+            is_invited_to_thread=is_invited_to_thread,
+        )
 
     async def _process_and_respond(
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
