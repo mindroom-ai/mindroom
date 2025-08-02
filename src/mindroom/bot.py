@@ -167,8 +167,9 @@ class AgentBot:
         if not await has_room_access(room.room_id, self.agent_name, self.rooms):
             return
 
-        # Handle commands (only general agent)
-        if self.agent_name == "general":
+        # Handle commands (only first agent alphabetically to avoid duplicates)
+        available_agents = get_available_agents_in_room(room)
+        if should_route_to_agent(self.agent_name, available_agents):
             command = command_parser.parse(event.body)
             if command:
                 await self._handle_command(room, event, command)
