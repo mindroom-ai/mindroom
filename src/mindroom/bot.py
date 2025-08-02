@@ -153,6 +153,10 @@ class AgentBot:
         await self.client.close()
         self.logger.info("Stopped agent bot")
 
+    async def sync_forever(self) -> None:
+        """Run the sync loop for this agent."""
+        await self.client.sync_forever(timeout=30000, full_state=True)
+
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
         if await join_room(self.client, room.room_id):
@@ -386,7 +390,7 @@ class MultiAgentOrchestrator:
         if not self.agent_bots:
             await self.initialize()
 
-        # Start each agent bot
+        # Start each agent bot (this registers callbacks and logs in)
         start_tasks = [bot.start() for bot in self.agent_bots.values()]
         await asyncio.gather(*start_tasks)
         self.running = True
@@ -395,8 +399,12 @@ class MultiAgentOrchestrator:
         # Create cleanup task for expired invitations
         cleanup_task = asyncio.create_task(self._periodic_cleanup())
 
-        # Run sync loops for all agents concurrently
-        sync_tasks = [bot.client.sync_forever(timeout=30000, full_state=True) for bot in self.agent_bots.values()]
+        # Create sync tasks for each bot
+        sync_tasks = []
+        for bot in self.agent_bots.values():
+            # Create a task for each bot's sync loop
+            sync_task = asyncio.create_task(bot.sync_forever())
+            sync_tasks.append(sync_task)
 
         # Run all tasks together
         all_tasks = sync_tasks + [cleanup_task]

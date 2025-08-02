@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 
 import nio
-import yaml
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -29,26 +28,68 @@ class InviteE2ETest:
 
     async def setup(self):
         """Load credentials and setup client."""
-        # Load user credentials
-        with open("matrix_users.yaml") as f:
-            users_data = yaml.safe_load(f)
-
-        # Use the main user account
-        self.username = users_data["accounts"]["user"]["username"]
-        self.password = users_data["accounts"]["user"]["password"]
-        self.lobby_room_id = users_data["rooms"]["lobby"]["room_id"]
-        self.science_room_id = users_data["rooms"].get("science", {}).get("room_id")
+        # Create a test user with consistent credentials
+        self.username = "e2e_test_user"
+        self.password = "e2e_test_password_12345"
 
         # Create client
         self.client = nio.AsyncClient(MATRIX_HOMESERVER, f"@{self.username}:localhost")
 
+        # Try to register the test user
+        response = await self.client.register(
+            username=self.username, password=self.password, device_name="e2e_test_device"
+        )
+        if isinstance(response, nio.RegisterResponse):
+            print(f"✅ Registered test user: @{self.username}:localhost")
+            # Set access token from registration
+            self.client.access_token = response.access_token
+            self.client.device_id = response.device_id
+        elif (
+            isinstance(response, nio.ErrorResponse)
+            and hasattr(response, "status_code")
+            and response.status_code == "M_USER_IN_USE"
+        ):
+            print("ℹ️  Test user already exists, will try to login")
+        else:
+            print(f"⚠️  Registration response: {response}")
+
+        # We'll set room IDs after mindroom creates them
+        self.lobby_room_id = None
+        self.science_room_id = None
+
     async def login(self):
         """Login to Matrix."""
-        print(f"🔑 Logging in as {self.username}...")
-        response = await self.client.login(self.password, device_name="e2e_invite_test")
-        if not isinstance(response, nio.LoginResponse):
-            raise Exception(f"Failed to login: {response}")
-        print("✓ Logged in successfully")
+        # Skip login if we already have access token from registration
+        if not self.client.access_token:
+            print(f"🔑 Logging in as {self.username}...")
+            response = await self.client.login(self.password, device_name="e2e_invite_test")
+            if not isinstance(response, nio.LoginResponse):
+                raise Exception(f"Failed to login: {response}")
+            print("✓ Logged in successfully")
+        else:
+            print("✓ Already authenticated from registration")
+
+    async def discover_rooms(self):
+        """Discover room IDs by joining public rooms."""
+        print("🔍 Discovering rooms...")
+
+        # Join lobby room
+        lobby_alias = "#lobby:localhost"
+        response = await self.client.join(lobby_alias)
+        if isinstance(response, nio.JoinResponse):
+            self.lobby_room_id = response.room_id
+            print(f"✓ Joined lobby: {self.lobby_room_id}")
+        else:
+            print(f"⚠️  Failed to join lobby: {response}")
+
+        # Join science room
+        science_alias = "#science:localhost"
+        response = await self.client.join(science_alias)
+        if isinstance(response, nio.JoinResponse):
+            self.science_room_id = response.room_id
+            print(f"✓ Joined science: {self.science_room_id}")
+        else:
+            print(f"⚠️  Failed to join science: {response}")
 
     async def send_message(self, room_id: str, message: str, thread_id: str = None):
         """Send a plain message or thread reply."""
@@ -257,10 +298,15 @@ async def run_test_sequence():
         # Setup
         await test.setup()
         await test.login()
+        await test.discover_rooms()
 
         print("\n📍 Testing in rooms:")
         print(f"   - Lobby: {test.lobby_room_id}")
         print(f"   - Science: {test.science_room_id}")
+
+        if not test.lobby_room_id or not test.science_room_id:
+            print("❌ Failed to discover rooms. Make sure mindroom has created them.")
+            return
 
         # Run test sequences
         await test_thread_invitations(test)
@@ -294,8 +340,8 @@ async def main():
     bot_task = asyncio.create_task(_run(log_level="INFO", storage_path=Path(temp_dir)))
 
     # Wait for startup
-    print("⏳ Waiting 15s for bot to start and sync...")
-    await asyncio.sleep(15)
+    print("⏳ Waiting 30s for bot to start, create rooms, and sync...")
+    await asyncio.sleep(30)
 
     # Run tests
     try:

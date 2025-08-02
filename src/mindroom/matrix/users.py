@@ -163,7 +163,9 @@ async def create_agent_user(
         )
     except ValueError as e:
         # If user already exists, that's fine
-        if "already exists" not in str(e):
+        error_msg = str(e) if e else ""
+        logger.debug(f"ValueError when registering {username}: {error_msg}")
+        if "already exists" not in error_msg:
             raise
 
     return AgentMatrixUser(
