@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.room_invites import AgentActivity, RoomInvite, RoomInviteManager
+from mindroom.room_invites import RoomInvite, RoomInviteManager
 
 
 @pytest.fixture
@@ -223,26 +223,6 @@ async def test_cleanup_inactive_invites_with_client(invite_manager):
 
     # Check that invitation was removed
     assert "!room123" not in invite_manager._room_invites
-
-
-@pytest.mark.asyncio
-async def test_agent_activity_tracking():
-    """Test AgentActivity class."""
-    activity = AgentActivity("calculator")
-
-    # Initially no activity
-    assert activity.get_last_activity("!room123") is None
-
-    # Record activity
-    activity.record_activity("!room123")
-    last_activity = activity.get_last_activity("!room123")
-    assert last_activity is not None
-    assert isinstance(last_activity, datetime)
-
-    # Record activity in another room
-    activity.record_activity("!room456")
-    assert activity.get_last_activity("!room456") is not None
-    assert len(activity.room_activities) == 2
 
 
 @pytest.mark.asyncio

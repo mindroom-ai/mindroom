@@ -1,6 +1,6 @@
 """Room-level agent invitation management with activity tracking."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 import nio
@@ -32,22 +32,6 @@ class RoomInvite(BaseInvite):
         self.last_activity = datetime.now()
 
 
-@dataclass
-class AgentActivity:
-    """Tracks agent activity in rooms."""
-
-    agent_name: str
-    room_activities: dict[str, datetime] = field(default_factory=dict)
-
-    def record_activity(self, room_id: str) -> None:
-        """Record activity for the agent in a specific room."""
-        self.room_activities[room_id] = datetime.now()
-
-    def get_last_activity(self, room_id: str) -> datetime | None:
-        """Get the last activity time for a room."""
-        return self.room_activities.get(room_id)
-
-
 class RoomInviteManager(BaseInviteManager[RoomInvite]):
     """Manages temporary agent invitations to rooms with activity tracking."""
 
@@ -55,8 +39,6 @@ class RoomInviteManager(BaseInviteManager[RoomInvite]):
         super().__init__()
         # Map of room_id -> agent_name -> RoomInvite
         self._room_invites: dict[str, dict[str, RoomInvite]] = {}
-        # Map of agent_name -> AgentActivity
-        self._agent_activities: dict[str, AgentActivity] = {}
 
     async def add_invite(
         self,
@@ -93,11 +75,6 @@ class RoomInviteManager(BaseInviteManager[RoomInvite]):
                 self._room_invites[room_id] = {}
             self._room_invites[room_id][agent_name] = invite
 
-            # Initialize agent activity tracking
-            if agent_name not in self._agent_activities:
-                self._agent_activities[agent_name] = AgentActivity(agent_name)
-            self._agent_activities[agent_name].record_activity(room_id)
-
             logger.info(
                 "Added room invitation",
                 room_id=room_id,
@@ -123,11 +100,6 @@ class RoomInviteManager(BaseInviteManager[RoomInvite]):
             # Update room invite activity if exists
             if room_id in self._room_invites and agent_name in self._room_invites[room_id]:
                 self._room_invites[room_id][agent_name].update_activity()
-
-            # Update agent activity tracking
-            if agent_name not in self._agent_activities:
-                self._agent_activities[agent_name] = AgentActivity(agent_name)
-            self._agent_activities[agent_name].record_activity(room_id)
 
             logger.debug(
                 "Recorded agent activity",

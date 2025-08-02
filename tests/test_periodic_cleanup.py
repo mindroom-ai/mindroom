@@ -20,7 +20,6 @@ async def cleanup_managers():
     # Clear room invites
     async with room_invite_manager._lock:
         room_invite_manager._room_invites.clear()
-        room_invite_manager._agent_activities.clear()
 
     # Clear thread invites
     async with thread_invite_manager._lock:
@@ -32,7 +31,6 @@ async def cleanup_managers():
     # Clean up after test
     async with room_invite_manager._lock:
         room_invite_manager._room_invites.clear()
-        room_invite_manager._agent_activities.clear()
 
     async with thread_invite_manager._lock:
         thread_invite_manager._invites.clear()
