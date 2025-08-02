@@ -383,7 +383,7 @@ class AgentBot:
                 total_removed = 0
                 for room_id in joined_rooms_response.rooms:
                     try:
-                        removed_count = await self.thread_invite_manager.cleanup_expired_invitations(
+                        removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
                             room_id, timeout_hours=self.invitation_timeout_hours
                         )
                         total_removed += removed_count
