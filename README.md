@@ -15,8 +15,8 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 ### 🧠 **Persistent Memory Everywhere**
 - Every agent maintains long-term memory across all conversations
 - Every room has its own persistent memory and context
-- Memories are ratable - users can mark quality and relevance
-- Tag-based memory sharing allows knowledge clustering across topics
+- Memories are ratable - users can mark quality and relevance (planned)
+- Tag-based memory sharing allows knowledge clustering across topics (planned)
 
 ### 🏠 **Rooms as Contexts**
 - Each Matrix room represents a dedicated context (Private Life, Open Source, Research, etc.)
@@ -64,7 +64,7 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - Builds expertise over time
 - Accessible across all rooms
 
-#### Tag-Based Memory Sharing
+#### Tag-Based Memory Sharing (planned)
 - Tag threads with keywords/topics
 - All threads with the same tag share memory
 - Creates topic-specific knowledge clusters
@@ -72,13 +72,13 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 
 ### Real-Time Features
 
-#### Progress Widget
+#### Progress Widget (planned)
 - See all agents currently processing
 - Monitor long-running research tasks
 - Real-time progress indicators
 - Cancel operations mid-flight
 
-#### Scheduled Interactions
+#### Scheduled Interactions (planned)
 - Agents can run scheduled tasks (daily check-ins, reminders)
 - Example: Mindfulness agent asking "What are you grateful for today?"
 - Configurable per-room schedules
@@ -87,10 +87,10 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 ### Advanced Capabilities
 
 #### Thread Management
-- **Branching**: Fork conversations to explore alternatives
-- **Linking**: Connect related threads for context expansion
-- **Editing**: Modify AI responses for better context
-- **Context Control**: Fine-grained memory permissions
+- **Branching**: Fork conversations to explore alternatives (planned)
+- **Linking**: Connect related threads for context expansion (planned)
+- **Editing**: Modify AI responses for better context (planned)
+- **Context Control**: Fine-grained memory permissions (planned)
 
 #### Slash Commands
 - `/invite <agent> [from <room>] [for <hours>]` - Invite an agent to a thread
@@ -264,6 +264,26 @@ def create_your_agent(model):
 pytest
 pre-commit run --all-files
 ```
+
+## Current Status
+
+### ✅ Implemented Features
+- Multi-agent system with specialized agents (calculator, code, research, etc.)
+- Basic memory system with room and agent contexts
+- Thread-based conversations
+- Cross-room agent invitations with time limits
+- Agent response routing based on context
+- Slash commands: `/invite`, `/uninvite`, `/list_invites`, `/help`
+- Multiple AI model support (OpenAI, Anthropic, Ollama, etc.)
+- End-to-end encryption via Matrix
+
+### 🚧 In Development
+- Memory rating and quality feedback
+- Thread tagging and memory sharing
+- Progress widget for real-time monitoring
+- Scheduled agent interactions
+- Thread branching and linking
+- Context management commands
 
 ## Roadmap
 
