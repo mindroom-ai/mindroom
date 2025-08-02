@@ -162,7 +162,7 @@ class TestAgentResponseLogic:
         assert decision.use_router is False
 
     def test_mentioned_outside_thread(self):
-        """Mentioned agents respond even outside threads."""
+        """Agents NEVER respond outside threads, even if mentioned."""
         decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=True,
@@ -172,7 +172,7 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=[],
         )
-        assert decision.should_respond is True
+        assert decision.should_respond is False
         assert decision.use_router is False
 
     def test_agent_mentioned_in_thread_history(self):

@@ -154,8 +154,10 @@ Shows all agents currently invited to this thread."""
 
 - `/invite <agent> [for <hours>]` - Invite an agent to this thread
 - `/uninvite <agent>` - Remove an agent from this thread
-- `/list_invites` - List all invited agents for this thread
+- `/list_invites` - List all invited agents
 - `/help [topic]` - Show this help or help for a specific command
+
+Note: All commands only work within threads, not in main room messages.
 
 For detailed help on a command, use: `/help <command>`"""
 

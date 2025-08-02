@@ -74,10 +74,7 @@ def create_session_id(room_id: str, thread_id: str | None) -> str:
 
 async def has_room_access(room_id: str, agent_name: str, configured_rooms: list[str]) -> bool:
     """Check if an agent has access to a room."""
-    from .room_invites import room_invite_manager
-
-    is_room_invite = await room_invite_manager.is_agent_invited_to_room(room_id, agent_name)
-    return room_id in configured_rooms or is_room_invite
+    return room_id in configured_rooms
 
 
 def should_agent_respond(
@@ -98,10 +95,14 @@ def should_agent_respond(
     should_respond = False
     use_router = False
 
+    # Agents ONLY respond in threads, never in main rooms
+    if not is_thread:
+        return ResponseDecision(False, False)
+
     if am_i_mentioned:
-        # Always respond if explicitly mentioned
+        # Respond if explicitly mentioned in a thread
         should_respond = True
-    elif is_thread:
+    else:
         # For threads, check if there's a single agent that should continue
         agents_in_thread = get_agents_in_thread(thread_history)
 

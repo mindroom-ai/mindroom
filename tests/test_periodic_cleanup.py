@@ -3,24 +3,18 @@
 import asyncio
 import contextlib
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-import nio
 import pytest
 import pytest_asyncio
 
 from mindroom.bot import MultiAgentOrchestrator
-from mindroom.room_invites import room_invite_manager
 from mindroom.thread_invites import thread_invite_manager
 
 
 @pytest_asyncio.fixture
 async def cleanup_managers():
     """Clear invite managers before each test."""
-    # Clear room invites
-    async with room_invite_manager._lock:
-        room_invite_manager._room_invites.clear()
-
     # Clear thread invites
     async with thread_invite_manager._lock:
         thread_invite_manager._invites.clear()
@@ -29,9 +23,6 @@ async def cleanup_managers():
     yield
 
     # Clean up after test
-    async with room_invite_manager._lock:
-        room_invite_manager._room_invites.clear()
-
     async with thread_invite_manager._lock:
         thread_invite_manager._invites.clear()
         thread_invite_manager._agent_threads.clear()
@@ -45,7 +36,6 @@ async def test_periodic_cleanup_runs_every_minute(cleanup_managers, tmp_path):
 
     # Mock the cleanup methods to track calls
     thread_cleanup_mock = AsyncMock(return_value=0)
-    AsyncMock(return_value=0)
 
     # Track sleep calls and iterations
     iteration_count = 0
@@ -71,145 +61,27 @@ async def test_periodic_cleanup_runs_every_minute(cleanup_managers, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_checks_thread_activity_before_kicking(cleanup_managers, tmp_path):
-    """Test that cleanup checks for active thread invites before kicking from room."""
+async def test_cleanup_handles_expired_thread_invites(cleanup_managers, tmp_path):
+    """Test that expired thread invites are cleaned up."""
     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
     orchestrator.running = True
 
-    # Create a mock general bot with client
-    mock_client = AsyncMock(spec=nio.AsyncClient)
-    mock_bot = MagicMock()
-    mock_bot.client = mock_client
-    orchestrator.agent_bots = {"general": mock_bot}
-
-    # Add an inactive room invite
+    # Add thread invites with different expiration times
     room_id = "!test_room:example.com"
-    agent_name = "calculator"
 
-    # Create invite that's inactive (25 hours old)
-    old_time = datetime.now() - timedelta(hours=25)
-    await room_invite_manager.add_invite(room_id, agent_name, "@user:example.com")
+    # Active invite (expires in future)
+    await thread_invite_manager.add_invite("$thread1", room_id, "calculator", "@user:example.com", duration_hours=2)
 
-    # Manually set the last activity to old time
-    async with room_invite_manager._lock:
-        room_invite_manager._room_invites[room_id][agent_name].last_activity = old_time
+    # Expired invite
+    thread_id2 = "$thread2"
+    await thread_invite_manager.add_invite(thread_id2, room_id, "research", "@user:example.com", duration_hours=1)
 
-    # Add an active thread invite in the same room
-    thread_id = "$thread123"
-    await thread_invite_manager.add_invite(thread_id, room_id, agent_name, "@user:example.com")
-
-    # Mock room_kick to track if it's called
-    mock_client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
-
-    # Run one iteration of cleanup
-    with patch("mindroom.bot.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        mock_sleep.side_effect = [None, asyncio.CancelledError()]  # Run once then cancel
-
-        cleanup_task = asyncio.create_task(orchestrator._periodic_cleanup())
-        with contextlib.suppress(asyncio.CancelledError):
-            await cleanup_task
-
-    # Agent should NOT have been kicked because they have active thread invite
-    mock_client.room_kick.assert_not_called()
-
-    # Room invite should have updated activity
-    async with room_invite_manager._lock:
-        invite = room_invite_manager._room_invites[room_id][agent_name]
-        # Activity should be updated to recent time
-        assert (datetime.now() - invite.last_activity).total_seconds() < 60
-
-
-@pytest.mark.asyncio
-async def test_cleanup_kicks_truly_inactive_agents(cleanup_managers, tmp_path):
-    """Test that cleanup kicks agents with no thread activity."""
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-    orchestrator.running = True
-
-    # Create a mock general bot with client
-    mock_client = AsyncMock(spec=nio.AsyncClient)
-    mock_bot = MagicMock()
-    mock_bot.client = mock_client
-    orchestrator.agent_bots = {"general": mock_bot}
-
-    # Add an inactive room invite
-    room_id = "!test_room:example.com"
-    agent_name = "research"
-
-    # Create invite that's inactive (25 hours old)
-    old_time = datetime.now() - timedelta(hours=25)
-    await room_invite_manager.add_invite(room_id, agent_name, "@user:example.com")
-
-    # Manually set the last activity to old time
-    async with room_invite_manager._lock:
-        room_invite_manager._room_invites[room_id][agent_name].last_activity = old_time
-
-    # No thread invites for this agent
-
-    # Mock room_kick
-    mock_client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
-
-    # Run one iteration of cleanup
-    with patch("mindroom.bot.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        mock_sleep.side_effect = [None, asyncio.CancelledError()]  # Run once then cancel
-
-        cleanup_task = asyncio.create_task(orchestrator._periodic_cleanup())
-        with contextlib.suppress(asyncio.CancelledError):
-            await cleanup_task
-
-    # Agent SHOULD have been kicked
-    mock_client.room_kick.assert_called_once_with(
-        room_id, f"@mindroom_{agent_name}:localhost", reason="Inactive for 24 hours - automatic removal"
-    )
-
-    # Room invite should be removed
-    assert not await room_invite_manager.is_agent_invited_to_room(room_id, agent_name)
-
-
-@pytest.mark.asyncio
-async def test_cleanup_handles_multiple_agents_and_rooms(cleanup_managers, tmp_path):
-    """Test cleanup handles multiple agents across multiple rooms correctly."""
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-    orchestrator.running = True
-
-    # Create a mock general bot with client
-    mock_client = AsyncMock(spec=nio.AsyncClient)
-    mock_bot = MagicMock()
-    mock_bot.client = mock_client
-    orchestrator.agent_bots = {"general": mock_bot}
-
-    # Set up test data
-    room1 = "!room1:example.com"
-    room2 = "!room2:example.com"
-    agent1 = "calculator"
-    agent2 = "research"
-    agent3 = "shell"
-
-    old_time = datetime.now() - timedelta(hours=25)
-
-    # Room 1: agent1 (inactive, has thread), agent2 (inactive, no thread)
-    await room_invite_manager.add_invite(room1, agent1, "@user:example.com")
-    await room_invite_manager.add_invite(room1, agent2, "@user:example.com")
-
-    # Room 2: agent3 (inactive, no thread)
-    await room_invite_manager.add_invite(room2, agent3, "@user:example.com")
-
-    # Make all invites old
-    async with room_invite_manager._lock:
-        room_invite_manager._room_invites[room1][agent1].last_activity = old_time
-        room_invite_manager._room_invites[room1][agent2].last_activity = old_time
-        room_invite_manager._room_invites[room2][agent3].last_activity = old_time
-
-    # Add thread invite for agent1 in room1
-    await thread_invite_manager.add_invite("$thread1", room1, agent1, "@user:example.com")
-
-    # Mock room_kick
-    kick_calls = []
-
-    async def mock_kick(room_id, user_id, reason):
-        kick_calls.append((room_id, user_id))
-        return nio.RoomKickResponse()
-
-    mock_client.room_kick = mock_kick
+    # Manually expire the second invite
+    async with thread_invite_manager._lock:
+        for invites in thread_invite_manager._invites.values():
+            for invite in invites:
+                if invite.thread_id == thread_id2:
+                    invite.expires_at = datetime.now() - timedelta(hours=1)
 
     # Run one iteration of cleanup
     with patch("mindroom.bot.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
@@ -219,17 +91,9 @@ async def test_cleanup_handles_multiple_agents_and_rooms(cleanup_managers, tmp_p
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
 
-    # Should have kicked agent2 from room1 and agent3 from room2
-    assert len(kick_calls) == 2
-    assert (room1, f"@mindroom_{agent2}:localhost") in kick_calls
-    assert (room2, f"@mindroom_{agent3}:localhost") in kick_calls
-
-    # agent1 should still be invited to room1
-    assert await room_invite_manager.is_agent_invited_to_room(room1, agent1)
-
-    # agent2 and agent3 should be removed
-    assert not await room_invite_manager.is_agent_invited_to_room(room1, agent2)
-    assert not await room_invite_manager.is_agent_invited_to_room(room2, agent3)
+    # Check that only the active invite remains
+    assert await thread_invite_manager.is_agent_invited_to_thread("$thread1", "calculator")
+    assert not await thread_invite_manager.is_agent_invited_to_thread("$thread2", "research")
 
 
 @pytest.mark.asyncio
@@ -270,80 +134,36 @@ async def test_cleanup_continues_on_error(cleanup_managers, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_handles_expired_thread_invites(cleanup_managers, tmp_path):
-    """Test that expired thread invites are cleaned up."""
+async def test_cleanup_multiple_thread_invites(cleanup_managers, tmp_path):
+    """Test cleanup handles multiple thread invites correctly."""
     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
     orchestrator.running = True
 
-    # Add thread invites with different expiration times
+    # Add multiple thread invites
     room_id = "!test_room:example.com"
 
-    # Active invite (expires in future)
-    await thread_invite_manager.add_invite("$thread1", room_id, "calculator", "@user:example.com", duration_hours=2)
+    # Add invites that will expire at different times
+    invites = [
+        ("$thread1", "calculator", 10),  # expires in 10 hours
+        ("$thread2", "research", 0.5),  # expires in 30 minutes
+        ("$thread3", "general", None),  # no expiration
+    ]
 
-    # Expired invite
-    thread_id2 = "$thread2"
-    await thread_invite_manager.add_invite(thread_id2, room_id, "research", "@user:example.com", duration_hours=1)
+    for thread_id, agent_name, duration in invites:
+        await thread_invite_manager.add_invite(thread_id, room_id, agent_name, "@user:example.com", duration)
 
-    # Manually expire the second invite
+    # Manually expire the 30-minute invite
     async with thread_invite_manager._lock:
-        for invites in thread_invite_manager._invites.values():
-            for invite in invites:
-                if invite.thread_id == thread_id2:
-                    invite.expires_at = datetime.now() - timedelta(hours=1)
+        for thread_invites in thread_invite_manager._invites.values():
+            for invite in thread_invites:
+                if invite.thread_id == "$thread2":
+                    invite.expires_at = datetime.now() - timedelta(minutes=1)
 
-    # Run one iteration of cleanup
-    with patch("mindroom.bot.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        mock_sleep.side_effect = [None, asyncio.CancelledError()]
+    # Run cleanup
+    removed_count = await thread_invite_manager.cleanup_expired()
 
-        cleanup_task = asyncio.create_task(orchestrator._periodic_cleanup())
-        with contextlib.suppress(asyncio.CancelledError):
-            await cleanup_task
-
-    # Check that only the active invite remains
+    # Should have removed only the expired invite
+    assert removed_count == 1
     assert await thread_invite_manager.is_agent_invited_to_thread("$thread1", "calculator")
     assert not await thread_invite_manager.is_agent_invited_to_thread("$thread2", "research")
-
-
-@pytest.mark.asyncio
-async def test_cleanup_logs_activity_updates(cleanup_managers, tmp_path, caplog):
-    """Test that cleanup logs when it updates room activity due to thread participation."""
-    import logging
-
-    # Set the caplog level on the specific logger
-    caplog.set_level(logging.DEBUG, logger="mindroom.bot")
-
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-    orchestrator.running = True
-
-    # Create inactive room invite with active thread invite
-    room_id = "!test_room:example.com"
-    agent_name = "calculator"
-
-    old_time = datetime.now() - timedelta(hours=25)
-    await room_invite_manager.add_invite(room_id, agent_name, "@user:example.com")
-
-    async with room_invite_manager._lock:
-        room_invite_manager._room_invites[room_id][agent_name].last_activity = old_time
-
-    await thread_invite_manager.add_invite("$thread1", room_id, agent_name, "@user:example.com")
-
-    # Create a mock general bot (needed for room cleanup)
-    mock_client = AsyncMock(spec=nio.AsyncClient)
-    mock_bot = MagicMock()
-    mock_bot.client = mock_client
-    orchestrator.agent_bots = {"general": mock_bot}
-
-    # Run one iteration
-    with patch("mindroom.bot.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-        mock_sleep.side_effect = [None, asyncio.CancelledError()]
-
-        cleanup_task = asyncio.create_task(orchestrator._periodic_cleanup())
-        with contextlib.suppress(asyncio.CancelledError):
-            await cleanup_task
-
-    # The activity should have been updated
-    async with room_invite_manager._lock:
-        invite = room_invite_manager._room_invites[room_id][agent_name]
-        # Activity should be updated to recent time
-        assert (datetime.now() - invite.last_activity).total_seconds() < 10, "Room activity was not updated"
+    assert await thread_invite_manager.is_agent_invited_to_thread("$thread3", "general")

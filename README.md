@@ -28,7 +28,7 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - Multiple specialized agents can work together in a single conversation
 - Agents see each other's responses and coordinate intelligently
 - Router agent automatically suggests relevant specialists
-- Users can invite agents from other rooms to specific threads
+- Users can invite agents to specific threads even if they're not native to the room
 - Thread-specific invitations with optional time limits
 
 ### 💬 **Threads as Experiments**
@@ -93,9 +93,9 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - **Context Control**: Fine-grained memory permissions (planned)
 
 #### Slash Commands
-- `/invite <agent> [from <room>] [for <hours>]` - Invite an agent to a thread
+- `/invite <agent> [for <hours>]` - Invite an agent to a thread (only works in threads)
 - `/uninvite <agent>` - Remove an agent from a thread
-- `/list_invites` - List all invited agents for current thread
+- `/list_invites` - List all invited agents in current thread
 - `/help [topic]` - Get help on available commands
 - `/link [thread-id]` - Link another thread's context (planned)
 - `/agents` - List available agents (planned)
@@ -156,9 +156,9 @@ In your Matrix client (Element, etc.):
 
 ### Agent Response Rules
 
-Agents follow intelligent rules to avoid chaos while remaining helpful:
+Agents ONLY respond in threads - never in main room messages. Within threads, they follow these intelligent rules:
 
-1. **Mentioned agents always respond** - If you @mention an agent, it will respond regardless of context
+1. **Mentioned agents always respond** - If you @mention an agent in a thread, it will respond
 2. **Single agent continues conversation** - If only one agent is in a thread, it continues responding without mentions
 3. **Multiple agents need direction** - When 2+ agents are in a thread, you must @mention who you want
 4. **Smart routing for new threads** - If no agents have participated in the thread, the system picks the most suitable one

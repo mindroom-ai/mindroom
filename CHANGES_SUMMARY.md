@@ -1,127 +1,78 @@
 # Cross-Room Agent Invites Feature - Detailed Change Summary
 
 ## Overview
-This feature branch implements cross-room agent invitations with periodic cleanup, allowing temporary agent participation in rooms and threads they're not natively assigned to. The implementation went through several iterations to achieve the simplest, most maintainable solution.
+This feature branch implements thread-specific agent invitations with periodic cleanup, allowing temporary agent participation in threads they're not natively assigned to. The implementation was significantly simplified after realizing agents should ONLY respond in threads, never in main room messages.
+
+## Key Simplification
+**Agents ONLY respond in threads** - This fundamental rule eliminated the need for complex room invitation logic. While Matrix requires agents to be invited to rooms for protocol compliance, conceptually agents only participate in specific threads.
 
 ## Key Features Implemented
 
-### 1. Agent Invitation System
-- **Thread Invitations**: `/invite <agent>` - Invite agents to specific threads
-- **Room Invitations**: `/invite <agent> to room` - Invite agents to entire rooms
-- **Duration Support**: Optional `for <hours>` parameter for time-limited invites
+### 1. Thread Invitation System
+- **Thread Invitations**: `/invite <agent> [for <hours>]` - Invite agents to specific threads
+- **Duration Support**: Optional time-limited invites
 - **Uninvite Command**: `/uninvite <agent>` - Remove agents from threads
-- **List Command**: `/list_invites` - Show all active invitations
+- **List Command**: `/list_invites` - Show active thread invitations
+- **Matrix Compliance**: Automatically handles room invites when needed for protocol
 
 ### 2. Periodic Cleanup System
-- **Automatic Background Task**: Runs every 60 seconds to manage invitations
-- **Inactivity Detection**: Removes room invites after 24 hours of inactivity
-- **Thread Activity Awareness**: Updates room activity when agents are active in threads
+- **Automatic Background Task**: Runs every 60 seconds
 - **Expired Invite Cleanup**: Removes time-limited invitations after expiration
+- **Simple and Focused**: Only manages thread invitations
 
-### 3. Response Rule Simplification
-- **Unified Behavior**: Invited agents now follow the same rules as native agents
-- **No Special Cases**: Removed complex special handling for invited agents
-- **Clear Rules**: Documented 5 simple rules that govern all agent behavior
+### 3. Response Rule Enforcement
+- **Thread-Only Responses**: Agents never respond to main room messages
+- **Unified Behavior**: Invited agents follow same rules as native agents
+- **No Special Cases**: Removed all complex special handling
 
 ## Major Code Changes
 
-### New Files Created
+### Files Removed
+- `src/mindroom/room_invites.py` - Entire room invitation concept removed
+- `src/mindroom/invites_base.py` - Over-engineered base classes removed
+- `tests/test_room_invites.py` - Related tests removed
 
-#### `src/mindroom/invites_base.py`
-Base classes for invitation management with common functionality:
-```python
-- BaseInvitation: Abstract base for all invitation types
-- BaseInviteManager: Abstract base for invitation managers
-- Provides timestamp handling, expiration logic, and thread safety
-```
+### New/Modified Files
 
 #### `src/mindroom/thread_invites.py`
 Thread-specific invitation management:
 ```python
-- ThreadInvitation: Dataclass for thread invitations
+- ThreadInvite: Dataclass for thread invitations
 - ThreadInviteManager: Singleton manager for thread invites
-- Supports time-limited invitations and cross-room thread access
-```
-
-#### `src/mindroom/room_invites.py`
-Room-level invitation management:
-```python
-- RoomInvitation: Dataclass with inactivity timeout support
-- RoomInviteManager: Singleton manager with activity tracking
-- Integrates with Matrix room kick functionality
+- Supports time-limited invitations
 ```
 
 #### `src/mindroom/commands.py`
-Command parsing for invitation commands:
+Simplified command parsing:
 ```python
-- CommandType enum with INVITE, UNINVITE, LIST_INVITES, HELP
-- Command dataclass for parsed commands
-- CommandParser with regex-based parsing
-- Support for various command formats and parameters
+- Removed "to room" syntax
+- Commands only work in threads
+- Clear error messages when used outside threads
 ```
 
 #### `src/mindroom/utils.py`
-Common utility functions extracted for DRY principle:
+Common utility functions with key change:
 ```python
-- extract_domain_from_user_id()
-- extract_username_from_user_id()
-- extract_server_name_from_homeserver()
-- construct_agent_user_id()
-- extract_thread_info()
-- check_agent_mentioned()
-- create_session_id()
-- has_room_access()
-- should_agent_respond()
-- should_route_to_agent()
+def should_agent_respond(...):
+    # Agents ONLY respond in threads, never in main rooms
+    if not is_thread:
+        return ResponseDecision(False, False)
+    # ... rest of logic
 ```
-
-#### Test Files
-- `tests/test_thread_invites.py` - Comprehensive thread invitation tests
-- `tests/test_room_invites.py` - Room invitation and activity tracking tests
-- `tests/test_commands.py` - Command parsing tests
-- `tests/test_periodic_cleanup.py` - Background cleanup task tests
-- `tests/test_bot_helpers.py` - Tests for extracted helper functions
-- `tests/test_agent_response_logic.py` - Comprehensive response rule tests
-
-### Modified Files
 
 #### `src/mindroom/bot.py`
-Major refactoring for clarity and maintainability:
+Major simplifications:
+- Removed all room invite logic
+- Simplified `_handle_invite_command` to only handle threads
+- Cleaned up `_periodic_cleanup` to only manage thread invites
+- Removed complex activity tracking
 
-**Extracted Helper Functions**:
-```python
-async def _handle_invite_command(...) -> str
-async def _handle_list_invites_command(...) -> str
-def _is_sender_other_agent(...) -> bool
-def _should_process_message(...) -> bool
-```
+### Test Updates
+- `tests/test_periodic_cleanup.py` - Rewritten to only test thread cleanup
+- `tests/test_agent_response_logic.py` - Updated to expect no responses outside threads
+- `tests/test_bot_helpers.py` - Removed room invite tests
 
-**Refactored Methods**:
-- `_on_message()` - Broken down into focused helper methods:
-  - `_should_process_message()` - Validates sender
-  - `_has_room_access()` - Checks permissions
-  - `_try_handle_command()` - Command processing
-  - `_extract_message_context()` - Context extraction
-  - `_should_respond_to_message()` - Response decision
-  - `_process_and_respond()` - Response generation
-  - `_send_response()` - Response sending
-
-**Added Features**:
-- Command handling in `_handle_command()`
-- Periodic cleanup task `_periodic_cleanup()`
-- Integration with invitation managers
-
-**Simplified Logic**:
-- Removed special cases for invited agents
-- Cleaner response decision flow
-- Better separation of concerns
-
-#### `src/mindroom/matrix/` modules
-- Updated to use utility functions from `utils.py`
-- Removed duplicate helper functions
-- Better code organization
-
-## Response Rules (Simplified)
+## Response Rules (Enforced in Threads Only)
 
 ### The 5 Core Rules
 1. **Mentioned agents always respond** - `@agent` guarantees response
@@ -130,80 +81,50 @@ def _should_process_message(...) -> bool
 4. **Smart routing for new threads** - Automatic agent selection
 5. **Invited agents act like natives** - Same rules apply to all agents
 
-### Key Simplification
-Previously, invited agents had special behavior (only respond when mentioned). This was removed - invited agents now participate exactly like native agents, making the system more predictable and easier to understand.
-
 ## Architecture Decisions
 
-### 1. Singleton Pattern for Managers
-- Thread and room invite managers use singleton pattern
-- Ensures consistent state across the application
-- Thread-safe with asyncio locks
+### 1. Thread-Only Design
+- Agents conceptually only exist in threads
+- Matrix room invites handled transparently for protocol compliance
+- Massive simplification of invitation logic
 
-### 2. Background Task Architecture
-- Single periodic task runs every 60 seconds
-- Handles both thread and room cleanup
-- Checks for thread activity before kicking from rooms
-- Resilient to errors (continues running)
+### 2. Simplified State Management
+- Only track thread invitations
+- No complex room-level activity tracking
+- Clear expiration semantics
 
-### 3. DRY Principle Application
-- Extracted 10+ common functions to `utils.py`
-- Created base classes for invitations
-- Reduced code duplication significantly
-
-### 4. Functional Programming Style
-- Extracted methods into standalone functions where possible
-- Made internal-only functions private with underscore prefix
-- Improved testability and code organization
-
-## Testing Coverage
-
-### Test Statistics
-- Added 70+ new test cases
-- Coverage improvements:
-  - `bot.py`: 60% → 70%
-  - `utils.py`: 69% → 76%
-  - New modules: 90%+ coverage
-
-### Test Categories
-1. **Unit Tests**: Individual functions and methods
-2. **Integration Tests**: Manager interactions
-3. **Concurrent Tests**: Thread safety verification
-4. **Edge Case Tests**: Boundary conditions
-5. **Response Logic Tests**: All rule combinations
+### 3. Cleaner Code Structure
+- Removed ~500 lines of room invitation code
+- Eliminated inheritance hierarchy
+- More focused and maintainable
 
 ## Documentation Updates
 
 ### README.md
-Added "Agent Response Rules" section explaining:
-- The 5 core rules
-- Benefits of the rule system
-- Examples of agent behavior
+- Updated to clarify agents only respond in threads
+- Simplified command documentation
+- Removed room invitation references
 
-### Code Documentation
-- Comprehensive docstrings for all new functions
-- Clear comments explaining complex logic
-- Test documentation explaining coverage
+### Command Help
+- Clear messaging that commands only work in threads
+- Simplified examples
+- Better error messages
 
-## Diff Statistics
-- Total lines changed: ~3,500
-- Files added: 10
-- Files modified: 15
-- Net code addition: ~2,000 lines (including tests)
+## Diff Statistics (Approximate)
+- Files removed: 3
+- Files significantly simplified: 5
+- Net code reduction: ~500 lines
+- Tests updated: 3 test files
 
-## Migration Path
-No migration needed - this is a new feature. The invitation system is backward compatible with existing room configurations.
+## Benefits of Simplification
 
-## Future Improvements (TODOs)
-1. Add explicit router agent that users can @mention
-2. Consider persistent storage for invitations across restarts
-3. Add metrics/monitoring for invitation usage
-4. Consider per-agent invitation limits
+1. **Conceptual Clarity**: One simple rule - agents only respond in threads
+2. **Code Simplicity**: Removed entire subsystem (room invites)
+3. **Reduced Bugs**: Less code = less bugs
+4. **Better UX**: Clear, predictable behavior
+5. **Maintainability**: Easier to understand and modify
 
-## Review Checklist
-- [ ] All tests pass (`pytest`)
-- [ ] Pre-commit hooks pass
-- [ ] Documentation is clear
-- [ ] Code follows DRY principles
-- [ ] No backward compatibility concerns (per project philosophy)
-- [ ] Simplified implementation without over-engineering
+## Migration Notes
+- No migration needed - simplified version is more restrictive
+- Existing thread invitations continue to work
+- Room invitations concept completely removed
