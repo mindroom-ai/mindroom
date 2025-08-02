@@ -120,7 +120,7 @@ Example:
 - `/invite calculator` - Invite calculator agent to this thread
 
 Note: Invites only work in threads. The agent will be able to participate in this thread only.
-Agents are automatically removed after 24 hours of inactivity."""
+Agents are automatically removed from the room 24 hours after being invited."""
 
     elif topic == "uninvite":
         return """**Uninvite Command**

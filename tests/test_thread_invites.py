@@ -43,7 +43,6 @@ async def test_add_invite(invite_manager, mock_client):
     content = call_args[1]["content"]
     assert content["invited_by"] == "@user:example.com"
     assert "invited_at" in content
-    assert content["last_response"] is None
 
 
 @pytest.mark.asyncio
@@ -173,56 +172,23 @@ async def test_remove_invite(invite_manager, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_update_last_response(invite_manager, mock_client):
-    """Test updating last response time."""
-    # Mock getting the current state
-    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        content={
-            "invited_by": "@user:example.com",
-            "invited_at": "2024-01-01T10:00:00",
-            "last_response": None,
-        },
-        event_type=THREAD_INVITE_EVENT_TYPE,
-        state_key="$thread123:calculator",
-        room_id="!room456",
-    )
-
-    # Mock updating the state
-    mock_client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$update123", room_id="!room456")
-
-    await invite_manager.update_last_response(
-        thread_id="$thread123",
-        room_id="!room456",
-        agent_name="calculator",
-    )
-
-    # Verify the state was updated
-    assert mock_client.room_put_state.called
-    call_args = mock_client.room_put_state.call_args
-    content = call_args[1]["content"]
-    assert "last_response" in content
-    assert content["last_response"] is not None  # Should be current timestamp
-
-
-@pytest.mark.asyncio
-async def test_cleanup_inactive_agents(invite_manager, mock_client):
-    """Test cleanup of inactive agents."""
+async def test_cleanup_expired_invitations(invite_manager, mock_client):
+    """Test cleanup of expired invitations."""
     from datetime import datetime, timedelta
 
-    # Mock room_get_state to return some active and inactive invitations
+    # Mock room_get_state to return some expired and non-expired invitations
     now = datetime.now()
-    old_time = (now - timedelta(hours=25)).isoformat()  # 25 hours ago
-    recent_time = (now - timedelta(hours=1)).isoformat()  # 1 hour ago
+    old_time = (now - timedelta(hours=25)).isoformat()  # 25 hours ago - expired
+    recent_time = (now - timedelta(hours=1)).isoformat()  # 1 hour ago - not expired
 
     mock_client.room_get_state.return_value = nio.RoomGetStateResponse(
         events=[
             {
                 "type": THREAD_INVITE_EVENT_TYPE,
-                "state_key": "$thread1:inactive_agent",
+                "state_key": "$thread1:expired_agent",
                 "content": {
                     "invited_by": "@user:example.com",
-                    "invited_at": old_time,
-                    "last_response": old_time,  # Last response 25 hours ago
+                    "invited_at": old_time,  # Invited 25 hours ago
                 },
             },
             {
@@ -230,47 +196,30 @@ async def test_cleanup_inactive_agents(invite_manager, mock_client):
                 "state_key": "$thread2:active_agent",
                 "content": {
                     "invited_by": "@user:example.com",
-                    "invited_at": old_time,
-                    "last_response": recent_time,  # Recent response
-                },
-            },
-            {
-                "type": THREAD_INVITE_EVENT_TYPE,
-                "state_key": "$thread3:never_responded",
-                "content": {
-                    "invited_by": "@user:example.com",
-                    "invited_at": old_time,
-                    "last_response": None,  # Never responded, invited 25 hours ago
+                    "invited_at": recent_time,  # Recent invitation
                 },
             },
         ],
         room_id="!room456",
     )
 
-    # Mock room_kick responses
-    mock_client.room_kick.side_effect = [
-        nio.RoomKickResponse(),  # Success for inactive_agent
-        nio.RoomKickResponse(),  # Success for never_responded
-    ]
+    # Mock room_kick response for expired agent
+    mock_client.room_kick.return_value = nio.RoomKickResponse()
 
-    # Mock room_put_state for removing invitations
-    mock_client.room_put_state.side_effect = [
-        nio.RoomPutStateResponse(event_id="$remove1", room_id="!room456"),
-        nio.RoomPutStateResponse(event_id="$remove2", room_id="!room456"),
-    ]
+    # Mock room_put_state for removing invitation
+    mock_client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$remove1", room_id="!room456")
 
     # Run cleanup
-    removed_count = await invite_manager.cleanup_inactive_agents("!room456", inactivity_hours=24)
+    removed_count = await invite_manager.cleanup_expired_invitations("!room456", timeout_hours=24)
 
-    # Should have removed 2 agents (inactive_agent and never_responded)
-    assert removed_count == 2
-    assert mock_client.room_kick.call_count == 2
+    # Should have removed 1 agent (expired_agent)
+    assert removed_count == 1
+    assert mock_client.room_kick.call_count == 1
 
-    # Check that the correct agents were kicked
-    kick_calls = mock_client.room_kick.call_args_list
-    kicked_users = [call[1]["user_id"] for call in kick_calls]
-    assert "@inactive_agent:mindroom.space" in kicked_users
-    assert "@never_responded:mindroom.space" in kicked_users
+    # Check that the correct agent was kicked
+    kick_call = mock_client.room_kick.call_args
+    assert kick_call[1]["user_id"] == "@expired_agent:mindroom.space"
+    assert "expired" in kick_call[1]["reason"]
 
 
 @pytest.mark.asyncio

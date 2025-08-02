@@ -117,7 +117,7 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
     thread_invite_manager: ThreadInviteManager = field(init=False)
-    inactivity_hours: int = field(default=24)  # Configurable inactivity timeout
+    invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
 
     @property
     def agent_name(self) -> str:
@@ -285,14 +285,6 @@ class AgentBot:
         if isinstance(response, nio.RoomSendResponse):
             self.response_tracker.mark_responded(reply_to_event_id)
             self.logger.info("Sent response", event_id=response.event_id)
-
-            # Update last response time if this is a thread response
-            if thread_id:
-                await self.thread_invite_manager.update_last_response(
-                    thread_id=thread_id,
-                    room_id=room_id,
-                    agent_name=self.agent_name,
-                )
         else:
             self.logger.error("Failed to send response", error=str(response))
 
@@ -391,8 +383,8 @@ class AgentBot:
                 total_removed = 0
                 for room_id in joined_rooms_response.rooms:
                     try:
-                        removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
-                            room_id, inactivity_hours=self.inactivity_hours
+                        removed_count = await self.thread_invite_manager.cleanup_expired_invitations(
+                            room_id, timeout_hours=self.invitation_timeout_hours
                         )
                         total_removed += removed_count
                     except Exception as e:
