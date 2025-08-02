@@ -175,17 +175,8 @@ class AgentBot:
             )
             return
 
-        # Track activity for room invites (if I'm in this room due to invite)
-        is_room_invite = await room_invite_manager.is_agent_invited_to_room(room.room_id, self.agent_name)
-        if is_room_invite:
-            await room_invite_manager.record_agent_activity(room.room_id, self.agent_name)
-            logger.debug(
-                "Recorded activity for room invite",
-                agent=f"{emoji(self.agent_name)} {self.agent_name}",
-                room_id=room.room_id,
-            )
-
         # Check if I should be in this room (native or invited)
+        is_room_invite = await room_invite_manager.is_agent_invited_to_room(room.room_id, self.agent_name)
         if room.room_id not in self.rooms and not is_room_invite:
             logger.debug(
                 "Not in this room and not invited",
