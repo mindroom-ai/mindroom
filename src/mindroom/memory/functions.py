@@ -33,7 +33,7 @@ def get_memory(storage_path: Path) -> "Memory":
     """Get or create the global memory instance."""
     global _memory_instance
     if _memory_instance is None:
-        logger.info(f"Creating memory instance with storage path: {storage_path}")
+        logger.info("Creating memory instance", path=storage_path)
         _memory_instance = create_memory_instance(storage_path)
     return _memory_instance
 
@@ -52,21 +52,18 @@ def add_agent_memory(
     """
     memory = get_memory(storage_path)
 
-    # Add agent context to metadata
     if metadata is None:
         metadata = {}
     metadata["agent"] = agent_name
 
-    # Create message format for Mem0
     messages = [{"role": "assistant", "content": content}]
 
     # Use agent_name as user_id to namespace memories per agent
     try:
         memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
-        logger.info(f"Successfully added memory for agent {agent_name}: {content[:50]}...")
+        logger.info("Memory added", agent=agent_name)
     except Exception as e:
-        # Mem0 could fail for various reasons (DB issues, etc)
-        logger.error(f"Failed to add memory for agent {agent_name}: {e}")
+        logger.error("Failed to add memory", agent=agent_name, error=str(e))
 
 
 def search_agent_memories(query: str, agent_name: str, storage_path: Path, limit: int = 3) -> list[MemoryResult]:
@@ -84,10 +81,9 @@ def search_agent_memories(query: str, agent_name: str, storage_path: Path, limit
     memory = get_memory(storage_path)
     search_result = memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
 
-    # Extract results list from the response
     results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
 
-    logger.debug(f"Found {len(results)} memories for agent {agent_name}")
+    logger.debug("Memories found", count=len(results), agent=agent_name)
     return results
 
 
@@ -105,20 +101,17 @@ def add_room_memory(
     """
     memory = get_memory(storage_path)
 
-    # Add room context to metadata
     if metadata is None:
         metadata = {}
     metadata["room_id"] = room_id
     if agent_name:
         metadata["contributed_by"] = agent_name
 
-    # Create message format for Mem0
     messages = [{"role": "assistant", "content": content}]
 
-    # Use sanitized room_id as user_id
     safe_room_id = room_id.replace(":", "_").replace("!", "")
     memory.add(messages, user_id=f"room_{safe_room_id}", metadata=metadata)
-    logger.debug(f"Added memory for room {room_id}: {content[:50]}...")
+    logger.debug("Room memory added", room_id=room_id)
 
 
 def search_room_memories(query: str, room_id: str, storage_path: Path, limit: int = 3) -> list[MemoryResult]:
@@ -137,10 +130,9 @@ def search_room_memories(query: str, room_id: str, storage_path: Path, limit: in
     safe_room_id = room_id.replace(":", "_").replace("!", "")
     search_result = memory.search(query, user_id=f"room_{safe_room_id}", limit=limit)
 
-    # Extract results list from the response
     results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
 
-    logger.debug(f"Found {len(results)} memories for room {room_id}")
+    logger.debug("Room memories found", count=len(results), room_id=room_id)
     return results
 
 
@@ -182,23 +174,21 @@ def build_memory_enhanced_prompt(
     Returns:
         Enhanced prompt with memory context
     """
-    logger.debug(f"Building memory enhanced prompt for agent {agent_name}")
+    logger.debug("Building enhanced prompt", agent=agent_name)
     enhanced_prompt = prompt
 
-    # Search for relevant agent memories
     agent_memories = search_agent_memories(prompt, agent_name, storage_path)
     if agent_memories:
         agent_context = format_memories_as_context(agent_memories, "agent")
         enhanced_prompt = f"{agent_context}\n\n{prompt}"
-        logger.debug(f"Added {len(agent_memories)} agent memories to prompt")
+        logger.debug("Agent memories added", count=len(agent_memories))
 
-    # If room_id is provided, add room context
     if room_id:
         room_memories = search_room_memories(prompt, room_id, storage_path)
         if room_memories:
             room_context = format_memories_as_context(room_memories, "room")
             enhanced_prompt = f"{room_context}\n\n{enhanced_prompt}"
-            logger.debug(f"Added {len(room_memories)} room memories to prompt")
+            logger.debug("Room memories added", count=len(room_memories))
 
     return enhanced_prompt
 
@@ -224,7 +214,6 @@ def store_conversation_memory(
     if not response:
         return
 
-    # Store the full conversation in agent memory
     conversation_summary = f"User asked: {prompt} I responded: {response}"
     add_agent_memory(
         conversation_summary,
@@ -233,7 +222,6 @@ def store_conversation_memory(
         metadata={"type": "conversation", "session_id": session_id},
     )
 
-    # Also add to room memory if room_id provided
     if room_id:
         room_summary = f"{agent_name} discussed: {response}"
         add_room_memory(

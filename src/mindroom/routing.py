@@ -81,10 +81,10 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             f"AI suggested {suggestion.agent_name} but available agents are {all_agents}"
         )
 
-        logger.info(f"Routing to {suggestion.agent_name}: {suggestion.reasoning}")
+        logger.info("Routing decision", agent=suggestion.agent_name, reason=suggestion.reasoning)
         return suggestion.agent_name
 
     except (KeyError, ValueError) as e:
         # Only catch specific errors that we expect from AI response parsing
-        logger.error(f"Routing error: {e}")
+        logger.error("Routing failed", error=str(e))
         return None

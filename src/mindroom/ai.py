@@ -20,10 +20,7 @@ from .memory import (
 
 logger = get_logger(__name__)
 
-# Load environment variables from .env file
 load_dotenv()
-
-# Configure caching
 ENABLE_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
 
 
@@ -58,9 +55,8 @@ def get_model_instance(model_name: str = "default") -> Model:
     provider = model_config.provider
     model_id = model_config.id
 
-    logger.info(f"Using AI model '{model_name}' from provider '{provider}' with ID '{model_id}'")
+    logger.info("Using AI model", model=model_name, provider=provider, id=model_id)
 
-    # Create model instance based on provider
     if provider == "ollama":
         host = model_config.host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         return Ollama(id=model_id, host=host)
@@ -82,37 +78,30 @@ async def _cached_agent_run(
     thread_history: list[dict[str, Any]] | None = None,
 ) -> RunResponse:
     """Cached wrapper for agent.arun() calls."""
-    # Format thread history into context
     full_prompt = prompt
     if thread_history:
         context = "Previous conversation in this thread:\n"
         for msg in thread_history:
-            # Include all messages for full context
             context += f"{msg['sender']}: {msg['body']}\n"
         context += "\nCurrent message:\n"
         full_prompt = context + prompt
 
     cache = get_cache(storage_path)
     if cache is None:
-        # If caching is disabled, run directly
         agent = create_agent(agent_name, model, storage_path)
         return await agent.arun(full_prompt, session_id=session_id)  # type: ignore[no-any-return]
 
-    # Create a cache key based on agent name, prompt, and model
     cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
-    # Check if result exists in cache
     cached_result = cache.get(cache_key)
     if cached_result is not None:
-        logger.info(f"Cache hit for agent '{agent_name}' with prompt: '{prompt}'")
+        logger.info("Cache hit", agent=agent_name)
         return cached_result  # type: ignore[no-any-return]
 
-    # If not in cache, run the agent and cache the result
     agent = create_agent(agent_name, model, storage_path=storage_path)
     response = await agent.arun(full_prompt, session_id=session_id)
 
-    # Cache the result
     cache.set(cache_key, response)
-    logger.info(f"Cached response for agent '{agent_name}' with prompt: '{prompt}'")
+    logger.info("Response cached", agent=agent_name)
 
     return response  # type: ignore[no-any-return]
 
@@ -138,18 +127,13 @@ async def ai_response(
     Returns:
         Agent response string
     """
-    logger.info(f"Routing to agent '{agent_name}' for prompt: '{prompt}'")
+    logger.info("AI request", agent=agent_name)
     try:
         model = get_model_instance()
 
-        # Build prompt enhanced with memory context
         enhanced_prompt = build_memory_enhanced_prompt(prompt, agent_name, storage_path, room_id)
-
-        # Generate response
         response = await _cached_agent_run(agent_name, enhanced_prompt, session_id, model, storage_path, thread_history)
         response_text = response.content or ""
-
-        # Store conversation in memory for future recall
         store_conversation_memory(prompt, response_text, agent_name, storage_path, session_id, room_id)
 
         return response_text
