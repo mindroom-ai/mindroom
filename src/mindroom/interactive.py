@@ -1,6 +1,8 @@
 """Interactive Q&A system using Matrix reactions as clickable buttons."""
 
 import asyncio
+import json
+import re
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -313,212 +315,105 @@ class InteractiveManager:
 
     @staticmethod
     def should_create_interactive_question(response_text: str) -> bool:
-        """Determine if the response warrants an interactive question.
+        """Check if the response contains an interactive question in JSON format.
 
         Args:
             response_text: The AI's response text
 
         Returns:
-            True if an interactive question should be created
+            True if an interactive code block is found
         """
-        # Patterns that suggest interactive questions could be helpful
-        interactive_patterns = [
-            "would you prefer",
-            "would you like me to",
-            "should i",
-            "which approach",
-            "choose one",
-            "select from",
-            "option 1",
-            "option a)",
-            "alternatively",
-            "do you want",
-            "shall i continue",
-        ]
-
-        response_lower = response_text.lower()
-        return any(pattern in response_lower for pattern in interactive_patterns)
+        return "```interactive" in response_text
 
     async def handle_interactive_response(self, room_id: str, thread_id: str | None, response_text: str) -> None:
-        """Create an interactive question based on the AI response.
+        """Create an interactive question from JSON in the AI response.
 
         Args:
             room_id: The room ID
             thread_id: Thread ID if in a thread
-            response_text: The AI's response containing options
+            response_text: The AI's response containing an interactive code block
         """
-        # Parse common patterns and create appropriate interactive questions
-        response_lower = response_text.lower()
+        # Extract JSON from interactive code block
+        pattern = r"```interactive\s*\n(.*?)\n```"
+        match = re.search(pattern, response_text, re.DOTALL)
 
-        # Send the original response first
+        if not match:
+            self.logger.warning("Interactive block found but couldn't extract JSON")
+            # Send the original response anyway
+            await self._send_response_text(room_id, thread_id, response_text)
+            return
+
+        try:
+            interactive_data = json.loads(match.group(1))
+        except json.JSONDecodeError as e:
+            self.logger.error("Failed to parse interactive JSON", error=str(e))
+            # Send the original response anyway
+            await self._send_response_text(room_id, thread_id, response_text)
+            return
+
+        # Send the original response first (without the interactive block)
+        clean_response = response_text.replace(match.group(0), "").strip()
+        if clean_response:
+            await self._send_response_text(room_id, thread_id, clean_response)
+
+        # Parse the interactive data
+        question = interactive_data.get("question", "Please choose an option:")
+        options_data = interactive_data.get("options", [])
+
+        if not options_data:
+            self.logger.warning("No options found in interactive data")
+            return
+
+        # Convert to our expected format
+        options = []
+        for opt in options_data:
+            emoji = opt.get("emoji", "❓")
+            label = opt.get("label", "Option")
+            value = opt.get("value", label.lower())
+            options.append((emoji, label, value))
+
+        # Create the interactive question
+        await self.ask_interactive(
+            room_id=room_id,
+            thread_id=thread_id,
+            question=question,
+            options=options,
+            handler=self._create_generic_handler(interactive_data.get("type", "question")),
+        )
+
+    async def _send_response_text(self, room_id: str, thread_id: str | None, text: str) -> None:
+        """Send a text response to the room."""
         sender_domain = extract_domain_from_user_id(self.client.user_id)
         content = create_mention_content_from_text(
-            response_text,
+            text,
             sender_domain=sender_domain,
             thread_event_id=thread_id,
         )
 
-        response = await self.client.room_send(
+        await self.client.room_send(
             room_id=room_id,
             message_type="m.room.message",
             content=content,
         )
 
-        if not isinstance(response, nio.RoomSendResponse):
-            return
-
-        # Now create interactive follow-up based on detected patterns
-        if "shall i continue" in response_lower or "should i continue" in response_lower:
-            await self.ask_interactive(
-                room_id=room_id,
-                thread_id=thread_id,
-                question="Would you like me to continue?",
-                options=[
-                    ("✅", "Yes, continue", "continue"),
-                    ("❌", "No, stop here", "stop"),
-                    ("🤔", "Explain more", "explain"),
-                ],
-                handler=self._create_continue_handler(),
-            )
-        elif "would you prefer" in response_lower or "which approach" in response_lower:
-            # For more complex choices, look for numbered options or bullets
-            if "option 1" in response_lower or "1)" in response_lower or "1." in response_lower:
-                await self._create_numbered_options_question(room_id, thread_id, response_text)
-        elif "should i include" in response_lower:
-            await self._create_yes_no_question(room_id, thread_id, response_text)
-
-    async def _create_numbered_options_question(self, room_id: str, thread_id: str | None, response_text: str) -> None:
-        """Create an interactive question for numbered options."""
-        # Simple pattern matching for common formats
-        options = []
-
-        if "fast" in response_text.lower() and "readable" in response_text.lower():
-            options = [
-                ("🚀", "Fast/Performance", "fast"),
-                ("📚", "Readable/Simple", "readable"),
-                ("⚖️", "Balanced", "balanced"),
-            ]
-        else:
-            # Generic numbered options
-            options = [
-                ("1️⃣", "Option 1", "option1"),
-                ("2️⃣", "Option 2", "option2"),
-                ("3️⃣", "Option 3", "option3"),
-            ]
-
-        await self.ask_interactive(
-            room_id=room_id,
-            thread_id=thread_id,
-            question="Which option would you prefer?",
-            options=options,
-            handler=self._create_option_handler(),
-        )
-
-    async def _create_yes_no_question(self, room_id: str, thread_id: str | None, response_text: str) -> None:
-        """Create a yes/no interactive question."""
-        # Extract what we're asking about
-        question = "Should I proceed with this?"
-        if "error handling" in response_text.lower():
-            question = "Should I include error handling?"
-        elif "tests" in response_text.lower():
-            question = "Should I include tests?"
-
-        await self.ask_interactive(
-            room_id=room_id,
-            thread_id=thread_id,
-            question=question,
-            options=[
-                ("✅", "Yes", "yes"),
-                ("❌", "No", "no"),
-                ("🤔", "Tell me more", "explain"),
-            ],
-            handler=self._create_yes_no_handler(),
-        )
-
-    def _create_continue_handler(
-        self,
+    def _create_generic_handler(
+        self, question_type: str
     ) -> Callable[[str, str, str, str | None], Coroutine[Any, Any, None]]:
-        """Create a handler for continue/stop choices."""
+        """Create a generic handler that responds based on the value selected."""
 
-        async def handler(room_id: str, user_id: str, choice: str, thread_id: str | None) -> None:
-            if choice == "continue":
-                response = "Continuing with the implementation..."
-            elif choice == "stop":
-                response = "Understood, I'll stop here."
-            else:  # explain
-                response = "Let me explain what I would do next..."
+        async def handler(room_id: str, user_id: str, value: str, thread_id: str | None) -> None:
+            # Generic response based on the value
+            response = f"You selected: {value}"
 
-            sender_domain = extract_domain_from_user_id(self.client.user_id)
-            content = create_mention_content_from_text(
-                response,
-                sender_domain=sender_domain,
-                thread_event_id=thread_id,
-            )
+            # Could customize based on question type
+            if question_type == "confirmation":
+                if value == "yes":
+                    response = "Great! Proceeding with your request."
+                elif value == "no":
+                    response = "Understood, I won't proceed."
+                else:
+                    response = "Let me provide more information..."
 
-            await self.client.room_send(
-                room_id=room_id,
-                message_type="m.room.message",
-                content=content,
-            )
-
-        return handler
-
-    def _create_option_handler(
-        self,
-    ) -> Callable[[str, str, str, str | None], Coroutine[Any, Any, None]]:
-        """Create a handler for option selection."""
-
-        async def handler(room_id: str, user_id: str, choice: str, thread_id: str | None) -> None:
-            responses = {
-                "fast": "Great! I'll implement the performance-optimized solution.",
-                "readable": "Perfect! I'll focus on clarity and simplicity.",
-                "balanced": "Good choice! I'll balance performance with readability.",
-                "option1": "Proceeding with option 1...",
-                "option2": "Proceeding with option 2...",
-                "option3": "Proceeding with option 3...",
-            }
-
-            response = responses.get(choice, f"Proceeding with your selection: {choice}")
-
-            sender_domain = extract_domain_from_user_id(self.client.user_id)
-            content = create_mention_content_from_text(
-                response,
-                sender_domain=sender_domain,
-                thread_event_id=thread_id,
-            )
-
-            await self.client.room_send(
-                room_id=room_id,
-                message_type="m.room.message",
-                content=content,
-            )
-
-        return handler
-
-    def _create_yes_no_handler(
-        self,
-    ) -> Callable[[str, str, str, str | None], Coroutine[Any, Any, None]]:
-        """Create a handler for yes/no choices."""
-
-        async def handler(room_id: str, user_id: str, choice: str, thread_id: str | None) -> None:
-            if choice == "yes":
-                response = "Great! I'll include that in the implementation."
-            elif choice == "no":
-                response = "Understood, I'll skip that part."
-            else:  # explain
-                response = "Let me explain the trade-offs..."
-
-            sender_domain = extract_domain_from_user_id(self.client.user_id)
-            content = create_mention_content_from_text(
-                response,
-                sender_domain=sender_domain,
-                thread_event_id=thread_id,
-            )
-
-            await self.client.room_send(
-                room_id=room_id,
-                message_type="m.room.message",
-                content=content,
-            )
+            await self._send_response_text(room_id, thread_id, response)
 
         return handler
