@@ -275,8 +275,12 @@ class TestStreamingBehavior:
 
         # Force finalize
         await streaming.finalize(mock_client)
-        # Should send final edit (might be same as previous if no new content)
+        # Should send final edit
         assert mock_client.room_send.call_count >= 2
+
+        # Check the final content has completion marker
+        assert streaming.accumulated_text.endswith(" ✓")
+        assert streaming.accumulated_text == "Hello world! ✓"
 
         # Check the edit content
         last_call = mock_client.room_send.call_args_list[-1]
