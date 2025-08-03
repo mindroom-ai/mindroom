@@ -189,8 +189,20 @@ class AgentBot:
         if not decision.should_respond:
             return
 
-        if self.response_tracker.has_responded(event.event_id):
-            return
+        # Check if this is an edit event
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        is_edit = relates_to.get("rel_type") == "m.replace"
+
+        if is_edit:
+            # For edits, check if we already responded to the original message
+            original_event_id = relates_to.get("event_id")
+            if original_event_id and self.response_tracker.has_responded(original_event_id):
+                self.logger.debug("Ignoring edit of already-responded message", original_event_id=original_event_id)
+                return
+        else:
+            # For original messages, check if we already responded to this event
+            if self.response_tracker.has_responded(event.event_id):
+                return
 
         # Process and send response
         if self.enable_streaming:
