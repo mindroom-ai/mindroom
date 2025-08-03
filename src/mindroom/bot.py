@@ -86,6 +86,11 @@ class AgentBot:
         """Get a logger with agent context bound."""
         return logger.bind(agent=f"{emoji(self.agent_name)} {self.agent_name}")
 
+    @cached_property
+    def matrix_id(self) -> MatrixID:
+        """Get the Matrix ID for this agent bot."""
+        return MatrixID.parse(self.agent_user.user_id)
+
     async def start(self) -> None:
         """Start the agent bot."""
         self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
@@ -232,7 +237,7 @@ class AgentBot:
     async def _send_response(
         self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None
     ) -> None:
-        sender_id = MatrixID.parse(self.agent_user.user_id)
+        sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
         # Always ensure we have a thread_id - use the original message as thread root if needed
@@ -278,7 +283,7 @@ class AgentBot:
             return
 
         response_text = "could you help with this?"
-        sender_id = MatrixID.parse(self.agent_user.user_id)
+        sender_id = self.matrix_id
         sender_domain = sender_id.domain
         full_message = f"@{suggested_agent} {response_text}"
 
@@ -314,7 +319,7 @@ class AgentBot:
         if command.type == CommandType.INVITE:
             # Handle invite command
             agent_name = command.args["agent_name"]
-            agent_domain = MatrixID.parse(self.agent_user.user_id).domain
+            agent_domain = self.matrix_id.domain
 
             response_text = await handle_invite_command(
                 room_id=room.room_id,

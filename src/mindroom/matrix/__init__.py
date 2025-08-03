@@ -36,11 +36,9 @@ from .rooms import (
 from .state import MatrixAccount, MatrixRoom, MatrixState
 from .users import (
     AgentMatrixUser,
-    construct_agent_user_id,
     create_agent_user,
     ensure_all_agent_users,
     extract_domain_from_user_id,
-    extract_username_from_user_id,
     get_agent_credentials,
     login_agent_user,
     save_agent_credentials,
@@ -87,11 +85,9 @@ __all__ = [
     "create_mention_content_from_text",
     # User functions
     "AgentMatrixUser",
-    "construct_agent_user_id",
     "create_agent_user",
     "ensure_all_agent_users",
     "extract_domain_from_user_id",
-    "extract_username_from_user_id",
     "get_agent_credentials",
     "login_agent_user",
     "save_agent_credentials",
