@@ -17,6 +17,7 @@ from .commands import (
     handle_invite_command,
     handle_list_invites_command,
 )
+from .interactive import InteractiveManager
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
@@ -74,6 +75,7 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
     thread_invite_manager: ThreadInviteManager = field(init=False)
+    interactive_manager: InteractiveManager = field(init=False)
     invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
 
     @property
@@ -96,8 +98,12 @@ class AgentBot:
         # Initialize thread invite manager
         self.thread_invite_manager = ThreadInviteManager(self.client)
 
+        # Initialize interactive manager
+        self.interactive_manager = InteractiveManager(self.client, self.agent_name)
+
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
         self.client.add_event_callback(self._on_message, nio.RoomMessageText)
+        self.client.add_event_callback(self._on_reaction, nio.ReactionEvent)
 
         self.running = True
         self.logger.info("Started bot", user_id=self.agent_user.user_id)
@@ -136,6 +142,9 @@ class AgentBot:
 
         if not await has_room_access(room.room_id, self.agent_name, self.rooms):
             return
+
+        # Check if this might be a text response to an interactive question
+        await self.interactive_manager.on_text_response(room, event)
 
         # Handle commands (only first agent alphabetically to avoid duplicates)
         available_agents = get_available_agents_in_room(room)
@@ -176,6 +185,10 @@ class AgentBot:
 
         # Process and send response
         await self._process_and_respond(room, event, context.thread_id, context.thread_history)
+
+    async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
+        """Handle reaction events for interactive questions."""
+        await self.interactive_manager.on_reaction(room, event)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -221,7 +234,11 @@ class AgentBot:
             room_id=room.room_id,
         )
 
-        await self._send_response(room.room_id, event.event_id, response_text, thread_id)
+        # Check if the response suggests multiple options or needs user input
+        if await self._should_create_interactive_question(response_text):
+            await self._handle_interactive_response(room.room_id, thread_id, response_text, event.sender)
+        else:
+            await self._send_response(room.room_id, event.event_id, response_text, thread_id)
 
     async def _send_response(
         self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None = None
@@ -327,6 +344,202 @@ class AgentBot:
 
         if response_text:
             await self._send_response(room.room_id, event.event_id, response_text, thread_id)
+
+    async def _should_create_interactive_question(self, response_text: str) -> bool:
+        """Determine if the response warrants an interactive question.
+
+        Args:
+            response_text: The AI's response text
+
+        Returns:
+            True if an interactive question should be created
+        """
+        # Patterns that suggest interactive questions could be helpful
+        interactive_patterns = [
+            "would you prefer",
+            "would you like me to",
+            "should i",
+            "which approach",
+            "choose one",
+            "select from",
+            "option 1",
+            "option a)",
+            "alternatively",
+            "do you want",
+            "shall i continue",
+        ]
+
+        response_lower = response_text.lower()
+        return any(pattern in response_lower for pattern in interactive_patterns)
+
+    async def _handle_interactive_response(
+        self, room_id: str, thread_id: str | None, response_text: str, sender: str
+    ) -> None:
+        """Create an interactive question based on the AI response.
+
+        Args:
+            room_id: The room ID
+            thread_id: Thread ID if in a thread
+            response_text: The AI's response containing options
+            sender: The original message sender
+        """
+        # Parse common patterns and create appropriate interactive questions
+        response_lower = response_text.lower()
+
+        # Send the original response first
+        sender_domain = extract_domain_from_user_id(self.client.user_id)
+        content = create_mention_content_from_text(
+            response_text,
+            sender_domain=sender_domain,
+            thread_event_id=thread_id,
+        )
+
+        response = await self.client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
+
+        if not isinstance(response, nio.RoomSendResponse):
+            return
+
+        # Now create interactive follow-up based on detected patterns
+        if "shall i continue" in response_lower or "should i continue" in response_lower:
+            await self.interactive_manager.ask_interactive(
+                room_id=room_id,
+                thread_id=thread_id,
+                question="Would you like me to continue?",
+                options=[
+                    ("✅", "Yes, continue", "continue"),
+                    ("❌", "No, stop here", "stop"),
+                    ("🤔", "Explain more", "explain"),
+                ],
+                handler=self._handle_continue_choice,
+            )
+        elif "would you prefer" in response_lower or "which approach" in response_lower:
+            # For more complex choices, look for numbered options or bullets
+            if "option 1" in response_lower or "1)" in response_lower or "1." in response_lower:
+                await self._create_numbered_options_question(room_id, thread_id, response_text)
+        elif "should i include" in response_lower:
+            await self._create_yes_no_question(room_id, thread_id, response_text)
+
+    async def _create_numbered_options_question(self, room_id: str, thread_id: str | None, response_text: str) -> None:
+        """Create an interactive question for numbered options."""
+        # Simple pattern matching for common formats
+        options = []
+
+        if "fast" in response_text.lower() and "readable" in response_text.lower():
+            options = [
+                ("🚀", "Fast/Performance", "fast"),
+                ("📚", "Readable/Simple", "readable"),
+                ("⚖️", "Balanced", "balanced"),
+            ]
+        else:
+            # Generic numbered options
+            options = [
+                ("1️⃣", "Option 1", "option1"),
+                ("2️⃣", "Option 2", "option2"),
+                ("3️⃣", "Option 3", "option3"),
+            ]
+
+        await self.interactive_manager.ask_interactive(
+            room_id=room_id,
+            thread_id=thread_id,
+            question="Which option would you prefer?",
+            options=options,
+            handler=self._handle_option_choice,
+        )
+
+    async def _create_yes_no_question(self, room_id: str, thread_id: str | None, response_text: str) -> None:
+        """Create a yes/no interactive question."""
+        # Extract what we're asking about
+        question = "Should I proceed with this?"
+        if "error handling" in response_text.lower():
+            question = "Should I include error handling?"
+        elif "tests" in response_text.lower():
+            question = "Should I include tests?"
+
+        await self.interactive_manager.ask_interactive(
+            room_id=room_id,
+            thread_id=thread_id,
+            question=question,
+            options=[
+                ("✅", "Yes", "yes"),
+                ("❌", "No", "no"),
+                ("🤔", "Tell me more", "explain"),
+            ],
+            handler=self._handle_yes_no_choice,
+        )
+
+    async def _handle_continue_choice(self, room_id: str, user_id: str, choice: str, thread_id: str | None) -> None:
+        """Handle continue/stop choices."""
+        if choice == "continue":
+            response = "Continuing with the implementation..."
+        elif choice == "stop":
+            response = "Understood, I'll stop here."
+        else:  # explain
+            response = "Let me explain what I would do next..."
+
+        sender_domain = extract_domain_from_user_id(self.client.user_id)
+        content = create_mention_content_from_text(
+            response,
+            sender_domain=sender_domain,
+            thread_event_id=thread_id,
+        )
+
+        await self.client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
+
+    async def _handle_option_choice(self, room_id: str, user_id: str, choice: str, thread_id: str | None) -> None:
+        """Handle option selection."""
+        responses = {
+            "fast": "Great! I'll implement the performance-optimized solution.",
+            "readable": "Perfect! I'll focus on clarity and simplicity.",
+            "balanced": "Good choice! I'll balance performance with readability.",
+            "option1": "Proceeding with option 1...",
+            "option2": "Proceeding with option 2...",
+            "option3": "Proceeding with option 3...",
+        }
+
+        response = responses.get(choice, f"Proceeding with your selection: {choice}")
+
+        sender_domain = extract_domain_from_user_id(self.client.user_id)
+        content = create_mention_content_from_text(
+            response,
+            sender_domain=sender_domain,
+            thread_event_id=thread_id,
+        )
+
+        await self.client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
+
+    async def _handle_yes_no_choice(self, room_id: str, user_id: str, choice: str, thread_id: str | None) -> None:
+        """Handle yes/no choices."""
+        if choice == "yes":
+            response = "Great! I'll include that in the implementation."
+        elif choice == "no":
+            response = "Understood, I'll skip that part."
+        else:  # explain
+            response = "Let me explain the trade-offs..."
+
+        sender_domain = extract_domain_from_user_id(self.client.user_id)
+        content = create_mention_content_from_text(
+            response,
+            sender_domain=sender_domain,
+            thread_event_id=thread_id,
+        )
+
+        await self.client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
 
     async def _periodic_cleanup(self) -> None:
         """Periodically clean up expired thread invitations."""
