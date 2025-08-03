@@ -61,9 +61,9 @@ class MessageContext:
 
 
 def _should_process_message(event_sender: str, agent_user_id: str) -> bool:
-    if event_sender == agent_user_id:
-        return False
-    return extract_agent_name(event_sender) is None
+    # Process all messages except our own
+    # The mention logic will determine if we should respond
+    return event_sender != agent_user_id
 
 
 @dataclass
@@ -161,6 +161,12 @@ class AgentBot:
 
         # Extract message context
         context = await self._extract_message_context(room, event)
+
+        # If message is from another agent and we're not mentioned, ignore it
+        sender_is_agent = extract_agent_name(event.sender) is not None
+        if sender_is_agent and not context.am_i_mentioned:
+            self.logger.debug("Ignoring message from other agent (not mentioned)")
+            return
 
         # Determine if this agent should respond to the message
         decision = should_agent_respond(
