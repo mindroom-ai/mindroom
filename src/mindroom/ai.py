@@ -95,11 +95,8 @@ async def _cached_agent_run(
 
     # Use agent's model for cache key
     model = agent.model
-    if model is None:
-        # If no model is set on agent, just use agent name for cache key
-        cache_key = f"{agent_name}:unknown:{full_prompt}:{session_id}"
-    else:
-        cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+    assert model is not None, "Agent should always have a model in our implementation"
+    cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         logger.info("Cache hit", agent=agent_name)
@@ -206,11 +203,8 @@ async def ai_response_streaming(
         cache = get_cache(storage_path)
         if cache is not None:
             model = agent.model
-            if model is None:
-                # If no model is set on agent, just use agent name for cache key
-                cache_key = f"{agent_name}:unknown:{full_prompt}:{session_id}"
-            else:
-                cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+            assert model is not None, "Agent should always have a model in our implementation"
+            cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
             cached_result = cache.get(cache_key)
             if cached_result is not None:
                 logger.info("Cache hit", agent=agent_name)
