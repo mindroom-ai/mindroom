@@ -4,10 +4,10 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
-import markdown
+import markdown  # type: ignore[import-untyped]
 import nio
 
-from ..logging_config import emoji, get_logger
+from ..logging_config import get_logger
 from .users import extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
@@ -314,55 +314,3 @@ def markdown_to_html(text: str) -> str:
     )
     html_text: str = md.convert(text)
     return html_text
-
-
-def prepare_response_content(
-    response_text: str,
-    event: nio.RoomMessageText,
-    agent_name: str = "",
-) -> dict[str, Any]:
-    """Prepares the content for the response message.
-
-    Args:
-        response_text: The text to send
-        event: The event being responded to
-        agent_name: Optional agent name for logging
-
-    Returns:
-        Message content dictionary
-    """
-    content: dict[str, Any] = {
-        "msgtype": "m.text",
-        "body": response_text,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(response_text),
-    }
-
-    is_thread_reply, thread_id = extract_thread_info(event.source)
-    relates_to = event.source.get("content", {}).get("m.relates_to")
-
-    agent_prefix = emoji(agent_name) if agent_name else ""
-
-    logger.debug(
-        f"{agent_prefix} Preparing response content - Original event_id: {event.event_id}, "
-        f"Original relates_to: {relates_to}, Is thread reply: {is_thread_reply}"
-    )
-
-    if relates_to:
-        if is_thread_reply:
-            content["m.relates_to"] = {
-                "rel_type": "m.thread",
-                "event_id": relates_to.get("event_id"),
-                "m.in_reply_to": {"event_id": event.event_id},
-            }
-            logger.debug(f"{agent_prefix} Setting thread reply with thread_id: {relates_to.get('event_id')}")
-        else:
-            content["m.relates_to"] = {"m.in_reply_to": {"event_id": event.event_id}}
-            logger.debug(f"{agent_prefix} Setting regular reply (not thread)")
-    else:
-        content["m.relates_to"] = {"m.in_reply_to": {"event_id": event.event_id}}
-        logger.debug(f"{agent_prefix} No relates_to in original message, setting regular reply")
-
-    logger.debug(f"{agent_prefix} Final content m.relates_to: {content.get('m.relates_to')}")
-
-    return content

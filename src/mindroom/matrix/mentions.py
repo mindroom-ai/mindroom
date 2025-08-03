@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from ..agent_config import load_config
+from .client import markdown_to_html
 from .identity import MatrixID
 
 
@@ -27,6 +28,8 @@ def create_mention_content(
     content: dict[str, Any] = {
         "msgtype": "m.text",
         "body": body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": markdown_to_html(body),
     }
 
     # Add mentions if any
