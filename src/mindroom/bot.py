@@ -230,15 +230,18 @@ class AgentBot:
         await self._send_response(room.room_id, event.event_id, response_text, thread_id)
 
     async def _send_response(
-        self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None = None
+        self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None
     ) -> None:
         sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
+
+        # Always ensure we have a thread_id - use the original message as thread root if needed
+        effective_thread_id = thread_id if thread_id else reply_to_event_id
 
         content = create_mention_content_from_text(
             response_text,
             sender_domain=sender_domain,
-            thread_event_id=thread_id,
-            reply_to_event_id=reply_to_event_id if thread_id else None,
+            thread_event_id=effective_thread_id,
+            reply_to_event_id=reply_to_event_id,
         )
 
         response = await self.client.room_send(
@@ -277,6 +280,10 @@ class AgentBot:
         sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
         full_message = f"@{suggested_agent} {response_text}"
 
+        # If no thread exists, create one with the original message as root
+        if not thread_event_id:
+            thread_event_id = event.event_id
+
         content = create_mention_content_from_text(
             full_message,
             sender_domain=sender_domain,
@@ -296,7 +303,8 @@ class AgentBot:
         is_thread, thread_id = extract_thread_info(event.source)
         if not is_thread or not thread_id:
             response_text = "❌ Commands only work within threads. Please start a thread first."
-            await self._send_response(room.room_id, event.event_id, response_text)
+            # Create a thread even for this error message
+            await self._send_response(room.room_id, event.event_id, response_text, thread_id=None)
             return
 
         response_text = ""

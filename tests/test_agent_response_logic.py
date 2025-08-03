@@ -133,8 +133,8 @@ class TestAgentResponseLogic:
         assert decision.should_respond is False
         assert decision.use_router is False
 
-    def test_not_in_thread_no_response(self):
-        """If not in a thread, don't respond."""
+    def test_not_in_thread_uses_router(self):
+        """If not in a thread, use router to determine response."""
         decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
@@ -145,7 +145,7 @@ class TestAgentResponseLogic:
             thread_history=[],
         )
         assert decision.should_respond is False
-        assert decision.use_router is False
+        assert decision.use_router is True
 
     def test_agent_not_in_room_no_response(self):
         """If agent is not in room (native or invited), don't respond."""
@@ -161,8 +161,8 @@ class TestAgentResponseLogic:
         assert decision.should_respond is False
         assert decision.use_router is False
 
-    def test_mentioned_outside_thread(self):
-        """Agents NEVER respond outside threads, even if mentioned."""
+    def test_mentioned_outside_thread_responds(self):
+        """Agents respond when mentioned in room (will create thread)."""
         decision = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=True,
@@ -172,7 +172,7 @@ class TestAgentResponseLogic:
             configured_rooms=["!room:localhost"],
             thread_history=[],
         )
-        assert decision.should_respond is False
+        assert decision.should_respond is True
         assert decision.use_router is False
 
     def test_agent_mentioned_in_thread_history(self):
@@ -232,6 +232,20 @@ class TestAgentResponseLogic:
         )
         assert decision.should_respond is False
         assert decision.use_router is True
+
+    def test_room_message_no_access_no_response(self):
+        """Agent without room access doesn't respond to room messages."""
+        decision = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=False,
+            is_invited_to_thread=False,
+            room_id="!room:localhost",
+            configured_rooms=[],  # No access to this room
+            thread_history=[],
+        )
+        assert decision.should_respond is False
+        assert decision.use_router is False
 
     def test_edge_case_empty_configured_rooms(self):
         """Test agent with no configured rooms but invited to thread."""

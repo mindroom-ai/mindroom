@@ -107,10 +107,19 @@ def should_agent_respond(
     should_respond = False
     use_router = False
 
-    # Agents ONLY respond in threads, never in main rooms
+    # For room messages (not in threads), use router to determine who responds
     if not is_thread:
-        return ResponseDecision(False, False)
+        # Only agents with room access can use the router
+        if room_id in configured_rooms:
+            if am_i_mentioned:
+                # Respond directly if mentioned
+                should_respond = True
+            else:
+                # Use router to pick an agent
+                use_router = True
+        return ResponseDecision(should_respond, use_router)
 
+    # Thread logic
     if am_i_mentioned:
         # Respond if explicitly mentioned in a thread
         should_respond = True
