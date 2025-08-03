@@ -285,3 +285,50 @@ class TestAgentResponseLogic:
         )
         assert decision.should_respond is False
         assert decision.use_router is False
+
+    def test_router_disabled_when_any_agent_mentioned(self):
+        """Test that router is disabled when any agent is mentioned, not just the current one."""
+        # Room message scenario - agent1 is NOT mentioned but agent2 IS mentioned
+        decision = should_agent_respond(
+            agent_name="agent1",
+            am_i_mentioned=False,
+            is_thread=False,
+            is_invited_to_thread=False,
+            room_id="!test:example.org",
+            configured_rooms=["!test:example.org"],
+            thread_history=[],
+            mentioned_agents=["agent2"],  # Another agent is mentioned
+        )
+        # Agent1 should not respond and should NOT use router
+        assert not decision.should_respond
+        assert not decision.use_router
+
+        # Now test when no agents are mentioned - router should be used
+        decision = should_agent_respond(
+            agent_name="agent1",
+            am_i_mentioned=False,
+            is_thread=False,
+            is_invited_to_thread=False,
+            room_id="!test:example.org",
+            configured_rooms=["!test:example.org"],
+            thread_history=[],
+            mentioned_agents=[],  # No agents mentioned
+        )
+        # Agent1 should not respond but SHOULD use router
+        assert not decision.should_respond
+        assert decision.use_router
+
+        # Test when current agent is mentioned
+        decision = should_agent_respond(
+            agent_name="agent1",
+            am_i_mentioned=True,
+            is_thread=False,
+            is_invited_to_thread=False,
+            room_id="!test:example.org",
+            configured_rooms=["!test:example.org"],
+            thread_history=[],
+            mentioned_agents=["agent1"],  # Current agent is mentioned
+        )
+        # Agent1 SHOULD respond and should NOT use router
+        assert decision.should_respond
+        assert not decision.use_router

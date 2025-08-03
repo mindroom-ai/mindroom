@@ -60,6 +60,7 @@ class MessageContext:
     thread_id: str | None
     thread_history: list[dict]
     is_invited_to_thread: bool
+    mentioned_agents: list[str]
 
 
 @dataclass
@@ -182,6 +183,7 @@ class AgentBot:
             room.room_id,
             self.rooms,
             context.thread_history,
+            context.mentioned_agents,
         )
 
         if decision.should_respond and not context.am_i_mentioned:
@@ -228,6 +230,7 @@ class AgentBot:
             thread_id=thread_id,
             thread_history=thread_history,
             is_invited_to_thread=is_invited_to_thread,
+            mentioned_agents=mentioned_agents,
         )
 
     async def _process_and_respond(
