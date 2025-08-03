@@ -10,7 +10,7 @@ import nio
 import typer
 from rich.console import Console
 
-from mindroom.matrix import MATRIX_HOMESERVER, MatrixState, matrix_client
+from mindroom.matrix import MATRIX_HOMESERVER, MatrixID, MatrixState, matrix_client
 
 app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
 console = Console()
@@ -97,7 +97,7 @@ async def _ensure_agents_in_rooms(client: nio.AsyncClient, required_rooms: set[s
             if room_key not in agent_config.rooms:
                 continue
 
-            agent_id = f"@mindroom_{agent_name}:localhost"
+            agent_id = MatrixID.from_agent(agent_name, "localhost").full_id
 
             # Skip if already in room
             if agent_id in room_members:
@@ -145,7 +145,7 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
         invited_count = 0
         for agent_name, agent_config in config.agents.items():
             if room_key in agent_config.rooms:
-                agent_id = f"@mindroom_{agent_name}:localhost"
+                agent_id = MatrixID.from_agent(agent_name, "localhost").full_id
                 invite_response = await user_client.room_invite(room_id, agent_id)
                 if isinstance(invite_response, nio.RoomInviteResponse):
                     invited_count += 1
@@ -387,7 +387,7 @@ async def _invite_agents(room_id: str) -> None:
                 invited_count = 0
                 for agent_name, agent_cfg in agent_config.agents.items():
                     if room_key in agent_cfg.rooms:
-                        agent_id = f"@mindroom_{agent_name}:localhost"
+                        agent_id = MatrixID.from_agent(agent_name, "localhost").full_id
                         response = await client.room_invite(room_id, agent_id)
                         if isinstance(response, nio.RoomInviteResponse):
                             console.print(f"✅ Invited {agent_id}")

@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from .agent_config import describe_agent
 from .ai import get_model_instance
 from .logging_config import get_logger
+from .matrix import MatrixID
 
 logger = get_logger(__name__)
 
@@ -57,7 +58,12 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         if thread_context:
             context = "Previous messages:\n"
             for msg in thread_context[-3:]:  # Last 3 messages
-                sender = msg.get("sender", "").split(":")[-1]
+                sender = msg.get("sender", "")
+                # For display, just show the username or domain
+                if sender.startswith("@") and ":" in sender:
+                    sender_id = MatrixID.parse(sender)
+                    # Show agent name or just domain for users
+                    sender = sender_id.agent_name or sender_id.domain
                 body = msg.get("body", "")[:100]
                 context += f"{sender}: {body}\n"
             prompt = context + "\n" + prompt

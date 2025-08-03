@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import nio
 
 from .logging_config import get_logger
+from .matrix import MatrixID, ThreadStateKey
 
 logger = get_logger(__name__)
 
@@ -18,7 +19,7 @@ class ThreadInviteManager:
         self.client = client
 
     def _get_state_key(self, thread_id: str, agent_name: str) -> str:
-        return f"{thread_id}:{agent_name}"
+        return ThreadStateKey(thread_id, agent_name).key
 
     async def add_invite(
         self,
@@ -45,11 +46,14 @@ class ThreadInviteManager:
         if not isinstance(response, nio.RoomGetStateResponse):
             return []
 
-        return [
-            event.get("state_key", "").split(":", 1)[1]
-            for event in response.events
-            if event.get("type") == THREAD_INVITE_EVENT_TYPE and event.get("state_key", "").startswith(f"{thread_id}:")
-        ]
+        agents = []
+        for event in response.events:
+            if event["type"] == THREAD_INVITE_EVENT_TYPE:
+                state_key = event["state_key"]
+                if state_key.startswith(f"{thread_id}:"):
+                    key = ThreadStateKey.parse(state_key)
+                    agents.append(key.agent_name)
+        return agents
 
     async def is_agent_invited_to_thread(
         self,
@@ -69,11 +73,14 @@ class ThreadInviteManager:
         if not isinstance(response, nio.RoomGetStateResponse):
             return []
 
-        return [
-            event.get("state_key", "").rsplit(":", 1)[0]
-            for event in response.events
-            if event.get("type") == THREAD_INVITE_EVENT_TYPE and event.get("state_key", "").endswith(f":{agent_name}")
-        ]
+        threads = []
+        for event in response.events:
+            if event["type"] == THREAD_INVITE_EVENT_TYPE:
+                state_key = event["state_key"]
+                if state_key.endswith(f":{agent_name}"):
+                    key = ThreadStateKey.parse(state_key)
+                    threads.append(key.thread_id)
+        return threads
 
     async def remove_invite(
         self,
@@ -137,15 +144,14 @@ class ThreadInviteManager:
         thread_invitations: dict[str, list[str]] = {}  # agent_name -> list of state_keys
 
         for event in state_response.events:
-            if event.get("type") == THREAD_INVITE_EVENT_TYPE:
-                state_key = event.get("state_key", "")
-                if ":" in state_key:
-                    thread_id, agent_name = state_key.split(":", 1)
-                    if agent_name not in invited_agents:
-                        invited_agents.append(agent_name)
-                    if agent_name not in thread_invitations:
-                        thread_invitations[agent_name] = []
-                    thread_invitations[agent_name].append(state_key)
+            if event["type"] == THREAD_INVITE_EVENT_TYPE:
+                state_key = event["state_key"]
+                key = ThreadStateKey.parse(state_key)
+                if key.agent_name not in invited_agents:
+                    invited_agents.append(key.agent_name)
+                if key.agent_name not in thread_invitations:
+                    thread_invitations[key.agent_name] = []
+                thread_invitations[key.agent_name].append(state_key)
 
         if not invited_agents:
             return 0
@@ -174,7 +180,9 @@ class ThreadInviteManager:
         for agent_name in agents_to_remove:
             # Try to kick the agent from the room
             kick_response = await self.client.room_kick(
-                room_id, f"@{agent_name}:mindroom.space", f"Inactive for {timeout_hours} hours"
+                room_id,
+                MatrixID.from_agent(agent_name, MatrixID.DEFAULT_DOMAIN).full_id,
+                f"Inactive for {timeout_hours} hours",
             )
             if isinstance(kick_response, nio.RoomKickResponse):
                 # Successfully kicked, now remove all their thread invitations

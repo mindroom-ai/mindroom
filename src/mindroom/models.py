@@ -81,7 +81,3 @@ class Config(BaseModel):
             available = ", ".join(sorted(self.agents.keys()))
             raise ValueError(f"Unknown agent: {agent_name}. Available agents: {available}")
         return self.agents[agent_name]
-
-    def list_agents(self) -> list[str]:
-        """Get sorted list of agent names."""
-        return sorted(self.agents.keys())
