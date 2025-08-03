@@ -38,7 +38,6 @@ from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
     get_available_agents_in_room,
-    has_room_access,
     should_agent_respond,
     should_route_to_agent,
 )
@@ -139,7 +138,7 @@ class AgentBot:
         if not _should_process_message(event.sender, self.agent_user.user_id):
             return
 
-        if not await has_room_access(room.room_id, self.agent_name, self.rooms):
+        if room.room_id not in self.rooms:
             return
 
         # Track agent activity if sender is an agent

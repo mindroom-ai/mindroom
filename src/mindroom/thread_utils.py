@@ -1,9 +1,8 @@
 """Utilities for thread analysis and agent detection."""
 
-from functools import lru_cache
 from typing import Any, NamedTuple
 
-from .matrix import extract_agent_name, get_known_agents
+from .matrix import extract_agent_name
 
 
 class ResponseDecision(NamedTuple):
@@ -11,12 +10,6 @@ class ResponseDecision(NamedTuple):
 
     should_respond: bool
     use_router: bool
-
-
-@lru_cache(maxsize=128)
-def get_known_agent_names() -> set[str]:
-    """Get set of all configured agent names."""
-    return get_known_agents()
 
 
 def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str], bool]:
@@ -33,11 +26,6 @@ def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str
 def create_session_id(room_id: str, thread_id: str | None) -> str:
     """Create a session ID with thread awareness."""
     return f"{room_id}:{thread_id}" if thread_id else room_id
-
-
-async def has_room_access(room_id: str, agent_name: str, configured_rooms: list[str]) -> bool:
-    """Check if an agent has access to a room."""
-    return room_id in configured_rooms
 
 
 def get_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
