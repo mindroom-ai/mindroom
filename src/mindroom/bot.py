@@ -189,20 +189,9 @@ class AgentBot:
         if not decision.should_respond:
             return
 
-        # Check if this is an edit event
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        is_edit = relates_to.get("rel_type") == "m.replace"
-
-        if is_edit:
-            # For edits, check if we already responded to the original message
-            original_event_id = relates_to.get("event_id")
-            if original_event_id and self.response_tracker.has_responded(original_event_id):
-                self.logger.debug("Ignoring edit of already-responded message", original_event_id=original_event_id)
-                return
-        else:
-            # For original messages, check if we already responded to this event
-            if self.response_tracker.has_responded(event.event_id):
-                return
+        # Skip if we've already handled this message or its original version
+        if self._should_skip_duplicate_response(event):
+            return
 
         # Process and send response
         if self.enable_streaming:
@@ -452,6 +441,36 @@ class AgentBot:
                 break
             except Exception as e:
                 self.logger.error("Error in periodic cleanup", error=str(e))
+
+    def _should_skip_duplicate_response(self, event: nio.RoomMessageText) -> bool:
+        """Check if we should skip responding to avoid duplicates.
+
+        This handles two cases:
+        1. We've already responded to this exact event
+        2. This is an edit of a message we've already responded to
+
+        Args:
+            event: The Matrix message event
+
+        Returns:
+            True if we should skip processing this message
+        """
+        # Check if this is an edit event
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        is_edit = relates_to.get("rel_type") == "m.replace"
+
+        if is_edit:
+            # For edits, check if we already responded to the original message
+            original_event_id = relates_to.get("event_id")
+            if original_event_id and self.response_tracker.has_responded(original_event_id):
+                self.logger.debug("Ignoring edit of already-responded message", original_event_id=original_event_id)
+                return True
+        else:
+            # For original messages, check if we already responded to this event
+            if self.response_tracker.has_responded(event.event_id):
+                return True
+
+        return False
 
 
 @dataclass
