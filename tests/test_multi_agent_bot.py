@@ -1,6 +1,7 @@
 """Tests for the multi-agent bot system."""
 
 import asyncio
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -155,16 +156,20 @@ class TestAgentBot:
         bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("enable_streaming", [True, False])
+    @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
     async def test_agent_bot_on_message_mentioned(
         self,
         mock_fetch_history: AsyncMock,
         mock_ai_response_streaming: AsyncMock,
+        mock_ai_response: AsyncMock,
+        enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test agent bot responding to mentions with streaming."""
+        """Test agent bot responding to mentions with both streaming and non-streaming modes."""
 
         # Mock streaming response - return an async generator
         async def mock_streaming_response():
@@ -172,9 +177,10 @@ class TestAgentBot:
             yield " response"
 
         mock_ai_response_streaming.return_value = mock_streaming_response()
+        mock_ai_response.return_value = "Test response"
         mock_fetch_history.return_value = []
 
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"])
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming)
         bot.client = AsyncMock()
 
         # Mock successful room_send response
@@ -204,17 +210,31 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event)
 
-        # Should call AI streaming and send response
-        mock_ai_response_streaming.assert_called_once_with(
-            agent_name="calculator",
-            prompt="@mindroom_calculator:localhost: What's 2+2?",
-            session_id="!test:localhost:$thread_root_id",
-            storage_path=tmp_path,
-            thread_history=[],
-            room_id="!test:localhost",
-        )
-        # With streaming, we expect 2 calls: initial message + final edit
-        assert bot.client.room_send.call_count == 2
+        # Should call AI and send response based on streaming mode
+        if enable_streaming:
+            mock_ai_response_streaming.assert_called_once_with(
+                agent_name="calculator",
+                prompt="@mindroom_calculator:localhost: What's 2+2?",
+                session_id="!test:localhost:$thread_root_id",
+                storage_path=tmp_path,
+                thread_history=[],
+                room_id="!test:localhost",
+            )
+            mock_ai_response.assert_not_called()
+            # With streaming, we expect 2 calls: initial message + final edit
+            assert bot.client.room_send.call_count == 2
+        else:
+            mock_ai_response.assert_called_once_with(
+                agent_name="calculator",
+                prompt="@mindroom_calculator:localhost: What's 2+2?",
+                session_id="!test:localhost:$thread_root_id",
+                storage_path=tmp_path,
+                thread_history=[],
+                room_id="!test:localhost",
+            )
+            mock_ai_response_streaming.assert_not_called()
+            # Without streaming, we expect 1 call
+            assert bot.client.room_send.call_count == 1
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -234,17 +254,21 @@ class TestAgentBot:
         bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("enable_streaming", [True, False])
+    @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
     async def test_agent_bot_thread_response(
         self,
         mock_fetch_history: AsyncMock,
         mock_ai_response_streaming: AsyncMock,
+        mock_ai_response: AsyncMock,
+        enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Test agent bot thread response behavior based on agent participation."""
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"])
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming)
         bot.client = AsyncMock()
 
         # Mock successful room_send response
@@ -279,6 +303,7 @@ class TestAgentBot:
             yield " response"
 
         mock_ai_response_streaming.return_value = mock_streaming_response()
+        mock_ai_response.return_value = "Thread response"
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
@@ -296,12 +321,20 @@ class TestAgentBot:
         await bot._on_message(mock_room, mock_event)
 
         # Should respond as only agent in thread
-        mock_ai_response_streaming.assert_called_once()
-        # With streaming, we expect 2 calls: initial message + final edit
-        assert bot.client.room_send.call_count == 2
+        if enable_streaming:
+            mock_ai_response_streaming.assert_called_once()
+            mock_ai_response.assert_not_called()
+            # With streaming, we expect 2 calls: initial message + final edit
+            assert bot.client.room_send.call_count == 2
+        else:
+            mock_ai_response.assert_called_once()
+            mock_ai_response_streaming.assert_not_called()
+            # Without streaming, we expect 1 call
+            assert bot.client.room_send.call_count == 1
 
         # Reset mocks
         mock_ai_response_streaming.reset_mock()
+        mock_ai_response.reset_mock()
         bot.client.room_send.reset_mock()
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
@@ -320,6 +353,7 @@ class TestAgentBot:
 
         # Should NOT respond when multiple agents in thread
         mock_ai_response_streaming.assert_not_called()
+        mock_ai_response.assert_not_called()
         bot.client.room_send.assert_not_called()
 
         # Test 3: Thread with multiple agents WITH mention - should respond
@@ -344,13 +378,21 @@ class TestAgentBot:
             yield " response"
 
         mock_ai_response_streaming.return_value = mock_streaming_response2()
+        mock_ai_response.return_value = "Mentioned response"
 
         await bot._on_message(mock_room, mock_event_with_mention)
 
         # Should respond when explicitly mentioned
-        mock_ai_response_streaming.assert_called_once()
-        # With streaming, we expect 2 calls: initial message + final edit
-        assert bot.client.room_send.call_count == 2
+        if enable_streaming:
+            mock_ai_response_streaming.assert_called_once()
+            mock_ai_response.assert_not_called()
+            # With streaming, we expect 2 calls: initial message + final edit
+            assert bot.client.room_send.call_count == 2
+        else:
+            mock_ai_response.assert_called_once()
+            mock_ai_response_streaming.assert_not_called()
+            # Without streaming, we expect 1 call
+            assert bot.client.room_send.call_count == 1
 
     @pytest.mark.asyncio
     async def test_agent_bot_skips_already_responded_messages(
@@ -476,6 +518,25 @@ class TestMultiAgentOrchestrator:
         for bot in orchestrator.agent_bots.values():
             assert not bot.running
             bot.client.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.bot.ensure_all_agent_users")
+    @patch.dict(os.environ, {"MINDROOM_ENABLE_STREAMING": "false"})
+    async def test_orchestrator_streaming_env_var(
+        self,
+        mock_ensure_users: AsyncMock,
+        mock_agent_users: dict[str, AgentMatrixUser],
+        tmp_path: Path,
+    ) -> None:
+        """Test that orchestrator respects MINDROOM_ENABLE_STREAMING environment variable."""
+        mock_ensure_users.return_value = mock_agent_users
+
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        await orchestrator.initialize()
+
+        # All bots should have streaming disabled
+        for bot in orchestrator.agent_bots.values():
+            assert bot.enable_streaming is False
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ensure_all_agent_users")
