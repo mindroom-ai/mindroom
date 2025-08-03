@@ -138,11 +138,10 @@ class AgentBot:
             return
 
         # Track agent activity if sender is an agent
-        if event.sender.startswith("@") and ":" in event.sender:
-            sender_id = MatrixID.parse(event.sender)
-            if sender_id.is_mindroom_domain and sender_id.agent_name:
-                # Update activity for the agent in this room (regardless of thread)
-                await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
+        sender_id = MatrixID.parse(event.sender)
+        if sender_id.is_mindroom_domain and sender_id.agent_name:
+            # Update activity for the agent in this room (regardless of thread)
+            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
         # Handle commands (only first agent alphabetically to avoid duplicates)
         available_agents = get_available_agents_in_room(room)
