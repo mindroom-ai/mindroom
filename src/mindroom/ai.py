@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import diskcache
+from agno.agent import Agent
 from agno.models.anthropic import Claude
 from agno.models.base import Model
 from agno.models.ollama import Ollama
@@ -81,7 +82,7 @@ def _build_full_prompt(prompt: str, thread_history: list[dict[str, Any]] | None 
 
 
 async def _cached_agent_run(
-    agent: Any,
+    agent: Agent,
     full_prompt: str,
     session_id: str,
     agent_name: str,
@@ -94,7 +95,11 @@ async def _cached_agent_run(
 
     # Use agent's model for cache key
     model = agent.model
-    cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+    if model is None:
+        # If no model is set on agent, just use agent name for cache key
+        cache_key = f"{agent_name}:unknown:{full_prompt}:{session_id}"
+    else:
+        cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         logger.info("Cache hit", agent=agent_name)
@@ -114,7 +119,7 @@ async def _prepare_agent_and_prompt(
     storage_path: Path,
     room_id: str | None,
     thread_history: list[dict[str, Any]] | None = None,
-) -> tuple[Any, str, str]:
+) -> tuple[Agent, str, str]:
     """Prepare agent and full prompt for AI processing.
 
     Returns:
@@ -201,7 +206,11 @@ async def ai_response_streaming(
         cache = get_cache(storage_path)
         if cache is not None:
             model = agent.model
-            cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+            if model is None:
+                # If no model is set on agent, just use agent name for cache key
+                cache_key = f"{agent_name}:unknown:{full_prompt}:{session_id}"
+            else:
+                cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
             cached_result = cache.get(cache_key)
             if cached_result is not None:
                 logger.info("Cache hit", agent=agent_name)
@@ -211,15 +220,13 @@ async def ai_response_streaming(
                 return
 
         # No cache hit - use streaming
+        from agno.run.response import RunResponseContentEvent
+
         stream_generator = await agent.arun(full_prompt, session_id=session_id, stream=True)
         async for event in stream_generator:
-            # RunResponseEvent might have different content depending on type
-            if hasattr(event, "content") and event.content:
+            # We're only interested in content events for streaming
+            if isinstance(event, RunResponseContentEvent) and event.content:
                 chunk_text = str(event.content)
-                full_response += chunk_text
-                yield chunk_text
-            elif hasattr(event, "response") and hasattr(event.response, "content"):
-                chunk_text = str(event.response.content)
                 full_response += chunk_text
                 yield chunk_text
 
