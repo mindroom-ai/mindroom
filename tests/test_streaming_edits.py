@@ -243,7 +243,10 @@ class TestStreamingEdits:
         }
 
         # Process edit - calculator should STILL NOT respond (it's an edit from an agent)
-        await bot._on_message(mock_room, edit_event)
+        with patch("mindroom.bot.extract_agent_name") as mock_extract:
+            # Make extract_agent_name return 'helper' for the sender
+            mock_extract.return_value = "helper"
+            await bot._on_message(mock_room, edit_event)
         assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0
 

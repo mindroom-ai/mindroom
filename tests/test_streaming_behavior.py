@@ -106,31 +106,57 @@ class TestStreamingBehavior:
         # Verify helper bot sent initial message and edit
         assert helper_bot.client.room_send.call_count >= 1  # At least initial message
 
-        # Simulate the streaming edit that mentions calculator
-        # This would be seen by calculator bot as an edit event
-        edit_event = MagicMock()
-        edit_event.sender = "@mindroom_helper:localhost"
-        edit_event.body = "* Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
-        edit_event.event_id = "$helper_edit_123"
-        edit_event.source = {
+        # Simulate the initial message from helper (without completion marker)
+        initial_event = MagicMock(spec=nio.RoomMessageText)
+        initial_event.sender = "@mindroom_helper:localhost"
+        initial_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
+        initial_event.event_id = "$helper_response_123"
+        initial_event.source = {
             "content": {
-                "body": "* Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
+                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-                "m.relates_to": {
-                    "rel_type": "m.replace",
-                    "event_id": "$helper_response_123",
-                },
-                "m.new_content": {
-                    "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
-                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-                },
             }
         }
 
-        # Process edit with calculator bot - it should NOT respond
-        await calc_bot._on_message(mock_room, edit_event)
+        # Process initial message - calculator should NOT respond (no completion marker)
+        with patch("mindroom.bot.check_agent_mentioned") as mock_check:
+            mock_check.return_value = (["calculator"], True)
+
+            # Debug: let's see what happens
+            calc_bot.logger.info(f"Processing initial message: '{initial_event.body}'")
+
+            # Add more logging to understand the flow
+            with patch("mindroom.bot.extract_agent_name") as mock_extract:
+                # Make extract_agent_name return 'helper' for the sender
+                mock_extract.return_value = "helper"
+
+                await calc_bot._on_message(mock_room, initial_event)
+
         assert calc_bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0  # Calculator didn't process anything
+
+        # Now simulate the final message with completion marker
+        final_event = MagicMock(spec=nio.RoomMessageText)
+        final_event.sender = "@mindroom_helper:localhost"
+        final_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ✓"
+        final_event.event_id = "$helper_final"
+        final_event.source = {
+            "content": {
+                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ✓",
+                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+            }
+        }
+
+        # Process final message - calculator SHOULD respond now
+        with patch("mindroom.bot.check_agent_mentioned") as mock_check:
+            mock_check.return_value = (["calculator"], True)
+            with patch("mindroom.bot.extract_agent_name") as mock_extract:
+                # Make extract_agent_name return 'helper' for the sender
+                mock_extract.return_value = "helper"
+                await calc_bot._on_message(mock_room, final_event)
+
+        assert calc_bot.client.room_send.call_count == 1
+        assert mock_ai_response.call_count == 1
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")

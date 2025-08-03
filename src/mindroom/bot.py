@@ -143,14 +143,8 @@ class AgentBot:
         if room.room_id not in self.rooms:
             return
 
-        # Check if this is an edit from another agent - skip to avoid responding to incomplete streaming
+        # Parse sender information
         sender_id = MatrixID.parse(event.sender)
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        is_edit = relates_to.get("rel_type") == "m.replace"
-
-        if is_edit and sender_id.is_agent:
-            self.logger.debug("Ignoring edit from agent (likely streaming)", sender=event.sender)
-            return
 
         # Track agent activity if sender is an agent
         if sender_id.is_agent and sender_id.agent_name:
@@ -172,6 +166,11 @@ class AgentBot:
         sender_is_agent = extract_agent_name(event.sender) is not None
         if sender_is_agent and not context.am_i_mentioned:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
+            return
+
+        # If we're mentioned by another agent, check if their message is complete
+        if sender_is_agent and context.am_i_mentioned and not event.body.rstrip().endswith("✓"):
+            self.logger.debug("Ignoring mention from agent - streaming not complete", sender=event.sender)
             return
 
         # Determine if this agent should respond to the message
