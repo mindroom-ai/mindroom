@@ -5,7 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import _handle_invite_command, _handle_list_invites_command, _should_process_message
+from mindroom.bot import _should_process_message
+from mindroom.commands import handle_invite_command, handle_list_invites_command
 from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import should_route_to_agent
 
@@ -30,7 +31,7 @@ class TestBotHelpers:
         mock_client = AsyncMock()
         mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
 
-        result = await _handle_invite_command(
+        result = await handle_invite_command(
             room_id="!room:localhost",
             thread_id="$thread123",
             agent_name="unknown_agent",
@@ -40,7 +41,7 @@ class TestBotHelpers:
             thread_invite_manager=mock_thread_mgr,
         )
 
-        assert "❌ Unknown agent: unknown_agent" in result
+        assert "❌ Unknown agent: @unknown_agent" in result
         assert "Available agents:" in result
 
     @pytest.mark.asyncio
@@ -57,7 +58,7 @@ class TestBotHelpers:
 
             mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
 
-            result = await _handle_invite_command(
+            result = await handle_invite_command(
                 room_id="!room:localhost",
                 thread_id="$thread123",
                 agent_name="calculator",
@@ -84,7 +85,7 @@ class TestBotHelpers:
 
             mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
 
-            result = await _handle_invite_command(
+            result = await handle_invite_command(
                 room_id="!room:localhost",
                 thread_id="$thread123",
                 agent_name="calculator",
@@ -103,7 +104,7 @@ class TestBotHelpers:
         mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
         mock_thread_mgr.get_thread_agents = AsyncMock(return_value=[])
 
-        result = await _handle_list_invites_command("!room:localhost", "$thread123", mock_thread_mgr)
+        result = await handle_list_invites_command("!room:localhost", "$thread123", mock_thread_mgr)
 
         assert result == "No agents are currently invited to this thread."
 
@@ -113,7 +114,7 @@ class TestBotHelpers:
         mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
         mock_thread_mgr.get_thread_agents = AsyncMock(return_value=["calculator", "research", "code"])
 
-        result = await _handle_list_invites_command("!room:localhost", "$thread123", mock_thread_mgr)
+        result = await handle_list_invites_command("!room:localhost", "$thread123", mock_thread_mgr)
 
         assert "**Invited agents in this thread:**" in result
         assert "- @calculator" in result

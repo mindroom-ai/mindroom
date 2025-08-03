@@ -9,12 +9,18 @@ import nio
 
 from .agent_config import load_config
 from .ai import ai_response
-from .commands import Command, CommandType, command_parser, get_command_help
+from .commands import (
+    Command,
+    CommandType,
+    command_parser,
+    get_command_help,
+    handle_invite_command,
+    handle_list_invites_command,
+)
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
     AgentMatrixUser,
-    construct_agent_user_id,
     create_mention_content_from_text,
     ensure_all_agent_users,
     extract_agent_name,
@@ -49,57 +55,6 @@ class MessageContext:
     thread_id: str | None
     thread_history: list[dict]
     is_invited_to_thread: bool
-
-
-async def _handle_invite_command(
-    room_id: str,
-    thread_id: str,
-    agent_name: str,
-    sender: str,
-    agent_domain: str,
-    client: nio.AsyncClient,
-    thread_invite_manager: ThreadInviteManager,
-) -> str:
-    """Handle the invite command logic."""
-    config = load_config()
-    if agent_name not in config.agents:
-        return f"❌ Unknown agent: {agent_name}. Available agents: {', '.join(config.agents.keys())}"
-
-    await thread_invite_manager.add_invite(
-        thread_id=thread_id,
-        room_id=room_id,
-        agent_name=agent_name,
-        invited_by=sender,
-    )
-
-    # Invite to Matrix room for protocol compliance
-    agent_user_id = construct_agent_user_id(agent_name, agent_domain)
-    room_members = await client.joined_members(room_id)
-    if isinstance(room_members, nio.JoinedMembersResponse):
-        if agent_user_id not in [m.user_id for m in room_members.members]:
-            result = await client.room_invite(room_id, agent_user_id)
-            if not isinstance(result, nio.RoomInviteResponse):
-                logger.warning("Failed to invite to room", agent=agent_name, error=str(result))
-    else:
-        logger.error("Failed to get room members", room_id=room_id, error=str(room_members))
-
-    response_text = f"✅ Invited @{agent_name} to this thread."
-    response_text += f"\n\n@{agent_name}, you've been invited to help in this thread!"
-    return response_text
-
-
-async def _handle_list_invites_command(
-    room_id: str,
-    thread_id: str,
-    thread_invite_manager: ThreadInviteManager,
-) -> str:
-    """Handle the list invites command."""
-    thread_invites = await thread_invite_manager.get_thread_agents(thread_id, room_id)
-    if thread_invites:
-        thread_list = "\n".join([f"- @{agent}" for agent in thread_invites])
-        return f"**Invited agents in this thread:**\n{thread_list}"
-
-    return "No agents are currently invited to this thread."
 
 
 def _should_process_message(event_sender: str, agent_user_id: str) -> bool:
@@ -345,7 +300,7 @@ class AgentBot:
             agent_name = command.args["agent_name"]
             agent_domain = extract_domain_from_user_id(self.agent_user.user_id)
 
-            response_text = await _handle_invite_command(
+            response_text = await handle_invite_command(
                 room_id=room.room_id,
                 thread_id=thread_id,
                 agent_name=agent_name,
@@ -364,7 +319,7 @@ class AgentBot:
                 response_text = f"❌ @{agent_name} was not invited to this thread."
 
         elif command.type == CommandType.LIST_INVITES:
-            response_text = await _handle_list_invites_command(room.room_id, thread_id, self.thread_invite_manager)
+            response_text = await handle_list_invites_command(room.room_id, thread_id, self.thread_invite_manager)
 
         elif command.type == CommandType.HELP:
             topic = command.args.get("topic")
