@@ -9,7 +9,14 @@ import nio
 
 from .agent_config import load_config
 from .ai import ai_response
-from .commands import Command, CommandType, command_handler, command_parser, get_command_help
+from .commands import (
+    Command,
+    CommandType,
+    command_parser,
+    get_command_help,
+    handle_invite_command,
+    handle_list_invites_command,
+)
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
@@ -293,7 +300,7 @@ class AgentBot:
             agent_name = command.args["agent_name"]
             agent_domain = extract_domain_from_user_id(self.agent_user.user_id)
 
-            response_text = await command_handler.handle_invite_command(
+            response_text = await handle_invite_command(
                 room_id=room.room_id,
                 thread_id=thread_id,
                 agent_name=agent_name,
@@ -312,9 +319,7 @@ class AgentBot:
                 response_text = f"❌ @{agent_name} was not invited to this thread."
 
         elif command.type == CommandType.LIST_INVITES:
-            response_text = await command_handler.handle_list_invites_command(
-                room.room_id, thread_id, self.thread_invite_manager
-            )
+            response_text = await handle_list_invites_command(room.room_id, thread_id, self.thread_invite_manager)
 
         elif command.type == CommandType.HELP:
             topic = command.args.get("topic")
