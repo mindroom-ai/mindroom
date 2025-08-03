@@ -48,8 +48,8 @@ async def test_thread_creation():
             return
 
         # Wait for response
-        print("   Waiting 5s for response...")
-        await asyncio.sleep(5)
+        print("   Waiting 10s for response...")
+        await asyncio.sleep(10)
 
         # Check messages
         print("\n2. Checking messages...")
@@ -57,7 +57,11 @@ async def test_thread_creation():
 
         if hasattr(messages_response, "chunk"):
             print(f"\nFound {len(messages_response.chunk)} messages:")
-            for event in messages_response.chunk:
+            # Sort by timestamp (newest first)
+            sorted_events = sorted(
+                messages_response.chunk, key=lambda e: getattr(e, "server_timestamp", 0), reverse=True
+            )
+            for event in sorted_events[:10]:
                 if hasattr(event, "sender") and hasattr(event, "body"):
                     sender = event.sender.split(":")[0].replace("@", "")
                     body = event.body[:100] + "..." if len(event.body) > 100 else event.body
@@ -66,10 +70,13 @@ async def test_thread_creation():
                     relates_to = getattr(event, "source", {}).get("content", {}).get("m.relates_to", {})
                     if relates_to.get("rel_type") == "m.thread":
                         thread_id = relates_to.get("event_id", "unknown")
+                        in_reply_to = relates_to.get("m.in_reply_to", {}).get("event_id", "none")
                         print(f"🧵 {sender}: {body}")
                         print(f"   Thread root: {thread_id}")
+                        print(f"   Reply to: {in_reply_to}")
                     else:
                         print(f"💬 {sender}: {body}")
+                        print(f"   Event ID: {event.event_id}")
 
         # Test with mention
         print("\n3. Testing with agent mention...")
@@ -86,15 +93,19 @@ async def test_thread_creation():
             print(f"   Failed to send: {response2}")
             return
 
-        print("   Waiting 5s for response...")
-        await asyncio.sleep(5)
+        print("   Waiting 10s for response...")
+        await asyncio.sleep(10)
 
         # Check messages again
         messages_response2 = await client.room_messages(room_id, limit=10)
 
         if hasattr(messages_response2, "chunk"):
             print(f"\nFound {len(messages_response2.chunk)} messages after mention:")
-            for event in messages_response2.chunk:
+            # Sort by timestamp (newest first)
+            sorted_events2 = sorted(
+                messages_response2.chunk, key=lambda e: getattr(e, "server_timestamp", 0), reverse=True
+            )
+            for event in sorted_events2[:10]:
                 if hasattr(event, "sender") and hasattr(event, "body"):
                     sender = event.sender.split(":")[0].replace("@", "")
                     body = event.body[:100] + "..." if len(event.body) > 100 else event.body
@@ -103,10 +114,13 @@ async def test_thread_creation():
                     relates_to = getattr(event, "source", {}).get("content", {}).get("m.relates_to", {})
                     if relates_to.get("rel_type") == "m.thread":
                         thread_id = relates_to.get("event_id", "unknown")
+                        in_reply_to = relates_to.get("m.in_reply_to", {}).get("event_id", "none")
                         print(f"🧵 {sender}: {body}")
                         print(f"   Thread root: {thread_id}")
+                        print(f"   Reply to: {in_reply_to}")
                     else:
                         print(f"💬 {sender}: {body}")
+                        print(f"   Event ID: {event.event_id}")
 
     finally:
         await client.close()
