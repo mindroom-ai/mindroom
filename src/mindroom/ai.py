@@ -11,7 +11,7 @@ from agno.models.openai import OpenAIChat
 from agno.run.response import RunResponse
 from dotenv import load_dotenv
 
-from .agent_config import create_agent
+from .agent_config import create_agent, load_config
 from .logging_config import get_logger
 from .memory import (
     build_memory_enhanced_prompt,
@@ -42,8 +42,6 @@ def get_model_instance(model_name: str = "default") -> Model:
     Raises:
         ValueError: If model not found or provider not supported
     """
-    from .agent_config import load_config
-
     config = load_config()
 
     if model_name not in config.models:

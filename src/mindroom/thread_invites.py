@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import nio
 
 from .logging_config import get_logger
-from .matrix import MatrixID
+from .matrix import MatrixID, ThreadStateKey
 
 logger = get_logger(__name__)
 
@@ -19,8 +19,6 @@ class ThreadInviteManager:
         self.client = client
 
     def _get_state_key(self, thread_id: str, agent_name: str) -> str:
-        from .matrix import ThreadStateKey
-
         return ThreadStateKey(thread_id, agent_name).key
 
     async def add_invite(
@@ -48,8 +46,6 @@ class ThreadInviteManager:
         if not isinstance(response, nio.RoomGetStateResponse):
             return []
 
-        from .matrix import ThreadStateKey
-
         agents = []
         for event in response.events:
             if event["type"] == THREAD_INVITE_EVENT_TYPE:
@@ -76,8 +72,6 @@ class ThreadInviteManager:
         response = await self.client.room_get_state(room_id)
         if not isinstance(response, nio.RoomGetStateResponse):
             return []
-
-        from .matrix import ThreadStateKey
 
         threads = []
         for event in response.events:
@@ -152,8 +146,6 @@ class ThreadInviteManager:
         for event in state_response.events:
             if event["type"] == THREAD_INVITE_EVENT_TYPE:
                 state_key = event["state_key"]
-                from .matrix import ThreadStateKey
-
                 key = ThreadStateKey.parse(state_key)
                 if key.agent_name not in invited_agents:
                     invited_agents.append(key.agent_name)

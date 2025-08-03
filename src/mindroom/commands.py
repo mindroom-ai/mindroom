@@ -7,7 +7,9 @@ from typing import Any
 
 import nio
 
+from .agent_config import load_config
 from .logging_config import get_logger
+from .matrix import MatrixID, get_room_members
 
 logger = get_logger(__name__)
 
@@ -165,9 +167,6 @@ async def handle_invite_command(
     thread_invite_manager: Any,
 ) -> str:
     """Handle the invite command to invite an agent to a thread."""
-    from .agent_config import load_config
-    from .matrix import MatrixID, get_room_members
-
     config = load_config()
     if agent_name not in config.agents:
         return f"❌ Unknown agent: @{agent_name}. Available agents: {', '.join(f'@{name}' for name in sorted(config.agents.keys()))}"

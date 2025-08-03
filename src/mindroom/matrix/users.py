@@ -7,7 +7,7 @@ import nio
 
 from ..agent_config import load_config
 from ..logging_config import get_logger
-from .identity import extract_server_name_from_homeserver
+from .identity import extract_server_name_from_homeserver, parse_matrix_id
 from .state import MatrixState
 
 logger = get_logger(__name__)
@@ -15,8 +15,6 @@ logger = get_logger(__name__)
 
 def extract_domain_from_user_id(user_id: str) -> str:
     """Extract domain from a Matrix user ID like "@user:example.com"."""
-    from .identity import parse_matrix_id
-
     if not user_id.startswith("@") or ":" not in user_id:
         return "localhost"
     return parse_matrix_id(user_id).domain
