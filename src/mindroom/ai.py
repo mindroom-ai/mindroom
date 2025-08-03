@@ -175,6 +175,9 @@ async def ai_response_streaming(
 ) -> AsyncIterator[str]:
     """Generate streaming AI response using Agno's streaming API.
 
+    Checks cache first - if found, yields the cached response immediately.
+    Otherwise streams the new response and caches it.
+
     Args:
         agent_name: Name of the agent to use
         prompt: User prompt
@@ -194,7 +197,20 @@ async def ai_response_streaming(
             agent_name, prompt, storage_path, room_id, thread_history
         )
 
-        # Use Agno's streaming capability
+        # Check cache first
+        cache = get_cache(storage_path)
+        if cache is not None:
+            model = agent.model
+            cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+            cached_result = cache.get(cache_key)
+            if cached_result is not None:
+                logger.info("Cache hit", agent=agent_name)
+                # Yield cached response immediately (non-streaming)
+                response_text = cached_result.content or ""
+                yield response_text
+                return
+
+        # No cache hit - use streaming
         stream_generator = await agent.arun(full_prompt, session_id=session_id, stream=True)
         async for event in stream_generator:
             # RunResponseEvent might have different content depending on type
@@ -206,6 +222,15 @@ async def ai_response_streaming(
                 chunk_text = str(event.response.content)
                 full_response += chunk_text
                 yield chunk_text
+
+        # Cache the complete response
+        if cache is not None:
+            # Create a mock response object to cache
+            from agno.run.response import RunResponse
+
+            cached_response = RunResponse(content=full_response)
+            cache.set(cache_key, cached_response)
+            logger.info("Response cached", agent=agent_name)
 
         # Store the complete response in memory
         store_conversation_memory(prompt, full_response, agent_name, storage_path, session_id, room_id)

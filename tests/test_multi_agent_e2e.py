@@ -109,8 +109,8 @@ async def test_agent_processes_direct_mention(
                     room_id=test_room_id,
                 )
 
-                # Verify message was sent
-                bot.client.room_send.assert_called_once()
+                # Verify message was sent (streaming makes 2 calls)
+                assert bot.client.room_send.call_count == 2
                 call_args = bot.client.room_send.call_args
                 assert call_args[1]["room_id"] == test_room_id
                 assert call_args[1]["content"]["body"] == "15% of 200 is 30"
@@ -201,6 +201,8 @@ async def test_agent_responds_in_threads_based_on_participation(
         message_event.sender = test_user_id
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
+        # Mock room users to include the agent
+        room.users = {mock_calculator_agent.user_id: MagicMock()}
 
         with (
             patch("mindroom.bot.ai_response_streaming") as mock_ai,
@@ -216,13 +218,20 @@ async def test_agent_responds_in_threads_based_on_participation(
                     "event_id": "msg2",
                 },
             ]
-            mock_ai.return_value = "20% of 300 is 60"
+
+            # Mock streaming response with async generator
+            async def mock_streaming_response():
+                yield "20% of 300"
+                yield " is 60"
+
+            mock_ai.return_value = mock_streaming_response()
 
             await bot._on_message(room, message_event)
 
             # Should process the message as only agent in thread
             mock_ai.assert_called_once()
-            bot.client.room_send.assert_called_once()
+            # Streaming makes 2 calls: initial message + final edit
+            assert bot.client.room_send.call_count == 2
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
         bot.client.room_send.reset_mock()
@@ -296,7 +305,13 @@ async def test_agent_responds_in_threads_based_on_participation(
                     "event_id": "msg3",
                 },
             ]
-            mock_ai.return_value = "20% of 300 is 60"
+
+            # Mock streaming response with async generator for mention case
+            async def mock_streaming_response2():
+                yield "20% of 300"
+                yield " is 60"
+
+            mock_ai.return_value = mock_streaming_response2()
 
             await bot._on_message(room, message_event_with_mention)
 
@@ -310,8 +325,8 @@ async def test_agent_responds_in_threads_based_on_participation(
                 room_id=test_room_id,
             )
 
-            # Verify thread response format
-            bot.client.room_send.assert_called_once()
+            # Verify thread response format (streaming makes 2 calls)
+            assert bot.client.room_send.call_count == 2
             sent_content = bot.client.room_send.call_args[1]["content"]
             assert sent_content["m.relates_to"]["rel_type"] == "m.thread"
             assert sent_content["m.relates_to"]["event_id"] == thread_root_id
