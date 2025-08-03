@@ -261,6 +261,11 @@ async def fetch_thread_history(
             logger.error("Failed to fetch thread history", room_id=room_id, error=str(response))
             break
 
+        # Break if no new messages found
+        if not response.chunk:
+            break
+
+        thread_messages_found = 0
         for event in response.chunk:
             if hasattr(event, "source") and event.source.get("type") == "m.room.message":
                 relates_to = event.source.get("content", {}).get("m.relates_to", {})
@@ -273,8 +278,10 @@ async def fetch_thread_history(
                             "event_id": event.event_id,
                         },
                     )
+                    thread_messages_found += 1
 
-        if not response.end:
+        # Exit if we've reached the end or no more relevant messages
+        if not response.end or thread_messages_found == 0:
             break
         from_token = response.end
 
