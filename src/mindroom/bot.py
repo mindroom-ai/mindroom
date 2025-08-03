@@ -140,10 +140,8 @@ class AgentBot:
         # Track agent activity if sender is an agent
         if "@" in event.sender and ":mindroom.space" in event.sender:
             sender_agent_name = event.sender.split("@")[1].split(":")[0]
-            is_thread, thread_id = extract_thread_info(event.source)
-            if thread_id:
-                # Update activity for the agent in this specific thread
-                await self.thread_invite_manager.update_agent_activity(thread_id, room.room_id, sender_agent_name)
+            # Update activity for the agent in this room (regardless of thread)
+            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
         # Handle commands (only first agent alphabetically to avoid duplicates)
         available_agents = get_available_agents_in_room(room)

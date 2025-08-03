@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.thread_invites import THREAD_INVITE_EVENT_TYPE, ThreadInviteManager
+from mindroom.thread_invites import AGENT_ACTIVITY_EVENT_TYPE, THREAD_INVITE_EVENT_TYPE, ThreadInviteManager
 
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def invite_manager(mock_client):
 @pytest.mark.asyncio
 async def test_add_invite(invite_manager, mock_client):
     """Test adding a thread invitation."""
-    # Mock the room_put_state response
+    # Mock the room_put_state response (will be called twice - invite + activity)
     mock_client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$event123", room_id="!room456")
 
     await invite_manager.add_invite(
@@ -34,16 +34,25 @@ async def test_add_invite(invite_manager, mock_client):
         invited_by="@user:example.com",
     )
 
-    # Verify the state event was created
-    assert mock_client.room_put_state.called
-    call_args = mock_client.room_put_state.call_args
-    assert call_args[1]["room_id"] == "!room456"
-    assert call_args[1]["event_type"] == THREAD_INVITE_EVENT_TYPE
-    assert call_args[1]["state_key"] == "$thread123:calculator"
-    content = call_args[1]["content"]
+    # Verify both state events were created
+    assert mock_client.room_put_state.call_count == 2
+
+    # First call should be the invitation
+    first_call = mock_client.room_put_state.call_args_list[0]
+    assert first_call[1]["room_id"] == "!room456"
+    assert first_call[1]["event_type"] == THREAD_INVITE_EVENT_TYPE
+    assert first_call[1]["state_key"] == "$thread123:calculator"
+    content = first_call[1]["content"]
     assert content["invited_by"] == "@user:example.com"
     assert "invited_at" in content
-    assert "last_activity" in content
+    # last_activity is now tracked separately
+    assert "last_activity" not in content
+
+    # Second call should be the activity update
+    second_call = mock_client.room_put_state.call_args_list[1]
+    assert second_call[1]["room_id"] == "!room456"
+    assert second_call[1]["event_type"] == AGENT_ACTIVITY_EVENT_TYPE
+    assert second_call[1]["state_key"] == "calculator"
 
 
 @pytest.mark.asyncio
@@ -190,7 +199,6 @@ async def test_cleanup_inactive_agents(invite_manager, mock_client):
                 "content": {
                     "invited_by": "@user:example.com",
                     "invited_at": old_time,
-                    "last_activity": old_time,  # No activity since invitation
                 },
             },
             {
@@ -199,12 +207,25 @@ async def test_cleanup_inactive_agents(invite_manager, mock_client):
                 "content": {
                     "invited_by": "@user:example.com",
                     "invited_at": old_time,
-                    "last_activity": recent_time,  # Recent activity
                 },
             },
         ],
         room_id="!room456",
     )
+
+    # Mock get_agent_activity for each agent
+    recent_time = (now - timedelta(hours=1)).isoformat()
+    mock_client.room_get_state_event.side_effect = [
+        # expired_agent has no activity
+        nio.RoomGetStateEventError(status_code="M_NOT_FOUND", message="Not found"),
+        # active_agent has recent activity
+        nio.RoomGetStateEventResponse(
+            content={"last_activity": recent_time},
+            event_type=AGENT_ACTIVITY_EVENT_TYPE,
+            state_key="active_agent",
+            room_id="!room456",
+        ),
+    ]
 
     # Mock room_kick response for expired agent
     mock_client.room_kick.return_value = nio.RoomKickResponse()
@@ -212,7 +233,7 @@ async def test_cleanup_inactive_agents(invite_manager, mock_client):
     # Mock room_put_state for removing invitation
     mock_client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$remove1", room_id="!room456")
 
-    # Run cleanup - no need to mock room_messages anymore!
+    # Run cleanup
     removed_count = await invite_manager.cleanup_inactive_agents("!room456", timeout_hours=24)
 
     # Should have removed 1 agent (expired_agent)
@@ -232,7 +253,6 @@ async def test_get_invite_state(invite_manager, mock_client):
         content={
             "invited_by": "@user:example.com",
             "invited_at": "2024-01-01T10:00:00",
-            "last_activity": "2024-01-01T12:00:00",
         },
         event_type=THREAD_INVITE_EVENT_TYPE,
         state_key="$thread123:calculator",
@@ -242,7 +262,7 @@ async def test_get_invite_state(invite_manager, mock_client):
     state = await invite_manager.get_invite_state("$thread123", "!room456", "calculator")
     assert state is not None
     assert state["invited_by"] == "@user:example.com"
-    assert state["last_activity"] == "2024-01-01T12:00:00"
+    assert state["invited_at"] == "2024-01-01T10:00:00"
 
     # Mock not found
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventError(
@@ -250,6 +270,28 @@ async def test_get_invite_state(invite_manager, mock_client):
     )
     state = await invite_manager.get_invite_state("$thread123", "!room456", "unknown")
     assert state is None
+
+
+@pytest.mark.asyncio
+async def test_get_agent_activity(invite_manager, mock_client):
+    """Test getting agent activity."""
+    # Mock successful activity retrieval
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={"last_activity": "2024-01-01T12:00:00"},
+        event_type=AGENT_ACTIVITY_EVENT_TYPE,
+        state_key="calculator",
+        room_id="!room456",
+    )
+
+    activity = await invite_manager.get_agent_activity("!room456", "calculator")
+    assert activity == "2024-01-01T12:00:00"
+
+    # Mock not found (no activity recorded)
+    mock_client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        status_code="M_NOT_FOUND", message="Not found"
+    )
+    activity = await invite_manager.get_agent_activity("!room456", "unknown")
+    assert activity is None
 
 
 @pytest.mark.asyncio
@@ -270,16 +312,17 @@ async def test_update_agent_activity(invite_manager, mock_client):
     # Mock room_put_state
     mock_client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$update123", room_id="!room456")
 
-    # Update activity
-    await invite_manager.update_agent_activity("$thread123", "!room456", "calculator")
+    # Update activity (signature changed - no thread_id needed)
+    await invite_manager.update_agent_activity("!room456", "calculator")
 
     # Verify state was updated
     assert mock_client.room_put_state.called
     call_args = mock_client.room_put_state.call_args
+    assert call_args[1]["room_id"] == "!room456"
+    assert call_args[1]["event_type"] == AGENT_ACTIVITY_EVENT_TYPE
+    assert call_args[1]["state_key"] == "calculator"
     content = call_args[1]["content"]
     assert "last_activity" in content
-    # Should have updated timestamp
-    assert content["last_activity"] != "2024-01-01T10:00:00"
 
 
 @pytest.mark.asyncio
