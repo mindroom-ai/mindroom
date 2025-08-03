@@ -234,11 +234,15 @@ class AgentBot:
     ) -> None:
         sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
 
+        # If no thread_id, create a thread with the original message as root
+        if not thread_id:
+            thread_id = reply_to_event_id
+
         content = create_mention_content_from_text(
             response_text,
             sender_domain=sender_domain,
             thread_event_id=thread_id,
-            reply_to_event_id=reply_to_event_id if thread_id else None,
+            reply_to_event_id=reply_to_event_id,
         )
 
         response = await self.client.room_send(
@@ -276,6 +280,10 @@ class AgentBot:
         response_text = "could you help with this?"
         sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
         full_message = f"@{suggested_agent} {response_text}"
+
+        # If no thread exists, create one with the original message as root
+        if not thread_event_id:
+            thread_event_id = event.event_id
 
         content = create_mention_content_from_text(
             full_message,
