@@ -13,7 +13,6 @@ from .client import (
     join_room,
     login,
     matrix_client,
-    prepare_response_content,
     register_user,
 )
 from .identity import (
@@ -60,7 +59,6 @@ __all__ = [
     "join_room",
     "login",
     "matrix_client",
-    "prepare_response_content",
     "register_user",
     # Identity classes and functions
     "MatrixID",
