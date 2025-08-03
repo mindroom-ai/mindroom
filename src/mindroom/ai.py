@@ -192,30 +192,34 @@ async def ai_response_streaming(
         Chunks of the AI response as they become available
     """
     logger.info("AI streaming request", agent=agent_name)
+
+    # Prepare agent and prompt - these are deterministic operations
+    agent, full_prompt, enhanced_prompt = await _prepare_agent_and_prompt(
+        agent_name, prompt, storage_path, room_id, thread_history
+    )
+
+    # Check cache first - also deterministic
+    cache = get_cache(storage_path)
+    if cache is not None:
+        model = agent.model
+        assert model is not None, "Agent should always have a model in our implementation"
+        cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+        cached_result = cache.get(cache_key)
+        if cached_result is not None:
+            logger.info("Cache hit", agent=agent_name)
+            # Yield cached response immediately (non-streaming)
+            response_text = cached_result.content or ""
+            yield response_text
+            # Store in memory even for cache hits
+            store_conversation_memory(prompt, response_text, agent_name, storage_path, session_id, room_id)
+            return
+
+    # No cache hit - use streaming
+    from agno.run.response import RunResponseContentEvent
+
     full_response = ""
 
     try:
-        agent, full_prompt, enhanced_prompt = await _prepare_agent_and_prompt(
-            agent_name, prompt, storage_path, room_id, thread_history
-        )
-
-        # Check cache first
-        cache = get_cache(storage_path)
-        if cache is not None:
-            model = agent.model
-            assert model is not None, "Agent should always have a model in our implementation"
-            cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
-            cached_result = cache.get(cache_key)
-            if cached_result is not None:
-                logger.info("Cache hit", agent=agent_name)
-                # Yield cached response immediately (non-streaming)
-                response_text = cached_result.content or ""
-                yield response_text
-                return
-
-        # No cache hit - use streaming
-        from agno.run.response import RunResponseContentEvent
-
         stream_generator = await agent.arun(full_prompt, session_id=session_id, stream=True)
         async for event in stream_generator:
             # We're only interested in content events for streaming
@@ -224,19 +228,21 @@ async def ai_response_streaming(
                 full_response += chunk_text
                 yield chunk_text
 
-        # Cache the complete response
-        if cache is not None:
-            # Create a mock response object to cache
-            from agno.run.response import RunResponse
-
-            cached_response = RunResponse(content=full_response)
-            cache.set(cache_key, cached_response)
-            logger.info("Response cached", agent=agent_name)
-
-        # Store the complete response in memory
-        store_conversation_memory(prompt, full_response, agent_name, storage_path, session_id, room_id)
-
     except Exception as e:
         logger.exception(f"Error generating streaming AI response: {e}")
         error_message = f"Sorry, I encountered an error trying to generate a response: {e}"
         yield error_message
+        return
+
+    # Cache the complete response - deterministic operation
+    if cache is not None and full_response:
+        # Create a mock response object to cache
+        from agno.run.response import RunResponse
+
+        cached_response = RunResponse(content=full_response)
+        cache.set(cache_key, cached_response)
+        logger.info("Response cached", agent=agent_name)
+
+    # Store the complete response in memory - also deterministic
+    if full_response:
+        store_conversation_memory(prompt, full_response, agent_name, storage_path, session_id, room_id)
