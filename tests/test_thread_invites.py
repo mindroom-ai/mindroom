@@ -242,7 +242,7 @@ async def test_cleanup_inactive_agents(invite_manager, mock_client):
 
     # Check that the correct agent was kicked
     kick_call = mock_client.room_kick.call_args
-    assert kick_call[0][1] == "@expired_agent:mindroom.space"  # Second positional arg is user_id
+    assert kick_call[0][1] == "@mindroom_expired_agent:mindroom.space"  # Second positional arg is user_id
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import nio
 
 from .logging_config import get_logger
+from .matrix import MatrixID
 
 logger = get_logger(__name__)
 
@@ -188,7 +189,9 @@ class ThreadInviteManager:
         for agent_name in agents_to_remove:
             # Try to kick the agent from the room
             kick_response = await self.client.room_kick(
-                room_id, f"@{agent_name}:mindroom.space", f"Inactive for {timeout_hours} hours"
+                room_id,
+                MatrixID.from_agent(agent_name, MatrixID.DEFAULT_DOMAIN).full_id,
+                f"Inactive for {timeout_hours} hours",
             )
             if isinstance(kick_response, nio.RoomKickResponse):
                 # Successfully kicked, now remove all their thread invitations

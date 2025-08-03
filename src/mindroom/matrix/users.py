@@ -23,7 +23,9 @@ def extract_domain_from_user_id(user_id: str) -> str:
 
 
 def extract_username_from_user_id(user_id: str) -> str:
-    """Extract username from a Matrix user ID like "@mindroom_calculator:example.com"."""
+    """Extract username from a Matrix user ID like "@mindroom_calculator:example.com".
+
+    This function delegates to MatrixID.parse() for consistent ID handling."""
     from .identity import parse_matrix_id
 
     if not user_id.startswith("@") or ":" not in user_id:
@@ -32,7 +34,9 @@ def extract_username_from_user_id(user_id: str) -> str:
 
 
 def construct_agent_user_id(agent_name: str, domain: str) -> str:
-    """Construct a Matrix user ID for an agent like "@mindroom_calculator:localhost"."""
+    """Construct a Matrix user ID for an agent like "@mindroom_calculator:localhost".
+
+    This function delegates to MatrixID.from_agent() for consistent ID generation."""
     from .identity import MatrixID
 
     return MatrixID.from_agent(agent_name, domain).full_id
