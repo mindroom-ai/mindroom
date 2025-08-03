@@ -10,6 +10,8 @@ import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.matrix import AgentMatrixUser
+from mindroom.response_tracker import ResponseTracker
+from mindroom.thread_invites import ThreadInviteManager
 
 
 @dataclass
@@ -170,8 +172,6 @@ class TestAgentBot:
         bot.client.room_send.return_value = mock_send_response
 
         # Initialize response tracker with isolated path
-        from mindroom.response_tracker import ResponseTracker
-        from mindroom.thread_invites import ThreadInviteManager
 
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
@@ -241,8 +241,6 @@ class TestAgentBot:
         bot.client.room_send.return_value = mock_send_response
 
         # Initialize response tracker with isolated path
-        from mindroom.response_tracker import ResponseTracker
-        from mindroom.thread_invites import ThreadInviteManager
 
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
@@ -335,8 +333,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
         # Initialize response tracker with isolated path
-        from mindroom.response_tracker import ResponseTracker
-        from mindroom.thread_invites import ThreadInviteManager
 
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)

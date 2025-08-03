@@ -9,7 +9,7 @@ from mindroom.agent_config import describe_agent
 from mindroom.bot import AgentBot
 from mindroom.matrix import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
-from mindroom.thread_utils import has_any_agent_mentions_in_thread
+from mindroom.thread_utils import extract_agent_name, has_any_agent_mentions_in_thread
 
 
 class TestAIRouting:
@@ -175,8 +175,6 @@ class TestThreadUtils:
 
     def test_extract_agent_name_rejects_unconfigured(self) -> None:
         """Test that unconfigured agents are not recognized."""
-        from mindroom.thread_utils import extract_agent_name
-
         # This should return None because "fake_agent" is not in config.yaml
         assert extract_agent_name("@mindroom_fake_agent:localhost") is None
 

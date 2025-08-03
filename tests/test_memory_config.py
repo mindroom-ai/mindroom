@@ -122,8 +122,6 @@ class TestMemoryConfig:
 
     def test_chroma_directory_creation(self, tmp_path):
         """Test that ChromaDB directory is created."""
-        from mindroom.memory.config import get_memory_config
-
         with patch("mindroom.memory.config.load_config") as mock_load_config:
             # Mock minimal config
             mock_config = MagicMock()
