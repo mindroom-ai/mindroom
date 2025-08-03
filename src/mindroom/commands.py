@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import nio
+
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -153,5 +155,66 @@ Note: All commands only work within threads, not in main room messages.
 For detailed help on a command, use: `/help <command>`"""
 
 
-# Global command parser instance
+class CommandHandler:
+    """Handles execution of parsed commands."""
+
+    async def handle_invite_command(
+        self,
+        room_id: str,
+        thread_id: str,
+        agent_name: str,
+        sender: str,
+        agent_domain: str,
+        client: nio.AsyncClient,
+        thread_invite_manager: Any,
+    ) -> str:
+        """Handle the invite command to invite an agent to a thread."""
+        from .agent_config import load_config
+        from .matrix import construct_agent_user_id, get_room_members
+
+        config = load_config()
+        if agent_name not in config.agents:
+            return f"❌ Unknown agent: @{agent_name}. Available agents: {', '.join(f'@{name}' for name in sorted(config.agents.keys()))}"
+
+        # Add the thread invitation
+        await thread_invite_manager.add_invite(thread_id, room_id, agent_name, sender)
+
+        # Check if agent user exists in room
+        agent_user_id = construct_agent_user_id(agent_name, agent_domain)
+        room_members = await get_room_members(client, room_id)
+
+        if isinstance(room_members, set):
+            if agent_user_id not in room_members:
+                # Invite the agent to the room (regular room invitation)
+                invite_response = await client.room_invite(room_id, agent_user_id)
+                if isinstance(invite_response, nio.RoomInviteResponse):
+                    logger.info("Invited agent to room", agent=agent_name, room_id=room_id)
+                else:
+                    logger.error(
+                        "Failed to invite agent to room", agent=agent_name, room_id=room_id, error=str(invite_response)
+                    )
+        else:
+            logger.error("Failed to get room members", room_id=room_id, error=str(room_members))
+
+        response_text = f"✅ Invited @{agent_name} to this thread."
+        response_text += f"\n\n@{agent_name}, you've been invited to help in this thread!"
+        return response_text
+
+    async def handle_list_invites_command(
+        self,
+        room_id: str,
+        thread_id: str,
+        thread_invite_manager: Any,
+    ) -> str:
+        """Handle the list invites command."""
+        thread_invites = await thread_invite_manager.get_thread_agents(thread_id, room_id)
+        if thread_invites:
+            thread_list = "\n".join([f"- @{agent}" for agent in thread_invites])
+            return f"**Invited agents in this thread:**\n{thread_list}"
+
+        return "No agents are currently invited to this thread."
+
+
+# Global instances
 command_parser = CommandParser()
+command_handler = CommandHandler()
