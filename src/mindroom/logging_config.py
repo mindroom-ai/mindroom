@@ -86,4 +86,4 @@ def get_logger(name: str = __name__) -> structlog.BoundLogger:
     Returns:
         Configured structlog logger
     """
-    return structlog.get_logger(name)  # type: ignore[no-any-return]
+    return structlog.get_logger(name)

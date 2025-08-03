@@ -89,13 +89,13 @@ async def _cached_agent_run(
     cache = get_cache(storage_path)
     if cache is None:
         agent = create_agent(agent_name, model, storage_path)
-        return await agent.arun(full_prompt, session_id=session_id)  # type: ignore[no-any-return]
+        return await agent.arun(full_prompt, session_id=session_id)
 
     cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         logger.info("Cache hit", agent=agent_name)
-        return cached_result  # type: ignore[no-any-return]
+        return cached_result
 
     agent = create_agent(agent_name, model, storage_path=storage_path)
     response = await agent.arun(full_prompt, session_id=session_id)
@@ -103,7 +103,7 @@ async def _cached_agent_run(
     cache.set(cache_key, response)
     logger.info("Response cached", agent=agent_name)
 
-    return response  # type: ignore[no-any-return]
+    return response
 
 
 async def ai_response(

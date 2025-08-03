@@ -145,6 +145,34 @@ ignore_missing_imports = true
 module = "aioresponses.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "loguru.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pydantic.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "structlog.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "markdown.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "dotenv.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "typer.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "rich.*"
+ignore_missing_imports = true
+
 [tool.versioningit]
 default-version = "0.0.0"
 

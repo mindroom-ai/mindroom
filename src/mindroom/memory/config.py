@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from mem0 import Memory  # type: ignore[import-untyped]
+from mem0 import Memory  # type: ignore[import-not-found]
 
 from ..logging_config import get_logger
 
