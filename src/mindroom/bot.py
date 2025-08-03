@@ -286,8 +286,7 @@ class AgentBot:
 
         except Exception as e:
             self.logger.error("Error in streaming response", error=str(e))
-            # Fall back to regular response on error
-            await self._process_and_respond(room, event, thread_id, thread_history)
+            # Don't fallback to avoid duplicate responses
 
     async def _send_response(
         self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None

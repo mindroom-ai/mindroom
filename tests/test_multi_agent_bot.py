@@ -254,6 +254,8 @@ class TestAgentBot:
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
+        # Mock room users to include the agent
+        mock_room.users = {"@mindroom_calculator:localhost": MagicMock()}
 
         # Test 1: Thread with only this agent - should respond without mention
         mock_fetch_history.return_value = [
@@ -331,11 +333,19 @@ class TestAgentBot:
             },
         }
 
+        # Set up fresh async generator for the second call
+        async def mock_streaming_response2():
+            yield "Mentioned"
+            yield " response"
+
+        mock_ai_response_streaming.return_value = mock_streaming_response2()
+
         await bot._on_message(mock_room, mock_event_with_mention)
 
         # Should respond when explicitly mentioned
         mock_ai_response_streaming.assert_called_once()
-        bot.client.room_send.assert_called_once()
+        # With streaming, we expect 2 calls: initial message + final edit
+        assert bot.client.room_send.call_count == 2
 
     @pytest.mark.asyncio
     async def test_agent_bot_skips_already_responded_messages(
