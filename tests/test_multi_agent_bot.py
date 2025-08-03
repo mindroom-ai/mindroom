@@ -69,6 +69,11 @@ class TestAgentBot:
         assert bot.agent_name == "calculator"
         assert bot.rooms == ["!test:localhost"]
         assert not bot.running
+        assert bot.enable_streaming is True  # Default value
+
+        # Test with streaming disabled
+        bot_no_stream = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
+        assert bot_no_stream.enable_streaming is False
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.login_agent_user")

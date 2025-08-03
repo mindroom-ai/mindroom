@@ -1,6 +1,7 @@
 """Multi-agent bot implementation where each agent has its own Matrix user account."""
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -73,6 +74,7 @@ class AgentBot:
     response_tracker: ResponseTracker = field(init=False)
     thread_invite_manager: ThreadInviteManager = field(init=False)
     invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
+    enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
 
     @property
     def agent_name(self) -> str:
@@ -190,8 +192,11 @@ class AgentBot:
         if self.response_tracker.has_responded(event.event_id):
             return
 
-        # Process and send response (using streaming)
-        await self._process_and_respond_streaming(room, event, context.thread_id, context.thread_history)
+        # Process and send response
+        if self.enable_streaming:
+            await self._process_and_respond_streaming(room, event, context.thread_id, context.thread_history)
+        else:
+            await self._process_and_respond(room, event, context.thread_id, context.thread_history)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -462,7 +467,10 @@ class MultiAgentOrchestrator:
                 resolved_room = room_aliases.get(room, room)
                 resolved_rooms.append(resolved_room)
 
-            bot = AgentBot(agent_user, self.storage_path, rooms=resolved_rooms)
+            # Check environment variable for streaming preference
+            enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+
+            bot = AgentBot(agent_user, self.storage_path, rooms=resolved_rooms, enable_streaming=enable_streaming)
             self.agent_bots[agent_name] = bot
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))
