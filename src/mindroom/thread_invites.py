@@ -52,9 +52,9 @@ class ThreadInviteManager:
 
         agents = []
         for event in response.events:
-            if event.get("type") == THREAD_INVITE_EVENT_TYPE:
-                state_key = event.get("state_key", "")
-                if state_key.startswith(f"{thread_id}:") and ":" in state_key:
+            if event["type"] == THREAD_INVITE_EVENT_TYPE:
+                state_key = event["state_key"]
+                if state_key.startswith(f"{thread_id}:"):
                     key = ThreadStateKey.parse(state_key)
                     agents.append(key.agent_name)
         return agents
@@ -81,9 +81,9 @@ class ThreadInviteManager:
 
         threads = []
         for event in response.events:
-            if event.get("type") == THREAD_INVITE_EVENT_TYPE:
-                state_key = event.get("state_key", "")
-                if state_key.endswith(f":{agent_name}") and ":" in state_key:
+            if event["type"] == THREAD_INVITE_EVENT_TYPE:
+                state_key = event["state_key"]
+                if state_key.endswith(f":{agent_name}"):
                     key = ThreadStateKey.parse(state_key)
                     threads.append(key.thread_id)
         return threads
@@ -150,17 +150,16 @@ class ThreadInviteManager:
         thread_invitations: dict[str, list[str]] = {}  # agent_name -> list of state_keys
 
         for event in state_response.events:
-            if event.get("type") == THREAD_INVITE_EVENT_TYPE:
-                state_key = event.get("state_key", "")
-                if ":" in state_key:
-                    from .matrix import ThreadStateKey
+            if event["type"] == THREAD_INVITE_EVENT_TYPE:
+                state_key = event["state_key"]
+                from .matrix import ThreadStateKey
 
-                    key = ThreadStateKey.parse(state_key)
-                    if key.agent_name not in invited_agents:
-                        invited_agents.append(key.agent_name)
-                    if key.agent_name not in thread_invitations:
-                        thread_invitations[key.agent_name] = []
-                    thread_invitations[key.agent_name].append(state_key)
+                key = ThreadStateKey.parse(state_key)
+                if key.agent_name not in invited_agents:
+                    invited_agents.append(key.agent_name)
+                if key.agent_name not in thread_invitations:
+                    thread_invitations[key.agent_name] = []
+                thread_invitations[key.agent_name].append(state_key)
 
         if not invited_agents:
             return 0
