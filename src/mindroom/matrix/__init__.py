@@ -16,6 +16,15 @@ from .client import (
     prepare_response_content,
     register_user,
 )
+from .identity import (
+    MatrixID,
+    ThreadStateKey,
+    extract_agent_name,
+    extract_server_name_from_homeserver,
+    get_known_agents,
+    is_agent_id,
+    parse_matrix_id,
+)
 from .mentions import create_mention_content, create_mention_content_from_text
 from .rooms import (
     add_room,
@@ -30,9 +39,7 @@ from .users import (
     construct_agent_user_id,
     create_agent_user,
     ensure_all_agent_users,
-    extract_agent_name,
     extract_domain_from_user_id,
-    extract_server_name_from_homeserver,
     extract_username_from_user_id,
     get_agent_credentials,
     login_agent_user,
@@ -57,6 +64,14 @@ __all__ = [
     "matrix_client",
     "prepare_response_content",
     "register_user",
+    # Identity classes and functions
+    "MatrixID",
+    "ThreadStateKey",
+    "extract_agent_name",
+    "extract_server_name_from_homeserver",
+    "get_known_agents",
+    "is_agent_id",
+    "parse_matrix_id",
     # Config models
     "MatrixAccount",
     "MatrixState",
@@ -75,9 +90,7 @@ __all__ = [
     "construct_agent_user_id",
     "create_agent_user",
     "ensure_all_agent_users",
-    "extract_agent_name",
     "extract_domain_from_user_id",
-    "extract_server_name_from_homeserver",
     "extract_username_from_user_id",
     "get_agent_credentials",
     "login_agent_user",

@@ -3,8 +3,7 @@
 from functools import lru_cache
 from typing import Any, NamedTuple
 
-from .agent_config import load_config
-from .matrix import extract_agent_name
+from .matrix import extract_agent_name, get_known_agents
 
 
 class ResponseDecision(NamedTuple):
@@ -17,8 +16,7 @@ class ResponseDecision(NamedTuple):
 @lru_cache(maxsize=128)
 def get_known_agent_names() -> set[str]:
     """Get set of all configured agent names."""
-    config = load_config()
-    return set(config.agents.keys())
+    return get_known_agents()
 
 
 def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str], bool]:

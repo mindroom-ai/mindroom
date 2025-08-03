@@ -21,10 +21,10 @@ from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
     AgentMatrixUser,
+    MatrixID,
     create_mention_content_from_text,
     ensure_all_agent_users,
     extract_agent_name,
-    extract_domain_from_user_id,
     extract_thread_info,
     fetch_thread_history,
     get_room_aliases,
@@ -138,10 +138,11 @@ class AgentBot:
             return
 
         # Track agent activity if sender is an agent
-        if "@" in event.sender and ":mindroom.space" in event.sender:
-            sender_agent_name = event.sender.split("@")[1].split(":")[0]
-            # Update activity for the agent in this room (regardless of thread)
-            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
+        if event.sender.startswith("@") and ":" in event.sender:
+            sender_id = MatrixID.parse(event.sender)
+            if sender_id.is_mindroom_domain and sender_id.agent_name:
+                # Update activity for the agent in this room (regardless of thread)
+                await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
         # Handle commands (only first agent alphabetically to avoid duplicates)
         available_agents = get_available_agents_in_room(room)
@@ -232,7 +233,8 @@ class AgentBot:
     async def _send_response(
         self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None
     ) -> None:
-        sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
+        sender_id = MatrixID.parse(self.agent_user.user_id)
+        sender_domain = sender_id.domain
 
         # Always ensure we have a thread_id - use the original message as thread root if needed
         effective_thread_id = thread_id if thread_id else reply_to_event_id
@@ -277,7 +279,8 @@ class AgentBot:
             return
 
         response_text = "could you help with this?"
-        sender_domain = extract_domain_from_user_id(self.agent_user.user_id)
+        sender_id = MatrixID.parse(self.agent_user.user_id)
+        sender_domain = sender_id.domain
         full_message = f"@{suggested_agent} {response_text}"
 
         # If no thread exists, create one with the original message as root
@@ -312,7 +315,7 @@ class AgentBot:
         if command.type == CommandType.INVITE:
             # Handle invite command
             agent_name = command.args["agent_name"]
-            agent_domain = extract_domain_from_user_id(self.agent_user.user_id)
+            agent_domain = MatrixID.parse(self.agent_user.user_id).domain
 
             response_text = await handle_invite_command(
                 room_id=room.room_id,

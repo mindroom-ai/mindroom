@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from ..agent_config import load_config
+from .identity import MatrixID
 
 
 def create_mention_content(
@@ -76,14 +77,14 @@ def parse_mentions_in_text(text: str, sender_domain: str = "localhost") -> tuple
 
         # Check if it's a known agent
         if agent_name in known_agents:
-            user_id = f"@mindroom_{agent_name}:{sender_domain}"
+            user_id = MatrixID.from_agent(agent_name, sender_domain).full_id
             if user_id not in mentioned_user_ids:
                 mentioned_user_ids.append(user_id)
             return user_id
         elif prefix and agent_name.replace("mindroom_", "") in known_agents:
             # Handle case where someone wrote @mindroom_mindroom_calculator
             actual_agent = agent_name.replace("mindroom_", "")
-            user_id = f"@mindroom_{actual_agent}:{sender_domain}"
+            user_id = MatrixID.from_agent(actual_agent, sender_domain).full_id
             if user_id not in mentioned_user_ids:
                 mentioned_user_ids.append(user_id)
             return user_id

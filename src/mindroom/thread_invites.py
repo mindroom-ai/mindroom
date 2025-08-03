@@ -18,7 +18,9 @@ class ThreadInviteManager:
         self.client = client
 
     def _get_state_key(self, thread_id: str, agent_name: str) -> str:
-        return f"{thread_id}:{agent_name}"
+        from .matrix import ThreadStateKey
+
+        return ThreadStateKey(thread_id, agent_name).key
 
     async def add_invite(
         self,
@@ -45,11 +47,16 @@ class ThreadInviteManager:
         if not isinstance(response, nio.RoomGetStateResponse):
             return []
 
-        return [
-            event.get("state_key", "").split(":", 1)[1]
-            for event in response.events
-            if event.get("type") == THREAD_INVITE_EVENT_TYPE and event.get("state_key", "").startswith(f"{thread_id}:")
-        ]
+        from .matrix import ThreadStateKey
+
+        agents = []
+        for event in response.events:
+            if event.get("type") == THREAD_INVITE_EVENT_TYPE:
+                state_key = event.get("state_key", "")
+                if state_key.startswith(f"{thread_id}:") and ":" in state_key:
+                    key = ThreadStateKey.parse(state_key)
+                    agents.append(key.agent_name)
+        return agents
 
     async def is_agent_invited_to_thread(
         self,
@@ -69,11 +76,16 @@ class ThreadInviteManager:
         if not isinstance(response, nio.RoomGetStateResponse):
             return []
 
-        return [
-            event.get("state_key", "").rsplit(":", 1)[0]
-            for event in response.events
-            if event.get("type") == THREAD_INVITE_EVENT_TYPE and event.get("state_key", "").endswith(f":{agent_name}")
-        ]
+        from .matrix import ThreadStateKey
+
+        threads = []
+        for event in response.events:
+            if event.get("type") == THREAD_INVITE_EVENT_TYPE:
+                state_key = event.get("state_key", "")
+                if state_key.endswith(f":{agent_name}") and ":" in state_key:
+                    key = ThreadStateKey.parse(state_key)
+                    threads.append(key.thread_id)
+        return threads
 
     async def remove_invite(
         self,
@@ -140,12 +152,14 @@ class ThreadInviteManager:
             if event.get("type") == THREAD_INVITE_EVENT_TYPE:
                 state_key = event.get("state_key", "")
                 if ":" in state_key:
-                    thread_id, agent_name = state_key.split(":", 1)
-                    if agent_name not in invited_agents:
-                        invited_agents.append(agent_name)
-                    if agent_name not in thread_invitations:
-                        thread_invitations[agent_name] = []
-                    thread_invitations[agent_name].append(state_key)
+                    from .matrix import ThreadStateKey
+
+                    key = ThreadStateKey.parse(state_key)
+                    if key.agent_name not in invited_agents:
+                        invited_agents.append(key.agent_name)
+                    if key.agent_name not in thread_invitations:
+                        thread_invitations[key.agent_name] = []
+                    thread_invitations[key.agent_name].append(state_key)
 
         if not invited_agents:
             return 0
