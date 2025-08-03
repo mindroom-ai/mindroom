@@ -44,6 +44,10 @@ from .thread_utils import (
 
 logger = get_logger(__name__)
 
+# Constants
+SYNC_TIMEOUT_MS = 30000
+CLEANUP_INTERVAL_SECONDS = 3600
+
 
 @dataclass
 class MessageContext:
@@ -125,7 +129,7 @@ class AgentBot:
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
-        await self.client.sync_forever(timeout=30000, full_state=True)
+        await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
@@ -235,7 +239,12 @@ class AgentBot:
 
     async def _send_response(
         self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None
-    ) -> None:
+    ) -> bool:
+        """Send a response message to a room.
+
+        Returns:
+            True if message was sent successfully, False otherwise.
+        """
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
@@ -257,8 +266,10 @@ class AgentBot:
         if isinstance(response, nio.RoomSendResponse):
             self.response_tracker.mark_responded(reply_to_event_id)
             self.logger.info("Sent response", event_id=response.event_id)
+            return True
         else:
             self.logger.error("Failed to send response", error=str(response))
+            return False
 
     async def _handle_ai_routing(
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
@@ -353,7 +364,7 @@ class AgentBot:
         while self.running:
             try:
                 # Wait for 1 hour between cleanups
-                await asyncio.sleep(3600)
+                await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
                 # Get all rooms the bot is in
                 joined_rooms_response = await self.client.joined_rooms()
@@ -369,7 +380,7 @@ class AgentBot:
                         )
                         total_removed += removed_count
                     except Exception as e:
-                        self.logger.error(f"Failed to cleanup room {room_id}", error=str(e))
+                        self.logger.error("Failed to cleanup room", room_id=room_id, error=str(e))
 
                 if total_removed > 0:
                     self.logger.info(f"Periodic cleanup removed {total_removed} expired agents")
