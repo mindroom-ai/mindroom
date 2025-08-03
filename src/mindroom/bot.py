@@ -8,7 +8,7 @@ from pathlib import Path
 import nio
 
 from .agent_config import load_config
-from .ai import ai_response
+from .ai import ai_response, ai_response_streaming
 from .commands import (
     Command,
     CommandType,
@@ -33,6 +33,7 @@ from .matrix import (
 )
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
+from .streaming import StreamingResponse
 from .thread_invites import ThreadInviteManager
 from .thread_utils import (
     check_agent_mentioned,
@@ -194,8 +195,8 @@ class AgentBot:
         if self.response_tracker.has_responded(event.event_id):
             return
 
-        # Process and send response
-        await self._process_and_respond(room, event, context.thread_id, context.thread_history)
+        # Process and send response (using streaming)
+        await self._process_and_respond_streaming(room, event, context.thread_id, context.thread_history)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -242,6 +243,51 @@ class AgentBot:
         )
 
         await self._send_response(room.room_id, event.event_id, response_text, thread_id)
+
+    async def _process_and_respond_streaming(
+        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
+    ) -> None:
+        self.logger.info("Processing streaming", event_id=event.event_id)
+
+        prompt = event.body.strip()
+        if not prompt:
+            return
+
+        session_id = create_session_id(room.room_id, thread_id)
+        sender_id = self.matrix_id
+
+        # Create streaming response manager
+        streaming = StreamingResponse(
+            room_id=room.room_id,
+            reply_to_event_id=event.event_id,
+            thread_id=thread_id,
+            sender_domain=sender_id.domain,
+        )
+
+        try:
+            # Stream the AI response
+            async for chunk in ai_response_streaming(
+                agent_name=self.agent_name,
+                prompt=prompt,
+                session_id=session_id,
+                storage_path=self.storage_path,
+                thread_history=thread_history,
+                room_id=room.room_id,
+            ):
+                await streaming.update_content(chunk, self.client)
+
+            # Finalize the response
+            await streaming.finalize(self.client)
+
+            # Mark as responded if we sent something
+            if streaming.event_id:
+                self.response_tracker.mark_responded(event.event_id)
+                self.logger.info("Sent streaming response", event_id=streaming.event_id)
+
+        except Exception as e:
+            self.logger.error("Error in streaming response", error=str(e))
+            # Fall back to regular response on error
+            await self._process_and_respond(room, event, thread_id, thread_history)
 
     async def _send_response(
         self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None

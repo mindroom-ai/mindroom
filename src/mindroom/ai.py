@@ -1,5 +1,6 @@
 import functools
 import os
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -139,3 +140,65 @@ async def ai_response(
         # AI models can fail for various reasons (network, API limits, etc)
         logger.exception(f"Error generating AI response: {e}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"
+
+
+async def ai_response_streaming(
+    agent_name: str,
+    prompt: str,
+    session_id: str,
+    storage_path: Path,
+    thread_history: list[dict[str, Any]] | None = None,
+    room_id: str | None = None,
+) -> AsyncIterator[str]:
+    """Generate streaming AI response using Agno's streaming API.
+
+    Args:
+        agent_name: Name of the agent to use
+        prompt: User prompt
+        session_id: Session ID for conversation tracking
+        storage_path: Path for storing agent data
+        thread_history: Optional thread history
+        room_id: Optional room ID for room memory access
+
+    Yields:
+        Chunks of the AI response as they become available
+    """
+    logger.info("AI streaming request", agent=agent_name)
+    full_response = ""
+
+    try:
+        model = get_model_instance()
+        enhanced_prompt = build_memory_enhanced_prompt(prompt, agent_name, storage_path, room_id)
+
+        # Build full prompt with thread history
+        full_prompt = enhanced_prompt
+        if thread_history:
+            context = "Previous conversation in this thread:\n"
+            for msg in thread_history:
+                context += f"{msg['sender']}: {msg['body']}\n"
+            context += "\nCurrent message:\n"
+            full_prompt = context + enhanced_prompt
+
+        # Create agent and use streaming
+        agent = create_agent(agent_name, model, storage_path=storage_path)
+
+        # Use Agno's streaming capability
+        stream_generator = await agent.arun(full_prompt, session_id=session_id, stream=True)
+        async for event in stream_generator:
+            # RunResponseEvent might have different content depending on type
+            if hasattr(event, "content") and event.content:
+                chunk_text = str(event.content)
+                full_response += chunk_text
+                yield chunk_text
+            elif hasattr(event, "response") and hasattr(event.response, "content"):
+                chunk_text = str(event.response.content)
+                full_response += chunk_text
+                yield chunk_text
+
+        # Store the complete response in memory
+        store_conversation_memory(prompt, full_response, agent_name, storage_path, session_id, room_id)
+
+    except Exception as e:
+        logger.exception(f"Error generating streaming AI response: {e}")
+        error_message = f"Sorry, I encountered an error trying to generate a response: {e}"
+        yield error_message

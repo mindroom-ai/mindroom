@@ -150,17 +150,23 @@ class TestAgentBot:
         bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
+    @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
     async def test_agent_bot_on_message_mentioned(
         self,
         mock_fetch_history: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_ai_response_streaming: AsyncMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test agent bot responding to mentions."""
-        mock_ai_response.return_value = "Test response"
+        """Test agent bot responding to mentions with streaming."""
+
+        # Mock streaming response - return an async generator
+        async def mock_streaming_response():
+            yield "Test"
+            yield " response"
+
+        mock_ai_response_streaming.return_value = mock_streaming_response()
         mock_fetch_history.return_value = []
 
         bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"])
@@ -193,8 +199,8 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event)
 
-        # Should call AI and send response
-        mock_ai_response.assert_called_once_with(
+        # Should call AI streaming and send response
+        mock_ai_response_streaming.assert_called_once_with(
             agent_name="calculator",
             prompt="@mindroom_calculator:localhost: What's 2+2?",
             session_id="!test:localhost:$thread_root_id",
@@ -202,7 +208,8 @@ class TestAgentBot:
             thread_history=[],
             room_id="!test:localhost",
         )
-        bot.client.room_send.assert_called_once()
+        # With streaming, we expect 2 calls: initial message + final edit
+        assert bot.client.room_send.call_count == 2
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -222,12 +229,12 @@ class TestAgentBot:
         bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response")
+    @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
     async def test_agent_bot_thread_response(
         self,
         mock_fetch_history: AsyncMock,
-        mock_ai_response: AsyncMock,
+        mock_ai_response_streaming: AsyncMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
@@ -258,7 +265,13 @@ class TestAgentBot:
                 "event_id": "prev2",
             },
         ]
-        mock_ai_response.return_value = "Thread response"
+
+        # Mock streaming response - return an async generator
+        async def mock_streaming_response():
+            yield "Thread"
+            yield " response"
+
+        mock_ai_response_streaming.return_value = mock_streaming_response()
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
@@ -276,11 +289,12 @@ class TestAgentBot:
         await bot._on_message(mock_room, mock_event)
 
         # Should respond as only agent in thread
-        mock_ai_response.assert_called_once()
-        bot.client.room_send.assert_called_once()
+        mock_ai_response_streaming.assert_called_once()
+        # With streaming, we expect 2 calls: initial message + final edit
+        assert bot.client.room_send.call_count == 2
 
         # Reset mocks
-        mock_ai_response.reset_mock()
+        mock_ai_response_streaming.reset_mock()
         bot.client.room_send.reset_mock()
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
@@ -298,7 +312,7 @@ class TestAgentBot:
         await bot._on_message(mock_room, mock_event)
 
         # Should NOT respond when multiple agents in thread
-        mock_ai_response.assert_not_called()
+        mock_ai_response_streaming.assert_not_called()
         bot.client.room_send.assert_not_called()
 
         # Test 3: Thread with multiple agents WITH mention - should respond
@@ -320,7 +334,7 @@ class TestAgentBot:
         await bot._on_message(mock_room, mock_event_with_mention)
 
         # Should respond when explicitly mentioned
-        mock_ai_response.assert_called_once()
+        mock_ai_response_streaming.assert_called_once()
         bot.client.room_send.assert_called_once()
 
     @pytest.mark.asyncio

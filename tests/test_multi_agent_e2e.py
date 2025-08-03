@@ -89,8 +89,12 @@ async def test_agent_processes_direct_mention(
             )
 
             # Mock the AI response
-            with patch("mindroom.bot.ai_response") as mock_ai:
-                mock_ai.return_value = "15% of 200 is 30"
+            with patch("mindroom.bot.ai_response_streaming") as mock_ai:
+
+                async def mock_streaming_response():
+                    yield "15% of 200 is 30"
+
+                mock_ai.return_value = mock_streaming_response()
 
                 # Process the message
                 await bot._on_message(room, message_event)
@@ -147,7 +151,7 @@ async def test_agent_ignores_other_agents(
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
-        with patch("mindroom.bot.ai_response") as mock_ai:
+        with patch("mindroom.bot.ai_response_streaming") as mock_ai:
             await bot._on_message(room, message_event)
 
             # Should not process the message
@@ -198,7 +202,10 @@ async def test_agent_responds_in_threads_based_on_participation(
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
-        with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
+        with (
+            patch("mindroom.bot.ai_response_streaming") as mock_ai,
+            patch("mindroom.bot.fetch_thread_history") as mock_fetch,
+        ):
             # Only this agent in the thread
             mock_fetch.return_value = [
                 {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
@@ -220,7 +227,10 @@ async def test_agent_responds_in_threads_based_on_participation(
         # Test 2: Thread with multiple agents - should NOT respond without mention
         bot.client.room_send.reset_mock()
 
-        with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
+        with (
+            patch("mindroom.bot.ai_response_streaming") as mock_ai,
+            patch("mindroom.bot.fetch_thread_history") as mock_fetch,
+        ):
             # Multiple agents in the thread
             mock_fetch.return_value = [
                 {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
@@ -267,7 +277,10 @@ async def test_agent_responds_in_threads_based_on_participation(
         )
         message_event_with_mention.sender = test_user_id
 
-        with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
+        with (
+            patch("mindroom.bot.ai_response_streaming") as mock_ai,
+            patch("mindroom.bot.fetch_thread_history") as mock_fetch,
+        ):
             mock_fetch.return_value = [
                 {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
                 {
