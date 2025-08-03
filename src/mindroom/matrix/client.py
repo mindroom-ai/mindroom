@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
-import markdown  # type: ignore[import-untyped]
+import markdown
 import nio
 
 from ..logging_config import get_logger

@@ -143,9 +143,17 @@ class AgentBot:
         if room.room_id not in self.rooms:
             return
 
-        # Track agent activity if sender is an agent
+        # Check if this is an edit from another agent - skip to avoid responding to incomplete streaming
         sender_id = MatrixID.parse(event.sender)
-        if sender_id.is_mindroom_domain and sender_id.agent_name:
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        is_edit = relates_to.get("rel_type") == "m.replace"
+
+        if is_edit and sender_id.is_agent:
+            self.logger.debug("Ignoring edit from agent (likely streaming)", sender=event.sender)
+            return
+
+        # Track agent activity if sender is an agent
+        if sender_id.is_agent and sender_id.agent_name:
             # Update activity for the agent in this room (regardless of thread)
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
@@ -447,7 +455,10 @@ class AgentBot:
 
         This handles two cases:
         1. We've already responded to this exact event
-        2. This is an edit of a message we've already responded to
+        2. This is an edit of a message we've already responded to (from users)
+
+        Note: Edits from agents are filtered earlier in _on_message to avoid
+        responding to incomplete streaming messages.
 
         Args:
             event: The Matrix message event
@@ -460,7 +471,7 @@ class AgentBot:
         is_edit = relates_to.get("rel_type") == "m.replace"
 
         if is_edit:
-            # For edits, check if we already responded to the original message
+            # For edits from users, check if we already responded to the original message
             original_event_id = relates_to.get("event_id")
             if original_event_id and self.response_tracker.has_responded(original_event_id):
                 self.logger.debug("Ignoring edit of already-responded message", original_event_id=original_event_id)

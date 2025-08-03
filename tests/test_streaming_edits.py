@@ -176,3 +176,143 @@ class TestStreamingEdits:
         await bot._on_message(mock_room, new_event)
         assert bot.client.room_send.call_count == 1
         assert mock_ai_response.call_count == 1
+
+    @pytest.mark.asyncio
+    @patch("mindroom.bot.ai_response")
+    async def test_agent_ignores_all_edits_from_agents(
+        self,
+        mock_ai_response: AsyncMock,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Test that agents ignore ALL edits from other agents, even first-time mentions."""
+        # Set up bot
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
+        bot.client = AsyncMock()
+
+        # Mock successful room_send response
+        mock_send_response = MagicMock()
+        mock_send_response.__class__ = nio.RoomSendResponse
+        bot.client.room_send.return_value = mock_send_response
+
+        # Initialize response tracker and thread manager
+        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
+        bot.thread_invite_manager = ThreadInviteManager(bot.client)
+
+        # Mock AI response
+        mock_ai_response.return_value = "I can help with that!"
+
+        # Set up room
+        mock_room = MagicMock()
+        mock_room.room_id = "!test:localhost"
+
+        # Initial message from another agent WITHOUT mentioning calculator
+        initial_event = MagicMock()
+        initial_event.sender = "@mindroom_helper:localhost"  # Another agent
+        initial_event.body = "Let me calculate something..."
+        initial_event.event_id = "$initial123"
+        initial_event.source = {
+            "content": {
+                "body": "Let me calculate something...",
+            }
+        }
+
+        # Process initial message - calculator should NOT respond (not mentioned)
+        await bot._on_message(mock_room, initial_event)
+        assert bot.client.room_send.call_count == 0
+        assert mock_ai_response.call_count == 0
+
+        # Edit from agent that NOW mentions calculator
+        edit_event = MagicMock()
+        edit_event.sender = "@mindroom_helper:localhost"  # Same agent
+        edit_event.body = "* Let me calculate something... @mindroom_calculator:localhost can you help?"
+        edit_event.event_id = "$edit1"
+        edit_event.source = {
+            "content": {
+                "body": "* Let me calculate something... @mindroom_calculator:localhost can you help?",
+                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$initial123",
+                },
+                "m.new_content": {
+                    "body": "Let me calculate something... @mindroom_calculator:localhost can you help?",
+                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                },
+            }
+        }
+
+        # Process edit - calculator should STILL NOT respond (it's an edit from an agent)
+        await bot._on_message(mock_room, edit_event)
+        assert bot.client.room_send.call_count == 0
+        assert mock_ai_response.call_count == 0
+
+    @pytest.mark.asyncio
+    @patch("mindroom.bot.ai_response")
+    async def test_agent_responds_to_user_edits_with_new_mentions(
+        self,
+        mock_ai_response: AsyncMock,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Test that agents DO respond to user edits that add new mentions."""
+        # Set up bot
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
+        bot.client = AsyncMock()
+
+        # Mock successful room_send response
+        mock_send_response = MagicMock()
+        mock_send_response.__class__ = nio.RoomSendResponse
+        bot.client.room_send.return_value = mock_send_response
+
+        # Initialize response tracker and thread manager
+        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
+        bot.thread_invite_manager = ThreadInviteManager(bot.client)
+
+        # Mock AI response
+        mock_ai_response.return_value = "I can help with that!"
+
+        # Set up room
+        mock_room = MagicMock()
+        mock_room.room_id = "!test:localhost"
+
+        # Initial message from user WITHOUT mentioning calculator
+        initial_event = MagicMock()
+        initial_event.sender = "@user:localhost"  # Regular user
+        initial_event.body = "I need some help..."
+        initial_event.event_id = "$initial123"
+        initial_event.source = {
+            "content": {
+                "body": "I need some help...",
+            }
+        }
+
+        # Process initial message - calculator should NOT respond (not mentioned)
+        await bot._on_message(mock_room, initial_event)
+        assert bot.client.room_send.call_count == 0
+        assert mock_ai_response.call_count == 0
+
+        # Edit from user that NOW mentions calculator
+        edit_event = MagicMock()
+        edit_event.sender = "@user:localhost"  # Same user
+        edit_event.body = "* I need some help... @mindroom_calculator:localhost what's 2+2?"
+        edit_event.event_id = "$edit1"
+        edit_event.source = {
+            "content": {
+                "body": "* I need some help... @mindroom_calculator:localhost what's 2+2?",
+                "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                "m.relates_to": {
+                    "rel_type": "m.replace",
+                    "event_id": "$initial123",
+                },
+                "m.new_content": {
+                    "body": "I need some help... @mindroom_calculator:localhost what's 2+2?",
+                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                },
+            }
+        }
+
+        # Process edit - calculator SHOULD respond (it's a user edit with new mention)
+        await bot._on_message(mock_room, edit_event)
+        assert bot.client.room_send.call_count == 1
+        assert mock_ai_response.call_count == 1
