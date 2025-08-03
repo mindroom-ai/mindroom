@@ -137,6 +137,12 @@ class AgentBot:
         if not await has_room_access(room.room_id, self.agent_name, self.rooms):
             return
 
+        # Track agent activity if sender is an agent
+        if "@" in event.sender and ":mindroom.space" in event.sender:
+            sender_agent_name = event.sender.split("@")[1].split(":")[0]
+            # Update activity for the agent in this room (regardless of thread)
+            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
+
         # Handle commands (only first agent alphabetically to avoid duplicates)
         available_agents = get_available_agents_in_room(room)
         if should_route_to_agent(self.agent_name, available_agents):
