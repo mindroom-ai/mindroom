@@ -61,12 +61,6 @@ class MessageContext:
     is_invited_to_thread: bool
 
 
-def _should_process_message(event_sender: str, agent_user_id: str) -> bool:
-    # Process all messages except our own
-    # The mention logic will determine if we should respond
-    return event_sender != agent_user_id
-
-
 @dataclass
 class AgentBot:
     """Represents a single agent bot with its own Matrix account."""
@@ -140,7 +134,8 @@ class AgentBot:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        if not _should_process_message(event.sender, self.agent_user.user_id):
+        # Process all messages except our own
+        if event.sender == self.agent_user.user_id:
             return
 
         if room.room_id not in self.rooms:
