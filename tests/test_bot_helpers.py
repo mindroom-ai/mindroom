@@ -111,12 +111,11 @@ class TestBotHelpers:
 
     def test_should_route_to_agent(self):
         """Test should_route_to_agent function."""
-        # Empty list
-        assert not should_route_to_agent("calculator", [])
-
-        # First agent should route
-        assert should_route_to_agent("calculator", ["calculator", "general", "research"])
+        # Only router agent should route
+        assert should_route_to_agent("router", [])
+        assert should_route_to_agent("router", ["calculator", "general", "research"])
 
         # Other agents should not route
+        assert not should_route_to_agent("calculator", ["calculator", "general", "research"])
         assert not should_route_to_agent("general", ["calculator", "general", "research"])
         assert not should_route_to_agent("research", ["calculator", "general", "research"])

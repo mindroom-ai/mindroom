@@ -39,9 +39,9 @@ from .thread_invites import ThreadInviteManager
 from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
+    get_agents_in_thread,
     get_available_agents_in_room,
     should_agent_respond,
-    should_route_to_agent,
 )
 
 logger = get_logger(__name__)
@@ -148,9 +148,8 @@ class AgentBot:
         if sender_id.is_agent and sender_id.agent_name:
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
-        # Handle commands (only first agent alphabetically to avoid duplicates)
-        available_agents = get_available_agents_in_room(room)
-        if should_route_to_agent(self.agent_name, available_agents):
+        # Handle commands (only router agent handles commands to avoid duplicates)
+        if self.agent_name == "router":
             command = command_parser.parse(event.body)
             if command:
                 await self._handle_command(room, event, command)
@@ -169,6 +168,20 @@ class AgentBot:
             self.logger.debug("Ignoring mention from agent - streaming not complete", sender=event.sender)
             return
 
+        # Router agent only routes, never participates in conversations
+        if self.agent_name == "router":
+            # Router should handle routing when no specific agent is mentioned
+            if not context.mentioned_agents:
+                # For threads, only route if no agent has participated yet
+                if context.is_thread:
+                    agents_in_thread = get_agents_in_thread(context.thread_history)
+                    if not agents_in_thread:
+                        await self._handle_ai_routing(room, event, context.thread_history)
+                else:
+                    # For non-thread messages, always route
+                    await self._handle_ai_routing(room, event, context.thread_history)
+            return
+
         # Determine if this agent should respond to the message
         decision = should_agent_respond(
             self.agent_name,
@@ -184,9 +197,9 @@ class AgentBot:
         if decision.should_respond and not context.am_i_mentioned:
             self.logger.info("Will respond: only agent in thread")
 
-        # Handle routing if needed
+        # For non-router agents, they shouldn't handle routing anymore
         if decision.use_router:
-            await self._handle_ai_routing(room, event, context.thread_history)
+            # Router agent will handle this
             return
 
         if not decision.should_respond:
@@ -327,8 +340,13 @@ class AgentBot:
     async def _handle_ai_routing(
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
     ) -> None:
+        # Only router agent should handle routing
+        if self.agent_name != "router":
+            return
+
         available_agents = get_available_agents_in_room(room)
-        if not should_route_to_agent(self.agent_name, available_agents):
+        if not available_agents:
+            self.logger.debug("No available agents to route to")
             return
 
         self.logger.info("Handling AI routing", event_id=event.event_id)
@@ -345,17 +363,17 @@ class AgentBot:
         if not suggested_agent:
             return
 
-        response_text = "could you help with this?"
+        # Router mentions the suggested agent and asks them to help
+        response_text = f"@{suggested_agent} could you help with this? ✓"
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
-        full_message = f"@{suggested_agent} {response_text} ✓"
 
         # If no thread exists, create one with the original message as root
         if not thread_event_id:
             thread_event_id = event.event_id
 
         content = create_mention_content_from_text(
-            full_message,
+            response_text,
             sender_domain=sender_domain,
             thread_event_id=thread_event_id,
             reply_to_event_id=event.event_id,

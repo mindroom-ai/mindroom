@@ -29,13 +29,17 @@ def create_session_id(room_id: str, thread_id: str | None) -> str:
 
 
 def get_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
-    """Get list of unique agents that have participated in thread."""
+    """Get list of unique agents that have participated in thread.
+
+    Note: Router agent is excluded from the participant list as it's not
+    a conversation participant.
+    """
     agents = set()
 
     for msg in thread_history:
         sender = msg.get("sender", "")
         agent_name = extract_agent_name(sender)
-        if agent_name:
+        if agent_name and agent_name != "router":
             agents.add(agent_name)
 
     return sorted(list(agents))
@@ -55,13 +59,16 @@ def get_mentioned_agents(mentions: dict[str, Any]) -> list[str]:
 
 
 def get_available_agents_in_room(room: Any) -> list[str]:
-    """Get list of available agents in a room."""
+    """Get list of available agents in a room.
+
+    Note: Router agent is excluded as it's not a regular conversation participant.
+    """
     agents = []
     room_members = list(room.users.keys()) if room.users else []
 
     for member_id in room_members:
         agent_name = extract_agent_name(member_id)
-        if agent_name:
+        if agent_name and agent_name != "router":
             agents.append(agent_name)
 
     return sorted(agents)
@@ -138,9 +145,6 @@ def should_agent_respond(
 def should_route_to_agent(agent_name: str, available_agents: list[str]) -> bool:
     """Determine if this agent should handle routing.
 
-    Only one agent should handle routing to avoid duplicates.
-    We use the first agent alphabetically as a deterministic choice.
+    Only the router agent should handle routing decisions.
     """
-    if not available_agents:
-        return False
-    return available_agents[0] == agent_name
+    return agent_name == "router"

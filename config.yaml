@@ -30,6 +30,31 @@ models:
   #   id: "claude-3-opus-20240229"
 
 agents:
+  # Router agent for intelligent message routing
+  router:
+    display_name: "RouterAgent"
+    role: "Route messages to the most appropriate agent based on context and expertise."
+    tools: []
+    instructions:
+      - "Analyze incoming messages and determine which agent is best suited to respond."
+      - "Consider the context, required tools, and agent specializations."
+      - "Never engage in the actual conversation - only route messages."
+      - "Always add a completion marker (✓) to routing messages."
+    rooms:
+      - lobby    # Main coordination room for all agents
+      - help     # General help and assistance
+      - dev      # Development and programming
+      - research # Research collaboration
+      - science  # Science and math collaboration
+      - news     # Current events
+      - finance  # Financial analysis
+      - analysis # Data analysis
+      - business # Business discussions
+      - docs     # Documentation
+      - automation # Automation and scripting
+      - ops      # Operations and maintenance
+    num_history_runs: 3
+
   # General conversation agent
   general:
     display_name: "GeneralAgent"
