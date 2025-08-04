@@ -178,7 +178,7 @@ class AgentBot:
                     if not agents_in_thread:
                         await self._handle_ai_routing(room, event, context.thread_history)
                 else:
-                    # For non-thread messages, always route
+                    # For non-thread messages (when no agents are mentioned), always route
                     await self._handle_ai_routing(room, event, context.thread_history)
             return
 
