@@ -230,6 +230,24 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
         return set()
 
 
+def _extract_message_data(event: nio.RoomMessageText) -> dict[str, Any]:
+    """Extract message data from a RoomMessageText event.
+
+    Args:
+        event: The RoomMessageText event to extract data from
+
+    Returns:
+        Dictionary containing message data
+    """
+    return {
+        "sender": event.sender,
+        "body": event.body,
+        "timestamp": event.server_timestamp,
+        "event_id": event.event_id,
+        "content": event.source.get("content", {}),
+    }
+
+
 async def fetch_thread_history(
     client: nio.AsyncClient,
     room_id: str,
@@ -272,30 +290,14 @@ async def fetch_thread_history(
             if isinstance(event, nio.RoomMessageText):
                 # Check if this is the thread root message
                 if event.event_id == thread_id and not root_message_found:
-                    messages.append(
-                        {
-                            "sender": event.sender,
-                            "body": event.body,
-                            "timestamp": event.server_timestamp,
-                            "event_id": event.event_id,
-                            "content": event.source.get("content", {}),
-                        },
-                    )
+                    messages.append(_extract_message_data(event))
                     root_message_found = True
                     thread_messages_found += 1
                 else:
                     # Check if this is a reply in the thread
                     relates_to = event.source.get("content", {}).get("m.relates_to", {})
                     if relates_to.get("rel_type") == "m.thread" and relates_to.get("event_id") == thread_id:
-                        messages.append(
-                            {
-                                "sender": event.sender,
-                                "body": event.body,
-                                "timestamp": event.server_timestamp,
-                                "event_id": event.event_id,
-                                "content": event.source.get("content", {}),
-                            },
-                        )
+                        messages.append(_extract_message_data(event))
                         thread_messages_found += 1
 
         # Exit if we've reached the end or no more relevant messages
