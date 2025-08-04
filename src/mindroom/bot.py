@@ -1,6 +1,7 @@
 """Multi-agent bot implementation where each agent has its own Matrix user account."""
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 import nio
 
 from .agent_config import load_config
-from .ai import ai_response
+from .ai import ai_response, ai_response_streaming
 from .commands import (
     Command,
     CommandType,
@@ -33,6 +34,7 @@ from .matrix import (
 )
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
+from .streaming import StreamingResponse
 from .thread_invites import ThreadInviteManager
 from .thread_utils import (
     check_agent_mentioned,
@@ -58,12 +60,7 @@ class MessageContext:
     thread_id: str | None
     thread_history: list[dict]
     is_invited_to_thread: bool
-
-
-def _should_process_message(event_sender: str, agent_user_id: str) -> bool:
-    # Process all messages except our own
-    # The mention logic will determine if we should respond
-    return event_sender != agent_user_id
+    mentioned_agents: list[str]
 
 
 @dataclass
@@ -78,6 +75,7 @@ class AgentBot:
     response_tracker: ResponseTracker = field(init=False)
     thread_invite_manager: ThreadInviteManager = field(init=False)
     invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
+    enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
 
     @property
     def agent_name(self) -> str:
@@ -139,16 +137,15 @@ class AgentBot:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        if not _should_process_message(event.sender, self.agent_user.user_id):
+        if event.sender == self.agent_user.user_id:
             return
 
         if room.room_id not in self.rooms:
             return
 
-        # Track agent activity if sender is an agent
         sender_id = MatrixID.parse(event.sender)
-        if sender_id.is_mindroom_domain and sender_id.agent_name:
-            # Update activity for the agent in this room (regardless of thread)
+
+        if sender_id.is_agent and sender_id.agent_name:
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
         # Handle commands (only first agent alphabetically to avoid duplicates)
@@ -168,6 +165,10 @@ class AgentBot:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
+        if sender_is_agent and context.am_i_mentioned and not event.body.rstrip().endswith("✓"):
+            self.logger.debug("Ignoring mention from agent - streaming not complete", sender=event.sender)
+            return
+
         # Determine if this agent should respond to the message
         decision = should_agent_respond(
             self.agent_name,
@@ -177,6 +178,7 @@ class AgentBot:
             room.room_id,
             self.rooms,
             context.thread_history,
+            context.mentioned_agents,
         )
 
         if decision.should_respond and not context.am_i_mentioned:
@@ -187,15 +189,17 @@ class AgentBot:
             await self._handle_ai_routing(room, event, context.thread_history)
             return
 
-        # Exit if not responding
         if not decision.should_respond:
             return
 
-        if self.response_tracker.has_responded(event.event_id):
+        if self._should_skip_duplicate_response(event):
             return
 
         # Process and send response
-        await self._process_and_respond(room, event, context.thread_id, context.thread_history)
+        if self.enable_streaming:
+            await self._process_and_respond_streaming(room, event, context.thread_id, context.thread_history)
+        else:
+            await self._process_and_respond(room, event, context.thread_id, context.thread_history)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -219,6 +223,7 @@ class AgentBot:
             thread_id=thread_id,
             thread_history=thread_history,
             is_invited_to_thread=is_invited_to_thread,
+            mentioned_agents=mentioned_agents,
         )
 
     async def _process_and_respond(
@@ -243,6 +248,45 @@ class AgentBot:
 
         await self._send_response(room.room_id, event.event_id, response_text, thread_id)
 
+    async def _process_and_respond_streaming(
+        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
+    ) -> None:
+        self.logger.info("Processing streaming", event_id=event.event_id)
+
+        prompt = event.body.strip()
+        if not prompt:
+            return
+
+        session_id = create_session_id(room.room_id, thread_id)
+        sender_id = self.matrix_id
+
+        streaming = StreamingResponse(
+            room_id=room.room_id,
+            reply_to_event_id=event.event_id,
+            thread_id=thread_id,
+            sender_domain=sender_id.domain,
+        )
+
+        try:
+            async for chunk in ai_response_streaming(
+                agent_name=self.agent_name,
+                prompt=prompt,
+                session_id=session_id,
+                storage_path=self.storage_path,
+                thread_history=thread_history,
+                room_id=room.room_id,
+            ):
+                await streaming.update_content(chunk, self.client)
+
+            await streaming.finalize(self.client)
+
+            if streaming.event_id:
+                self.response_tracker.mark_responded(event.event_id)
+                self.logger.info("Sent streaming response", event_id=streaming.event_id)
+
+        except Exception as e:
+            self.logger.error("Error in streaming response", error=str(e))
+
     async def _send_response(
         self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None
     ) -> bool:
@@ -256,6 +300,9 @@ class AgentBot:
 
         # Always ensure we have a thread_id - use the original message as thread root if needed
         effective_thread_id = thread_id if thread_id else reply_to_event_id
+
+        if not response_text.rstrip().endswith("✓"):
+            response_text += " ✓"
 
         content = create_mention_content_from_text(
             response_text,
@@ -301,7 +348,7 @@ class AgentBot:
         response_text = "could you help with this?"
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
-        full_message = f"@{suggested_agent} {response_text}"
+        full_message = f"@{suggested_agent} {response_text} ✓"
 
         # If no thread exists, create one with the original message as root
         if not thread_event_id:
@@ -396,6 +443,36 @@ class AgentBot:
             except Exception as e:
                 self.logger.error("Error in periodic cleanup", error=str(e))
 
+    def _should_skip_duplicate_response(self, event: nio.RoomMessageText) -> bool:
+        """Check if we should skip responding to avoid duplicates.
+
+        This handles two cases:
+        1. We've already responded to this exact event
+        2. This is an edit of a message we've already responded to (from users)
+
+        Note: Edits from agents are filtered earlier in _on_message to avoid
+        responding to incomplete streaming messages.
+
+        Args:
+            event: The Matrix message event
+
+        Returns:
+            True if we should skip processing this message
+        """
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        is_edit = relates_to.get("rel_type") == "m.replace"
+
+        if is_edit:
+            original_event_id = relates_to.get("event_id")
+            if original_event_id and self.response_tracker.has_responded(original_event_id):
+                self.logger.debug("Ignoring edit of already-responded message", original_event_id=original_event_id)
+                return True
+        else:
+            if self.response_tracker.has_responded(event.event_id):
+                return True
+
+        return False
+
 
 @dataclass
 class MultiAgentOrchestrator:
@@ -422,7 +499,9 @@ class MultiAgentOrchestrator:
                 resolved_room = room_aliases.get(room, room)
                 resolved_rooms.append(resolved_room)
 
-            bot = AgentBot(agent_user, self.storage_path, rooms=resolved_rooms)
+            enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+
+            bot = AgentBot(agent_user, self.storage_path, rooms=resolved_rooms, enable_streaming=enable_streaming)
             self.agent_bots[agent_name] = bot
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))

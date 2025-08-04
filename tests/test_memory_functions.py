@@ -132,7 +132,7 @@ class TestMemoryFunctions:
 
         context = format_memories_as_context(memories, "agent")
 
-        expected = "Relevant agent memories:\n- First memory\n- Second memory"
+        expected = "[Automatically extracted agent memories - may not be relevant to current context]\nPrevious agent memories that might be related:\n- First memory\n- Second memory"
         assert context == expected
 
     def test_format_memories_as_context_empty(self):
@@ -152,9 +152,9 @@ class TestMemoryFunctions:
             enhanced = build_memory_enhanced_prompt("What is 3+3?", "calculator", storage_path, room_id="!room:server")
 
             # Should include both contexts
-            assert "Relevant agent memories:" in enhanced
+            assert "[Automatically extracted agent memories - may not be relevant to current context]" in enhanced
             assert "I previously calculated 2+2=4" in enhanced
-            assert "Relevant room memories:" in enhanced
+            assert "[Automatically extracted room memories - may not be relevant to current context]" in enhanced
             assert "We discussed math earlier" in enhanced
             assert "What is 3+3?" in enhanced
 

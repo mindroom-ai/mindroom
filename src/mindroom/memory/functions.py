@@ -149,7 +149,10 @@ def format_memories_as_context(memories: list[MemoryResult], context_type: str =
     if not memories:
         return ""
 
-    context_parts = [f"Relevant {context_type} memories:"]
+    context_parts = [
+        f"[Automatically extracted {context_type} memories - may not be relevant to current context]",
+        f"Previous {context_type} memories that might be related:",
+    ]
     for memory in memories:
         content = memory.get("memory", "")
         context_parts.append(f"- {content}")

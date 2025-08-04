@@ -4,7 +4,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
-import markdown  # type: ignore[import-untyped]
+import markdown
 import nio
 
 from ..logging_config import get_logger
@@ -230,6 +230,17 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
         return set()
 
 
+def _extract_message_data(event: nio.RoomMessageText) -> dict[str, Any]:
+    """Extract message data from a RoomMessageText event."""
+    return {
+        "sender": event.sender,
+        "body": event.body,
+        "timestamp": event.server_timestamp,
+        "event_id": event.event_id,
+        "content": event.source.get("content", {}),
+    }
+
+
 async def fetch_thread_history(
     client: nio.AsyncClient,
     room_id: str,
@@ -247,6 +258,7 @@ async def fetch_thread_history(
     """
     messages = []
     from_token = None
+    root_message_found = False
 
     while True:
         response = await client.room_messages(
@@ -267,20 +279,17 @@ async def fetch_thread_history(
 
         thread_messages_found = 0
         for event in response.chunk:
-            if hasattr(event, "source") and event.source.get("type") == "m.room.message":
-                relates_to = event.source.get("content", {}).get("m.relates_to", {})
-                if relates_to.get("rel_type") == "m.thread" and relates_to.get("event_id") == thread_id:
-                    messages.append(
-                        {
-                            "sender": event.sender,
-                            "body": getattr(event, "body", ""),
-                            "timestamp": event.server_timestamp,
-                            "event_id": event.event_id,
-                        },
-                    )
+            if isinstance(event, nio.RoomMessageText):
+                if event.event_id == thread_id and not root_message_found:
+                    messages.append(_extract_message_data(event))
+                    root_message_found = True
                     thread_messages_found += 1
+                else:
+                    relates_to = event.source.get("content", {}).get("m.relates_to", {})
+                    if relates_to.get("rel_type") == "m.thread" and relates_to.get("event_id") == thread_id:
+                        messages.append(_extract_message_data(event))
+                        thread_messages_found += 1
 
-        # Exit if we've reached the end or no more relevant messages
         if not response.end or thread_messages_found == 0:
             break
         from_token = response.end

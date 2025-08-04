@@ -85,6 +85,7 @@ def should_agent_respond(
     room_id: str,
     configured_rooms: list[str],
     thread_history: list[dict],
+    mentioned_agents: list[str] | None = None,
 ) -> ResponseDecision:
     """Determine if an agent should respond to a message.
 
@@ -100,8 +101,11 @@ def should_agent_respond(
             if am_i_mentioned:
                 # Respond directly if mentioned
                 should_respond = True
+            elif mentioned_agents:
+                # Some other agent is mentioned - don't use router
+                pass
             else:
-                # Use router to pick an agent
+                # No agents mentioned - use router to pick an agent
                 use_router = True
         return ResponseDecision(should_respond, use_router)
 

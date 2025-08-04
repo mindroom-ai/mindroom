@@ -89,8 +89,12 @@ async def test_agent_processes_direct_mention(
             )
 
             # Mock the AI response
-            with patch("mindroom.bot.ai_response") as mock_ai:
-                mock_ai.return_value = "15% of 200 is 30"
+            with patch("mindroom.bot.ai_response_streaming") as mock_ai:
+
+                async def mock_streaming_response():
+                    yield "15% of 200 is 30"
+
+                mock_ai.return_value = mock_streaming_response()
 
                 # Process the message
                 await bot._on_message(room, message_event)
@@ -105,11 +109,12 @@ async def test_agent_processes_direct_mention(
                     room_id=test_room_id,
                 )
 
-                # Verify message was sent
-                bot.client.room_send.assert_called_once()
+                # Verify message was sent (streaming makes 2 calls)
+                assert bot.client.room_send.call_count == 2
                 call_args = bot.client.room_send.call_args
                 assert call_args[1]["room_id"] == test_room_id
-                assert call_args[1]["content"]["body"] == "15% of 200 is 30"
+                # Since streaming is enabled, the final message will have the completion marker
+                assert call_args[1]["content"]["body"] == "15% of 200 is 30 ✓"
 
 
 @pytest.mark.asyncio
@@ -147,7 +152,7 @@ async def test_agent_ignores_other_agents(
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
-        with patch("mindroom.bot.ai_response") as mock_ai:
+        with patch("mindroom.bot.ai_response_streaming") as mock_ai:
             await bot._on_message(room, message_event)
 
             # Should not process the message
@@ -171,7 +176,7 @@ async def test_agent_responds_in_threads_based_on_participation(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id])
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
         await bot.start()
 
         # Test 1: Thread with only this agent - should respond without mention
@@ -197,8 +202,13 @@ async def test_agent_responds_in_threads_based_on_participation(
         message_event.sender = test_user_id
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
+        # Mock room users to include the agent
+        room.users = {mock_calculator_agent.user_id: MagicMock()}
 
-        with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
+        with (
+            patch("mindroom.bot.ai_response") as mock_ai,
+            patch("mindroom.bot.fetch_thread_history") as mock_fetch,
+        ):
             # Only this agent in the thread
             mock_fetch.return_value = [
                 {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
@@ -209,18 +219,24 @@ async def test_agent_responds_in_threads_based_on_participation(
                     "event_id": "msg2",
                 },
             ]
+
+            # Mock non-streaming response
             mock_ai.return_value = "20% of 300 is 60"
 
             await bot._on_message(room, message_event)
 
             # Should process the message as only agent in thread
             mock_ai.assert_called_once()
-            bot.client.room_send.assert_called_once()
+            # Non-streaming makes 1 call
+            assert bot.client.room_send.call_count == 1
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
         bot.client.room_send.reset_mock()
 
-        with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
+        with (
+            patch("mindroom.bot.ai_response") as mock_ai,
+            patch("mindroom.bot.fetch_thread_history") as mock_fetch,
+        ):
             # Multiple agents in the thread
             mock_fetch.return_value = [
                 {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
@@ -267,7 +283,10 @@ async def test_agent_responds_in_threads_based_on_participation(
         )
         message_event_with_mention.sender = test_user_id
 
-        with patch("mindroom.bot.ai_response") as mock_ai, patch("mindroom.bot.fetch_thread_history") as mock_fetch:
+        with (
+            patch("mindroom.bot.ai_response") as mock_ai,
+            patch("mindroom.bot.fetch_thread_history") as mock_fetch,
+        ):
             mock_fetch.return_value = [
                 {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
                 {
@@ -283,6 +302,8 @@ async def test_agent_responds_in_threads_based_on_participation(
                     "event_id": "msg3",
                 },
             ]
+
+            # Mock non-streaming response for mention case
             mock_ai.return_value = "20% of 300 is 60"
 
             await bot._on_message(room, message_event_with_mention)
@@ -297,8 +318,8 @@ async def test_agent_responds_in_threads_based_on_participation(
                 room_id=test_room_id,
             )
 
-            # Verify thread response format
-            bot.client.room_send.assert_called_once()
+            # Verify thread response format (non-streaming makes 1 call)
+            assert bot.client.room_send.call_count == 1
             sent_content = bot.client.room_send.call_args[1]["content"]
             assert sent_content["m.relates_to"]["rel_type"] == "m.thread"
             assert sent_content["m.relates_to"]["event_id"] == thread_root_id
