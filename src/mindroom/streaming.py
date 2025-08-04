@@ -35,7 +35,6 @@ class StreamingResponse:
 
     async def finalize(self, client: nio.AsyncClient) -> None:
         """Send final message update with completion marker."""
-        # Add completion marker if not already present
         if not self.accumulated_text.endswith(" ✓"):
             self.accumulated_text += " ✓"
         await self._send_or_edit_message(client)

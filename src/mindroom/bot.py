@@ -137,19 +137,15 @@ class AgentBot:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        # Process all messages except our own
         if event.sender == self.agent_user.user_id:
             return
 
         if room.room_id not in self.rooms:
             return
 
-        # Parse sender information
         sender_id = MatrixID.parse(event.sender)
 
-        # Track agent activity if sender is an agent
         if sender_id.is_agent and sender_id.agent_name:
-            # Update activity for the agent in this room (regardless of thread)
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
         # Handle commands (only first agent alphabetically to avoid duplicates)
@@ -169,7 +165,6 @@ class AgentBot:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
-        # If we're mentioned by another agent, check if their message is complete
         if sender_is_agent and context.am_i_mentioned and not event.body.rstrip().endswith("✓"):
             self.logger.debug("Ignoring mention from agent - streaming not complete", sender=event.sender)
             return
@@ -194,11 +189,9 @@ class AgentBot:
             await self._handle_ai_routing(room, event, context.thread_history)
             return
 
-        # Exit if not responding
         if not decision.should_respond:
             return
 
-        # Skip if we've already handled this message or its original version
         if self._should_skip_duplicate_response(event):
             return
 
@@ -267,7 +260,6 @@ class AgentBot:
         session_id = create_session_id(room.room_id, thread_id)
         sender_id = self.matrix_id
 
-        # Create streaming response manager
         streaming = StreamingResponse(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
@@ -276,7 +268,6 @@ class AgentBot:
         )
 
         try:
-            # Stream the AI response
             async for chunk in ai_response_streaming(
                 agent_name=self.agent_name,
                 prompt=prompt,
@@ -287,17 +278,14 @@ class AgentBot:
             ):
                 await streaming.update_content(chunk, self.client)
 
-            # Finalize the response
             await streaming.finalize(self.client)
 
-            # Mark as responded if we sent something
             if streaming.event_id:
                 self.response_tracker.mark_responded(event.event_id)
                 self.logger.info("Sent streaming response", event_id=streaming.event_id)
 
         except Exception as e:
             self.logger.error("Error in streaming response", error=str(e))
-            # Don't fallback to avoid duplicate responses
 
     async def _send_response(
         self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None
@@ -313,7 +301,6 @@ class AgentBot:
         # Always ensure we have a thread_id - use the original message as thread root if needed
         effective_thread_id = thread_id if thread_id else reply_to_event_id
 
-        # Add completion marker for non-streaming messages
         if not response_text.rstrip().endswith("✓"):
             response_text += " ✓"
 
@@ -361,7 +348,6 @@ class AgentBot:
         response_text = "could you help with this?"
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
-        # Add completion marker so mentioned agent will respond
         full_message = f"@{suggested_agent} {response_text} ✓"
 
         # If no thread exists, create one with the original message as root
@@ -473,18 +459,15 @@ class AgentBot:
         Returns:
             True if we should skip processing this message
         """
-        # Check if this is an edit event
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
         is_edit = relates_to.get("rel_type") == "m.replace"
 
         if is_edit:
-            # For edits from users, check if we already responded to the original message
             original_event_id = relates_to.get("event_id")
             if original_event_id and self.response_tracker.has_responded(original_event_id):
                 self.logger.debug("Ignoring edit of already-responded message", original_event_id=original_event_id)
                 return True
         else:
-            # For original messages, check if we already responded to this event
             if self.response_tracker.has_responded(event.event_id):
                 return True
 
@@ -516,7 +499,6 @@ class MultiAgentOrchestrator:
                 resolved_room = room_aliases.get(room, room)
                 resolved_rooms.append(resolved_room)
 
-            # Check environment variable for streaming preference
             enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
 
             bot = AgentBot(agent_user, self.storage_path, rooms=resolved_rooms, enable_streaming=enable_streaming)
