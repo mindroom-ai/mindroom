@@ -184,7 +184,7 @@ class AgentBot:
             return
 
         # Determine if this agent should respond to the message
-        decision = should_agent_respond(
+        should_respond = should_agent_respond(
             self.agent_name,
             context.am_i_mentioned,
             context.is_thread,
@@ -195,15 +195,10 @@ class AgentBot:
             context.mentioned_agents,
         )
 
-        if decision.should_respond and not context.am_i_mentioned:
+        if should_respond and not context.am_i_mentioned:
             self.logger.info("Will respond: only agent in thread")
 
-        # For non-router agents, they shouldn't handle routing anymore
-        if decision.use_router:
-            # Router agent will handle this
-            return
-
-        if not decision.should_respond:
+        if not should_respond:
             return
 
         if self._should_skip_duplicate_response(event):

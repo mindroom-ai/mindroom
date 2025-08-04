@@ -81,6 +81,12 @@ def _build_full_prompt(prompt: str, thread_history: list[dict[str, Any]] | None 
     return context + prompt
 
 
+def _build_cache_key(agent: Agent, full_prompt: str, session_id: str) -> str:
+    model = agent.model
+    assert model is not None, "Agent should always have a model in our implementation"
+    return f"{agent.name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+
+
 async def _cached_agent_run(
     agent: Agent,
     full_prompt: str,
@@ -95,7 +101,7 @@ async def _cached_agent_run(
 
     model = agent.model
     assert model is not None, "Agent should always have a model in our implementation"
-    cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+    cache_key = _build_cache_key(agent, full_prompt, session_id)
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         logger.info("Cache hit", agent=agent_name)
@@ -115,7 +121,7 @@ async def _prepare_agent_and_prompt(
     storage_path: Path,
     room_id: str | None,
     thread_history: list[dict[str, Any]] | None = None,
-) -> tuple[Agent, str, str]:
+) -> tuple[Agent, str]:
     """Prepare agent and full prompt for AI processing.
 
     Returns:
@@ -126,7 +132,7 @@ async def _prepare_agent_and_prompt(
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     agent = create_agent(agent_name, model, storage_path=storage_path)
-    return agent, full_prompt, enhanced_prompt
+    return agent, full_prompt
 
 
 async def ai_response(
@@ -152,9 +158,7 @@ async def ai_response(
     """
     logger.info("AI request", agent=agent_name)
     try:
-        agent, full_prompt, enhanced_prompt = await _prepare_agent_and_prompt(
-            agent_name, prompt, storage_path, room_id, thread_history
-        )
+        agent, full_prompt = await _prepare_agent_and_prompt(agent_name, prompt, storage_path, room_id, thread_history)
 
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
         response_text = response.content or ""
@@ -193,15 +197,13 @@ async def ai_response_streaming(
     """
     logger.info("AI streaming request", agent=agent_name)
 
-    agent, full_prompt, enhanced_prompt = await _prepare_agent_and_prompt(
-        agent_name, prompt, storage_path, room_id, thread_history
-    )
+    agent, full_prompt = await _prepare_agent_and_prompt(agent_name, prompt, storage_path, room_id, thread_history)
 
     cache = get_cache(storage_path)
     if cache is not None:
         model = agent.model
         assert model is not None, "Agent should always have a model in our implementation"
-        cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
+        cache_key = _build_cache_key(agent, full_prompt, session_id)
         cached_result = cache.get(cache_key)
         if cached_result is not None:
             logger.info("Cache hit", agent=agent_name)

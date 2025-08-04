@@ -66,7 +66,7 @@ class TestRoutingRegression:
         research_bot.response_tracker = ResponseTracker(research_bot.agent_name, base_path=tmp_path)
         research_bot.thread_invite_manager = ThreadInviteManager(research_bot.client)
 
-        # Set up news bot (alphabetically first, would be selected by router)
+        # Set up news bot
         news_bot = AgentBot(mock_news_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
         news_bot.client = AsyncMock()
         news_bot.response_tracker = ResponseTracker(news_bot.agent_name, base_path=tmp_path)

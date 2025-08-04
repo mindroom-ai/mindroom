@@ -31,7 +31,7 @@ class TestRoutingIntegration:
         """Test the exact scenario reported: MindRoomResearch mentioned in research channel.
 
         When a user mentions @MindRoomResearch, only that agent should respond.
-        MindRoomNews (alphabetically first) should NOT use the router to respond.
+        MindRoomNews should NOT respond or route.
         """
 
         # Create generator for streaming response

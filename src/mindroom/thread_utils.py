@@ -1,18 +1,11 @@
 """Utilities for thread analysis and agent detection."""
 
-from typing import Any, NamedTuple
+from typing import Any
 
 from .matrix import extract_agent_name
 
 # Constants
 ROUTER_AGENT_NAME = "router"
-
-
-class ResponseDecision(NamedTuple):
-    """Decision about whether an agent should respond to a message."""
-
-    should_respond: bool
-    use_router: bool
 
 
 def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str], bool]:
@@ -96,50 +89,20 @@ def should_agent_respond(
     configured_rooms: list[str],
     thread_history: list[dict],
     mentioned_agents: list[str] | None = None,
-) -> ResponseDecision:
-    """Determine if an agent should respond to a message.
+) -> bool:
+    """Determine if an agent should respond to a message."""
 
-    Returns ResponseDecision with (should_respond, use_router).
-    """
-    should_respond = False
-    use_router = False
-
-    # For room messages (not in threads), use router to determine who responds
+    # For room messages (not in threads)
     if not is_thread:
-        # Only agents with room access can use the router
-        if room_id in configured_rooms:
-            if am_i_mentioned:
-                # Respond directly if mentioned
-                should_respond = True
-            elif mentioned_agents:
-                # Some other agent is mentioned - don't use router
-                pass
-            else:
-                # No agents mentioned - use router to pick an agent
-                use_router = True
-        return ResponseDecision(should_respond, use_router)
+        # Only respond if mentioned and have room access
+        return am_i_mentioned and room_id in configured_rooms
 
     # Thread logic
     if am_i_mentioned:
         # Respond if explicitly mentioned in a thread
-        should_respond = True
-    else:
-        # For threads, check if there's a single agent that should continue
-        agents_in_thread = get_agents_in_thread(thread_history)
+        return True
 
-        # If I'm the only agent in the thread, I should continue responding
-        if len(agents_in_thread) == 1 and agent_name in agents_in_thread:
-            should_respond = True
-        # Standard logic for all agents (native or invited)
-        elif room_id in configured_rooms or is_invited_to_thread:
-            if has_any_agent_mentions_in_thread(thread_history):
-                # Someone is mentioned - only mentioned agents respond
-                pass
-            elif not agents_in_thread:
-                # No agents yet - use router to pick first responder
-                use_router = True
-            else:
-                # Multiple agents - nobody responds
-                pass
+    # For threads, check if there's a single agent that should continue
+    agents_in_thread = get_agents_in_thread(thread_history)
 
-    return ResponseDecision(should_respond, use_router)
+    return [agent_name] == agents_in_thread
