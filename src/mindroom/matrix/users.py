@@ -12,6 +12,9 @@ from .state import MatrixState
 
 logger = get_logger(__name__)
 
+# Constants
+ROUTER_AGENT_NAME = "router"
+
 
 def extract_domain_from_user_id(user_id: str) -> str:
     """Extract domain from a Matrix user ID like "@user:example.com"."""
@@ -160,10 +163,10 @@ async def ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
     try:
         router_user = await create_agent_user(
             homeserver,
-            "router",
+            ROUTER_AGENT_NAME,
             "RouterAgent",
         )
-        agent_users["router"] = router_user
+        agent_users[ROUTER_AGENT_NAME] = router_user
         logger.info(f"Ensured Matrix user for built-in router agent: {router_user.user_id}")
     except Exception as e:
         logger.error(f"Failed to create Matrix user for built-in router agent: {e}")

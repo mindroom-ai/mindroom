@@ -4,6 +4,9 @@ from typing import Any, NamedTuple
 
 from .matrix import extract_agent_name
 
+# Constants
+ROUTER_AGENT_NAME = "router"
+
 
 class ResponseDecision(NamedTuple):
     """Decision about whether an agent should respond to a message."""
@@ -39,7 +42,7 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
     for msg in thread_history:
         sender = msg.get("sender", "")
         agent_name = extract_agent_name(sender)
-        if agent_name and agent_name != "router":
+        if agent_name and agent_name != ROUTER_AGENT_NAME:
             agents.add(agent_name)
 
     return sorted(list(agents))
@@ -68,7 +71,7 @@ def get_available_agents_in_room(room: Any) -> list[str]:
 
     for member_id in room_members:
         agent_name = extract_agent_name(member_id)
-        if agent_name and agent_name != "router":
+        if agent_name and agent_name != ROUTER_AGENT_NAME:
             agents.append(agent_name)
 
     return sorted(agents)

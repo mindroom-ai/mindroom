@@ -49,6 +49,7 @@ logger = get_logger(__name__)
 # Constants
 SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
+ROUTER_AGENT_NAME = "router"
 
 
 @dataclass
@@ -149,7 +150,7 @@ class AgentBot:
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
         # Handle commands (only router agent handles commands to avoid duplicates)
-        if self.agent_name == "router":
+        if self.agent_name == ROUTER_AGENT_NAME:
             command = command_parser.parse(event.body)
             if command:
                 await self._handle_command(room, event, command)
@@ -169,7 +170,7 @@ class AgentBot:
             return
 
         # Router agent only routes, never participates in conversations
-        if self.agent_name == "router":
+        if self.agent_name == ROUTER_AGENT_NAME:
             # Router should handle routing when no specific agent is mentioned
             if not context.mentioned_agents:
                 # For threads, only route if no agent has participated yet
@@ -341,7 +342,7 @@ class AgentBot:
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
     ) -> None:
         # Only router agent should handle routing
-        if self.agent_name != "router":
+        if self.agent_name != ROUTER_AGENT_NAME:
             return
 
         available_agents = get_available_agents_in_room(room)
@@ -509,19 +510,18 @@ class MultiAgentOrchestrator:
         room_aliases = get_room_aliases()
 
         for agent_name, agent_user in agent_users.items():
-            if agent_name == "router":
+            if agent_name == ROUTER_AGENT_NAME:
                 # Router is a built-in agent that has access to all rooms
                 # Get all unique room IDs from all agents
                 all_room_aliases = {room for agent_config in config.agents.values() for room in agent_config.rooms}
-
-                # Resolve all room aliases to IDs
-                resolved_rooms = [room_aliases.get(room_alias, room_alias) for room_alias in all_room_aliases]
+                rooms_to_resolve = list(all_room_aliases)
             else:
                 # Regular agent - use configured rooms
                 agent_config = config.agents.get(agent_name)
-                rooms = agent_config.rooms if agent_config else []
+                rooms_to_resolve = agent_config.rooms if agent_config else []
 
-                resolved_rooms = [room_aliases.get(room, room) for room in rooms]
+            # Resolve all room aliases to IDs
+            resolved_rooms = [room_aliases.get(room, room) for room in rooms_to_resolve]
 
             enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
 
