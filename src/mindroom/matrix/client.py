@@ -247,6 +247,7 @@ async def fetch_thread_history(
     """
     messages = []
     from_token = None
+    root_message_found = False
 
     while True:
         response = await client.room_messages(
@@ -267,18 +268,35 @@ async def fetch_thread_history(
 
         thread_messages_found = 0
         for event in response.chunk:
-            if hasattr(event, "source") and event.source.get("type") == "m.room.message":
-                relates_to = event.source.get("content", {}).get("m.relates_to", {})
-                if relates_to.get("rel_type") == "m.thread" and relates_to.get("event_id") == thread_id:
+            # Only process RoomMessageText events
+            if isinstance(event, nio.RoomMessageText):
+                # Check if this is the thread root message
+                if event.event_id == thread_id and not root_message_found:
                     messages.append(
                         {
                             "sender": event.sender,
-                            "body": getattr(event, "body", ""),
+                            "body": event.body,
                             "timestamp": event.server_timestamp,
                             "event_id": event.event_id,
+                            "content": event.source.get("content", {}),
                         },
                     )
+                    root_message_found = True
                     thread_messages_found += 1
+                else:
+                    # Check if this is a reply in the thread
+                    relates_to = event.source.get("content", {}).get("m.relates_to", {})
+                    if relates_to.get("rel_type") == "m.thread" and relates_to.get("event_id") == thread_id:
+                        messages.append(
+                            {
+                                "sender": event.sender,
+                                "body": event.body,
+                                "timestamp": event.server_timestamp,
+                                "event_id": event.event_id,
+                                "content": event.source.get("content", {}),
+                            },
+                        )
+                        thread_messages_found += 1
 
         # Exit if we've reached the end or no more relevant messages
         if not response.end or thread_messages_found == 0:
