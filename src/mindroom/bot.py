@@ -313,6 +313,10 @@ class AgentBot:
         # Always ensure we have a thread_id - use the original message as thread root if needed
         effective_thread_id = thread_id if thread_id else reply_to_event_id
 
+        # Add completion marker for non-streaming messages
+        if not response_text.rstrip().endswith("✓"):
+            response_text += " ✓"
+
         content = create_mention_content_from_text(
             response_text,
             sender_domain=sender_domain,
@@ -357,7 +361,8 @@ class AgentBot:
         response_text = "could you help with this?"
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
-        full_message = f"@{suggested_agent} {response_text}"
+        # Add completion marker so mentioned agent will respond
+        full_message = f"@{suggested_agent} {response_text} ✓"
 
         # If no thread exists, create one with the original message as root
         if not thread_event_id:
