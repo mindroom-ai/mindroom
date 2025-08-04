@@ -93,9 +93,9 @@ class TestAIRouting:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_only_first_agent_routes(self) -> None:
-        """Test that only the first agent (alphabetically) handles routing."""
-        # Create general agent (not first alphabetically)
+    async def test_only_router_agent_routes(self) -> None:
+        """Test that only the router agent handles routing."""
+        # Create general agent (not router)
         agent = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -109,7 +109,7 @@ class TestAIRouting:
         mock_room = MagicMock()
         mock_room.users = MagicMock()
         mock_room.users.keys.return_value = [
-            "@mindroom_calculator:localhost",  # First alphabetically
+            "@mindroom_calculator:localhost",
             "@mindroom_general:localhost",
             "@user:localhost",
         ]
@@ -120,7 +120,7 @@ class TestAIRouting:
         with patch("mindroom.bot.suggest_agent_for_message") as mock_suggest:
             await bot._handle_ai_routing(mock_room, mock_event, [])
 
-            # Should not call routing since general is not first
+            # Should not call routing since general is not the router agent
             mock_suggest.assert_not_called()
 
 

@@ -307,18 +307,20 @@ class TestEnsureAllAgentUsers:
         }
         mock_load_config.return_value = mock_state
 
-        # Mock user creation
+        # Mock user creation - router is created first, then configured agents
         mock_create_user.side_effect = [
+            AgentMatrixUser("router", "@mindroom_router:localhost", "RouterAgent", "router_pass"),
             AgentMatrixUser("calculator", "@mindroom_calculator:localhost", "CalculatorAgent", "pass1"),
             AgentMatrixUser("general", "@mindroom_general:localhost", "GeneralAgent", "pass2"),
         ]
 
         agent_users = await ensure_all_agent_users("http://localhost:8008")
 
-        assert len(agent_users) == 2
+        assert len(agent_users) == 3
+        assert "router" in agent_users
         assert "calculator" in agent_users
         assert "general" in agent_users
-        assert mock_create_user.call_count == 2
+        assert mock_create_user.call_count == 3
 
     @pytest.mark.asyncio
     @patch("mindroom.matrix.users.create_agent_user")
@@ -337,15 +339,17 @@ class TestEnsureAllAgentUsers:
         }
         mock_load_config.return_value = mock_state
 
-        # Mock user creation with one failure
+        # Mock user creation with one failure - router is created first
         mock_create_user.side_effect = [
+            AgentMatrixUser("router", "@mindroom_router:localhost", "RouterAgent", "router_pass"),
             AgentMatrixUser("calculator", "@mindroom_calculator:localhost", "CalculatorAgent", "pass1"),
             Exception("Failed to create user"),
         ]
 
         agent_users = await ensure_all_agent_users("http://localhost:8008")
 
-        # Should still return the successful one
-        assert len(agent_users) == 1
+        # Should still return the successful ones (router + calculator)
+        assert len(agent_users) == 2
+        assert "router" in agent_users
         assert "calculator" in agent_users
         assert "failing" not in agent_users

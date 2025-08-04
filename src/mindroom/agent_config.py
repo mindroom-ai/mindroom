@@ -13,6 +13,9 @@ from .tools import get_tool_by_name
 
 logger = get_logger(__name__)
 
+# Constants
+ROUTER_AGENT_NAME = "router"
+
 # Default path to agents configuration file
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 
@@ -123,6 +126,10 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
     Returns:
         Human-readable description of the agent
     """
+    # Handle built-in router agent
+    if agent_name == ROUTER_AGENT_NAME:
+        return "router\n  - Route messages to the most appropriate agent based on context and expertise.\n  - Analyzes incoming messages and determines which agent is best suited to respond."
+
     config = load_config(config_path)
 
     # Check if agent exists

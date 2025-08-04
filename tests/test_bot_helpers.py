@@ -7,7 +7,6 @@ import pytest
 
 from mindroom.commands import handle_invite_command, handle_list_invites_command
 from mindroom.thread_invites import ThreadInviteManager
-from mindroom.thread_utils import should_route_to_agent
 
 
 class TestBotHelpers:
@@ -108,15 +107,3 @@ class TestBotHelpers:
         assert "- @calculator" in result
         assert "- @research" in result
         assert "- @code" in result
-
-    def test_should_route_to_agent(self):
-        """Test should_route_to_agent function."""
-        # Empty list
-        assert not should_route_to_agent("calculator", [])
-
-        # First agent should route
-        assert should_route_to_agent("calculator", ["calculator", "general", "research"])
-
-        # Other agents should not route
-        assert not should_route_to_agent("general", ["calculator", "general", "research"])
-        assert not should_route_to_agent("research", ["calculator", "general", "research"])
