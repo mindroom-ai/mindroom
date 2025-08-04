@@ -509,13 +509,27 @@ class MultiAgentOrchestrator:
         room_aliases = get_room_aliases()
 
         for agent_name, agent_user in agent_users.items():
-            agent_config = config.agents.get(agent_name)
-            rooms = agent_config.rooms if agent_config else []
+            if agent_name == "router":
+                # Router is a built-in agent that has access to all rooms
+                # Get all unique room IDs from all agents
+                all_room_aliases = set()
+                for agent_config in config.agents.values():
+                    all_room_aliases.update(agent_config.rooms)
 
-            resolved_rooms = []
-            for room in rooms:
-                resolved_room = room_aliases.get(room, room)
-                resolved_rooms.append(resolved_room)
+                # Resolve all room aliases to IDs
+                resolved_rooms = []
+                for room_alias in all_room_aliases:
+                    resolved_room = room_aliases.get(room_alias, room_alias)
+                    resolved_rooms.append(resolved_room)
+            else:
+                # Regular agent - use configured rooms
+                agent_config = config.agents.get(agent_name)  # type: ignore[assignment]
+                rooms = agent_config.rooms if agent_config else []
+
+                resolved_rooms = []
+                for room in rooms:
+                    resolved_room = room_aliases.get(room, room)
+                    resolved_rooms.append(resolved_room)
 
             enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
 

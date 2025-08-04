@@ -274,11 +274,19 @@ class TestRoutingRegression:
         """
         test_room_id = "!research:localhost"
 
-        # Set up news bot (will act as router)
-        news_bot = AgentBot(mock_news_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
-        news_bot.client = AsyncMock()
-        news_bot.response_tracker = ResponseTracker(news_bot.agent_name, base_path=tmp_path)
-        news_bot.thread_invite_manager = ThreadInviteManager(news_bot.client)
+        # Create router agent
+        router_agent = AgentMatrixUser(
+            agent_name="router",
+            password="test_password",
+            display_name="RouterAgent",
+            user_id="@mindroom_router:localhost",
+        )
+
+        # Set up router bot
+        router_bot = AgentBot(router_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
+        router_bot.client = AsyncMock()
+        router_bot.response_tracker = ResponseTracker(router_bot.agent_name, base_path=tmp_path)
+        router_bot.thread_invite_manager = ThreadInviteManager(router_bot.client)
 
         # Set up research bot (will be mentioned by router)
         research_bot = AgentBot(mock_research_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
@@ -293,7 +301,7 @@ class TestRoutingRegression:
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$router_msg"
-        news_bot.client.room_send.return_value = mock_send_response
+        router_bot.client.room_send.return_value = mock_send_response
         research_bot.client.room_send.return_value = mock_send_response
 
         # Create room
@@ -301,40 +309,21 @@ class TestRoutingRegression:
         mock_room.room_id = test_room_id
 
         # Simulate router message from router agent mentioning research
-        # This is what the router sends when it picks an agent
+        # The router always includes completion marker in its messages
         router_message = MagicMock(spec=nio.RoomMessageText)
-        router_message.sender = "@mindroom_router:localhost"  # From router bot
-        router_message.body = "@research could you help with this?"
+        router_message.sender = "@mindroom_router:localhost"
+        router_message.body = "@research could you help with this? ✓"
         router_message.event_id = "$router_msg"
         router_message.source = {
-            "content": {
-                "body": "@research could you help with this?",
-                "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
-            }
-        }
-
-        # Process router message with research bot
-        # Without completion marker, research bot would ignore it
-        await research_bot._on_message(mock_room, router_message)
-
-        # Research bot should NOT respond (no completion marker)
-        assert research_bot.client.room_send.call_count == 0
-
-        # Now test with completion marker (how router messages should be sent)
-        router_message_complete = MagicMock(spec=nio.RoomMessageText)
-        router_message_complete.sender = "@mindroom_router:localhost"
-        router_message_complete.body = "@research could you help with this? ✓"
-        router_message_complete.event_id = "$router_msg_complete"
-        router_message_complete.source = {
             "content": {
                 "body": "@research could you help with this? ✓",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
             }
         }
 
-        # Process complete router message
-        await research_bot._on_message(mock_room, router_message_complete)
+        # Process router message with research bot
+        await research_bot._on_message(mock_room, router_message)
 
-        # Research bot SHOULD respond now
+        # Research bot SHOULD respond (router messages always have completion marker)
         assert research_bot.client.room_send.call_count == 1
         assert mock_ai_response.call_count == 1

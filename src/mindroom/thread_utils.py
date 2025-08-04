@@ -140,11 +140,3 @@ def should_agent_respond(
                 pass
 
     return ResponseDecision(should_respond, use_router)
-
-
-def should_route_to_agent(agent_name: str, available_agents: list[str]) -> bool:
-    """Determine if this agent should handle routing.
-
-    Only the router agent should handle routing decisions.
-    """
-    return agent_name == "router"

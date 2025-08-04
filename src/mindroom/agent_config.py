@@ -123,6 +123,10 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
     Returns:
         Human-readable description of the agent
     """
+    # Handle built-in router agent
+    if agent_name == "router":
+        return "router\n  - Route messages to the most appropriate agent based on context and expertise.\n  - Analyzes incoming messages and determines which agent is best suited to respond."
+
     config = load_config(config_path)
 
     # Check if agent exists
