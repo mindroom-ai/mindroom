@@ -1,5 +1,6 @@
 """Agent loader that reads agent configurations from YAML file."""
 
+import functools
 from pathlib import Path
 
 import yaml
@@ -20,10 +21,10 @@ ROUTER_AGENT_NAME = "router"
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 
 # Global caches
-_config_cache: dict[Path, Config] = {}
 _agent_cache: dict[str, Agent] = {}
 
 
+@functools.cache
 def load_config(config_path: Path | None = None) -> Config:
     """Load agent configuration from YAML file.
 
@@ -38,10 +39,6 @@ def load_config(config_path: Path | None = None) -> Config:
     """
     path = config_path or DEFAULT_AGENTS_CONFIG
 
-    # Check cache
-    if path in _config_cache:
-        return _config_cache[path]
-
     if not path.exists():
         raise FileNotFoundError(f"Agent configuration file not found: {path}")
 
@@ -49,7 +46,6 @@ def load_config(config_path: Path | None = None) -> Config:
         data = yaml.safe_load(f)
 
     config = Config(**data)
-    _config_cache[path] = config
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")
 
@@ -156,9 +152,3 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
             parts.append(f"- {first_instruction}")
 
     return "\n  ".join(parts)
-
-
-def clear_cache() -> None:
-    """Clear all caches."""
-    _config_cache.clear()
-    _agent_cache.clear()

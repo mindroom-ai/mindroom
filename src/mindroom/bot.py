@@ -71,6 +71,7 @@ class AgentBot:
     agent_user: AgentMatrixUser
     storage_path: Path
     rooms: list[str] = field(default_factory=list)
+
     client: nio.AsyncClient = field(init=False)
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
@@ -86,7 +87,7 @@ class AgentBot:
     @cached_property
     def logger(self):
         """Get a logger with agent context bound."""
-        return logger.bind(agent=f"{emoji(self.agent_name)} {self.agent_name}")
+        return logger.bind(agent=emoji(self.agent_name))
 
     @cached_property
     def matrix_id(self) -> MatrixID:
