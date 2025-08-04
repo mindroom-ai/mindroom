@@ -10,7 +10,7 @@ from agno.models.anthropic import Claude
 from agno.models.base import Model
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
-from agno.run.response import RunResponse
+from agno.run.response import RunResponse, RunResponseContentEvent
 from dotenv import load_dotenv
 
 from .agent_config import create_agent, load_config
@@ -216,8 +216,6 @@ async def ai_response_streaming(
             return
 
     # No cache hit - use streaming
-    from agno.run.response import RunResponseContentEvent
-
     full_response = ""
 
     try:
@@ -238,8 +236,6 @@ async def ai_response_streaming(
     # Cache the complete response - deterministic operation
     if cache is not None and full_response:
         # Create a mock response object to cache
-        from agno.run.response import RunResponse
-
         cached_response = RunResponse(content=full_response)
         cache.set(cache_key, cached_response)
         logger.info("Response cached", agent=agent_name)
