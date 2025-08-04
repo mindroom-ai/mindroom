@@ -512,9 +512,7 @@ class MultiAgentOrchestrator:
             if agent_name == "router":
                 # Router is a built-in agent that has access to all rooms
                 # Get all unique room IDs from all agents
-                all_room_aliases = set()
-                for agent_config in config.agents.values():
-                    all_room_aliases.update(agent_config.rooms)
+                all_room_aliases = {room for agent_config in config.agents.values() for room in agent_config.rooms}
 
                 # Resolve all room aliases to IDs
                 resolved_rooms = []
@@ -523,7 +521,7 @@ class MultiAgentOrchestrator:
                     resolved_rooms.append(resolved_room)
             else:
                 # Regular agent - use configured rooms
-                agent_config = config.agents.get(agent_name)  # type: ignore[assignment]
+                agent_config = config.agents.get(agent_name)
                 rooms = agent_config.rooms if agent_config else []
 
                 resolved_rooms = []
