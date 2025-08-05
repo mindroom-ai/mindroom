@@ -564,7 +564,7 @@ class MultiAgentOrchestrator:
             # Resolve all room aliases to IDs
             resolved_rooms = [room_aliases.get(room, room) for room in rooms_to_resolve]
 
-            enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+            enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "false").lower() == "true"
 
             bot = AgentBot(
                 agent_user,
