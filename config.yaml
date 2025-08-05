@@ -13,8 +13,8 @@ memory:
 
 models:
   default:
-    provider: "openrouter"
-    id: "z-ai/glm-4.5-air"
+    provider: "openai"
+    id: "gpt-4o"
 
   anthropic:
     provider: "anthropic"

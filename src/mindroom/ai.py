@@ -170,7 +170,12 @@ async def ai_response(
         return response_text
     except Exception as e:
         # AI models can fail for various reasons (network, API limits, etc)
-        logger.exception(f"Error generating AI response: {e}")
+        logger.exception(f"Error generating AI response for agent {agent_name}: {e}")
+        logger.error(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
+        logger.error(f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}")
+        import traceback
+
+        logger.error(f"Traceback:\n{traceback.format_exc()}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"
 
 

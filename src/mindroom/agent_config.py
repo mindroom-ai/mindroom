@@ -91,19 +91,30 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
     storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
 
     # Create agent with defaults applied
-    agent = Agent(
-        name=agent_config.display_name,
-        role=agent_config.role,
-        model=model,
-        tools=tools,
-        instructions=agent_config.instructions,
-        storage=storage,
-        add_history_to_messages=agent_config.add_history_to_messages
-        if agent_config.add_history_to_messages is not None
-        else defaults.add_history_to_messages,
-        num_history_runs=agent_config.num_history_runs or defaults.num_history_runs,
-        markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
-    )
+    logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
+    logger.info(f"Storage path: {storage_path}, DB file: {storage_path / f'{agent_name}.db'}")
+
+    try:
+        agent = Agent(
+            name=agent_config.display_name,
+            role=agent_config.role,
+            model=model,
+            tools=tools,
+            instructions=agent_config.instructions,
+            storage=storage,
+            add_history_to_messages=agent_config.add_history_to_messages
+            if agent_config.add_history_to_messages is not None
+            else defaults.add_history_to_messages,
+            num_history_runs=agent_config.num_history_runs or defaults.num_history_runs,
+            markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
+        )
+    except Exception as e:
+        logger.error(f"Failed to create agent '{agent_name}': {e}")
+        logger.error(f"Model details: {model.__class__.__name__}, id={model.id}")
+        import traceback
+
+        logger.error(f"Traceback:\n{traceback.format_exc()}")
+        raise
 
     # Cache the agent
     _agent_cache[cache_key] = agent
