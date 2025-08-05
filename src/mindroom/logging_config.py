@@ -76,6 +76,11 @@ def setup_logging(level: str = "INFO") -> None:
         stream=sys.stderr,
     )
 
+    # Reduce verbosity of nio (Matrix) library
+    logging.getLogger("nio").setLevel(logging.WARNING)
+    logging.getLogger("nio.client").setLevel(logging.WARNING)
+    logging.getLogger("nio.responses").setLevel(logging.WARNING)
+
 
 def get_logger(name: str = __name__) -> structlog.BoundLogger:
     """Get a structlog logger instance.

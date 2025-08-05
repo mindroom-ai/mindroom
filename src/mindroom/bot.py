@@ -215,7 +215,7 @@ class AgentBot:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
 
         if am_i_mentioned:
-            self.logger.info("Mentioned", event_id=event.event_id)
+            self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
         is_thread, thread_id = extract_thread_info(event.source)
 
@@ -256,7 +256,7 @@ class AgentBot:
             room_id=room.room_id,
         )
 
-        await self._send_response(room.room_id, event.event_id, response_text, thread_id)
+        await self._send_response(room, event.event_id, response_text, thread_id)
 
     async def _process_and_respond_streaming(
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
@@ -298,7 +298,7 @@ class AgentBot:
             self.logger.error("Error in streaming response", error=str(e))
 
     async def _send_response(
-        self, room_id: str, reply_to_event_id: str, response_text: str, thread_id: str | None
+        self, room: nio.MatrixRoom, reply_to_event_id: str, response_text: str, thread_id: str | None
     ) -> bool:
         """Send a response message to a room.
 
@@ -321,11 +321,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
         )
 
-        response = await self.client.room_send(
-            room_id=room_id,
-            message_type="m.room.message",
-            content=content,
-        )
+        response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
         if isinstance(response, nio.RoomSendResponse):
             self.response_tracker.mark_responded(reply_to_event_id)
             self.logger.info("Sent response", event_id=response.event_id)
@@ -389,7 +385,7 @@ class AgentBot:
         if not is_thread or not thread_id:
             response_text = "❌ Commands only work within threads. Please start a thread first."
             # Create a thread even for this error message
-            await self._send_response(room.room_id, event.event_id, response_text, thread_id=None)
+            await self._send_response(room, event.event_id, response_text, thread_id=None)
             return
 
         response_text = ""
@@ -425,7 +421,7 @@ class AgentBot:
             response_text = get_command_help(topic)
 
         if response_text:
-            await self._send_response(room.room_id, event.event_id, response_text, thread_id)
+            await self._send_response(room, event.event_id, response_text, thread_id)
 
     async def _periodic_cleanup(self) -> None:
         """Periodically clean up expired thread invitations."""
