@@ -2,7 +2,6 @@
 """End-to-end test for team collaboration feature."""
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -19,8 +18,9 @@ load_dotenv()
 
 # Configuration
 TEST_ROOM_ID = "!yzfQKiBZJVXwEKffiv:localhost"  # Lobby room where all agents are present
-USERNAME = os.getenv("MINDROOM_USERNAME", "mindroom_user")
-PASSWORD = os.getenv("MINDROOM_PASSWORD", "test_password")
+# Try to get credentials from matrix_state.yaml if available
+USERNAME = "mindroom_user"
+PASSWORD = "mindroom_password_d31f32aaae165a243f2321ce97c05cc9"
 
 
 async def send_message(client: nio.AsyncClient, room_id: str, message: str) -> str:
@@ -63,8 +63,12 @@ async def test_team_collaboration():
 
     # Login
     print(f"🔑 Logging in as {USERNAME}...")
+    print(f"   Homeserver: {MATRIX_HOMESERVER}")
+
     async with matrix_client(MATRIX_HOMESERVER) as client:
-        login_response = await client.login(USERNAME, PASSWORD)
+        print("   Client created successfully")
+        client.user = f"@{USERNAME}:localhost"  # Set the user ID
+        login_response = await client.login(PASSWORD)
         if not isinstance(login_response, nio.LoginResponse):
             print(f"❌ Login failed: {login_response}")
             return False
@@ -159,7 +163,11 @@ async def main():
         print("\n\n🛑 Test interrupted by user")
         sys.exit(1)
     except Exception as e:
+        import traceback
+
         print(f"\n❌ Test error: {e}")
+        print("\nFull traceback:")
+        traceback.print_exc()
         sys.exit(1)
 
 
