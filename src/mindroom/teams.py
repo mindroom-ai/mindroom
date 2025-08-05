@@ -107,7 +107,8 @@ class TeamManager:
 
             # Create an Agno Agent for the team
             # We need to create fresh agent instances for the team
-            model = get_model_instance(bot.model_name if hasattr(bot, "model_name") else "default")
+            # Use the default model configuration (all agents use the same model)
+            model = get_model_instance("default")
             agent = create_agent(
                 agent_name=name,
                 model=model,
@@ -143,11 +144,14 @@ class TeamManager:
             ]
 
         # Create the team
+        # Use the default model configuration for the team coordinator
+        team_model = get_model_instance("default")
         team = Team(
             members=agents,
             mode=mode.value,
             name=team_name,
             instructions=instructions,
+            model=team_model,  # Specify model to avoid OpenAI default
         )
 
         # Track active team
