@@ -160,23 +160,45 @@ Agents ONLY respond in threads - never in main room messages. Within threads, th
 
 1. **Mentioned agents always respond** - If you @mention an agent in a thread, it will respond
 2. **Single agent continues conversation** - If only one agent is in a thread, it continues responding without mentions
-3. **Multiple agents need direction** - When 2+ agents are in a thread, you must @mention who you want
-4. **Smart routing for new threads** - If no agents have participated in the thread, the system picks the most suitable one
+3. **Multiple agents collaborate** - When 2+ agents are in a thread, they form a team and provide coordinated responses
+4. **Smart routing for new threads** - If no agents have participated in the thread, the system picks the most suitable one(s)
 5. **Invited agents act like natives** - Agents invited via `/invite` follow the same rules as room natives
 
+#### Team Collaboration Modes
+
+When multiple agents work together, they can operate in different modes:
+
+- **Coordinate Mode**: Agents work sequentially, building on each other's contributions
+- **Collaborate Mode**: Agents work in parallel, with responses synthesized into a unified answer
+- **Route Mode**: A lead agent delegates to the most appropriate specialist
+
 These rules ensure:
-- No agent response storms (multiple agents responding to everything)
+- No agent response storms (agents coordinate instead of competing)
 - Natural conversations (single agent threads flow smoothly)
-- User control (you decide who responds when multiple agents are present)
-- Intelligent routing (best agent selected for new questions)
+- Richer responses (multiple perspectives when multiple agents are present)
+- Intelligent routing (best agent or team selected for new questions)
 
 ## Usage Examples
 
 ### Multi-Agent Collaboration
+
+#### Explicit Team Formation (Multiple Agents Tagged)
 ```
 You: @mindroom_research:localhost @mindroom_analyst:localhost What are the latest trends in renewable energy?
+[Team forms with Research and Analyst agents]
 ResearchAgent: I'll gather recent data on renewable energy trends...
 AnalystAgent: Based on the research, here's my analysis of the key patterns...
+Team Response: Combining our findings, here are the three major trends in renewable energy...
+```
+
+#### Automatic Team Formation (Multiple Agents in Thread)
+```
+[Thread already has Code and Security agents participating]
+You: How should we implement user authentication?
+[Code and Security agents automatically form a team]
+CodeAgent: From an implementation perspective, I recommend using JWT tokens with...
+SecurityAgent: Adding to that, we need to ensure proper encryption and...
+Team Response: Here's our unified recommendation for secure authentication...
 ```
 
 ### Memory Persistence
@@ -278,6 +300,7 @@ pre-commit run --all-files
 - End-to-end encryption via Matrix
 
 ### 🚧 In Development
+- Team-based agent collaboration (using Agno Teams)
 - Memory rating and quality feedback
 - Thread tagging and memory sharing
 - Progress widget for real-time monitoring
@@ -288,6 +311,7 @@ pre-commit run --all-files
 ## Roadmap
 
 ### Near Term
+- [ ] Team-based agent collaboration for multi-agent threads
 - [ ] Widget API for real-time progress monitoring
 - [ ] Advanced scheduling system with YAML configuration
 - [ ] Voice interaction (STT/TTS) support

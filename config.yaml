@@ -207,6 +207,36 @@ agents:
       - business  # Business analytics
     num_history_runs: 5
 
+  # Security analysis agent (for testing)
+  security:
+    display_name: "SecurityAgent"
+    role: "Analyze security aspects and provide recommendations."
+    tools: []
+    instructions:
+      - "Analyze security implications thoroughly."
+      - "Provide security best practices."
+      - "Identify potential vulnerabilities."
+      - "Suggest mitigation strategies."
+    rooms:
+      - lobby     # Main coordination room
+      - dev       # Development security
+    num_history_runs: 5
+
+  # Analyst agent (for testing)
+  analyst:
+    display_name: "AnalystAgent"
+    role: "Provide analytical insights and recommendations."
+    tools: []
+    instructions:
+      - "Analyze information comprehensively."
+      - "Provide structured insights."
+      - "Consider multiple perspectives."
+      - "Make evidence-based recommendations."
+    rooms:
+      - lobby     # Main coordination room
+      - analysis  # Analysis tasks
+    num_history_runs: 5
+
 
 # Configuration for agent defaults
 defaults:

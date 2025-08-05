@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.models import AgentMatrixUser
-from mindroom.thread_invite_manager import ThreadInviteManager
+from mindroom.matrix import AgentMatrixUser
+from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import get_agents_in_thread
 
 
@@ -224,7 +224,7 @@ class TestTeamCollaboration:
 
         # Verify the perspectives can be synthesized
         assert "JWT tokens" in expected_synthesis
-        assert "multi-factor authentication" in expected_synthesis
+        assert "Multi-factor authentication" in expected_synthesis
 
     @pytest.mark.asyncio
     async def test_team_route_mode(

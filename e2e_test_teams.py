@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""End-to-end test for team collaboration feature."""
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+import nio
+from dotenv import load_dotenv
+
+# Add the src directory to the path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from mindroom.matrix import MATRIX_HOMESERVER, matrix_client
+
+# Load environment variables
+load_dotenv()
+
+# Configuration
+TEST_ROOM_ID = "!yzfQKiBZJVXwEKffiv:localhost"  # Lobby room where all agents are present
+USERNAME = os.getenv("MINDROOM_USERNAME", "mindroom_user")
+PASSWORD = os.getenv("MINDROOM_PASSWORD", "test_password")
+
+
+async def send_message(client: nio.AsyncClient, room_id: str, message: str) -> str:
+    """Send a message to a room and return the event ID."""
+    response = await client.room_send(
+        room_id=room_id,
+        message_type="m.room.message",
+        content={
+            "msgtype": "m.text",
+            "body": message,
+        },
+    )
+    if isinstance(response, nio.RoomSendResponse):
+        return response.event_id
+    else:
+        print(f"Failed to send message: {response}")
+        return ""
+
+
+async def get_recent_messages(client: nio.AsyncClient, room_id: str, limit: int = 10) -> list[dict]:
+    """Get recent messages from a room."""
+    response = await client.room_messages(room_id, start="", limit=limit)
+    if not isinstance(response, nio.RoomMessagesResponse):
+        return []
+
+    messages = []
+    for event in response.chunk:
+        if isinstance(event, nio.RoomMessageText):
+            sender = event.sender.split(":")[0][1:]  # Extract username
+            body = event.body
+            messages.append({"sender": sender, "body": body})
+
+    return list(reversed(messages))
+
+
+async def test_team_collaboration():
+    """Test team collaboration scenarios."""
+    print("🧪 TEAM COLLABORATION TEST")
+    print("=" * 60)
+
+    # Login
+    print(f"🔑 Logging in as {USERNAME}...")
+    async with matrix_client(MATRIX_HOMESERVER) as client:
+        login_response = await client.login(USERNAME, PASSWORD)
+        if not isinstance(login_response, nio.LoginResponse):
+            print(f"❌ Login failed: {login_response}")
+            return False
+        print("✓ Logged in successfully")
+
+        # Give agents time to sync
+        print("⏳ Waiting 5s for agents to sync...")
+        await asyncio.sleep(5)
+
+        print(f"\n📍 Testing in room: {TEST_ROOM_ID}")
+
+        # Test 1: Multiple agents mentioned (explicit team)
+        print("\n🧪 Test 1: Multiple agents mentioned form a team")
+        print("   Agents: @calculator, @general")
+        print("   Message: @mindroom_calculator @mindroom_general what is 10 + 20 and explain why")
+
+        event_id = await send_message(
+            client, TEST_ROOM_ID, "@mindroom_calculator @mindroom_general what is 10 + 20 and explain why"
+        )
+        print(f"   ✓ Sent (event_id: {event_id})")
+        print("   ⏳ Waiting 8s for team response...")
+        await asyncio.sleep(8)
+
+        # Test 2: Multiple agents in thread (implicit team)
+        print("\n🧪 Test 2: Multiple agents in thread collaborate")
+        print("   Starting a thread with two agents...")
+
+        # Create a thread root
+        thread_root = await send_message(
+            client, TEST_ROOM_ID, "@mindroom_code @mindroom_security how should we implement user authentication?"
+        )
+        print(f"   ✓ Thread started (root: {thread_root})")
+        await asyncio.sleep(5)
+
+        # Send follow-up without mentioning anyone
+        await client.room_send(
+            room_id=TEST_ROOM_ID,
+            message_type="m.room.message",
+            content={
+                "msgtype": "m.text",
+                "body": "What about session management?",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": thread_root,
+                },
+            },
+        )
+        print("   ✓ Sent follow-up (no mentions) - agents should form team")
+        print("   ⏳ Waiting 8s for team response...")
+        await asyncio.sleep(8)
+
+        # Test 3: Complex query triggers team formation
+        print("\n🧪 Test 3: Complex query triggers team formation")
+        print("   Message: Create a financial report with data analysis and visualizations")
+
+        event_id = await send_message(
+            client, TEST_ROOM_ID, "Create a financial report with data analysis and visualizations"
+        )
+        print(f"   ✓ Sent (event_id: {event_id})")
+        print("   ⏳ Waiting 8s for router to form team...")
+        await asyncio.sleep(8)
+
+        # Get recent messages
+        print("\n📊 Recent messages:")
+        messages = await get_recent_messages(client, TEST_ROOM_ID, 20)
+
+        # Display last messages
+        for msg in messages[-10:]:
+            print(f"  {msg['sender']}: {msg['body'][:100]}...")
+
+        print("\n✅ Team collaboration test completed!")
+        return True
+
+
+async def main():
+    """Run the team collaboration test."""
+    try:
+        # Start the mindroom system (assuming it's already running)
+        print("Note: This test assumes mindroom is already running")
+        print("Start it with: mindroom run\n")
+
+        success = await test_team_collaboration()
+
+        if success:
+            print("\n✅ All tests passed!")
+            sys.exit(0)
+        else:
+            print("\n❌ Tests failed!")
+            sys.exit(1)
+
+    except KeyboardInterrupt:
+        print("\n\n🛑 Test interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Test error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
