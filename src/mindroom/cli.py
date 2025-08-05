@@ -25,30 +25,6 @@ class InviteResult(NamedTuple):
     already_member: bool
 
 
-async def _register_user(username: str, password: str, display_name: str) -> None:
-    """Register a new Matrix user."""
-    async with matrix_client(HOMESERVER) as client:
-        # Try to register
-        response = await client.register(
-            username=username,
-            password=password,
-            device_name="mindroom-cli",
-        )
-
-        if isinstance(response, nio.RegisterResponse):
-            # Set display name - use the user_id from the response
-            client.user = response.user_id
-            client.access_token = response.access_token
-            client.device_id = response.device_id
-            # No need to login again - we already have access token from registration
-            await client.set_displayname(display_name)
-            console.print(f"✅ Registered user: @{username}:localhost")
-        elif isinstance(response, nio.responses.RegisterErrorResponse) and response.status_code == "M_USER_IN_USE":
-            console.print(f"ℹ️  User @{username}:localhost already exists")
-        else:
-            console.print(f"❌ Failed to register {username}: {response}")
-
-
 async def _get_room_members(client: nio.AsyncClient, room_id: str, room_key: str) -> set[str]:
     """Get the current members of a room."""
     members_response = await client.joined_members(room_id)
@@ -184,7 +160,17 @@ async def _ensure_user_account() -> MatrixState:
     user_password = f"mindroom_password_{os.urandom(16).hex()}"
 
     # Register user
-    await _register_user(user_username, user_password, "Mindroom User")
+    from mindroom.matrix.client import register_user
+
+    try:
+        user_id = await register_user(HOMESERVER, user_username, user_password, "Mindroom User")
+        console.print(f"✅ Registered user: {user_id}")
+    except ValueError as e:
+        error_msg = str(e)
+        if "M_USER_IN_USE" in error_msg:
+            console.print(f"ℹ️  User @{user_username}:localhost already exists")
+        else:
+            console.print(f"❌ Failed to register {user_username}: {error_msg}")
 
     # Save credentials
     state.add_account("user", user_username, user_password)

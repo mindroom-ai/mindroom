@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.cli import _ensure_user_account, _register_user
+from mindroom.cli import _ensure_user_account
 from mindroom.matrix import MatrixState
 
 
@@ -26,32 +26,33 @@ class TestUserAccountManagement:
     @pytest.mark.asyncio
     async def test_register_user_success(self, mock_matrix_client) -> None:
         """Test successful user registration."""
+        from mindroom.matrix.client import register_user
+
         mock_context, mock_client = mock_matrix_client
 
         # Mock successful registration
         mock_client.register.return_value = nio.RegisterResponse(
             user_id="@test_user:localhost", device_id="TEST_DEVICE", access_token="test_token"
         )
-        mock_client.login.return_value = nio.LoginResponse(
-            user_id="@test_user:localhost", device_id="TEST_DEVICE", access_token="test_token"
-        )
         mock_client.set_displayname.return_value = AsyncMock()
 
-        with patch("mindroom.cli.matrix_client", return_value=mock_context):
-            await _register_user("test_user", "test_password", "Test User")
+        with patch("mindroom.matrix.client.matrix_client", return_value=mock_context):
+            user_id = await register_user("http://localhost:8008", "test_user", "test_password", "Test User")
+
+            assert user_id == "@test_user:localhost"
 
             # Verify registration was called
             mock_client.register.assert_called_once_with(
-                username="test_user", password="test_password", device_name="mindroom-cli"
+                username="test_user", password="test_password", device_name="mindroom_agent"
             )
-            # Login should not be called after successful registration
-            mock_client.login.assert_not_called()
             # Verify display name was set
             mock_client.set_displayname.assert_called_once_with("Test User")
 
     @pytest.mark.asyncio
     async def test_register_user_already_exists(self, mock_matrix_client) -> None:
         """Test registration when user already exists."""
+        from mindroom.matrix.client import register_user
+
         mock_context, mock_client = mock_matrix_client
 
         # Mock user already exists error
@@ -59,14 +60,14 @@ class TestUserAccountManagement:
             message="User ID already taken.", status_code="M_USER_IN_USE"
         )
 
-        with patch("mindroom.cli.matrix_client", return_value=mock_context):
-            # Should not raise an exception
-            await _register_user("existing_user", "test_password", "Existing User")
+        with patch("mindroom.matrix.client.matrix_client", return_value=mock_context):
+            # Should return the user_id even when user exists
+            user_id = await register_user("http://localhost:8008", "existing_user", "test_password", "Existing User")
+
+            assert user_id == "@existing_user:localhost"
 
             # Verify registration was attempted
             mock_client.register.assert_called_once()
-            # Login should not be called when registration fails
-            mock_client.login.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_creates_new(self, tmp_path: Path, mock_matrix_client) -> None:

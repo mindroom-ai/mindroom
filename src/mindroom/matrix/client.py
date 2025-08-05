@@ -114,13 +114,13 @@ async def register_user(
         )
 
         if isinstance(response, nio.RegisterResponse):
-            logger.info(f"Successfully registered user: {user_id}")
-            # Set display name
-            login_response = await client.login(password)
-            if not isinstance(login_response, nio.LoginResponse):
-                logger.error(f"Failed to login after registration: {login_response}")
-                raise ValueError(f"Failed to login after registration: {login_response}")
+            logger.info(f"✅ Successfully registered user: {user_id}")
+            # After registration, we already have an access token
+            client.user_id = response.user_id
+            client.access_token = response.access_token
+            client.device_id = response.device_id
 
+            # Set display name using the existing session
             display_response = await client.set_displayname(display_name)
             if isinstance(display_response, nio.ErrorResponse):
                 logger.warning(f"Failed to set display name: {display_response}")
