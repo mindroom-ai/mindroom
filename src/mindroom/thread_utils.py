@@ -89,8 +89,22 @@ def should_agent_respond(
     configured_rooms: list[str],
     thread_history: list[dict],
     mentioned_agents: list[str] | None = None,
+    team_manager: Any = None,
+    thread_id: str | None = None,
 ) -> bool:
-    """Determine if an agent should respond to a message."""
+    """Determine if an agent should respond to a message.
+
+    With team support: When multiple agents are in a thread or multiple
+    agents are mentioned, they form a team and collaborate instead of
+    responding individually.
+    """
+    # Avoid circular import
+    from .teams import is_part_of_team_response
+
+    # Check if agent is part of an active team response
+    if is_part_of_team_response(agent_name, thread_id, team_manager):
+        # Team manager will handle the response
+        return False
 
     # For room messages (not in threads)
     if not is_thread:
@@ -99,10 +113,17 @@ def should_agent_respond(
 
     # Thread logic
     if am_i_mentioned:
-        # Respond if explicitly mentioned in a thread
-        return True
+        # Check if multiple agents are mentioned (team scenario)
+        # Single agent mentioned - respond normally
+        return not (mentioned_agents and len(mentioned_agents) > 1)
 
-    # For threads, check if there's a single agent that should continue
+    # For threads, check agent participation
     agents_in_thread = get_agents_in_thread(thread_history)
 
+    # Multiple agents in thread with no specific mention - team scenario
+    if len(agents_in_thread) > 1:
+        # Team will handle the response
+        return False
+
+    # Single agent continues conversation
     return [agent_name] == agents_in_thread
