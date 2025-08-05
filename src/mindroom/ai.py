@@ -10,6 +10,7 @@ from agno.models.anthropic import Claude
 from agno.models.base import Model
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
+from agno.models.openrouter import OpenRouter
 from agno.run.response import RunResponse, RunResponseContentEvent
 from dotenv import load_dotenv
 
@@ -64,6 +65,8 @@ def get_model_instance(model_name: str = "default") -> Model:
         return OpenAIChat(id=model_id)
     if provider == "anthropic":
         return Claude(id=model_id)
+    if provider == "openrouter":
+        return OpenRouter(id=model_id)
 
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)

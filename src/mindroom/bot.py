@@ -369,7 +369,7 @@ class AgentBot:
         response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
         if isinstance(response, nio.RoomSendResponse):
             self.response_tracker.mark_responded(reply_to_event_id)
-            self.logger.info("Sent response", event_id=response.event_id)
+            self.logger.info("Sent response", event_id=response.event_id, room_name=room.name)
             return True
         else:
             self.logger.error("Failed to send response", error=str(response))

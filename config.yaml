@@ -11,14 +11,29 @@ memory:
       model: "nomic-embed-text"  # Ollama embedding model
       host: "http://localhost:11434"  # Ollama host URL
 
-# Model configuration
 models:
-  default:  # Default model used when agent doesn't specify one
+  default:
+    provider: "openrouter"
+    id: "z-ai/glm-4.5-air"
+
+  anthropic:
+    provider: "anthropic"
+    id: "claude-3-5-haiku-latest"
+
+  ollama:  # Default model used when agent doesn't specify one
     provider: "ollama"
     id: "devstral:24b"
     # Add any provider-specific config here
     # For ollama, you can add:
     # host: "http://localhost:11434"
+
+  openrouter:
+    provider: "openrouter"
+    id: "z-ai/glm-4.5-air:free"
+
+  deepseek:
+    provider: "openrouter"
+    id: "deepseek-ai/deepseek-chat:free"
 
   # Example of other model configurations:
   # gpt4:
@@ -27,7 +42,7 @@ models:
   #
   # claude:
   #   provider: "anthropic"
-  #   id: "claude-3-opus-20240229"
+  #   id: "claude-4-opus-latest"
 
 agents:
   # General conversation agent
