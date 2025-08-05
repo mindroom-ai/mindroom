@@ -192,14 +192,31 @@ class TeamManager:
             logger.info(f"Executing team response for: {message[:100]}...")
             response = await team.arun(prompt)
 
+            # Debug log the response type and content
+            logger.debug(f"Team response type: {type(response)}")
+            logger.debug(f"Team response attributes: {dir(response) if hasattr(response, '__dict__') else 'N/A'}")
+            if hasattr(response, "content"):
+                logger.debug(f"Team response content: {response.content}")
+            logger.debug(f"Team response str: {str(response)[:200]}")
+
             # Extract the text content from the response
             if hasattr(response, "content") and response.content:
-                # Handle RunResponse object
-                content_parts = []
-                for content_item in response.content:
-                    if hasattr(content_item, "text"):
-                        content_parts.append(content_item.text)
-                result = "\n\n".join(content_parts)
+                # TeamRunResponse has content as a string
+                if isinstance(response.content, str):
+                    result = response.content
+                else:
+                    # Handle other response types where content might be iterable
+                    content_parts = []
+                    try:
+                        for content_item in response.content:
+                            if hasattr(content_item, "text"):
+                                content_parts.append(content_item.text)
+                            else:
+                                content_parts.append(str(content_item))
+                        result = "\n\n".join(content_parts)
+                    except TypeError:
+                        # If content is not iterable, just convert to string
+                        result = str(response.content)
             else:
                 # Fallback for other response types
                 result = str(response)
