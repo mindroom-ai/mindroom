@@ -212,6 +212,13 @@ async def handle_reaction(
     if event.sender == client.user_id:
         return
 
+    # Ignore reactions from other agents
+    from .matrix.identity import is_agent_id
+
+    if is_agent_id(event.sender):
+        logger.debug("Ignoring reaction from agent", sender=event.sender, reaction=reaction_key)
+        return
+
     # Get the value for this reaction
     selected_value = option_map[reaction_key]
 
