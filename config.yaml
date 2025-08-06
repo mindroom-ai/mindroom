@@ -258,3 +258,7 @@ defaults:
   num_history_runs: 5
   markdown: true
   add_history_to_messages: true
+
+# Router configuration
+router:
+  model: "ollama"  # Which model to use for routing decisions (references models section)

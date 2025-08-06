@@ -58,6 +58,12 @@ class ModelConfig(BaseModel):
     # Add other provider-specific fields as needed
 
 
+class RouterConfig(BaseModel):
+    """Configuration for the router system."""
+
+    model: str = Field(default="default", description="Model to use for routing decisions")
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -65,6 +71,7 @@ class Config(BaseModel):
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
+    router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
 
     def get_agent(self, agent_name: str) -> AgentConfig:
         """Get an agent configuration by name.
