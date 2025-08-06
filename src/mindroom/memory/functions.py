@@ -206,31 +206,35 @@ def store_conversation_memory(
 ) -> None:
     """Store conversation in memory for future recall.
 
+    Following mem0 best practices, only stores user prompts to allow
+    intelligent extraction of relevant facts, preferences, and context.
+    AI responses are not stored as they don't contain valuable user information.
+
     Args:
         prompt: The user's prompt
-        response: The agent's response
+        response: The agent's response (kept for compatibility but not stored)
         agent_name: Name of the agent
         storage_path: Path for memory storage
         session_id: Session ID for the conversation
         room_id: Optional room ID for room memory
     """
-    if not response:
+    if not prompt:
         return
 
-    conversation_summary = f"User asked: {prompt} I responded: {response}"
+    # Store only the user's input - let mem0 extract what's valuable
     add_agent_memory(
-        conversation_summary,
+        prompt,
         agent_name,
         storage_path,
-        metadata={"type": "conversation", "session_id": session_id},
+        metadata={"type": "user_input", "session_id": session_id},
     )
 
     if room_id:
-        room_summary = f"{agent_name} discussed: {response}"
+        # For room memory, also store user input for room context
         add_room_memory(
-            room_summary,
+            prompt,
             room_id,
             storage_path,
             agent_name=agent_name,
-            metadata={"type": "conversation", "user_prompt": prompt},
+            metadata={"type": "user_input", "session_id": session_id},
         )

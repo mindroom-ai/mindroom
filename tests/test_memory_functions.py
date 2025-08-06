@@ -181,29 +181,47 @@ class TestMemoryFunctions:
             # Check agent memory call
             agent_call = mock_memory.add.call_args_list[0]
             agent_messages = agent_call[0][0]
-            assert "User asked: What is 2+2?" in agent_messages[0]["content"]
-            assert "I responded: The answer is 4" in agent_messages[0]["content"]
+            assert agent_messages[0]["content"] == "What is 2+2?"  # Only user prompt stored
             assert agent_call[1]["user_id"] == "agent_calculator"
+            assert agent_call[1]["metadata"]["type"] == "user_input"
 
             # Check room memory call
             room_call = mock_memory.add.call_args_list[1]
             room_messages = room_call[0][0]
-            assert "calculator discussed: The answer is 4" in room_messages[0]["content"]
+            assert room_messages[0]["content"] == "What is 2+2?"  # Only user prompt stored
             assert room_call[1]["user_id"] == "room_room_server"
+            assert room_call[1]["metadata"]["type"] == "user_input"
 
-    def test_store_conversation_memory_no_response(self, mock_memory, storage_path):
-        """Test that empty responses are not stored."""
+    def test_store_conversation_memory_no_prompt(self, mock_memory, storage_path):
+        """Test that empty prompts are not stored."""
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
             store_conversation_memory(
-                "Question",
-                "",  # Empty response
+                "",  # Empty prompt
+                "The answer is 4",
                 "agent",
                 storage_path,
                 "session123",
             )
 
-            # Should not call add
+            # Should not call add when prompt is empty
             mock_memory.add.assert_not_called()
+
+    def test_store_conversation_memory_with_empty_response(self, mock_memory, storage_path):
+        """Test that user prompts are still stored even with empty responses."""
+        with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
+            store_conversation_memory(
+                "What is 2+2?",
+                "",  # Empty response
+                "calculator",
+                storage_path,
+                "session123",
+            )
+
+            # Should still store the user prompt
+            assert mock_memory.add.call_count == 1
+            agent_call = mock_memory.add.call_args_list[0]
+            agent_messages = agent_call[0][0]
+            assert agent_messages[0]["content"] == "What is 2+2?"
 
     def test_memory_result_typed_dict(self):
         """Test MemoryResult TypedDict structure."""
