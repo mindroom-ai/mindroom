@@ -306,14 +306,14 @@ class AgentBot:
     async def _process_and_respond(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        prompt: str,
+        reply_to_event_id: str,
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
     ) -> None:
         """Process a message and send a response (non-streaming)."""
-        prompt = event.body.strip()
-        if not prompt:
+        if not prompt.strip():
             return
 
         session_id = create_session_id(room.room_id, thread_id)
@@ -337,21 +337,21 @@ class AgentBot:
                     self.client, room.room_id, thread_id, response_text, self.agent_name
                 )
             else:
-                event_id = await self._send_response(room, event.event_id, response_text, thread_id)
+                event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
                 if event_id:
-                    self.response_tracker.mark_responded(event.event_id)
+                    self.response_tracker.mark_responded(reply_to_event_id)
 
     async def _process_and_respond_streaming(
         self,
         room: nio.MatrixRoom,
-        event: nio.RoomMessageText,
+        prompt: str,
+        reply_to_event_id: str,
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
     ) -> None:
         """Process a message and send a response (streaming)."""
-        prompt = event.body.strip()
-        if not prompt:
+        if not prompt.strip():
             return
 
         session_id = create_session_id(room.room_id, thread_id)
@@ -359,7 +359,7 @@ class AgentBot:
 
         streaming = StreamingResponse(
             room_id=room.room_id,
-            reply_to_event_id=event.event_id,
+            reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
             sender_domain=sender_id.domain,
         )
@@ -383,7 +383,7 @@ class AgentBot:
             await streaming.finalize(self.client)
 
             if streaming.event_id and not existing_event_id:
-                self.response_tracker.mark_responded(event.event_id)
+                self.response_tracker.mark_responded(reply_to_event_id)
                 self.logger.info("Sent streaming response", event_id=streaming.event_id)
 
             # If the message contains an interactive question, handle it
@@ -423,20 +423,17 @@ class AgentBot:
         if not prompt.strip():
             return
 
-        # Create a minimal event for compatibility with process methods
-        class MinimalEvent:
-            def __init__(self, event_id: str, body: str):
-                self.event_id = event_id
-                self.body = body
-
-        event = MinimalEvent(reply_to_event_id, prompt)
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
         # Dispatch to appropriate method
         if self.enable_streaming:
-            await self._process_and_respond_streaming(room, event, thread_id, thread_history, existing_event_id)
+            await self._process_and_respond_streaming(
+                room, prompt, reply_to_event_id, thread_id, thread_history, existing_event_id
+            )
         else:
-            await self._process_and_respond(room, event, thread_id, thread_history, existing_event_id)
+            await self._process_and_respond(
+                room, prompt, reply_to_event_id, thread_id, thread_history, existing_event_id
+            )
 
     async def _send_response(
         self, room: nio.MatrixRoom, reply_to_event_id: str, response_text: str, thread_id: str | None
