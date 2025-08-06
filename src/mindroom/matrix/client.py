@@ -226,7 +226,7 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
     if isinstance(response, nio.JoinedMembersResponse):
         return {member.user_id for member in response.members}
     else:
-        logger.warning(f"Could not check members for room {room_id}")
+        logger.warning(f"⚠️ Could not check members for room {room_id}")
         return set()
 
 

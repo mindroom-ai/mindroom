@@ -29,17 +29,6 @@ class InviteResult(NamedTuple):
     already_member: bool
 
 
-async def _get_room_members(client: nio.AsyncClient, room_id: str, room_key: str) -> set[str]:
-    """Get the current members of a room."""
-    members_response = await client.joined_members(room_id)
-    if isinstance(members_response, nio.JoinedMembersResponse):
-        # members is a list of RoomMember objects
-        return set(member.user_id for member in members_response.members)
-    else:
-        console.print(f"⚠️  Could not check members for {room_key}")
-        return set()
-
-
 async def _invite_agent_to_room(client: nio.AsyncClient, room_id: str, room_key: str, agent_id: str) -> InviteResult:
     """Invite an agent to a room. Returns InviteResult."""
     response = await client.room_invite(room_id, agent_id)
@@ -173,7 +162,7 @@ async def _ensure_user_account() -> MatrixState:
 async def _ensure_rooms_and_agents(client: nio.AsyncClient, required_rooms: set[str]) -> None:
     """Ensure all required rooms exist and all agents (including router) are invited."""
     from mindroom.agent_config import load_config
-    from mindroom.matrix import load_rooms
+    from mindroom.matrix import get_room_members, load_rooms
 
     console.print("\n🔄 Setting up rooms and agent access...")
 
@@ -203,7 +192,7 @@ async def _ensure_rooms_and_agents(client: nio.AsyncClient, required_rooms: set[
         # Ensure all agents are in the room (for existing rooms)
         if room_key in existing_rooms:
             room = existing_rooms[room_key]
-            room_members = await _get_room_members(client, room.room_id, room_key)
+            room_members = await get_room_members(client, room.room_id)
 
             # Always invite router to ALL rooms first
             router_id = MatrixID.from_agent("router", "localhost").full_id
