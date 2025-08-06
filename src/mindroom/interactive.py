@@ -135,9 +135,9 @@ async def handle_interactive_response(
     if not response_already_sent and not final_text.rstrip().endswith("✓"):
         final_text += " ✓"
 
-    # If we have an event_id (streaming mode), edit the existing message
+    # If we have an event_id (streaming mode), the message is already formatted
     if event_id and response_already_sent:
-        await _edit_message_with_question(client, room_id, event_id, final_text, thread_id)
+        # Message is already sent and formatted by streaming, just use the event_id
         question_event_id = event_id
     else:
         # Otherwise, send a new message
@@ -384,6 +384,65 @@ def _extract_thread_id_from_event(event: nio.Event) -> str | None:
         event_id = relates_to.get("event_id")
         return event_id if isinstance(event_id, str) else None
     return None
+
+
+def _format_interactive_text_only(response_text: str) -> str | None:
+    """Format text containing an interactive question block.
+
+    This is a pure formatting function without side effects, useful for streaming.
+    Returns None if formatting fails.
+    """
+    # Extract JSON from interactive code block
+    match = re.search(INTERACTIVE_PATTERN_WITH_CHECK, response_text, re.DOTALL)
+    if not match:
+        match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
+
+    if not match:
+        return None
+
+    try:
+        interactive_data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+
+    # Extract question and options
+    question = interactive_data.get("question", DEFAULT_QUESTION)
+    options = interactive_data.get("options", [])
+
+    if not options or len(options) == 0:
+        return None
+
+    # Limit options
+    options = options[:MAX_OPTIONS]
+
+    # Remove the JSON block from the original text
+    clean_response = response_text.replace(match.group(0), "").strip()
+
+    # Build option lines
+    option_lines = []
+    for i, opt in enumerate(options, 1):
+        emoji_char = opt.get("emoji", "❓")
+        label = opt.get("label", "Option")
+        option_lines.append(f"{i}. {emoji_char} {label}")
+
+    # Combine everything into the final message
+    message_parts = []
+    if clean_response:
+        message_parts.append(clean_response)
+    message_parts.append("")  # Empty line
+    message_parts.append(question)
+    message_parts.append("")  # Empty line
+    message_parts.extend(option_lines)
+    message_parts.append("")  # Empty line
+    message_parts.append(INSTRUCTION_TEXT)
+
+    final_text = "\n".join(message_parts)
+
+    # Add checkmark if not already present
+    if not final_text.rstrip().endswith("✓"):
+        final_text += " ✓"
+
+    return final_text
 
 
 def cleanup() -> None:

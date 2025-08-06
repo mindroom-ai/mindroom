@@ -24,16 +24,10 @@ class StreamingResponse:
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
     update_interval: float = 0.1  # 100ms updates
-    interactive_processed: bool = False  # Track if we've already processed an interactive block
 
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
         self.accumulated_text += new_chunk
-
-        # Don't send updates if we've already processed an interactive block
-        # The interactive handler has taken over message editing
-        if self.interactive_processed:
-            return
 
         current_time = time.time()
         if current_time - self.last_update >= self.update_interval:
@@ -42,18 +36,10 @@ class StreamingResponse:
 
     def has_complete_interactive_block(self) -> bool:
         """Check if we have a complete interactive block that can be processed."""
-        if self.interactive_processed:
-            return False
-
         return interactive.should_create_interactive_question(self.accumulated_text)
 
     async def finalize(self, client: nio.AsyncClient) -> None:
         """Send final message update with completion marker."""
-        # Don't finalize if we've already processed an interactive block
-        # The interactive handler has already edited the message properly
-        if self.interactive_processed:
-            return
-
         if not self.accumulated_text.endswith(" ✓"):
             self.accumulated_text += " ✓"
         await self._send_or_edit_message(client)
@@ -66,8 +52,16 @@ class StreamingResponse:
         # Always ensure we have a thread_id - use the original message as thread root if needed
         effective_thread_id = self.thread_id if self.thread_id else self.reply_to_event_id
 
+        # Check if we should format as interactive question
+        display_text = self.accumulated_text
+        if interactive.should_create_interactive_question(self.accumulated_text):
+            # Extract and format the interactive question
+            formatted_text = await self._format_interactive_text()
+            if formatted_text:
+                display_text = formatted_text
+
         content = create_mention_content_from_text(
-            self.accumulated_text,
+            display_text,
             sender_domain=self.sender_domain,
             thread_event_id=effective_thread_id,
             reply_to_event_id=self.reply_to_event_id,
@@ -105,3 +99,16 @@ class StreamingResponse:
             )
             if not isinstance(response, nio.RoomSendResponse):
                 logger.error("Failed to edit streaming message", error=str(response))
+
+    async def _format_interactive_text(self) -> str | None:
+        """Format text containing an interactive question block.
+
+        Returns the formatted text or None if formatting fails.
+        """
+        # Simply reuse the formatting logic from interactive module
+        # This is a dummy agent name since we're just formatting
+        try:
+            return interactive._format_interactive_text_only(self.accumulated_text)
+        except Exception as e:
+            logger.error("Failed to format interactive text", error=str(e))
+            return None

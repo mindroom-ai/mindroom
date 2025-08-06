@@ -357,13 +357,14 @@ class AgentBot:
             ):
                 await streaming.update_content(chunk, self.client)
 
-                # Check if we now have a complete interactive block
-                if (
-                    streaming.event_id
-                    and streaming.has_complete_interactive_block()
-                    and not streaming.interactive_processed
-                ):
-                    # Process the interactive question immediately
+            await streaming.finalize(self.client)
+
+            if streaming.event_id:
+                self.response_tracker.mark_responded(event.event_id)
+                self.logger.info("Sent streaming response", event_id=streaming.event_id)
+
+                # If the message contains an interactive question, handle it
+                if interactive.should_create_interactive_question(streaming.accumulated_text):
                     await interactive.handle_interactive_response(
                         self.client,
                         room.room_id,
@@ -373,13 +374,6 @@ class AgentBot:
                         response_already_sent=True,
                         event_id=streaming.event_id,
                     )
-                    streaming.interactive_processed = True
-
-            await streaming.finalize(self.client)
-
-            if streaming.event_id:
-                self.response_tracker.mark_responded(event.event_id)
-                self.logger.info("Sent streaming response", event_id=streaming.event_id)
 
         except Exception as e:
             self.logger.error("Error in streaming response", error=str(e))

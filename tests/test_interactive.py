@@ -340,16 +340,14 @@ interactive
 
     @pytest.mark.asyncio
     async def test_handle_interactive_response_streaming_mode(self, mock_client):
-        """Test creating interactive question in streaming mode (editing existing message)."""
+        """Test creating interactive question in streaming mode (message already formatted)."""
         interactive._active_questions.clear()
 
-        # Mock room_send responses for edit and reactions
-        mock_edit_response = MagicMock(spec=nio.RoomSendResponse)
-        mock_edit_response.event_id = "$edit123"
+        # Mock room_send responses for reactions only (no edit needed)
         mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_reaction_response.event_id = "$react123"
 
         mock_client.room_send.side_effect = [
-            mock_edit_response,  # Edit message
             mock_reaction_response,  # First reaction
             mock_reaction_response,  # Second reaction
         ]
@@ -378,16 +376,11 @@ interactive
             event_id=existing_event_id,
         )
 
-        # Should edit the existing message
+        # Should NOT edit the existing message (streaming already formatted it)
+        # Should only add reactions
         first_call = mock_client.room_send.call_args_list[0]
-        assert first_call[1]["content"]["m.relates_to"]["rel_type"] == "m.replace"
+        assert first_call[1]["content"]["m.relates_to"]["rel_type"] == "m.annotation"
         assert first_call[1]["content"]["m.relates_to"]["event_id"] == existing_event_id
-
-        # Check edited content
-        assert "I'll help you with that." in first_call[1]["content"]["body"]
-        assert "How should I proceed?" in first_call[1]["content"]["body"]
-        assert "1. ⚡ Fast" in first_call[1]["content"]["body"]
-        assert "```interactive" not in first_call[1]["content"]["body"]
 
         # Should store question with existing event_id
         assert existing_event_id in interactive._active_questions
