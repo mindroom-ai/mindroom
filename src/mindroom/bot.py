@@ -196,10 +196,25 @@ class AgentBot:
         agents_in_thread = get_agents_in_thread(context.thread_history)
         form_team = should_form_team(context.mentioned_agents, agents_in_thread)
 
+        self.logger.debug(
+            "Team formation check",
+            mentioned_agents=context.mentioned_agents,
+            agents_in_thread=agents_in_thread,
+            should_form_team=form_team.should_form_team,
+            team_agents=form_team.agents,
+            team_mode=form_team.mode,
+        )
+
         # Simple team formation: only the first agent (alphabetically) handles team formation
         if form_team.should_form_team and self.agent_name in form_team.agents:
             # Simple coordination: let the first agent alphabetically handle the team
             first_agent = min(form_team.agents)
+            self.logger.debug(
+                "Team coordination",
+                first_agent=first_agent,
+                my_agent=self.agent_name,
+                am_i_first=self.agent_name == first_agent,
+            )
             if self.agent_name != first_agent:
                 # Other agents in the team don't respond individually
                 return
