@@ -32,7 +32,7 @@ pip install -r requirements.txt
 python src/main.py
 ```
 
-The backend will run on http://localhost:8000
+The backend will run on http://localhost:8001
 
 ### Frontend Setup
 

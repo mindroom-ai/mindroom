@@ -53,7 +53,7 @@ npm run dev
 
 ### Backend (FastAPI/Python)
 - **Location**: `widget/backend/`
-- **Port**: 8000
+- **Port**: 8001
 - **Technologies**: FastAPI, PyYAML, Watchdog, Pydantic
 - **Key Files**:
   - `src/main.py` - API endpoints and file watching
@@ -84,7 +84,7 @@ npm run dev
 - Hot reload for both frontend and backend
 - TypeScript for type safety
 - Comprehensive error handling
-- RESTful API with OpenAPI docs at http://localhost:8000/docs
+- RESTful API with OpenAPI docs at http://localhost:8001/docs
 
 ## API Endpoints
 
@@ -179,7 +179,7 @@ Currently manual testing. Run the widget and verify:
 
 ### Common Issues
 
-1. **Port conflicts**: Backend uses 8000, frontend uses 3001
+1. **Port conflicts**: Backend uses 8001, frontend uses 3000
 2. **File permissions**: Ensure write access to `config.yaml`
 3. **Missing dependencies**: Run `npm install` and `uv sync`
 

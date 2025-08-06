@@ -32,7 +32,7 @@ echo "Using uv for Python dependencies..."
 if [ ! -d ".venv" ]; then
     uv sync
 fi
-uv run uvicorn src.main:app --reload &
+uv run uvicorn src.main:app --reload --port 8001 &
 BACKEND_PID=$!
 
 cd ..
@@ -54,7 +54,7 @@ cd ..
 
 echo -e "${GREEN}Widget is running!${NC}"
 echo -e "Frontend: http://localhost:3000"
-echo -e "Backend: http://localhost:8000"
+echo -e "Backend: http://localhost:8001"
 echo -e "\nPress Ctrl+C to stop both servers"
 
 # Wait for both processes
