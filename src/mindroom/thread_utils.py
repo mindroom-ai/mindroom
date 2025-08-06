@@ -98,13 +98,7 @@ def should_agent_respond(
     agents are mentioned, they form a team and collaborate instead of
     responding individually.
     """
-    # Avoid circular import
-    from .teams import is_part_of_team_response
-
-    # Check if agent is part of an active team response
-    if is_part_of_team_response(agent_name, thread_id, team_manager):
-        # Team manager will handle the response
-        return False
+    # Team coordination is now handled in bot.py directly
 
     # For room messages (not in threads)
     if not is_thread:

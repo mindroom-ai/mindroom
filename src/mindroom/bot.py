@@ -36,7 +36,7 @@ from .matrix import (
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .streaming import StreamingResponse
-from .teams import TeamManager
+from .teams import create_team_response, should_form_team
 from .thread_invites import ThreadInviteManager
 from .thread_utils import (
     check_agent_mentioned,
@@ -177,9 +177,19 @@ class AgentBot:
         if self.agent_name == ROUTER_AGENT_NAME:
             # Router should handle routing when no specific agent is mentioned
             if not context.mentioned_agents:
-                # For threads, only route if no agent has participated yet
+                # For threads, check if a team should be formed
                 if context.is_thread:
                     agents_in_thread = get_agents_in_thread(context.thread_history)
+
+                    # Check if team should form - if so, don't route
+                    team_should_form, _, _ = should_form_team(
+                        tagged_agents=context.mentioned_agents,
+                        agents_in_thread=agents_in_thread,
+                    )
+                    if team_should_form:
+                        return
+
+                    # Only route if no agent has participated yet
                     if not agents_in_thread:
                         await self._handle_ai_routing(room, event, context.thread_history)
                 else:
@@ -187,45 +197,34 @@ class AgentBot:
                     await self._handle_ai_routing(room, event, context.thread_history)
             return
 
-        # Get team manager from orchestrator
-        team_manager = self.orchestrator.team_manager if self.orchestrator else None
-
-        # Check if we should form a team first
-        if team_manager and context.is_thread and context.thread_id:
-            # Get agents already in the thread
+        # Check if we should form a team first (only if orchestrator is available)
+        if self.orchestrator:
             agents_in_thread = get_agents_in_thread(context.thread_history)
-
-            # Check if a team should be formed
-            should_form_team, team_agents, team_mode = team_manager.should_form_team(
+            team_should_form, team_agents, team_mode = should_form_team(
                 tagged_agents=context.mentioned_agents,
                 agents_in_thread=agents_in_thread,
-                message=event.body,
-                thread_id=context.thread_id,
             )
 
-            # If team should form and this is the first agent mentioned (or the only one in thread)
-            if should_form_team and (
+            # If team should form and this is the first agent mentioned (or first in thread)
+            if team_should_form and (
                 (context.mentioned_agents and self.agent_name == context.mentioned_agents[0])
                 or (not context.mentioned_agents and agents_in_thread and self.agent_name == agents_in_thread[0])
             ):
                 self.logger.info("Forming team for collaborative response", agents=team_agents, mode=team_mode)
 
                 # Create and execute team response
-                try:
-                    team = await team_manager.create_team(team_agents, team_mode, context.thread_id)
-                    team_response = await team_manager.execute_team_response(
-                        team,
-                        event.body,
-                        {"thread_history": context.thread_history},
-                        context.thread_id,
-                    )
+                team_response = await create_team_response(
+                    agent_names=team_agents,
+                    mode=team_mode,
+                    message=event.body,
+                    orchestrator=self.orchestrator,
+                    storage_path=self.storage_path,
+                    thread_history=context.thread_history,
+                )
 
-                    # Send the team response
-                    await self._send_response(room, event.event_id, team_response, context.thread_id)
-                    return
-                except Exception as e:
-                    self.logger.error("Failed to execute team response", error=str(e))
-                    # Fall back to individual response
+                # Send the team response
+                await self._send_response(room, event.event_id, team_response, context.thread_id)
+                return
 
         # Determine if this agent should respond individually
         should_respond = should_agent_respond(
@@ -237,7 +236,7 @@ class AgentBot:
             self.rooms,
             context.thread_history,
             context.mentioned_agents,
-            team_manager,
+            None,  # No team manager needed anymore
             context.thread_id,
         )
 
@@ -537,14 +536,10 @@ class MultiAgentOrchestrator:
     storage_path: Path
     agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
-    team_manager: TeamManager = field(init=False)
 
     async def initialize(self) -> None:
         """Initialize all agent bots."""
         logger.info("Initializing multi-agent system...")
-
-        # Initialize team manager
-        self.team_manager = TeamManager(self, self.storage_path)
 
         config = load_config()
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
