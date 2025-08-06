@@ -330,16 +330,17 @@ class AgentBot:
         if existing_event_id:
             # Edit the existing message
             await self._edit_message(room.room_id, existing_event_id, response_text, thread_id)
+            return
+
+        # Check if the response suggests multiple options or needs user input
+        if interactive.should_create_interactive_question(response_text):
+            await interactive.handle_interactive_response(
+                self.client, room.room_id, thread_id, response_text, self.agent_name
+            )
         else:
-            # Check if the response suggests multiple options or needs user input
-            if interactive.should_create_interactive_question(response_text):
-                await interactive.handle_interactive_response(
-                    self.client, room.room_id, thread_id, response_text, self.agent_name
-                )
-            else:
-                event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
-                if event_id:
-                    self.response_tracker.mark_responded(reply_to_event_id)
+            event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
+            if event_id:
+                self.response_tracker.mark_responded(reply_to_event_id)
 
     async def _process_and_respond_streaming(
         self,
