@@ -1,6 +1,6 @@
 # Minimal Makefile for mindroom
 
-.PHONY: help up down setup run test clean
+.PHONY: help up down setup run test clean reset
 
 help:
 	@echo "mindroom - Minimal commands:"
@@ -11,6 +11,7 @@ help:
 	@echo "run     - Run the mindroom bot"
 	@echo "test    - Test bot connection"
 	@echo "clean   - Clean up everything"
+	@echo "reset   - Full reset: down compose, remove volumes, clean state"
 
 up:
 	docker compose up -d
@@ -32,3 +33,13 @@ clean:
 	rm -f matrix_state.yaml .env.python
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
+
+reset:
+	@echo "🔄 Full reset: stopping containers, removing volumes, cleaning state..."
+	docker compose down -v
+	docker volume prune -f
+	rm -f matrix_state.yaml .env.python
+	rm -rf tmp/
+	find . -type d -name "__pycache__" -exec rm -rf {} +
+	find . -type f -name "*.pyc" -delete
+	@echo "✅ Reset complete! Run 'make up' then 'mindroom run' to start fresh."
