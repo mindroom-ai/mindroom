@@ -100,15 +100,11 @@ def should_agent_respond(
     room_id: str,
     configured_rooms: list[str],
     thread_history: list[dict],
-    mentioned_agents: list[str],
 ) -> bool:
-    """Determine if an agent should respond to a message.
+    """Determine if an agent should respond to a message individually.
 
-    With team support: When multiple agents are in a thread or multiple
-    agents are mentioned, they form a team and collaborate instead of
-    responding individually.
+    Team formation is handled elsewhere - this just determines individual responses.
     """
-    # Team coordination is now handled in bot.py directly
 
     # For room messages (not in threads)
     if not is_thread:

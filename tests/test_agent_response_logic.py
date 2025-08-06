@@ -25,7 +25,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
-            mentioned_agents=[],
         )
         assert should_respond is True
 
@@ -43,7 +42,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
-            mentioned_agents=[],
         )
         assert should_respond is True
 
@@ -57,7 +55,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=[],  # Not native to room
             thread_history=[],
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -73,7 +70,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=[],  # Not native to room
             thread_history=thread_history,
-            mentioned_agents=[],
         )
         assert should_respond is True
 
@@ -90,7 +86,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=[],  # Not native to room
             thread_history=thread_history,
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -103,7 +98,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -122,7 +116,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -135,7 +128,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -148,7 +140,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!other_room:localhost"],  # Different room
             thread_history=[],
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -161,7 +152,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
-            mentioned_agents=[],
         )
         assert should_respond is True
 
@@ -186,7 +176,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -200,7 +189,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -216,7 +204,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -229,7 +216,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=[],  # No access to this room
             thread_history=[],
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -243,7 +229,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=[],  # No native rooms
             thread_history=[],
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -266,7 +251,6 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
-            mentioned_agents=[],
         )
         assert should_respond is False
 
@@ -280,7 +264,6 @@ class TestAgentResponseLogic:
             room_id="!test:example.org",
             configured_rooms=["!test:example.org"],
             thread_history=[],
-            mentioned_agents=["agent2"],  # Another agent is mentioned
         )
         # Agent1 should not respond and should NOT use router
         assert not should_respond
@@ -293,7 +276,7 @@ class TestAgentResponseLogic:
             room_id="!test:example.org",
             configured_rooms=["!test:example.org"],
             thread_history=[],
-            mentioned_agents=[],  # No agents mentioned
+            # No agents mentioned
         )
         # Agent1 should not respond but SHOULD use router
         assert not should_respond
@@ -306,7 +289,6 @@ class TestAgentResponseLogic:
             room_id="!test:example.org",
             configured_rooms=["!test:example.org"],
             thread_history=[],
-            mentioned_agents=["agent1"],  # Current agent is mentioned
         )
         # Agent1 SHOULD respond and should NOT use router
         assert should_respond

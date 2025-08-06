@@ -233,7 +233,6 @@ class AgentBot:
             room_id=room.room_id,
             configured_rooms=self.rooms,
             thread_history=context.thread_history,
-            mentioned_agents=context.mentioned_agents,
         )
 
         if should_respond and not context.am_i_mentioned:
