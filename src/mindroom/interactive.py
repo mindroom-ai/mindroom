@@ -2,6 +2,7 @@
 
 import json
 import re
+from contextlib import suppress
 
 import nio
 
@@ -49,7 +50,7 @@ async def handle_interactive_response(
     match = re.search(pattern, response_text, re.DOTALL)
 
     if not match:
-        logger.warning("Interactive block found but couldn't extract JSON")
+        logger.warning("Interactive block found but couldn't extract JSON", response_preview=response_text[:200])
         # Send the original response anyway if not already sent
         if not response_already_sent:
             await _send_response_text(client, room_id, thread_id, response_text)
@@ -71,13 +72,16 @@ async def handle_interactive_response(
             await _send_response_text(client, room_id, thread_id, clean_response)
 
     # Create the interactive question
-    await create_interactive_question(
+    question_event_id = await create_interactive_question(
         client=client,
         room_id=room_id,
         thread_id=thread_id,
         question=interactive_data.get("question", "Please choose an option:"),
         options=interactive_data.get("options", []),
     )
+
+    if question_event_id:
+        logger.info("Created interactive question from response", event_id=question_event_id)
 
 
 async def create_interactive_question(
@@ -188,6 +192,13 @@ async def handle_reaction(
     # Check if this reaction relates to an active question
     question_data = _active_questions.get(event.reacts_to)
     if not question_data:
+        logger.debug(
+            "Reaction to unknown message",
+            reacts_to=event.reacts_to,
+            sender=event.sender,
+            reaction=event.key,
+            active_questions=list(_active_questions.keys()),
+        )
         return
 
     room_id, thread_id, option_map = question_data
@@ -215,7 +226,8 @@ async def handle_reaction(
     await _send_confirmation(client, room_id, thread_id, event.reacts_to, reaction_key, selected_value)
 
     # Remove the question after successful response
-    del _active_questions[event.reacts_to]
+    with suppress(KeyError):
+        del _active_questions[event.reacts_to]
 
 
 async def handle_text_response(
