@@ -30,16 +30,12 @@ test:
 
 clean:
 	docker compose down -v
-	rm -f matrix_state.yaml .env.python
+	rm -f matrix_state.yaml
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 
-reset:
-	@echo "🔄 Full reset: stopping containers, removing volumes, cleaning state..."
-	docker compose down -v
+reset: clean
+	@echo "🔄 Full reset: removing volumes and temporary files..."
 	docker volume prune -f
-	rm -f matrix_state.yaml .env.python
 	rm -rf tmp/
-	find . -type d -name "__pycache__" -exec rm -rf {} +
-	find . -type f -name "*.pyc" -delete
 	@echo "✅ Reset complete! Run 'make up' then 'mindroom run' to start fresh."
