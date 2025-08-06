@@ -347,9 +347,10 @@ class TestAgentBot:
         mock_ai_response.reset_mock()
         mock_team_arun.reset_mock()
         bot.client.room_send.reset_mock()
+        mock_fetch_history.reset_mock()
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
-        mock_fetch_history.return_value = [
+        test2_history = [
             {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
             {"sender": "@mindroom_calculator:localhost", "body": "My response", "timestamp": 124, "event_id": "prev2"},
             {
@@ -359,8 +360,23 @@ class TestAgentBot:
                 "event_id": "prev3",
             },
         ]
+        mock_fetch_history.return_value = test2_history
 
-        await bot._on_message(mock_room, mock_event)
+        # Create a new event with a different ID for Test 2
+        mock_event_2 = MagicMock()
+        mock_event_2.sender = "@user:localhost"
+        mock_event_2.body = "Thread message without mention"
+        mock_event_2.event_id = "event456"  # Different event ID
+        mock_event_2.source = {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "thread_root",
+                },
+            },
+        }
+
+        await bot._on_message(mock_room, mock_event_2)
 
         # Should form team and send team response when multiple agents in thread
         mock_ai_response_streaming.assert_not_called()
@@ -378,7 +394,7 @@ class TestAgentBot:
         mock_event_with_mention = MagicMock()
         mock_event_with_mention.sender = "@user:localhost"
         mock_event_with_mention.body = "@mindroom_calculator:localhost What's 2+2?"
-        mock_event_with_mention.event_id = "event456"
+        mock_event_with_mention.event_id = "event789"  # Unique event ID for Test 3
         mock_event_with_mention.source = {
             "content": {
                 "body": "@mindroom_calculator:localhost What's 2+2?",
