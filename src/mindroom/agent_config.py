@@ -25,7 +25,6 @@ DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 _agent_cache: dict[str, Agent] = {}
 
 
-
 @functools.cache
 def load_config(config_path: Path | None = None) -> Config:
     """Load agent configuration from YAML file.
