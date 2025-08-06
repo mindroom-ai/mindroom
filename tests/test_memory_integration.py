@@ -21,10 +21,14 @@ class TestMemoryIntegration:
     def mock_memory_functions(self):
         """Mock all memory functions."""
         with (
-            patch("mindroom.ai.build_memory_enhanced_prompt") as mock_build,
-            patch("mindroom.ai.store_conversation_memory") as mock_store,
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock) as mock_build,
+            patch("mindroom.ai.store_conversation_memory", new_callable=AsyncMock) as mock_store,
         ):
-            mock_build.side_effect = lambda prompt, *args, **kwargs: f"[Enhanced] {prompt}"
+            # Set up async side effects
+            async def build_side_effect(prompt, *args, **kwargs):
+                return f"[Enhanced] {prompt}"
+
+            mock_build.side_effect = build_side_effect
             yield mock_build, mock_store
 
     @pytest.mark.asyncio
@@ -80,7 +84,14 @@ class TestMemoryIntegration:
     @pytest.mark.asyncio
     async def test_ai_response_error_handling(self, tmp_path):
         """Test error handling in AI response."""
-        with patch("mindroom.ai.get_model_instance", side_effect=Exception("Model error")):
+        # Mock memory to prevent real memory instance creation during error handling
+        mock_memory = AsyncMock()
+        mock_memory.search.return_value = {"results": []}
+
+        with (
+            patch("mindroom.ai.get_model_instance", side_effect=Exception("Model error")),
+            patch("mindroom.memory.functions.get_memory", return_value=mock_memory),
+        ):
             response = await ai_response(
                 agent_name="general", prompt="Test", session_id="session", storage_path=tmp_path
             )
@@ -93,7 +104,7 @@ class TestMemoryIntegration:
     async def test_memory_persistence_across_calls(self, tmp_path):
         """Test that memory persists across multiple AI calls."""
         # This is more of a documentation test showing expected behavior
-        mock_memory = MagicMock()
+        mock_memory = AsyncMock()
 
         # First call - no memories
         mock_memory.search.return_value = {"results": []}
