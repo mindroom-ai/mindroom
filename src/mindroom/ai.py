@@ -1,5 +1,6 @@
 import functools
 import os
+import traceback
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -174,8 +175,6 @@ async def ai_response(
         logger.exception(f"Error generating AI response for agent {agent_name}: {e}")
         logger.error(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
         logger.error(f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}")
-        import traceback
-
         logger.error(f"Traceback:\n{traceback.format_exc()}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"
 

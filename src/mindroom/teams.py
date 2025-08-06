@@ -113,7 +113,7 @@ async def create_team_response(
 
     # Create and run team
     team = Team(
-        members=agents,
+        members=agents,  # type: ignore[arg-type]
         mode=mode.value,
         name=f"Team-{'-'.join(agent_names)}",
         model=get_model_instance("default"),
