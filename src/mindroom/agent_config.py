@@ -24,6 +24,19 @@ DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 # Global caches
 _agent_cache: dict[str, Agent] = {}
 
+# Rich prompt mapping - agents that use detailed prompts instead of simple roles
+RICH_PROMPTS = {
+    "code": agent_prompts.CODE_AGENT_PROMPT,
+    "research": agent_prompts.RESEARCH_AGENT_PROMPT,
+    "calculator": agent_prompts.CALCULATOR_AGENT_PROMPT,
+    "general": agent_prompts.GENERAL_AGENT_PROMPT,
+    "shell": agent_prompts.SHELL_AGENT_PROMPT,
+    "summary": agent_prompts.SUMMARY_AGENT_PROMPT,
+    "finance": agent_prompts.FINANCE_AGENT_PROMPT,
+    "news": agent_prompts.NEWS_AGENT_PROMPT,
+    "data_analyst": agent_prompts.DATA_ANALYST_AGENT_PROMPT,
+}
+
 
 @functools.cache
 def load_config(config_path: Path | None = None) -> Config:
@@ -92,10 +105,9 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
     storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
 
     # Use rich prompt if available, otherwise use YAML config
-    rich_prompt_name = f"{agent_name.upper()}_AGENT_PROMPT"
-    if hasattr(agent_prompts, rich_prompt_name):
+    if agent_name in RICH_PROMPTS:
         logger.info(f"Using rich prompt for agent: {agent_name}")
-        role = getattr(agent_prompts, rich_prompt_name)
+        role = RICH_PROMPTS[agent_name]
         instructions = []  # Instructions are in the rich prompt
     else:
         logger.info(f"Using YAML config for agent: {agent_name}")
