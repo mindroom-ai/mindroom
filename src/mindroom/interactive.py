@@ -43,8 +43,11 @@ def should_create_interactive_question(response_text: str) -> bool:
     Returns:
         True if an interactive code block is found
     """
-    # Check for both formats: ```interactive and ```\ninteractive
-    return "```interactive" in response_text or "```\ninteractive" in response_text
+    # Try with checkmark first (more specific pattern)
+    if re.search(INTERACTIVE_PATTERN_WITH_CHECK, response_text, re.DOTALL):
+        return True
+    # Try without checkmark
+    return bool(re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL))
 
 
 async def handle_interactive_response(
