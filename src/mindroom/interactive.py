@@ -94,7 +94,6 @@ async def handle_reaction(
         return None
 
     # Ignore reactions from other agents
-
     if is_agent_id(event.sender):
         logger.debug("Ignoring reaction from agent", sender=event.sender, reaction=reaction_key)
         return None
@@ -126,13 +125,17 @@ async def handle_text_response(
     room: nio.MatrixRoom,
     event: nio.RoomMessageText,
     agent_name: str,
-) -> None:
+) -> tuple[str, str | None] | None:
     """Handle text responses to interactive questions (e.g., "1", "2", "3").
 
     Args:
         client: The Matrix client
         room: The room the message occurred in
         event: The message event
+        agent_name: The name of the agent handling this
+
+    Returns:
+        Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
     """
     # Check if this might be a response to a question
     message_text = event.body.strip()
@@ -168,12 +171,12 @@ async def handle_text_response(
             value=selected_value,
         )
 
-        # Store the response for the agent to process
-        # No confirmation needed - the user's message is their response
-
         # Remove the question after receiving response
         del _active_questions[question_event_id]
-        break
+
+        return (selected_value, question.thread_id)
+
+    return None
 
 
 def _extract_thread_id_from_event(event: nio.Event) -> str | None:
@@ -187,68 +190,17 @@ def _extract_thread_id_from_event(event: nio.Event) -> str | None:
     return None
 
 
-def format_interactive_text_only(response_text: str) -> str:
-    """Format text containing an interactive question block.
+def _parse_and_format_interactive(
+    response_text: str, extract_mapping: bool = False
+) -> tuple[str, dict[str, str] | None, list[dict[str, str]] | None]:
+    """Parse and format interactive content from response text.
 
-    This is a pure formatting function without side effects, useful for streaming.
-    Returns the original text if formatting fails.
-    """
-    # Extract JSON from interactive code block
-    match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
-
-    if not match:
-        return response_text
-
-    try:
-        interactive_data = json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return response_text
-
-    # Extract question and options
-    question = interactive_data.get("question", DEFAULT_QUESTION)
-    options = interactive_data.get("options", [])
-
-    if not options or len(options) == 0:
-        return response_text
-
-    # Limit options
-    options = options[:MAX_OPTIONS]
-
-    # Remove the JSON block from the original text
-    clean_response = response_text.replace(match.group(0), "").strip()
-
-    # Build option lines
-    option_lines = []
-    for i, opt in enumerate(options, 1):
-        emoji_char = opt.get("emoji", "❓")
-        label = opt.get("label", "Option")
-        option_lines.append(f"{i}. {emoji_char} {label}")
-
-    # Combine everything into the final message
-    message_parts = []
-    if clean_response:
-        message_parts.append(clean_response)
-    message_parts.append("")  # Empty line
-    message_parts.append(question)
-    message_parts.append("")  # Empty line
-    message_parts.extend(option_lines)
-    message_parts.append("")  # Empty line
-    message_parts.append(INSTRUCTION_TEXT)
-
-    final_text = "\n".join(message_parts)
-
-    # Add checkmark if not already present
-    if not final_text.rstrip().endswith("✓"):
-        final_text += " ✓"
-
-    return final_text
-
-
-def prepare_interactive_response(response_text: str) -> tuple[str, dict[str, str] | None, list[dict[str, str]] | None]:
-    """Prepare an interactive response by formatting the text and extracting option mapping.
+    Args:
+        response_text: The response text containing interactive JSON
+        extract_mapping: Whether to extract option mapping and return options list
 
     Returns:
-        Tuple of (formatted_text, option_map, options_list) where option_map and options_list are None if not interactive
+        Tuple of (formatted_text, option_map, options_list)
     """
     # Extract JSON from interactive code block
     match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
@@ -274,18 +226,19 @@ def prepare_interactive_response(response_text: str) -> tuple[str, dict[str, str
     # Remove the JSON block from the original text
     clean_response = response_text.replace(match.group(0), "").strip()
 
-    # Build option lines and map
+    # Build option lines and optionally the mapping
     option_lines = []
-    option_map = {}
+    option_map = {} if extract_mapping else None
+
     for i, opt in enumerate(options, 1):
         emoji_char = opt.get("emoji", "❓")
         label = opt.get("label", "Option")
-        value = opt.get("value", label.lower())
-
         option_lines.append(f"{i}. {emoji_char} {label}")
-        # Support both emoji and numeric responses
-        option_map[emoji_char] = value
-        option_map[str(i)] = value
+
+        if extract_mapping:
+            value = opt.get("value", label.lower())
+            option_map[emoji_char] = value
+            option_map[str(i)] = value
 
     # Combine everything into the final message
     message_parts = []
@@ -304,7 +257,26 @@ def prepare_interactive_response(response_text: str) -> tuple[str, dict[str, str
     if not final_text.rstrip().endswith("✓"):
         final_text += " ✓"
 
-    return final_text, option_map, options
+    return final_text, option_map, options if extract_mapping else None
+
+
+def format_interactive_text_only(response_text: str) -> str:
+    """Format text containing an interactive question block.
+
+    This is a pure formatting function without side effects, useful for streaming.
+    Returns the original text if formatting fails.
+    """
+    formatted_text, _, _ = _parse_and_format_interactive(response_text, extract_mapping=False)
+    return formatted_text
+
+
+def prepare_interactive_response(response_text: str) -> tuple[str, dict[str, str] | None, list[dict[str, str]] | None]:
+    """Prepare an interactive response by formatting the text and extracting option mapping.
+
+    Returns:
+        Tuple of (formatted_text, option_map, options_list) where option_map and options_list are None if not interactive
+    """
+    return _parse_and_format_interactive(response_text, extract_mapping=True)
 
 
 def register_interactive_question(
