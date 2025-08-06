@@ -13,8 +13,6 @@ from .ai import get_model_instance
 from .logging_config import get_logger
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from .bot import MultiAgentOrchestrator
 
 
@@ -51,7 +49,6 @@ async def create_team_response(
     mode: TeamMode,
     message: str,
     orchestrator: MultiAgentOrchestrator,
-    storage_path: Path,
     thread_history: list[dict] | None = None,
 ) -> str:
     """Create a team and execute response."""
@@ -60,10 +57,6 @@ async def create_team_response(
     agents: list[Agent] = []
     for name in agent_names:
         if name == ROUTER_AGENT_NAME:
-            continue
-
-        if name not in orchestrator.agent_bots:
-            logger.warning(f"Agent '{name}' not found, skipping")
             continue
 
         # Use the existing agent instance from the bot

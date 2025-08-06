@@ -232,7 +232,6 @@ class AgentBot:
                 mode=team_mode,
                 message=event.body,
                 orchestrator=self.orchestrator,
-                storage_path=self.storage_path,
                 thread_history=context.thread_history,
             )
 
