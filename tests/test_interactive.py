@@ -31,8 +31,8 @@ class TestInteractiveFunctions:
         # Should detect - newline format (agent mistake)
         assert interactive.should_create_interactive_question("Here's a question:\n```\ninteractive\n{}\n```")
 
-        # Should detect - with checkmark
-        assert interactive.should_create_interactive_question("Here's a question:\n```interactive\n{}\n``` ✓")
+        # Should detect - without checkmark
+        assert interactive.should_create_interactive_question("Here's a question:\n```interactive\n{}\n```")
 
         # Should not detect
         assert not interactive.should_create_interactive_question("Regular message without code block")
@@ -466,7 +466,7 @@ Just let me know your preference!"""
         {"emoji": "🪨", "label": "Rock", "value": "rock"}
     ]
 }
-``` ✓"""
+```"""
 
         # Test the new approach
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -477,7 +477,7 @@ Just let me know your preference!"""
         assert "What do you choose?" in formatted_text
         assert "1. 🪨 Rock" in formatted_text
         assert "```interactive" not in formatted_text
-        assert formatted_text.endswith("✓")  # Should preserve the checkmark
+        # No checkmark anymore
 
         # Should extract options correctly
         assert option_map is not None

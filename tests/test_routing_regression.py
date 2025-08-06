@@ -308,14 +308,14 @@ class TestRoutingRegression:
         mock_room.room_id = test_room_id
 
         # Simulate router message from router agent mentioning research
-        # The router always includes completion marker in its messages
+        # The router sends its messages
         router_message = MagicMock(spec=nio.RoomMessageText)
         router_message.sender = "@mindroom_router:localhost"
-        router_message.body = "@research could you help with this? ✓"
+        router_message.body = "@research could you help with this?"
         router_message.event_id = "$router_msg"
         router_message.source = {
             "content": {
-                "body": "@research could you help with this? ✓",
+                "body": "@research could you help with this?",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
             }
         }

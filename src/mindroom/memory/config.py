@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from mem0 import AsyncMemory  # type: ignore[import-untyped]
+from mem0 import AsyncMemory
 
 from ..agent_config import load_config
 from ..logging_config import get_logger

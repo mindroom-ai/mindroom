@@ -35,8 +35,8 @@ class InteractiveResponse(NamedTuple):
 _active_questions: dict[str, InteractiveQuestion] = {}
 
 # Constants
-# Match interactive code blocks with optional trailing checkmark
-INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```(?:\s*✓)?"
+# Match interactive code blocks
+INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
 MAX_OPTIONS = 5
 DEFAULT_QUESTION = "Please choose an option:"
 INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
@@ -235,10 +235,6 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     message_parts.append(INSTRUCTION_TEXT)
 
     final_text = "\n".join(message_parts)
-
-    # Add checkmark if not already present
-    if not final_text.rstrip().endswith("✓"):
-        final_text += " ✓"
 
     return InteractiveResponse(final_text, option_map, options if extract_mapping else None)
 

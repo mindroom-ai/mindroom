@@ -106,19 +106,19 @@ class TestStreamingBehavior:
         # Verify helper bot sent initial message and edit
         assert helper_bot.client.room_send.call_count >= 1  # At least initial message
 
-        # Simulate the initial message from helper (without completion marker)
+        # Simulate the initial message from helper (with in-progress marker)
         initial_event = MagicMock(spec=nio.RoomMessageText)
         initial_event.sender = "@mindroom_helper:localhost"
-        initial_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
+        initial_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ⋯"
         initial_event.event_id = "$helper_response_123"
         initial_event.source = {
             "content": {
-                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
+                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ⋯",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
             }
         }
 
-        # Process initial message - calculator should NOT respond (no completion marker)
+        # Process initial message - calculator should NOT respond (has in-progress marker)
         with patch("mindroom.bot.check_agent_mentioned") as mock_check:
             mock_check.return_value = (["calculator"], True)
 
@@ -138,11 +138,11 @@ class TestStreamingBehavior:
         # Now simulate the final message with completion marker
         final_event = MagicMock(spec=nio.RoomMessageText)
         final_event.sender = "@mindroom_helper:localhost"
-        final_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ✓"
+        final_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
         final_event.event_id = "$helper_final"
         final_event.source = {
             "content": {
-                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ✓",
+                "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
             }
         }
@@ -278,12 +278,54 @@ class TestStreamingBehavior:
         # Should send final edit
         assert mock_client.room_send.call_count >= 2
 
-        # Check the final content has completion marker
-        assert streaming.accumulated_text.endswith(" ✓")
-        assert streaming.accumulated_text == "Hello world! ✓"
+        # Check the final content
+        assert streaming.accumulated_text == "Hello world!"
 
         # Check the edit content
         last_call = mock_client.room_send.call_args_list[-1]
         content = last_call[1]["content"]
         assert content["m.relates_to"]["rel_type"] == "m.replace"
         assert content["m.relates_to"]["event_id"] == "$stream_123"
+
+    @pytest.mark.asyncio
+    async def test_streaming_in_progress_marker(
+        self,
+        mock_helper_agent: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Test that in-progress marker is shown during streaming but not in final message."""
+        # Create a mock client
+        mock_client = AsyncMock()
+        mock_send_response = MagicMock()
+        mock_send_response.__class__ = nio.RoomSendResponse
+        mock_send_response.event_id = "$stream_123"
+        mock_client.room_send.return_value = mock_send_response
+
+        # Create streaming response
+        streaming = StreamingResponse(
+            room_id="!test:localhost",
+            reply_to_event_id="$original_123",
+            thread_id=None,
+            sender_domain="localhost",
+        )
+
+        # Stream some content
+        await streaming.update_content("Hello world", mock_client)
+
+        # Check that the sent message includes the in-progress marker
+        first_call = mock_client.room_send.call_args_list[0]
+        content = first_call[1]["content"]
+        # The body should contain the in-progress marker
+        assert streaming.in_progress_marker in content["body"]
+        assert "Hello world" in content["body"]
+        # No completion marker anymore
+
+        # Finalize the message
+        await streaming.finalize(mock_client)
+
+        # Check the final message has completion marker but no in-progress marker
+        final_call = mock_client.room_send.call_args_list[-1]
+        final_content = final_call[1]["content"]
+        # Check the final message has no in-progress marker
+        assert streaming.in_progress_marker not in final_content["body"]
+        assert "Hello world" in final_content["body"]
