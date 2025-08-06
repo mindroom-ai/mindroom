@@ -258,6 +258,14 @@ class AgentBot:
             selected_value, thread_id = result
             # User selected an option from an interactive question
 
+            # Check if we've already responded to this interactive question
+            if self.response_tracker.has_responded(event.reacts_to):
+                self.logger.info(
+                    "Ignoring reaction - already responded to this question",
+                    reacted_to=event.reacts_to,
+                )
+                return
+
             # Send immediate acknowledgment
             ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
             ack_event_id = await self._send_response(room, event.reacts_to, ack_text, thread_id)
