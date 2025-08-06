@@ -14,7 +14,7 @@ from agno.models.openrouter import OpenRouter
 from agno.run.response import RunResponse, RunResponseContentEvent
 from dotenv import load_dotenv
 
-from .agent_config import create_agent, load_config
+from .agent_config import load_config
 from .logging_config import get_logger
 from .memory import (
     build_memory_enhanced_prompt,
@@ -130,11 +130,12 @@ async def _prepare_agent_and_prompt(
     Returns:
         Tuple of (agent, full_prompt, session_id)
     """
-    model = get_model_instance()
+    from .agent_config import create_agent
+
     enhanced_prompt = build_memory_enhanced_prompt(prompt, agent_name, storage_path, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
-    agent = create_agent(agent_name, model, storage_path=storage_path)
+    agent = create_agent(agent_name, storage_path=storage_path)
     return agent, full_prompt
 
 

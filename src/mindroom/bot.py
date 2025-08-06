@@ -1,15 +1,17 @@
 """Multi-agent bot implementation where each agent has its own Matrix user account."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import nio
 
-from .agent_config import load_config
+from .agent_config import create_agent, load_config
 from .ai import ai_response, ai_response_streaming
 from .commands import (
     Command,
@@ -46,6 +48,9 @@ from .thread_utils import (
     should_agent_respond,
 )
 
+if TYPE_CHECKING:
+    from agno.agent import Agent
+
 logger = get_logger(__name__)
 
 # Constants
@@ -80,7 +85,7 @@ class AgentBot:
     thread_invite_manager: ThreadInviteManager = field(init=False)
     invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
-    orchestrator: Any = field(default=None)  # Reference to orchestrator (avoid circular import)
+    orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator (avoid circular import)
 
     @property
     def agent_name(self) -> str:
@@ -96,6 +101,16 @@ class AgentBot:
     def matrix_id(self) -> MatrixID:
         """Get the Matrix ID for this agent bot."""
         return MatrixID.parse(self.agent_user.user_id)
+
+    @cached_property
+    def agent(self) -> Agent:
+        """Get the Agno Agent instance for this bot."""
+
+        # TODO: Use agent-specific model from config instead of default
+        return create_agent(
+            agent_name=self.agent_name,
+            storage_path=self.storage_path / "agents",
+        )
 
     async def start(self) -> None:
         """Start the agent bot."""
@@ -197,34 +212,33 @@ class AgentBot:
                     await self._handle_ai_routing(room, event, context.thread_history)
             return
 
-        # Check if we should form a team first (only if orchestrator is available)
-        if self.orchestrator:
-            agents_in_thread = get_agents_in_thread(context.thread_history)
-            team_should_form, team_agents, team_mode = should_form_team(
-                tagged_agents=context.mentioned_agents,
-                agents_in_thread=agents_in_thread,
+        # Check if we should form a team first
+        agents_in_thread = get_agents_in_thread(context.thread_history)
+        team_should_form, team_agents, team_mode = should_form_team(
+            tagged_agents=context.mentioned_agents,
+            agents_in_thread=agents_in_thread,
+        )
+
+        # If team should form and this is the first agent mentioned (or first in thread)
+        if team_should_form and (
+            (context.mentioned_agents and self.agent_name == context.mentioned_agents[0])
+            or (not context.mentioned_agents and agents_in_thread and self.agent_name == agents_in_thread[0])
+        ):
+            self.logger.info("Forming team for collaborative response", agents=team_agents, mode=team_mode)
+
+            # Create and execute team response
+            team_response = await create_team_response(
+                agent_names=team_agents,
+                mode=team_mode,
+                message=event.body,
+                orchestrator=self.orchestrator,
+                storage_path=self.storage_path,
+                thread_history=context.thread_history,
             )
 
-            # If team should form and this is the first agent mentioned (or first in thread)
-            if team_should_form and (
-                (context.mentioned_agents and self.agent_name == context.mentioned_agents[0])
-                or (not context.mentioned_agents and agents_in_thread and self.agent_name == agents_in_thread[0])
-            ):
-                self.logger.info("Forming team for collaborative response", agents=team_agents, mode=team_mode)
-
-                # Create and execute team response
-                team_response = await create_team_response(
-                    agent_names=team_agents,
-                    mode=team_mode,
-                    message=event.body,
-                    orchestrator=self.orchestrator,
-                    storage_path=self.storage_path,
-                    thread_history=context.thread_history,
-                )
-
-                # Send the team response
-                await self._send_response(room, event.event_id, team_response, context.thread_id)
-                return
+            # Send the team response
+            await self._send_response(room, event.event_id, team_response, context.thread_id)
+            return
 
         # Determine if this agent should respond individually
         should_respond = should_agent_respond(
@@ -563,7 +577,6 @@ class MultiAgentOrchestrator:
                 self.storage_path,
                 rooms=resolved_rooms,
                 enable_streaming=enable_streaming,
-                orchestrator=self,
             )
             self.agent_bots[agent_name] = bot
 

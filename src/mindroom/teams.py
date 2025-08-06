@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from agno.agent import Agent
 from agno.team import Team
 
-from .agent_config import ROUTER_AGENT_NAME, create_agent
+from .agent_config import ROUTER_AGENT_NAME
 from .ai import get_model_instance
 from .logging_config import get_logger
 
@@ -55,11 +55,8 @@ async def create_team_response(
     thread_history: list[dict] | None = None,
 ) -> str:
     """Create a team and execute response."""
-    # Handle case where orchestrator is None (in tests)
-    if not orchestrator or not hasattr(orchestrator, "agent_bots"):
-        return "Team collaboration not available (no orchestrator)"
 
-    # Create agents for the team
+    # Get existing agent instances from the orchestrator
     agents: list[Agent] = []
     for name in agent_names:
         if name == ROUTER_AGENT_NAME:
@@ -69,13 +66,9 @@ async def create_team_response(
             logger.warning(f"Agent '{name}' not found, skipping")
             continue
 
-        model = get_model_instance("default")
-        agent = create_agent(
-            agent_name=name,
-            model=model,
-            storage_path=storage_path / "teams",
-        )
-        agents.append(agent)
+        # Use the existing agent instance from the bot
+        agent_bot = orchestrator.agent_bots[name]
+        agents.append(agent_bot.agent)
 
     if not agents:
         return "Sorry, no agents available for team collaboration."

@@ -14,6 +14,7 @@ class AgentConfig(BaseModel):
     num_history_runs: int | None = Field(default=None, description="Number of history runs to include")
     markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
     add_history_to_messages: bool | None = Field(default=None, description="Whether to add history to messages")
+    model: str = Field(default="default", description="Model name")
 
 
 class DefaultsConfig(BaseModel):

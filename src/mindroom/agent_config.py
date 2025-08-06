@@ -5,7 +5,6 @@ from pathlib import Path
 
 import yaml
 from agno.agent import Agent
-from agno.models.base import Model
 from agno.storage.sqlite import SqliteStorage
 
 from .logging_config import get_logger
@@ -19,9 +18,6 @@ ROUTER_AGENT_NAME = "router"
 
 # Default path to agents configuration file
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
-
-# Global caches
-_agent_cache: dict[str, Agent] = {}
 
 
 @functools.cache
@@ -52,7 +48,7 @@ def load_config(config_path: Path | None = None) -> Config:
     return config
 
 
-def create_agent(agent_name: str, model: Model, storage_path: Path, config_path: Path | None = None) -> Agent:
+def create_agent(agent_name: str, storage_path: Path, config_path: Path | None = None) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
@@ -67,10 +63,7 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
     Raises:
         ValueError: If agent_name is not found in configuration
     """
-    # Check cache
-    cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}"
-    if cache_key in _agent_cache:
-        return _agent_cache[cache_key]
+    from .ai import get_model_instance
 
     # Load config and get agent
     config = load_config(config_path)
@@ -91,6 +84,7 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
     storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
 
     # Create agent with defaults applied
+    model = get_model_instance(agent_config.model)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
     logger.info(f"Storage path: {storage_path}, DB file: {storage_path / f'{agent_name}.db'}")
 
@@ -107,9 +101,6 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
         num_history_runs=agent_config.num_history_runs or defaults.num_history_runs,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
     )
-
-    # Cache the agent
-    _agent_cache[cache_key] = agent
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 
     return agent
