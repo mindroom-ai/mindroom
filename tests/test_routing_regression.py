@@ -266,13 +266,12 @@ class TestRoutingRegression:
         await research_bot._on_message(mock_room, message_event)
         await news_bot._on_message(mock_room, message_event)
 
-        # With new team behavior: multiple mentions should form a team
-        # Only the first mentioned agent (research) should form team and respond
-        # Second agent (news) should not respond individually
-        assert research_bot.client.room_send.call_count == 1  # Team response
-        assert news_bot.client.room_send.call_count == 1  # Individual response (needs fix)
+        # With simplified team behavior: multiple mentions should form a team
+        # The alphabetically first agent (news) handles team formation
+        # The other agent (research) does not respond individually
+        assert research_bot.client.room_send.call_count == 0  # No individual response
+        assert news_bot.client.room_send.call_count == 1  # Team response
         assert mock_team_arun.call_count == 1  # Team formed once
-        # Note: Currently both respond due to a bug in team coordination
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
