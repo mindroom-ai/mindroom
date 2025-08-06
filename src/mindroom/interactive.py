@@ -341,40 +341,6 @@ async def _send_response_text(
     )
 
 
-async def _edit_message_with_question(
-    client: nio.AsyncClient,
-    room_id: str,
-    event_id: str,
-    new_text: str,
-    thread_id: str | None,
-) -> None:
-    """Edit an existing message to show the interactive question."""
-    sender_domain = extract_domain_from_user_id(client.user_id)
-    content = create_mention_content_from_text(
-        new_text,
-        sender_domain=sender_domain,
-        thread_event_id=thread_id,
-    )
-
-    edit_content = {
-        "msgtype": "m.text",
-        "body": f"* {new_text}",
-        "format": "org.matrix.custom.html",
-        "formatted_body": content.get("formatted_body", new_text),
-        "m.new_content": content,
-        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
-    }
-
-    response = await client.room_send(
-        room_id=room_id,
-        message_type="m.room.message",
-        content=edit_content,
-    )
-
-    if not isinstance(response, nio.RoomSendResponse):
-        logger.error("Failed to edit message with interactive question", error=str(response))
-
-
 def _extract_thread_id_from_event(event: nio.Event) -> str | None:
     """Extract thread ID from a Matrix event."""
     content = getattr(event, "source", {}).get("content", {})
