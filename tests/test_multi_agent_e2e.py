@@ -161,7 +161,9 @@ async def test_agent_ignores_other_agents(
 
 
 @pytest.mark.asyncio
+@patch("mindroom.teams.Team.arun")
 async def test_agent_responds_in_threads_based_on_participation(
+    mock_team_arun: AsyncMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
 ) -> None:
@@ -177,6 +179,15 @@ async def test_agent_responds_in_threads_based_on_participation(
         mock_login.return_value = mock_client
 
         bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
+
+        # Mock orchestrator
+        mock_orchestrator = MagicMock()
+        mock_agent_bot = MagicMock()
+        mock_agent_bot.agent = MagicMock()
+        mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
+        bot.orchestrator = mock_orchestrator
+        mock_team_arun.return_value = "Team response"
+
         await bot.start()
 
         # Test 1: Thread with only this agent - should respond without mention

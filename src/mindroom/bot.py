@@ -105,12 +105,7 @@ class AgentBot:
     @cached_property
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-
-        # TODO: Use agent-specific model from config instead of default
-        return create_agent(
-            agent_name=self.agent_name,
-            storage_path=self.storage_path / "agents",
-        )
+        return create_agent(agent_name=self.agent_name, storage_path=self.storage_path / "agents")
 
     async def start(self) -> None:
         """Start the agent bot."""
@@ -197,11 +192,11 @@ class AgentBot:
                     agents_in_thread = get_agents_in_thread(context.thread_history)
 
                     # Check if team should form - if so, don't route
-                    team_should_form, _, _ = should_form_team(
+                    form_team = should_form_team(
                         tagged_agents=context.mentioned_agents,
                         agents_in_thread=agents_in_thread,
                     )
-                    if team_should_form:
+                    if form_team.should_form_team:
                         return
 
                     # Only route if no agent has participated yet
@@ -214,22 +209,26 @@ class AgentBot:
 
         # Check if we should form a team first
         agents_in_thread = get_agents_in_thread(context.thread_history)
-        team_should_form, team_agents, team_mode = should_form_team(
+        form_team = should_form_team(
             tagged_agents=context.mentioned_agents,
             agents_in_thread=agents_in_thread,
         )
 
         # If team should form and this is the first agent mentioned (or first in thread)
-        if team_should_form and (
+        if form_team.should_form_team and (
             (context.mentioned_agents and self.agent_name == context.mentioned_agents[0])
             or (not context.mentioned_agents and agents_in_thread and self.agent_name == agents_in_thread[0])
         ):
-            self.logger.info("Forming team for collaborative response", agents=team_agents, mode=team_mode)
+            self.logger.info(
+                "Forming team for collaborative response",
+                agents=form_team.agents,
+                mode=form_team.mode,
+            )
 
             # Create and execute team response
             team_response = await create_team_response(
-                agent_names=team_agents,
-                mode=team_mode,
+                agent_names=form_team.agents,
+                mode=form_team.mode,
                 message=event.body,
                 orchestrator=self.orchestrator,
                 thread_history=context.thread_history,
@@ -577,6 +576,7 @@ class MultiAgentOrchestrator:
                 rooms=resolved_rooms,
                 enable_streaming=enable_streaming,
             )
+            bot.orchestrator = self  # Set orchestrator reference
             self.agent_bots[agent_name] = bot
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))

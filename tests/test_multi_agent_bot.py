@@ -255,6 +255,7 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
+    @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
@@ -263,6 +264,7 @@ class TestAgentBot:
         mock_fetch_history: AsyncMock,
         mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,
+        mock_team_arun: AsyncMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -270,6 +272,13 @@ class TestAgentBot:
         """Test agent bot thread response behavior based on agent participation."""
         bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming)
         bot.client = AsyncMock()
+
+        # Mock orchestrator with agent_bots
+        mock_orchestrator = MagicMock()
+        mock_agent_bot = MagicMock()
+        mock_agent_bot.agent = MagicMock()
+        mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
+        bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -304,6 +313,7 @@ class TestAgentBot:
 
         mock_ai_response_streaming.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Thread response"
+        mock_team_arun.return_value = "Team response"
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
@@ -335,6 +345,7 @@ class TestAgentBot:
         # Reset mocks
         mock_ai_response_streaming.reset_mock()
         mock_ai_response.reset_mock()
+        mock_team_arun.reset_mock()
         bot.client.room_send.reset_mock()
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
@@ -351,10 +362,17 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event)
 
-        # Should NOT respond when multiple agents in thread
+        # Should form team and send team response when multiple agents in thread
         mock_ai_response_streaming.assert_not_called()
         mock_ai_response.assert_not_called()
-        bot.client.room_send.assert_not_called()
+        mock_team_arun.assert_called_once()
+        bot.client.room_send.assert_called_once()  # Team response sent
+
+        # Reset mocks
+        mock_ai_response_streaming.reset_mock()
+        mock_ai_response.reset_mock()
+        mock_team_arun.reset_mock()
+        bot.client.room_send.reset_mock()
 
         # Test 3: Thread with multiple agents WITH mention - should respond
         mock_event_with_mention = MagicMock()
