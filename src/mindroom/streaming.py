@@ -44,12 +44,10 @@ class StreamingResponse:
         if self.interactive_processed:
             return False
 
-        # Check for both formats: ```interactive...``` and ```\ninteractive...```
-        import re
+        # Use the same detection logic as interactive.should_create_interactive_question
+        from . import interactive
 
-        pattern = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
-        match = re.search(pattern, self.accumulated_text, re.DOTALL)
-        return match is not None
+        return interactive.should_create_interactive_question(self.accumulated_text)
 
     async def finalize(self, client: nio.AsyncClient) -> None:
         """Send final message update with completion marker."""

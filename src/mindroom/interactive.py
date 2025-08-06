@@ -3,6 +3,7 @@
 import json
 import re
 from contextlib import suppress
+from typing import NamedTuple
 
 import nio
 
@@ -11,8 +12,26 @@ from .matrix import create_mention_content_from_text, extract_domain_from_user_i
 
 logger = get_logger(__name__)
 
-# Track active interactive questions: event_id -> (room_id, thread_id, options, creator_agent_name)
-_active_questions: dict[str, tuple[str, str | None, dict[str, str], str]] = {}
+
+class InteractiveQuestion(NamedTuple):
+    """Represents an active interactive question."""
+
+    room_id: str
+    thread_id: str | None
+    options: dict[str, str]  # emoji/number -> value mapping
+    creator_agent: str
+
+
+# Track active interactive questions by event_id
+_active_questions: dict[str, InteractiveQuestion] = {}
+
+# Constants
+INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
+# Also match when the backticks are followed by a checkmark with optional whitespace
+INTERACTIVE_PATTERN_WITH_CHECK = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```\s*✓"
+MAX_OPTIONS = 5
+DEFAULT_QUESTION = "Please choose an option:"
+INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
 
 
 def should_create_interactive_question(response_text: str) -> bool:
@@ -49,9 +68,11 @@ async def handle_interactive_response(
         event_id: The event ID of the message to edit (if in streaming mode)
     """
     # Extract JSON from interactive code block
-    # Handle both ```interactive and ```\ninteractive formats
-    pattern = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
-    match = re.search(pattern, response_text, re.DOTALL)
+    # Try with checkmark first (more specific pattern)
+    match = re.search(INTERACTIVE_PATTERN_WITH_CHECK, response_text, re.DOTALL)
+    if not match:
+        # Try without checkmark
+        match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
 
     if not match:
         logger.warning("Interactive block found but couldn't extract JSON", response_preview=response_text[:200])
@@ -70,16 +91,16 @@ async def handle_interactive_response(
         return
 
     # Extract question and options
-    question = interactive_data.get("question", "Please choose an option:")
+    question = interactive_data.get("question", DEFAULT_QUESTION)
     options = interactive_data.get("options", [])
 
     if not options:
         logger.warning("No options provided for interactive question")
         return
 
-    if len(options) > 5:
+    if len(options) > MAX_OPTIONS:
         logger.warning("Too many options for interactive question", count=len(options))
-        options = options[:5]
+        options = options[:MAX_OPTIONS]
 
     # Build the formatted question text
     # Remove the JSON block and any surrounding backticks
@@ -107,7 +128,7 @@ async def handle_interactive_response(
     message_parts.append("")  # Empty line
     message_parts.extend(option_lines)
     message_parts.append("")  # Empty line
-    message_parts.append("React with an emoji or type the number to respond.")
+    message_parts.append(INSTRUCTION_TEXT)
 
     final_text = "\n".join(message_parts)
     # Don't add checkmark in streaming mode - it's already there
@@ -140,7 +161,12 @@ async def handle_interactive_response(
         question_event_id = response.event_id
 
     # Store the active question
-    _active_questions[question_event_id] = (room_id, thread_id, option_map, agent_name)
+    _active_questions[question_event_id] = InteractiveQuestion(
+        room_id=room_id,
+        thread_id=thread_id,
+        options=option_map,
+        creator_agent=agent_name,
+    )
 
     # Add reaction buttons
     for opt in options:
@@ -180,8 +206,8 @@ async def handle_reaction(
         Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
     """
     # Check if this reaction relates to an active question
-    question_data = _active_questions.get(event.reacts_to)
-    if not question_data:
+    question = _active_questions.get(event.reacts_to)
+    if not question:
         logger.debug(
             "Reaction to unknown message",
             reacts_to=event.reacts_to,
@@ -191,21 +217,19 @@ async def handle_reaction(
         )
         return None
 
-    room_id, thread_id, option_map, question_creator = question_data
-
     # Only the agent who created the question should respond to reactions
-    if agent_name != question_creator:
+    if agent_name != question.creator_agent:
         logger.debug(
             "Ignoring reaction to question created by another agent",
             reacting_agent=agent_name,
-            question_creator=question_creator,
+            question_creator=question.creator_agent,
             reaction=event.key,
         )
         return None
 
     # Check if the reaction is one of our options
     reaction_key = event.key
-    if reaction_key not in option_map:
+    if reaction_key not in question.options:
         return None
 
     # Don't process our own reactions
@@ -220,7 +244,7 @@ async def handle_reaction(
         return None
 
     # Get the value for this reaction
-    selected_value = option_map[reaction_key]
+    selected_value = question.options[reaction_key]
 
     logger.info(
         "Received answer via reaction",
@@ -238,7 +262,7 @@ async def handle_reaction(
         del _active_questions[event.reacts_to]
 
     # Return the selected value and thread_id so the agent can respond
-    return (selected_value, thread_id)
+    return (selected_value, question.thread_id)
 
 
 async def handle_text_response(
@@ -262,29 +286,24 @@ async def handle_text_response(
         return
 
     # Extract thread info from the event
-    is_thread = "m.relates_to" in event.source.get("content", {})
-    thread_id = None
-    if is_thread:
-        relates_to = event.source["content"]["m.relates_to"]
-        if relates_to.get("rel_type") == "m.thread":
-            thread_id = relates_to.get("event_id")
+    thread_id = _extract_thread_id_from_event(event)
 
     # Find matching active questions in this room/thread
-    for question_event_id, (q_room_id, q_thread_id, option_map, question_creator) in _active_questions.items():
-        if q_room_id != room.room_id:
+    for question_event_id, question in _active_questions.items():
+        if question.room_id != room.room_id:
             continue
-        if q_thread_id != thread_id:
+        if question.thread_id != thread_id:
             continue
-        if message_text not in option_map:
+        if message_text not in question.options:
             continue
         if event.sender == client.user_id:
             continue
         # Only respond if this agent created the question
-        if agent_name != question_creator:
+        if agent_name != question.creator_agent:
             continue
 
         # Found a matching question
-        selected_value = option_map[message_text]
+        selected_value = question.options[message_text]
 
         logger.info(
             "Received answer via text",
@@ -354,6 +373,17 @@ async def _edit_message_with_question(
 
     if not isinstance(response, nio.RoomSendResponse):
         logger.error("Failed to edit message with interactive question", error=str(response))
+
+
+def _extract_thread_id_from_event(event: nio.Event) -> str | None:
+    """Extract thread ID from a Matrix event."""
+    content = getattr(event, "source", {}).get("content", {})
+    relates_to = content.get("m.relates_to", {})
+
+    if relates_to.get("rel_type") == "m.thread":
+        event_id = relates_to.get("event_id")
+        return event_id if isinstance(event_id, str) else None
+    return None
 
 
 def cleanup() -> None:

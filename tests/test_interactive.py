@@ -31,6 +31,9 @@ class TestInteractiveFunctions:
         # Should detect - newline format (agent mistake)
         assert interactive.should_create_interactive_question("Here's a question:\n```\ninteractive\n{}\n```")
 
+        # Should detect - with checkmark
+        assert interactive.should_create_interactive_question("Here's a question:\n```interactive\n{}\n``` ✓")
+
         # Should not detect
         assert not interactive.should_create_interactive_question("Regular message without code block")
 
@@ -86,13 +89,13 @@ Based on your choice, I'll proceed accordingly."""
 
         # Should create question
         assert "$question123" in interactive._active_questions
-        room_id, thread_id, options, agent_name = interactive._active_questions["$question123"]
-        assert room_id == "!room:localhost"
-        assert thread_id == "$thread123"
-        assert options["🚀"] == "fast"
-        assert options["🔍"] == "careful"
-        assert options["1"] == "fast"
-        assert options["2"] == "careful"
+        question = interactive._active_questions["$question123"]
+        assert question.room_id == "!room:localhost"
+        assert question.thread_id == "$thread123"
+        assert question.options["🚀"] == "fast"
+        assert question.options["🔍"] == "careful"
+        assert question.options["1"] == "fast"
+        assert question.options["2"] == "careful"
 
     @pytest.mark.asyncio
     async def test_handle_interactive_response_invalid_json(self, mock_client):
@@ -147,11 +150,11 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Set up an active question
-        interactive._active_questions["$question123"] = (
-            "!room:localhost",
-            "$thread123",
-            {"🚀": "fast", "🐢": "slow", "1": "fast", "2": "slow"},
-            "test_agent",
+        interactive._active_questions["$question123"] = interactive.InteractiveQuestion(
+            room_id="!room:localhost",
+            thread_id="$thread123",
+            options={"🚀": "fast", "🐢": "slow", "1": "fast", "2": "slow"},
+            creator_agent="test_agent",
         )
 
         # Mock confirmation send
@@ -205,7 +208,12 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Set up a question
-        interactive._active_questions["$question123"] = ("!room:localhost", None, {"✅": "yes"}, "test_agent")
+        interactive._active_questions["$question123"] = interactive.InteractiveQuestion(
+            room_id="!room:localhost",
+            thread_id=None,
+            options={"✅": "yes"},
+            creator_agent="test_agent",
+        )
 
         # Create reaction event from bot itself
         room = MagicMock()
@@ -231,11 +239,11 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Set up an active question
-        interactive._active_questions["$question123"] = (
-            "!room:localhost",
-            "$thread123",
-            {"1": "first", "2": "second", "3": "third"},
-            "test_agent",
+        interactive._active_questions["$question123"] = interactive.InteractiveQuestion(
+            room_id="!room:localhost",
+            thread_id="$thread123",
+            options={"1": "first", "2": "second", "3": "third"},
+            creator_agent="test_agent",
         )
 
         # Mock confirmation send
@@ -264,11 +272,11 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Set up a question
-        interactive._active_questions["$question123"] = (
-            "!room:localhost",
-            None,
-            {"1": "one", "2": "two"},
-            "test_agent",
+        interactive._active_questions["$question123"] = interactive.InteractiveQuestion(
+            room_id="!room:localhost",
+            thread_id=None,
+            options={"1": "one", "2": "two"},
+            creator_agent="test_agent",
         )
 
         room = MagicMock()
@@ -325,10 +333,10 @@ interactive
 
         # Should create question despite the format
         assert "$question456" in interactive._active_questions
-        room_id, thread_id, options, agent_name = interactive._active_questions["$question456"]
-        assert room_id == "!room:localhost"
-        assert options["✅"] == "yes"
-        assert options["1"] == "yes"
+        question = interactive._active_questions["$question456"]
+        assert question.room_id == "!room:localhost"
+        assert question.options["✅"] == "yes"
+        assert question.options["1"] == "yes"
 
     @pytest.mark.asyncio
     async def test_handle_interactive_response_streaming_mode(self, mock_client):
@@ -439,10 +447,10 @@ Just let me know your preference!"""
 
         # Verify question was created
         assert "$q123" in interactive._active_questions
-        room_id, thread_id, options, agent_name = interactive._active_questions["$q123"]
-        assert room_id == "!room:localhost"
-        assert thread_id == "$thread123"
-        assert len(options) == 6  # 3 emojis + 3 numbers
+        question = interactive._active_questions["$q123"]
+        assert question.room_id == "!room:localhost"
+        assert question.thread_id == "$thread123"
+        assert len(question.options) == 6  # 3 emojis + 3 numbers
 
         # Step 2: User reacts with emoji
         room = MagicMock()
@@ -460,3 +468,50 @@ Just let me know your preference!"""
         assert "$q123" not in interactive._active_questions
         # We expect 4 calls: 1 question + 3 reactions (no confirmation)
         assert mock_client.room_send.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_handle_interactive_response_with_checkmark(self, mock_client):
+        """Test creating interactive question from JSON with trailing checkmark."""
+        # Clear any existing questions
+        interactive._active_questions.clear()
+
+        # Mock room_send responses
+        mock_question_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_question_response.event_id = "$question789"
+        mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_reaction_response.event_id = "$react789"
+
+        mock_client.room_send.side_effect = [
+            mock_question_response,  # Question send
+            mock_reaction_response,  # Reaction
+        ]
+
+        response_text = """Let's play rock paper scissors!
+
+```interactive
+{
+    "question": "What do you choose?",
+    "options": [
+        {"emoji": "🪨", "label": "Rock", "value": "rock"}
+    ]
+}
+``` ✓"""
+
+        await interactive.handle_interactive_response(
+            mock_client, "!room:localhost", "$thread123", response_text, "test_agent"
+        )
+
+        # Should send formatted message with question
+        first_call = mock_client.room_send.call_args_list[0]
+        assert "Let's play rock paper scissors!" in first_call[1]["content"]["body"]
+        assert "What do you choose?" in first_call[1]["content"]["body"]
+        assert "1. 🪨 Rock" in first_call[1]["content"]["body"]
+        assert "```interactive" not in first_call[1]["content"]["body"]
+
+        # Should create question
+        assert "$question789" in interactive._active_questions
+        question = interactive._active_questions["$question789"]
+        assert question.room_id == "!room:localhost"
+        assert question.thread_id == "$thread123"
+        assert question.options["🪨"] == "rock"
+        assert question.options["1"] == "rock"

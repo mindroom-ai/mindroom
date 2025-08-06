@@ -253,9 +253,12 @@ class AgentBot:
         if result:
             selected_value, thread_id = result
             # User selected an option from an interactive question
-            # Trigger the agent to respond based on this selection
 
-            # Create a session for the response
+            # Send immediate acknowledgment
+            ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
+            await self._send_response(room, event.reacts_to, ack_text, thread_id)
+
+            # Create a session for the full response
             session_id = create_session_id(room.room_id, thread_id)
 
             # Generate agent response based on the selection
@@ -268,7 +271,7 @@ class AgentBot:
                 room_id=room.room_id,
             )
 
-            # Send the response
+            # Send the full response
             await self._send_response(room, event.reacts_to, response_text, thread_id)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
