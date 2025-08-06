@@ -112,11 +112,7 @@ async def create_team_response(
     response = await team.arun(prompt)
 
     # Extract response content
-    team_response = ""
-    if hasattr(response, "content") and response.content:
-        team_response = str(response.content)
-    else:
-        team_response = str(response)
+    team_response = str(response)
 
     # Prepend team information to the response
     agent_mentions = " ".join([f"@{name}" for name in agent_names if name != ROUTER_AGENT_NAME])
