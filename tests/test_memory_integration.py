@@ -57,7 +57,7 @@ class TestMemoryIntegration:
 
             # Verify conversation was stored
             mock_store.assert_called_once_with(
-                "What is 2+2?", "Test response", "calculator", tmp_path, "test_session", "!test:room"
+                "What is 2+2?", "calculator", tmp_path, "test_session", "!test:room"
             )
 
     @pytest.mark.asyncio
@@ -77,7 +77,7 @@ class TestMemoryIntegration:
             mock_build.assert_called_once_with("Hello", "general", tmp_path, None)
 
             # Verify storage without room_id
-            mock_store.assert_called_once_with("Hello", "Test response", "general", tmp_path, "test_session", None)
+            mock_store.assert_called_once_with("Hello", "general", tmp_path, "test_session", None)
 
     @pytest.mark.asyncio
     async def test_ai_response_error_handling(self, tmp_path):

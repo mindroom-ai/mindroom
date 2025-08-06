@@ -172,7 +172,7 @@ class TestMemoryFunctions:
         """Test storing conversation memory."""
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
             store_conversation_memory(
-                "What is 2+2?", "The answer is 4", "calculator", storage_path, "session123", room_id="!room:server"
+                "What is 2+2?", "calculator", storage_path, "session123", room_id="!room:server"
             )
 
             # Should be called twice (agent and room)
@@ -197,7 +197,6 @@ class TestMemoryFunctions:
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
             store_conversation_memory(
                 "",  # Empty prompt
-                "The answer is 4",
                 "agent",
                 storage_path,
                 "session123",
@@ -211,7 +210,6 @@ class TestMemoryFunctions:
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
             store_conversation_memory(
                 "What is 2+2?",
-                "",  # Empty response
                 "calculator",
                 storage_path,
                 "session123",

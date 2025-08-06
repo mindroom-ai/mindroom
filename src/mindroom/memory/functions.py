@@ -198,7 +198,6 @@ def build_memory_enhanced_prompt(
 
 def store_conversation_memory(
     prompt: str,
-    response: str,
     agent_name: str,
     storage_path: Path,
     session_id: str,
@@ -212,7 +211,6 @@ def store_conversation_memory(
 
     Args:
         prompt: The user's prompt
-        response: The agent's response (not stored)
         agent_name: Name of the agent
         storage_path: Path for memory storage
         session_id: Session ID for the conversation

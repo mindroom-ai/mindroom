@@ -167,7 +167,7 @@ async def ai_response(
 
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
         response_text = response.content or ""
-        store_conversation_memory(prompt, response_text, agent_name, storage_path, session_id, room_id)
+        store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id)
 
         return response_text
     except Exception as e:
@@ -217,7 +217,7 @@ async def ai_response_streaming(
             logger.info("Cache hit", agent=agent_name)
             response_text = cached_result.content or ""
             yield response_text
-            store_conversation_memory(prompt, response_text, agent_name, storage_path, session_id, room_id)
+            store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id)
             return
 
     full_response = ""
@@ -242,4 +242,4 @@ async def ai_response_streaming(
         logger.info("Response cached", agent=agent_name)
 
     if full_response:
-        store_conversation_memory(prompt, full_response, agent_name, storage_path, session_id, room_id)
+        store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id)
