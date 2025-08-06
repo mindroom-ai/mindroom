@@ -201,10 +201,12 @@ class TestRoutingRegression:
         assert news_bot.client.room_send.call_count == 0
 
     @pytest.mark.asyncio
+    @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
     async def test_multiple_mentions_each_responds_once(
         self,
         mock_ai_response: AsyncMock,
+        mock_team_arun: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -218,13 +220,24 @@ class TestRoutingRegression:
         research_bot.response_tracker = ResponseTracker(research_bot.agent_name, base_path=tmp_path)
         research_bot.thread_invite_manager = ThreadInviteManager(research_bot.client)
 
+        # Mock orchestrator for research bot
+        mock_orchestrator = MagicMock()
+        mock_agent_bot = MagicMock()
+        mock_agent_bot.agent = MagicMock()
+        mock_orchestrator.agent_bots = {"research": mock_agent_bot, "news": mock_agent_bot}
+        research_bot.orchestrator = mock_orchestrator
+
         news_bot = AgentBot(mock_news_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
         news_bot.client = AsyncMock()
         news_bot.response_tracker = ResponseTracker(news_bot.agent_name, base_path=tmp_path)
         news_bot.thread_invite_manager = ThreadInviteManager(news_bot.client)
 
-        # Mock AI responses
+        # Mock orchestrator for news bot
+        news_bot.orchestrator = mock_orchestrator
+
+        # Mock AI responses and team response
         mock_ai_response.side_effect = ["Research response!", "News response!"]
+        mock_team_arun.return_value = "Team response"
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -253,10 +266,12 @@ class TestRoutingRegression:
         await research_bot._on_message(mock_room, message_event)
         await news_bot._on_message(mock_room, message_event)
 
-        # Both should respond exactly once
-        assert research_bot.client.room_send.call_count == 1
-        assert news_bot.client.room_send.call_count == 1
-        assert mock_ai_response.call_count == 2
+        # With simplified team behavior: multiple mentions should form a team
+        # The alphabetically first agent (news) handles team formation
+        # The other agent (research) does not respond individually
+        assert research_bot.client.room_send.call_count == 0  # No individual response
+        assert news_bot.client.room_send.call_count == 1  # Team response
+        assert mock_team_arun.call_count == 1  # Team formed once
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")

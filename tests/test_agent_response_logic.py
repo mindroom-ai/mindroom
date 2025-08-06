@@ -22,7 +22,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=True,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
@@ -40,7 +39,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
@@ -54,7 +52,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=True,
             room_id="!room:localhost",
             configured_rooms=[],  # Not native to room
             thread_history=[],
@@ -70,7 +67,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=True,
             room_id="!room:localhost",
             configured_rooms=[],  # Not native to room
             thread_history=thread_history,
@@ -87,7 +83,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=True,
             room_id="!room:localhost",
             configured_rooms=[],  # Not native to room
             thread_history=thread_history,
@@ -100,7 +95,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
@@ -119,7 +113,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
@@ -132,7 +125,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=False,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
@@ -145,7 +137,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!other_room:localhost"],  # Different room
             thread_history=[],
@@ -158,7 +149,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=True,
             is_thread=False,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
@@ -183,7 +173,6 @@ class TestAgentResponseLogic:
             agent_name="general",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
@@ -197,7 +186,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
@@ -213,7 +201,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
@@ -226,7 +213,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=False,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=[],  # No access to this room
             thread_history=[],
@@ -240,7 +226,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=True,
             room_id="!room:localhost",
             configured_rooms=[],  # No native rooms
             thread_history=[],
@@ -263,7 +248,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
-            is_invited_to_thread=False,
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
@@ -277,11 +261,9 @@ class TestAgentResponseLogic:
             agent_name="agent1",
             am_i_mentioned=False,
             is_thread=False,
-            is_invited_to_thread=False,
             room_id="!test:example.org",
             configured_rooms=["!test:example.org"],
             thread_history=[],
-            mentioned_agents=["agent2"],  # Another agent is mentioned
         )
         # Agent1 should not respond and should NOT use router
         assert not should_respond
@@ -291,11 +273,10 @@ class TestAgentResponseLogic:
             agent_name="agent1",
             am_i_mentioned=False,
             is_thread=False,
-            is_invited_to_thread=False,
             room_id="!test:example.org",
             configured_rooms=["!test:example.org"],
             thread_history=[],
-            mentioned_agents=[],  # No agents mentioned
+            # No agents mentioned
         )
         # Agent1 should not respond but SHOULD use router
         assert not should_respond
@@ -304,12 +285,10 @@ class TestAgentResponseLogic:
         should_respond = should_agent_respond(
             agent_name="agent1",
             am_i_mentioned=True,
-            is_thread=False,
-            is_invited_to_thread=False,
+            is_thread=True,
             room_id="!test:example.org",
             configured_rooms=["!test:example.org"],
             thread_history=[],
-            mentioned_agents=["agent1"],  # Current agent is mentioned
         )
         # Agent1 SHOULD respond and should NOT use router
         assert should_respond

@@ -2,10 +2,8 @@
 
 from typing import Any
 
+from .agent_config import ROUTER_AGENT_NAME
 from .matrix import extract_agent_name
-
-# Constants
-ROUTER_AGENT_NAME = "router"
 
 
 def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str], bool]:
@@ -80,17 +78,31 @@ def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]]) -> bo
     return False
 
 
+def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
+    """Get all unique agents that have been mentioned anywhere in the thread."""
+    mentioned_agents = set()
+
+    for msg in thread_history:
+        content = msg.get("content", {})
+        mentions = content.get("m.mentions", {})
+        agents = get_mentioned_agents(mentions)
+        mentioned_agents.update(agents)
+
+    return sorted(list(mentioned_agents))
+
+
 def should_agent_respond(
     agent_name: str,
     am_i_mentioned: bool,
     is_thread: bool,
-    is_invited_to_thread: bool,
     room_id: str,
     configured_rooms: list[str],
     thread_history: list[dict],
-    mentioned_agents: list[str] | None = None,
 ) -> bool:
-    """Determine if an agent should respond to a message."""
+    """Determine if an agent should respond to a message individually.
+
+    Team formation is handled elsewhere - this just determines individual responses.
+    """
 
     # For room messages (not in threads)
     if not is_thread:
@@ -99,10 +111,15 @@ def should_agent_respond(
 
     # Thread logic
     if am_i_mentioned:
-        # Respond if explicitly mentioned in a thread
         return True
 
-    # For threads, check if there's a single agent that should continue
+    # For threads, check agent participation
     agents_in_thread = get_agents_in_thread(thread_history)
 
+    # Multiple agents in thread with no specific mention - team scenario
+    if len(agents_in_thread) > 1:
+        # Team will handle the response
+        return False
+
+    # Single agent continues conversation
     return [agent_name] == agents_in_thread

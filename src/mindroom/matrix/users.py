@@ -5,15 +5,12 @@ from dataclasses import dataclass
 
 import nio
 
-from ..agent_config import load_config
+from ..agent_config import ROUTER_AGENT_NAME, load_config
 from ..logging_config import get_logger
 from .identity import extract_server_name_from_homeserver, parse_matrix_id
 from .state import MatrixState
 
 logger = get_logger(__name__)
-
-# Constants
-ROUTER_AGENT_NAME = "router"
 
 
 def extract_domain_from_user_id(user_id: str) -> str:

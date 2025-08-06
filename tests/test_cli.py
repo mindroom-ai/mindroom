@@ -85,6 +85,7 @@ class TestUserAccountManagement:
 
         with (
             patch("mindroom.cli.matrix_client", return_value=mock_context),
+            patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
             patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
             patch("mindroom.matrix.client.register_user", return_value="@mindroom_user:localhost") as mock_register,
         ):
@@ -154,6 +155,7 @@ class TestUserAccountManagement:
 
             with (
                 patch("mindroom.cli.matrix_client", return_value=mock_context),
+                patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
                 patch("mindroom.matrix.client.register_user", return_value="@mindroom_user:localhost") as mock_register,
             ):
                 result_config = await _ensure_user_account()

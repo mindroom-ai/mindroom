@@ -83,7 +83,9 @@ class TestMemoryIntegration:
     async def test_ai_response_error_handling(self, tmp_path):
         """Test error handling in AI response."""
         with patch("mindroom.ai.get_model_instance", side_effect=Exception("Model error")):
-            response = await ai_response(agent_name="test", prompt="Test", session_id="session", storage_path=tmp_path)
+            response = await ai_response(
+                agent_name="general", prompt="Test", session_id="session", storage_path=tmp_path
+            )
 
             # Should return error message
             assert "Sorry, I encountered an error" in response
@@ -102,11 +104,11 @@ class TestMemoryIntegration:
             patch("mindroom.memory.functions.get_memory", return_value=mock_memory),
             patch("mindroom.ai._cached_agent_run", AsyncMock(return_value=MagicMock(content="First response"))),
             patch("mindroom.ai.get_model_instance", return_value=MagicMock()),
-            patch("mindroom.ai.create_agent", return_value=MagicMock()),
+            patch("mindroom.agent_config.create_agent", return_value=MagicMock()),
         ):
             # First interaction
             await ai_response(
-                agent_name="test_agent", prompt="Remember this: A=1", session_id="session1", storage_path=tmp_path
+                agent_name="general", prompt="Remember this: A=1", session_id="session1", storage_path=tmp_path
             )
 
             # Verify memory was stored (only user prompt)
@@ -120,9 +122,7 @@ class TestMemoryIntegration:
             # Second call - should find previous memory (only user prompt stored)
             mock_memory.search.return_value = {"results": [{"memory": "Remember this: A=1", "id": "1"}]}
 
-            await ai_response(
-                agent_name="test_agent", prompt="What is A?", session_id="session2", storage_path=tmp_path
-            )
+            await ai_response(agent_name="general", prompt="What is A?", session_id="session2", storage_path=tmp_path)
 
             # Memory search should have been called
-            mock_memory.search.assert_called_with("What is A?", user_id="agent_test_agent", limit=3)
+            mock_memory.search.assert_called_with("What is A?", user_id="agent_general", limit=3)
