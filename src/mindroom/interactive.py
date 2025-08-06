@@ -403,6 +403,125 @@ def format_interactive_text_only(response_text: str) -> str:
     return final_text
 
 
+def prepare_interactive_response(response_text: str) -> tuple[str, dict[str, str] | None, list[dict[str, str]] | None]:
+    """Prepare an interactive response by formatting the text and extracting option mapping.
+
+    Returns:
+        Tuple of (formatted_text, option_map, options_list) where option_map and options_list are None if not interactive
+    """
+    # Extract JSON from interactive code block
+    match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
+
+    if not match:
+        return response_text, None, None
+
+    try:
+        interactive_data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return response_text, None, None
+
+    # Extract question and options
+    question = interactive_data.get("question", DEFAULT_QUESTION)
+    options = interactive_data.get("options", [])
+
+    if not options:
+        return response_text, None, None
+
+    # Limit options
+    options = options[:MAX_OPTIONS]
+
+    # Remove the JSON block from the original text
+    clean_response = response_text.replace(match.group(0), "").strip()
+
+    # Build option lines and map
+    option_lines = []
+    option_map = {}
+    for i, opt in enumerate(options, 1):
+        emoji_char = opt.get("emoji", "❓")
+        label = opt.get("label", "Option")
+        value = opt.get("value", label.lower())
+
+        option_lines.append(f"{i}. {emoji_char} {label}")
+        # Support both emoji and numeric responses
+        option_map[emoji_char] = value
+        option_map[str(i)] = value
+
+    # Combine everything into the final message
+    message_parts = []
+    if clean_response:
+        message_parts.append(clean_response)
+    message_parts.append("")  # Empty line
+    message_parts.append(question)
+    message_parts.append("")  # Empty line
+    message_parts.extend(option_lines)
+    message_parts.append("")  # Empty line
+    message_parts.append(INSTRUCTION_TEXT)
+
+    final_text = "\n".join(message_parts)
+
+    # Add checkmark if not already present
+    if not final_text.rstrip().endswith("✓"):
+        final_text += " ✓"
+
+    return final_text, option_map, options
+
+
+def register_interactive_question(
+    event_id: str,
+    room_id: str,
+    thread_id: str | None,
+    option_map: dict[str, str],
+    agent_name: str,
+) -> None:
+    """Register an interactive question for tracking.
+
+    Args:
+        event_id: The event ID of the message with the question
+        room_id: The room ID
+        thread_id: Thread ID if in a thread
+        option_map: Mapping of emoji/number to values
+        agent_name: The agent that created the question
+    """
+    _active_questions[event_id] = InteractiveQuestion(
+        room_id=room_id,
+        thread_id=thread_id,
+        options=option_map,
+        creator_agent=agent_name,
+    )
+    logger.info("Registered interactive question", event_id=event_id, options=len(option_map))
+
+
+async def add_reaction_buttons(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    options: list[dict[str, str]],
+) -> None:
+    """Add reaction buttons to a message.
+
+    Args:
+        client: The Matrix client
+        room_id: The room ID
+        event_id: The event ID of the message to add reactions to
+        options: List of option dictionaries with 'emoji' keys
+    """
+    for opt in options:
+        emoji_char = opt.get("emoji", "❓")
+        reaction_response = await client.room_send(
+            room_id=room_id,
+            message_type="m.reaction",
+            content={
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": event_id,
+                    "key": emoji_char,
+                }
+            },
+        )
+        if not isinstance(reaction_response, nio.RoomSendResponse):
+            logger.warning("Failed to add reaction", emoji=emoji_char, error=str(reaction_response))
+
+
 def cleanup() -> None:
     """Clean up when shutting down."""
     _active_questions.clear()

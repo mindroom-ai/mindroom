@@ -332,15 +332,20 @@ class AgentBot:
             await self._edit_message(room.room_id, existing_event_id, response_text, thread_id)
             return
 
-        # Check if the response suggests multiple options or needs user input
-        if interactive.should_create_interactive_question(response_text):
-            await interactive.handle_interactive_response(
-                self.client, room.room_id, thread_id, response_text, self.agent_name
-            )
-        else:
-            event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
-            if event_id:
-                self.response_tracker.mark_responded(reply_to_event_id)
+        # Check if the response contains an interactive question and format it
+        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
+
+        # Send the response (formatted or not)
+        event_id = await self._send_response(room, reply_to_event_id, formatted_text, thread_id)
+        if event_id:
+            self.response_tracker.mark_responded(reply_to_event_id)
+
+            # If it was an interactive question, register it and add reactions
+            if option_map and options:
+                interactive.register_interactive_question(
+                    event_id, room.room_id, thread_id, option_map, self.agent_name
+                )
+                await interactive.add_reaction_buttons(self.client, room.room_id, event_id, options)
 
     async def _process_and_respond_streaming(
         self,
@@ -387,17 +392,15 @@ class AgentBot:
                 self.response_tracker.mark_responded(reply_to_event_id)
                 self.logger.info("Sent streaming response", event_id=streaming.event_id)
 
-            # If the message contains an interactive question, handle it
+            # If the message contains an interactive question, register it and add reactions
             if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
-                await interactive.handle_interactive_response(
-                    self.client,
-                    room.room_id,
-                    thread_id,
-                    streaming.accumulated_text,
-                    self.agent_name,
-                    response_already_sent=True,
-                    event_id=streaming.event_id,
-                )
+                # The message is already formatted by format_interactive_text_only in streaming
+                _, option_map, options = interactive.prepare_interactive_response(streaming.accumulated_text)
+                if option_map and options:
+                    interactive.register_interactive_question(
+                        streaming.event_id, room.room_id, thread_id, option_map, self.agent_name
+                    )
+                    await interactive.add_reaction_buttons(self.client, room.room_id, streaming.event_id, options)
 
         except Exception as e:
             self.logger.error("Error in streaming response", error=str(e))
