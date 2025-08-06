@@ -7,9 +7,22 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.interactive import InteractiveManager
 from mindroom.matrix import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
+
+
+def setup_test_bot(
+    agent: AgentMatrixUser, storage_path: Path, room_id: str, enable_streaming: bool = False
+) -> AgentBot:
+    """Set up a test bot with all required mocks."""
+    bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming)
+    bot.client = AsyncMock()
+    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=storage_path)
+    bot.thread_invite_manager = ThreadInviteManager(bot.client)
+    bot.interactive_manager = InteractiveManager(bot.client, bot.agent_name)
+    return bot
 
 
 @pytest.fixture
@@ -38,17 +51,12 @@ class TestStreamingEdits:
     ) -> None:
         """Test that agents don't respond to edits of messages they already responded to."""
         # Set up bot
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
-        bot.client = AsyncMock()
+        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost")
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         bot.client.room_send.return_value = mock_send_response
-
-        # Initialize response tracker and thread manager
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
         # Mock AI response
         mock_ai_response.return_value = "I can help with that!"
@@ -138,17 +146,12 @@ class TestStreamingEdits:
     ) -> None:
         """Test that agents still respond to new messages after seeing edits."""
         # Set up bot
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
-        bot.client = AsyncMock()
+        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost")
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         bot.client.room_send.return_value = mock_send_response
-
-        # Initialize response tracker and thread manager
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
         # Mock AI response
         mock_ai_response.return_value = "Here's the answer!"
@@ -187,17 +190,12 @@ class TestStreamingEdits:
     ) -> None:
         """Test that agents ignore ALL edits from other agents, even first-time mentions."""
         # Set up bot
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
-        bot.client = AsyncMock()
+        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost")
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         bot.client.room_send.return_value = mock_send_response
-
-        # Initialize response tracker and thread manager
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
         # Mock AI response
         mock_ai_response.return_value = "I can help with that!"
@@ -260,17 +258,12 @@ class TestStreamingEdits:
     ) -> None:
         """Test that agents DO respond to user edits that add new mentions."""
         # Set up bot
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
-        bot.client = AsyncMock()
+        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost")
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         bot.client.room_send.return_value = mock_send_response
-
-        # Initialize response tracker and thread manager
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
         # Mock AI response
         mock_ai_response.return_value = "I can help with that!"

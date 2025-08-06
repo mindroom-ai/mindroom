@@ -12,9 +12,22 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.interactive import InteractiveManager
 from mindroom.matrix import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
+
+
+def setup_test_bot(
+    agent: AgentMatrixUser, storage_path: Path, room_id: str, enable_streaming: bool = False
+) -> AgentBot:
+    """Set up a test bot with all required mocks."""
+    bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming)
+    bot.client = AsyncMock()
+    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=storage_path)
+    bot.thread_invite_manager = ThreadInviteManager(bot.client)
+    bot.interactive_manager = InteractiveManager(bot.client, bot.agent_name)
+    return bot
 
 
 @pytest.fixture
@@ -61,16 +74,10 @@ class TestRoutingRegression:
         test_room_id = "!research:localhost"
 
         # Set up research bot (the one being mentioned)
-        research_bot = AgentBot(mock_research_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
-        research_bot.client = AsyncMock()
-        research_bot.response_tracker = ResponseTracker(research_bot.agent_name, base_path=tmp_path)
-        research_bot.thread_invite_manager = ThreadInviteManager(research_bot.client)
+        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
 
         # Set up news bot
-        news_bot = AgentBot(mock_news_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
-        news_bot.client = AsyncMock()
-        news_bot.response_tracker = ResponseTracker(news_bot.agent_name, base_path=tmp_path)
-        news_bot.thread_invite_manager = ThreadInviteManager(news_bot.client)
+        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)
 
         # Mock AI responses
         mock_ai_response.return_value = "I can help with that research!"
@@ -137,22 +144,13 @@ class TestRoutingRegression:
         )
 
         # Set up router bot
-        router_bot = AgentBot(router_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
-        router_bot.client = AsyncMock()
-        router_bot.response_tracker = ResponseTracker(router_bot.agent_name, base_path=tmp_path)
-        router_bot.thread_invite_manager = ThreadInviteManager(router_bot.client)
+        router_bot = setup_test_bot(router_agent, tmp_path, test_room_id)
 
         # Set up research bot
-        research_bot = AgentBot(mock_research_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
-        research_bot.client = AsyncMock()
-        research_bot.response_tracker = ResponseTracker(research_bot.agent_name, base_path=tmp_path)
-        research_bot.thread_invite_manager = ThreadInviteManager(research_bot.client)
+        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
 
         # Set up news bot
-        news_bot = AgentBot(mock_news_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
-        news_bot.client = AsyncMock()
-        news_bot.response_tracker = ResponseTracker(news_bot.agent_name, base_path=tmp_path)
-        news_bot.thread_invite_manager = ThreadInviteManager(news_bot.client)
+        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)
 
         # Mock AI responses
         mock_ai_response.return_value = "I can help with that!"
@@ -215,10 +213,7 @@ class TestRoutingRegression:
         test_room_id = "!research:localhost"
 
         # Set up both bots
-        research_bot = AgentBot(mock_research_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
-        research_bot.client = AsyncMock()
-        research_bot.response_tracker = ResponseTracker(research_bot.agent_name, base_path=tmp_path)
-        research_bot.thread_invite_manager = ThreadInviteManager(research_bot.client)
+        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
 
         # Mock orchestrator for research bot
         mock_orchestrator = MagicMock()
@@ -227,10 +222,7 @@ class TestRoutingRegression:
         mock_orchestrator.agent_bots = {"research": mock_agent_bot, "news": mock_agent_bot}
         research_bot.orchestrator = mock_orchestrator
 
-        news_bot = AgentBot(mock_news_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
-        news_bot.client = AsyncMock()
-        news_bot.response_tracker = ResponseTracker(news_bot.agent_name, base_path=tmp_path)
-        news_bot.thread_invite_manager = ThreadInviteManager(news_bot.client)
+        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)
 
         # Mock orchestrator for news bot
         news_bot.orchestrator = mock_orchestrator
@@ -298,16 +290,10 @@ class TestRoutingRegression:
         )
 
         # Set up router bot
-        router_bot = AgentBot(router_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
-        router_bot.client = AsyncMock()
-        router_bot.response_tracker = ResponseTracker(router_bot.agent_name, base_path=tmp_path)
-        router_bot.thread_invite_manager = ThreadInviteManager(router_bot.client)
+        router_bot = setup_test_bot(router_agent, tmp_path, test_room_id)
 
         # Set up research bot (will be mentioned by router)
-        research_bot = AgentBot(mock_research_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
-        research_bot.client = AsyncMock()
-        research_bot.response_tracker = ResponseTracker(research_bot.agent_name, base_path=tmp_path)
-        research_bot.thread_invite_manager = ThreadInviteManager(research_bot.client)
+        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
 
         # Mock AI response
         mock_ai_response.return_value = "I can help with that research question!"

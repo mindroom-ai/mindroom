@@ -64,6 +64,10 @@ class TestRoutingIntegration:
             bot.client = AsyncMock()
             bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
             bot.thread_invite_manager = ThreadInviteManager(bot.client)
+            # Initialize interactive manager to avoid AttributeError
+            from mindroom.interactive import InteractiveManager
+
+            bot.interactive_manager = InteractiveManager(bot.client, bot.agent_name)
 
             # Mock room_send for streaming
             mock_send = MagicMock()
