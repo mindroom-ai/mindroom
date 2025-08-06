@@ -393,12 +393,15 @@ class AgentBot:
                 await streaming.update_content(chunk, self.client)
 
             await streaming.finalize(self.client)
+
+            # Only mark as responded after successful completion
+            if streaming.event_id and not existing_event_id:
+                self.response_tracker.mark_responded(reply_to_event_id)
+                self.logger.info("Sent streaming response", event_id=streaming.event_id)
+
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
-
-        if streaming.event_id and not existing_event_id:
-            self.response_tracker.mark_responded(reply_to_event_id)
-            self.logger.info("Sent streaming response", event_id=streaming.event_id)
+            # Don't mark as responded if streaming failed
 
         # If the message contains an interactive question, register it and add reactions
         if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
