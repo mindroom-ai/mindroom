@@ -63,57 +63,36 @@ For vague times like "later" or "soon", use 30 minutes as a reasonable default.
 
 If you cannot parse the request, return an error with a helpful suggestion."""
 
-    try:
-        # Use default model for simplicity
-        model = get_model_instance("default")
+    # Use default model for simplicity
+    model = get_model_instance("default")
 
-        agent = Agent(
-            name="ScheduleParser",
-            role="Parse natural language schedule requests",
-            model=model,
-            response_model=ScheduledTimeResponse,
+    agent = Agent(
+        name="ScheduleParser",
+        role="Parse natural language schedule requests",
+        model=model,
+        response_model=ScheduledTimeResponse | ScheduleParseError,
+    )
+
+    response = await agent.arun(prompt, session_id=f"schedule_parse_{uuid.uuid4()}")
+    result = response.content
+
+    if isinstance(result, ScheduledTimeResponse):
+        logger.info(
+            "Successfully parsed schedule",
+            request=full_text,
+            execute_at=result.execute_at,
+            message=result.message,
+            interpretation=result.interpretation,
         )
+        return result
+    elif isinstance(result, ScheduleParseError):
+        logger.debug("AI returned parse error", error=result.error)
+        return result
 
-        response = await agent.arun(prompt, session_id=f"schedule_parse_{uuid.uuid4()}")
-        result = response.content
-
-        if isinstance(result, ScheduledTimeResponse):
-            logger.info(
-                "Successfully parsed schedule",
-                request=full_text,
-                execute_at=result.execute_at,
-                message=result.message,
-                interpretation=result.interpretation,
-            )
-            return result
-
-    except Exception as e:
-        logger.debug(f"Failed to parse as valid schedule, trying error response: {e}")
-
-    # If we couldn't parse as valid time, try to get a helpful error
-    try:
-        model = get_model_instance("default")
-        error_agent = Agent(
-            name="ScheduleParser",
-            role="Explain why schedule request cannot be parsed",
-            model=model,
-            response_model=ScheduleParseError,
-        )
-
-        error_prompt = prompt + "\n\nProvide a clear error message and suggestion."
-        error_response = await error_agent.arun(error_prompt, session_id=f"schedule_error_{uuid.uuid4()}")
-        error_result = error_response.content
-
-        if isinstance(error_result, ScheduleParseError):
-            return error_result
-
-    except Exception as e:
-        logger.error("Failed to parse schedule request", error=str(e))
-
-    # Fallback error
+    # Fallback if AI returns unexpected type
     return ScheduleParseError(
-        error="Unable to parse the schedule request", 
-        suggestion="Try something like 'in 5 minutes Check the deployment' or 'tomorrow at 3pm Send report'"
+        error="Unable to parse the schedule request",
+        suggestion="Try something like 'in 5 minutes Check the deployment' or 'tomorrow at 3pm Send report'",
     )
 
 
@@ -164,7 +143,9 @@ async def schedule_task(
 
     # Start the async task
     task = asyncio.create_task(
-        _execute_scheduled_task(client, task_id, room_id, thread_id, agent_user_id, parse_result.execute_at, parse_result.message)
+        _execute_scheduled_task(
+            client, task_id, room_id, thread_id, agent_user_id, parse_result.execute_at, parse_result.message
+        )
     )
     _running_tasks[task_id] = task
 
@@ -284,31 +265,25 @@ async def cancel_scheduled_task(
         _running_tasks[task_id].cancel()
         del _running_tasks[task_id]
 
-    # Update state to cancelled
-    try:
-        # First check if task exists
-        response = await client.room_get_state_event(
-            room_id=room_id,
-            event_type=SCHEDULED_TASK_EVENT_TYPE,
-            state_key=task_id,
-        )
+    # First check if task exists
+    response = await client.room_get_state_event(
+        room_id=room_id,
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        state_key=task_id,
+    )
 
-        if not isinstance(response, nio.RoomGetStateEventResponse):
-            return f"❌ Task `{task_id}` not found."
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        return f"❌ Task `{task_id}` not found."
 
-        # Update to cancelled
-        await client.room_put_state(
-            room_id=room_id,
-            event_type=SCHEDULED_TASK_EVENT_TYPE,
-            content={"status": "cancelled"},
-            state_key=task_id,
-        )
+    # Update to cancelled
+    await client.room_put_state(
+        room_id=room_id,
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        content={"status": "cancelled"},
+        state_key=task_id,
+    )
 
-        return f"✅ Cancelled task `{task_id}`"
-
-    except Exception as e:
-        logger.error(f"Failed to cancel task {task_id}: {e}")
-        return f"❌ Failed to cancel task `{task_id}`"
+    return f"✅ Cancelled task `{task_id}`"
 
 
 async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str) -> int:
