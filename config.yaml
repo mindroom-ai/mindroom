@@ -12,15 +12,15 @@ memory:
       host: "http://localhost:11434"  # Ollama host URL
 
 models:
-  default:
-    provider: "openai"
-    id: "gpt-4o"
+  default:  # Default model used when agent doesn't specify one
+    provider: "ollama"
+    id: "devstral:24b"
 
   anthropic:
     provider: "anthropic"
     id: "claude-3-5-haiku-latest"
 
-  ollama:  # Default model used when agent doesn't specify one
+  ollama:
     provider: "ollama"
     id: "devstral:24b"
     # Add any provider-specific config here
