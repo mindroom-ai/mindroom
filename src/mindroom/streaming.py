@@ -48,12 +48,8 @@ class StreamingResponse:
         # Always ensure we have a thread_id - use the original message as thread root if needed
         effective_thread_id = self.thread_id if self.thread_id else self.reply_to_event_id
 
-        # Check if we should format as interactive question
-        display_text = (
-            await self._format_interactive_text()
-            if interactive.should_create_interactive_question(self.accumulated_text)
-            else self.accumulated_text
-        )
+        # Format the text (handles interactive questions if present)
+        display_text = interactive.format_interactive_text_only(self.accumulated_text)
 
         content = create_mention_content_from_text(
             display_text,
@@ -94,15 +90,3 @@ class StreamingResponse:
             )
             if not isinstance(response, nio.RoomSendResponse):
                 logger.error("Failed to edit streaming message", error=str(response))
-
-    async def _format_interactive_text(self) -> str:
-        """Format text containing an interactive question block.
-
-        Returns the formatted text or the original text if formatting fails.
-        """
-        # Simply reuse the formatting logic from interactive module
-        try:
-            return interactive.format_interactive_text_only(self.accumulated_text)
-        except Exception as e:
-            logger.error("Failed to format interactive text", error=str(e))
-            return self.accumulated_text
