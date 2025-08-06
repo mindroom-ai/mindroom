@@ -52,6 +52,27 @@ def get_mentioned_agents(mentions: dict[str, Any]) -> list[str]:
     return agents
 
 
+def has_user_responded_after_message(thread_history: list[dict], target_event_id: str, user_id: str) -> bool:
+    """Check if a user has sent any messages after a specific message in the thread.
+
+    Args:
+        thread_history: List of messages in the thread
+        target_event_id: The event ID to check after
+        user_id: The user ID to check for
+
+    Returns:
+        True if the user has responded after the target message
+    """
+    # Find the target message and check for user responses after it
+    found_target = False
+    for msg in thread_history:
+        if msg["event_id"] == target_event_id:
+            found_target = True
+        elif found_target and msg["sender"] == user_id:
+            return True
+    return False
+
+
 def get_available_agents_in_room(room: Any) -> list[str]:
     """Get list of available agents in a room.
 
