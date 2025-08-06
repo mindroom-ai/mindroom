@@ -31,6 +31,7 @@ async def handle_interactive_response(
     room_id: str,
     thread_id: str | None,
     response_text: str,
+    response_already_sent: bool = False,
 ) -> None:
     """Create an interactive question from JSON in the AI response.
 
@@ -39,6 +40,7 @@ async def handle_interactive_response(
         room_id: The room ID
         thread_id: Thread ID if in a thread
         response_text: The AI's response containing an interactive code block
+        response_already_sent: Whether the response text has already been sent (e.g., in streaming mode)
     """
     # Extract JSON from interactive code block
     pattern = r"```interactive\s*\n(.*?)\n```"
@@ -46,22 +48,25 @@ async def handle_interactive_response(
 
     if not match:
         logger.warning("Interactive block found but couldn't extract JSON")
-        # Send the original response anyway
-        await _send_response_text(client, room_id, thread_id, response_text)
+        # Send the original response anyway if not already sent
+        if not response_already_sent:
+            await _send_response_text(client, room_id, thread_id, response_text)
         return
 
     try:
         interactive_data = json.loads(match.group(1))
     except json.JSONDecodeError as e:
         logger.error("Failed to parse interactive JSON", error=str(e))
-        # Send the original response anyway
-        await _send_response_text(client, room_id, thread_id, response_text)
+        # Send the original response anyway if not already sent
+        if not response_already_sent:
+            await _send_response_text(client, room_id, thread_id, response_text)
         return
 
-    # Send the original response first (without the interactive block)
-    clean_response = response_text.replace(match.group(0), "").strip()
-    if clean_response:
-        await _send_response_text(client, room_id, thread_id, clean_response)
+    # Send the original response first (without the interactive block) if not already sent
+    if not response_already_sent:
+        clean_response = response_text.replace(match.group(0), "").strip()
+        if clean_response:
+            await _send_response_text(client, room_id, thread_id, clean_response)
 
     # Create the interactive question
     await create_interactive_question(

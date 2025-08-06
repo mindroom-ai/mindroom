@@ -337,6 +337,13 @@ class AgentBot:
                 self.response_tracker.mark_responded(event.event_id)
                 self.logger.info("Sent streaming response", event_id=streaming.event_id)
 
+                # Check if the accumulated response contains an interactive question
+                if interactive.should_create_interactive_question(streaming.accumulated_text):
+                    # Handle the interactive question
+                    await interactive.handle_interactive_response(
+                        self.client, room.room_id, thread_id, streaming.accumulated_text, response_already_sent=True
+                    )
+
         except Exception as e:
             self.logger.error("Error in streaming response", error=str(e))
 
