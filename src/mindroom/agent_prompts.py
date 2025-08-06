@@ -12,7 +12,11 @@ INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between option
 }
 ```
 
-IMPORTANT: You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word "interactive").
+IMPORTANT:
+- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word "interactive").
+- The JSON block will be automatically replaced with a formatted question showing the options with emojis.
+- Don't write things like "here are the options:" before the JSON block - the formatted question will appear instead.
+- Write your response as if the formatted question will be shown directly to the user.
 
 The user can respond by:
 - Clicking the emoji reaction
