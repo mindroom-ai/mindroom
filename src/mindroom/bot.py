@@ -189,6 +189,11 @@ class AgentBot:
         # Extract message context
         context = await self._extract_message_context(room, event)
 
+        # Check if this is a command (starts with !) - non-router agents should ignore commands
+        if self.agent_name != ROUTER_AGENT_NAME and event.body.strip().startswith("!"):
+            self.logger.debug("Ignoring command (not router agent)")
+            return
+
         # If message is from another agent and we're not mentioned, ignore it
         sender_is_agent = extract_agent_name(event.sender) is not None
         if sender_is_agent and not context.am_i_mentioned:

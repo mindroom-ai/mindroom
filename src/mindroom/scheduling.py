@@ -58,8 +58,11 @@ Examples of requests you should handle:
 - "later Ping me about the meeting"
 - "next week Review the project proposal"
 - "in 2 hours" (if no message specified, use "Reminder" as default)
+- "tell me in 1 min again" (time: "in 1 min", message: "Reminder")
+- "in 30 seconds remind me to check email" (time: "in 30 seconds", message: "check email")
 
 For vague times like "later" or "soon", use 30 minutes as a reasonable default.
+Parse time expressions flexibly - "1 min", "1 minute", "one minute" are all valid.
 
 If you cannot parse the request, return an error with a helpful suggestion."""
 
