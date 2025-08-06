@@ -8,6 +8,7 @@ from typing import NamedTuple
 import nio
 
 from .logging_config import get_logger
+from .matrix.identity import is_agent_id
 
 logger = get_logger(__name__)
 
@@ -93,7 +94,6 @@ async def handle_reaction(
         return None
 
     # Ignore reactions from other agents
-    from .matrix.identity import is_agent_id
 
     if is_agent_id(event.sender):
         logger.debug("Ignoring reaction from agent", sender=event.sender, reaction=reaction_key)
