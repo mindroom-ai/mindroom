@@ -80,8 +80,8 @@ Based on your choice, I'll proceed accordingly."""
         assert "Let me help you decide." in first_call[1]["content"]["body"]
         assert "Based on your choice" in first_call[1]["content"]["body"]
         assert "What approach would you prefer?" in first_call[1]["content"]["body"]
-        assert "🚀 Fast and automated" in first_call[1]["content"]["body"]
-        assert "🔍 Careful and manual" in first_call[1]["content"]["body"]
+        assert "1. 🚀 Fast and automated" in first_call[1]["content"]["body"]
+        assert "2. 🔍 Careful and manual" in first_call[1]["content"]["body"]
         assert "```interactive" not in first_call[1]["content"]["body"]
 
         # Should create question
@@ -378,7 +378,7 @@ interactive
         # Check edited content
         assert "I'll help you with that." in first_call[1]["content"]["body"]
         assert "How should I proceed?" in first_call[1]["content"]["body"]
-        assert "⚡ Fast" in first_call[1]["content"]["body"]
+        assert "1. ⚡ Fast" in first_call[1]["content"]["body"]
         assert "```interactive" not in first_call[1]["content"]["body"]
 
         # Should store question with existing event_id

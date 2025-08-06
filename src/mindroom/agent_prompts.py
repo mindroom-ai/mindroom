@@ -18,6 +18,15 @@ IMPORTANT:
 - Don't write things like "here are the options:" before the JSON block - the formatted question will appear instead.
 - Write your response as if the formatted question will be shown directly to the user.
 
+The JSON block above will be automatically converted to this formatted display:
+
+How would you like me to proceed?
+
+1. 🚀 Fast and automated
+2. 🐢 Careful and manual
+
+React with an emoji or type the number to respond.
+
 The user can respond by:
 - Clicking the emoji reaction
 - Typing the number (1, 2, etc.)

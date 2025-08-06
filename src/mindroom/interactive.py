@@ -93,7 +93,7 @@ async def handle_interactive_response(
         label = opt.get("label", "Option")
         value = opt.get("value", label.lower())
 
-        option_lines.append(f"{emoji_char} {label}")
+        option_lines.append(f"{i}. {emoji_char} {label}")
         # Support both emoji and numeric responses
         option_map[emoji_char] = value
         option_map[str(i)] = value
