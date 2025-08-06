@@ -21,10 +21,14 @@ class TestMemoryIntegration:
     def mock_memory_functions(self):
         """Mock all memory functions."""
         with (
-            patch("mindroom.ai.build_memory_enhanced_prompt") as mock_build,
-            patch("mindroom.ai.store_conversation_memory") as mock_store,
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock) as mock_build,
+            patch("mindroom.ai.store_conversation_memory", new_callable=AsyncMock) as mock_store,
         ):
-            mock_build.side_effect = lambda prompt, *args, **kwargs: f"[Enhanced] {prompt}"
+            # Set up async side effects
+            async def build_side_effect(prompt, *args, **kwargs):
+                return f"[Enhanced] {prompt}"
+
+            mock_build.side_effect = build_side_effect
             yield mock_build, mock_store
 
     @pytest.mark.asyncio
@@ -56,9 +60,7 @@ class TestMemoryIntegration:
             assert call_args[1] == "[Enhanced] What is 2+2?"  # Enhanced prompt
 
             # Verify conversation was stored
-            mock_store.assert_called_once_with(
-                "What is 2+2?", "Test response", "calculator", tmp_path, "test_session", "!test:room"
-            )
+            mock_store.assert_called_once_with("What is 2+2?", "calculator", tmp_path, "test_session", "!test:room")
 
     @pytest.mark.asyncio
     async def test_ai_response_without_room_id(self, mock_agent_run, mock_memory_functions, tmp_path):
@@ -77,12 +79,19 @@ class TestMemoryIntegration:
             mock_build.assert_called_once_with("Hello", "general", tmp_path, None)
 
             # Verify storage without room_id
-            mock_store.assert_called_once_with("Hello", "Test response", "general", tmp_path, "test_session", None)
+            mock_store.assert_called_once_with("Hello", "general", tmp_path, "test_session", None)
 
     @pytest.mark.asyncio
     async def test_ai_response_error_handling(self, tmp_path):
         """Test error handling in AI response."""
-        with patch("mindroom.ai.get_model_instance", side_effect=Exception("Model error")):
+        # Mock memory to prevent real memory instance creation during error handling
+        mock_memory = AsyncMock()
+        mock_memory.search.return_value = {"results": []}
+
+        with (
+            patch("mindroom.ai.get_model_instance", side_effect=Exception("Model error")),
+            patch("mindroom.memory.functions.get_memory", return_value=mock_memory),
+        ):
             response = await ai_response(
                 agent_name="general", prompt="Test", session_id="session", storage_path=tmp_path
             )
@@ -95,7 +104,7 @@ class TestMemoryIntegration:
     async def test_memory_persistence_across_calls(self, tmp_path):
         """Test that memory persists across multiple AI calls."""
         # This is more of a documentation test showing expected behavior
-        mock_memory = MagicMock()
+        mock_memory = AsyncMock()
 
         # First call - no memories
         mock_memory.search.return_value = {"results": []}
@@ -111,19 +120,16 @@ class TestMemoryIntegration:
                 agent_name="general", prompt="Remember this: A=1", session_id="session1", storage_path=tmp_path
             )
 
-            # Verify memory was stored
+            # Verify memory was stored (only user prompt)
             assert mock_memory.add.called
             stored_content = mock_memory.add.call_args[0][0][0]["content"]
-            assert "A=1" in stored_content
-            assert "First response" in stored_content
+            assert stored_content == "Remember this: A=1"
 
             # Reset for second call
             mock_memory.reset_mock()
 
-            # Second call - should find previous memory
-            mock_memory.search.return_value = {
-                "results": [{"memory": "User asked: Remember this: A=1 I responded: First response", "id": "1"}]
-            }
+            # Second call - should find previous memory (only user prompt stored)
+            mock_memory.search.return_value = {"results": [{"memory": "Remember this: A=1", "id": "1"}]}
 
             await ai_response(agent_name="general", prompt="What is A?", session_id="session2", storage_path=tmp_path)
 

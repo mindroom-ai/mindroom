@@ -133,7 +133,7 @@ async def _prepare_agent_and_prompt(
     """
     from .agent_config import create_agent
 
-    enhanced_prompt = build_memory_enhanced_prompt(prompt, agent_name, storage_path, room_id)
+    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
     agent = create_agent(agent_name, storage_path=storage_path)
@@ -167,7 +167,7 @@ async def ai_response(
 
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
         response_text = response.content or ""
-        store_conversation_memory(prompt, response_text, agent_name, storage_path, session_id, room_id)
+        await store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id)
 
         return response_text
     except Exception as e:
@@ -217,7 +217,7 @@ async def ai_response_streaming(
             logger.info("Cache hit", agent=agent_name)
             response_text = cached_result.content or ""
             yield response_text
-            store_conversation_memory(prompt, response_text, agent_name, storage_path, session_id, room_id)
+            await store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id)
             return
 
     full_response = ""
@@ -242,4 +242,4 @@ async def ai_response_streaming(
         logger.info("Response cached", agent=agent_name)
 
     if full_response:
-        store_conversation_memory(prompt, full_response, agent_name, storage_path, session_id, room_id)
+        await store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id)

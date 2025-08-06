@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from mem0 import Memory
+from mem0 import AsyncMemory  # type: ignore[import-untyped]
 
 from ..agent_config import load_config
 from ..logging_config import get_logger
@@ -95,20 +95,20 @@ def get_memory_config(storage_path: Path) -> dict:
     return config
 
 
-def create_memory_instance(storage_path: Path) -> Memory:
+def create_memory_instance(storage_path: Path) -> AsyncMemory:
     """Create a Mem0 memory instance with ChromaDB backend.
 
     Args:
         storage_path: Base directory for memory storage
 
     Returns:
-        Configured Memory instance
+        Configured AsyncMemory instance
     """
     config_dict = get_memory_config(storage_path)
 
-    # Create Memory instance with dictionary config directly
+    # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
-    memory = Memory.from_config(config_dict)
+    memory = AsyncMemory.from_config(config_dict)
 
     logger.info(f"Created memory instance with ChromaDB at {storage_path}")
     return memory
