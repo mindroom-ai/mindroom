@@ -70,7 +70,8 @@ class TestInteractiveFunctions:
 Based on your choice, I'll proceed accordingly."""
 
         # Test the new approach
-        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        formatted_text, option_map, options = response.formatted_text, response.option_map, response.options_list
 
         # Should format the message correctly
         assert "Let me help you decide." in formatted_text
@@ -120,7 +121,8 @@ Based on your choice, I'll proceed accordingly."""
 ```"""
 
         # Test the new approach - should return original text when JSON is invalid
-        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        formatted_text, option_map, options = response.formatted_text, response.option_map, response.options_list
 
         # Should return original text unchanged
         assert formatted_text == response_text
@@ -145,7 +147,8 @@ Based on your choice, I'll proceed accordingly."""
 ```"""
 
         # Test the new approach - should return original text when options are empty
-        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        formatted_text, option_map, options = response.formatted_text, response.option_map, response.options_list
 
         # Should return original text unchanged when no options
         assert formatted_text == response_text
@@ -338,7 +341,8 @@ interactive
 ```"""
 
         # Test the new approach
-        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        formatted_text, option_map, options = response.formatted_text, response.option_map, response.options_list
 
         # Should format despite the newline format
         assert "Let me help." in formatted_text
@@ -396,7 +400,8 @@ interactive
 Just let me know your preference!"""
 
         # Test the new approach
-        formatted_text, option_map, options = interactive.prepare_interactive_response(ai_response)
+        response = interactive.parse_and_format_interactive(ai_response, extract_mapping=True)
+        formatted_text, option_map, options = response.formatted_text, response.option_map, response.options_list
 
         # Verify formatting
         assert "I can help you with that task." in formatted_text
@@ -464,7 +469,8 @@ Just let me know your preference!"""
 ``` ✓"""
 
         # Test the new approach
-        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        formatted_text, option_map, options = response.formatted_text, response.option_map, response.options_list
 
         # Should format the message correctly even with checkmark
         assert "Let's play rock paper scissors!" in formatted_text

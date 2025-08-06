@@ -49,7 +49,8 @@ class StreamingResponse:
         effective_thread_id = self.thread_id if self.thread_id else self.reply_to_event_id
 
         # Format the text (handles interactive questions if present)
-        display_text = interactive.format_interactive_text_only(self.accumulated_text)
+        response = interactive.parse_and_format_interactive(self.accumulated_text, extract_mapping=False)
+        display_text = response.formatted_text
 
         content = create_mention_content_from_text(
             display_text,
