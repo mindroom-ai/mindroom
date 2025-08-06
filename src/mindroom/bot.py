@@ -228,16 +228,13 @@ class AgentBot:
 
         # Determine if this agent should respond individually
         should_respond = should_agent_respond(
-            self.agent_name,
-            context.am_i_mentioned,
-            context.is_thread,
-            context.is_invited_to_thread,
-            room.room_id,
-            self.rooms,
-            context.thread_history,
-            context.mentioned_agents,
-            None,  # No team manager needed anymore
-            context.thread_id,
+            agent_name=self.agent_name,
+            am_i_mentioned=context.am_i_mentioned,
+            is_thread=context.is_thread,
+            room_id=room.room_id,
+            configured_rooms=self.rooms,
+            thread_history=context.thread_history,
+            mentioned_agents=context.mentioned_agents,
         )
 
         if should_respond and not context.am_i_mentioned:

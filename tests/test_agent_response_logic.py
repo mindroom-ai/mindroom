@@ -302,6 +302,7 @@ class TestAgentResponseLogic:
         should_respond = should_agent_respond(
             agent_name="agent1",
             am_i_mentioned=True,
+            is_thread=True,
             room_id="!test:example.org",
             configured_rooms=["!test:example.org"],
             thread_history=[],
