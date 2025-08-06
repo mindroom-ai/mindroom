@@ -1,13 +1,10 @@
 """Rich prompts for agents - like prompts.py but for agents instead of tools."""
 
-INTERACTIVE_QUESTION_PROMPT = """When you want to present the user with multiple-choice options, you can create an interactive question that allows them to respond with a simple emoji reaction or number.
-
-To create an interactive question, include this JSON format in your response:
+INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between options, create an interactive question by including this JSON in your response:
 
 ```interactive
 {
     "question": "How would you like me to proceed?",
-    "type": "preference",
     "options": [
         {"emoji": "🚀", "label": "Fast and automated", "value": "fast"},
         {"emoji": "🐢", "label": "Careful and manual", "value": "slow"}
@@ -15,18 +12,11 @@ To create an interactive question, include this JSON format in your response:
 }
 ```
 
-The system will automatically:
-- Display your question with numbered options (1, 2, 3...)
-- Add emoji reactions to your message for easy clicking
-- Accept either emoji reactions or typed numbers as responses
-- Show a confirmation when the user makes their choice
+The user can respond by:
+- Clicking the emoji reaction
+- Typing the number (1, 2, etc.)
 
-Use this feature when:
-- You need user input between clear alternatives
-- The choice affects how you'll proceed with a task
-- You want to make the interaction more engaging
-
-Keep options concise (max 5) and make the labels self-explanatory.
+Keep it simple: max 5 options with clear, concise labels.
 """
 
 CODE_AGENT_PROMPT = """You are CodeAgent, an expert software developer specialized in code generation, file management, and development workflows.
