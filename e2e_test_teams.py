@@ -2,25 +2,57 @@
 """End-to-end test for team collaboration feature."""
 
 import asyncio
+import contextlib
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import nio
+import yaml
 from dotenv import load_dotenv
 
 # Add the src directory to the path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+from mindroom.cli import _run
 from mindroom.matrix import MATRIX_HOMESERVER, matrix_client
 
 # Load environment variables
 load_dotenv()
 
-# Configuration
-TEST_ROOM_ID = "!yzfQKiBZJVXwEKffiv:localhost"  # Lobby room where all agents are present
-# Try to get credentials from matrix_state.yaml if available
-USERNAME = "mindroom_user"
-PASSWORD = "mindroom_password_d31f32aaae165a243f2321ce97c05cc9"
+
+# Configuration - Load from matrix_state.yaml
+def load_test_config():
+    """Load current credentials and room IDs from matrix_state.yaml."""
+
+    try:
+        with open("matrix_state.yaml") as f:
+            state = yaml.safe_load(f)
+
+        user_account = state["accounts"]["user"]
+        lobby_room = state["rooms"]["lobby"]
+
+        return {
+            "username": user_account["username"],
+            "password": user_account["password"],
+            "room_id": lobby_room["room_id"],
+        }
+    except Exception as e:
+        print(f"❌ Failed to load matrix_state.yaml: {e}")
+        return None
+
+
+# Load current configuration
+config = load_test_config()
+if not config:
+    print("❌ Cannot load configuration from matrix_state.yaml")
+    sys.exit(1)
+
+TEST_ROOM_ID = config["room_id"]  # Current lobby room with all agents
+USERNAME = config["username"]
+PASSWORD = config["password"]
 
 
 async def send_message(client: nio.AsyncClient, room_id: str, message: str) -> str:
@@ -65,9 +97,8 @@ async def test_team_collaboration():
     print(f"🔑 Logging in as {USERNAME}...")
     print(f"   Homeserver: {MATRIX_HOMESERVER}")
 
-    async with matrix_client(MATRIX_HOMESERVER) as client:
+    async with matrix_client(MATRIX_HOMESERVER, f"@{USERNAME}:localhost") as client:
         print("   Client created successfully")
-        client.user = f"@{USERNAME}:localhost"  # Set the user ID
         login_response = await client.login(PASSWORD)
         if not isinstance(login_response, nio.LoginResponse):
             print(f"❌ Login failed: {login_response}")
@@ -145,30 +176,55 @@ async def test_team_collaboration():
 
 async def main():
     """Run the team collaboration test."""
-    try:
-        # Start the mindroom system (assuming it's already running)
-        print("Note: This test assumes mindroom is already running")
-        print("Start it with: mindroom run\n")
+    print("=" * 60)
+    print("MINDROOM TEAM COLLABORATION E2E TEST")
+    print("=" * 60)
 
+    # Kill any existing mindroom processes
+    print("\n🧹 Cleaning up old processes...")
+    subprocess.run(["pkill", "-f", "mindroom run"], capture_output=True)
+    await asyncio.sleep(2)
+
+    # Start mindroom
+    print("🚀 Starting Mindroom...")
+    temp_dir = tempfile.mkdtemp(prefix="mindroom_teams_test_")
+    bot_task = asyncio.create_task(_run(log_level="INFO", storage_path=Path(temp_dir)))
+
+    # Wait for startup
+    print("⏳ Waiting 15s for bot to start and sync...")
+    await asyncio.sleep(15)
+
+    try:
         success = await test_team_collaboration()
 
         if success:
             print("\n✅ All tests passed!")
-            sys.exit(0)
+            return_code = 0
         else:
             print("\n❌ Tests failed!")
-            sys.exit(1)
+            return_code = 1
 
     except KeyboardInterrupt:
         print("\n\n🛑 Test interrupted by user")
-        sys.exit(1)
+        return_code = 1
     except Exception as e:
         import traceback
 
         print(f"\n❌ Test error: {e}")
         print("\nFull traceback:")
         traceback.print_exc()
-        sys.exit(1)
+        return_code = 1
+    finally:
+        # Clean up
+        print("\n🧹 Cleaning up...")
+        bot_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await bot_task
+
+        # Clean up temp directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    sys.exit(return_code)
 
 
 if __name__ == "__main__":
