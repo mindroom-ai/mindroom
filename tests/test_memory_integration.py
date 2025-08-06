@@ -56,9 +56,7 @@ class TestMemoryIntegration:
             assert call_args[1] == "[Enhanced] What is 2+2?"  # Enhanced prompt
 
             # Verify conversation was stored
-            mock_store.assert_called_once_with(
-                "What is 2+2?", "calculator", tmp_path, "test_session", "!test:room"
-            )
+            mock_store.assert_called_once_with("What is 2+2?", "calculator", tmp_path, "test_session", "!test:room")
 
     @pytest.mark.asyncio
     async def test_ai_response_without_room_id(self, mock_agent_run, mock_memory_functions, tmp_path):

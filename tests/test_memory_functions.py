@@ -171,9 +171,7 @@ class TestMemoryFunctions:
     def test_store_conversation_memory(self, mock_memory, storage_path):
         """Test storing conversation memory."""
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            store_conversation_memory(
-                "What is 2+2?", "calculator", storage_path, "session123", room_id="!room:server"
-            )
+            store_conversation_memory("What is 2+2?", "calculator", storage_path, "session123", room_id="!room:server")
 
             # Should be called twice (agent and room)
             assert mock_memory.add.call_count == 2
