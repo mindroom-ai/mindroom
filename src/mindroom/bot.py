@@ -242,10 +242,14 @@ class AgentBot:
             return
 
         # Process and send response
-        if self.enable_streaming:
-            await self._process_and_respond_streaming(room, event, context.thread_id, context.thread_history)
-        else:
-            await self._process_and_respond(room, event, context.thread_id, context.thread_history)
+        self.logger.info("Processing", event_id=event.event_id)
+        await self._generate_response(
+            room_id=room.room_id,
+            prompt=event.body,
+            reply_to_event_id=event.event_id,
+            thread_id=context.thread_id,
+            thread_history=context.thread_history,
+        )
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
@@ -395,30 +399,6 @@ class AgentBot:
                     event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
                     if event_id:
                         self.response_tracker.mark_responded(reply_to_event_id)
-
-    async def _process_and_respond(
-        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
-    ) -> None:
-        self.logger.info("Processing", event_id=event.event_id)
-        await self._generate_response(
-            room_id=room.room_id,
-            prompt=event.body,
-            reply_to_event_id=event.event_id,
-            thread_id=thread_id,
-            thread_history=thread_history,
-        )
-
-    async def _process_and_respond_streaming(
-        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
-    ) -> None:
-        self.logger.info("Processing streaming", event_id=event.event_id)
-        await self._generate_response(
-            room_id=room.room_id,
-            prompt=event.body,
-            reply_to_event_id=event.event_id,
-            thread_id=thread_id,
-            thread_history=thread_history,
-        )
 
     async def _send_response(
         self, room: nio.MatrixRoom, reply_to_event_id: str, response_text: str, thread_id: str | None
