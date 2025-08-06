@@ -200,6 +200,22 @@ async def _ensure_rooms_and_agents(client: nio.AsyncClient, required_rooms: set[
     )
 
 
+async def _invite_router_to_room(client: nio.AsyncClient, room_id: str) -> bool:
+    """Invite the router agent to a room.
+
+    Returns True if invitation was successful, False otherwise.
+    """
+    router_id = MatrixID.from_agent("router", "localhost").full_id
+    response = await client.room_invite(room_id, router_id)
+
+    if isinstance(response, nio.RoomInviteResponse):
+        console.print("  ✅ Invited router to room")
+        return True
+    else:
+        console.print(f"  ❌ Failed to invite router: {response}")
+        return False
+
+
 async def _create_room_and_invite_all_agents(
     room_key: str,
     room_name: str,
@@ -226,14 +242,9 @@ async def _create_room_and_invite_all_agents(
 
         invited_count = 0
 
-        # Always invite router first
-        router_id = MatrixID.from_agent("router", "localhost").full_id
-        router_response = await client.room_invite(room_id, router_id)
-        if isinstance(router_response, nio.RoomInviteResponse):
+        # Always invite the router first
+        if await _invite_router_to_room(client, room_id):
             invited_count += 1
-            console.print(f"  ✅ Invited router to {room_name}")
-        else:
-            console.print(f"  ❌ Failed to invite router: {router_response}")
 
         # Invite configured agents
         for agent_name, agent_config in config.agents.items():
@@ -428,13 +439,8 @@ async def _invite_agents(room_id: str) -> None:
                 invited_count = 0
 
                 # Always invite the router first
-                router_id = MatrixID.from_agent("router", "localhost").full_id
-                router_response = await client.room_invite(room_id, router_id)
-                if isinstance(router_response, nio.RoomInviteResponse):
-                    console.print(f"✅ Invited {router_id} (router)")
+                if await _invite_router_to_room(client, room_id):
                     invited_count += 1
-                else:
-                    console.print(f"❌ Failed to invite {router_id} (router): {router_response}")
 
                 for agent_name, agent_cfg in agent_config.agents.items():
                     if room_key in agent_cfg.rooms:
@@ -452,13 +458,8 @@ async def _invite_agents(room_id: str) -> None:
                 agent_count = 0
 
                 # Always invite the router first
-                router_id = MatrixID.from_agent("router", "localhost").full_id
-                router_response = await client.room_invite(room_id, router_id)
-                if isinstance(router_response, nio.RoomInviteResponse):
-                    console.print(f"✅ Invited {router_id} (router)")
+                if await _invite_router_to_room(client, room_id):
                     agent_count += 1
-                else:
-                    console.print(f"❌ Failed to invite {router_id} (router): {router_response}")
 
                 for key, account in state.accounts.items():
                     if key.startswith("agent_"):
