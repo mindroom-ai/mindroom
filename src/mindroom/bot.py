@@ -28,6 +28,7 @@ from .matrix import (
     AgentMatrixUser,
     MatrixID,
     create_mention_content_from_text,
+    edit_message,
     ensure_all_agent_users,
     extract_agent_name,
     extract_thread_info,
@@ -410,7 +411,7 @@ class AgentBot:
         if isinstance(response, nio.RoomSendResponse):
             self.response_tracker.mark_responded(reply_to_event_id)
             self.logger.info("Sent response", event_id=response.event_id, room_name=room.name)
-            return response.event_id
+            return response.event_id  # type: ignore[no-any-return]
         else:
             self.logger.error("Failed to send response", error=str(response))
             return None
@@ -421,8 +422,6 @@ class AgentBot:
         Returns:
             True if edit was successful, False otherwise.
         """
-        from .matrix import edit_message
-
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 

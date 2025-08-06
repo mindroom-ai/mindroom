@@ -7,7 +7,7 @@ import nio
 
 from . import interactive
 from .logging_config import get_logger
-from .matrix import create_mention_content_from_text
+from .matrix import create_mention_content_from_text, edit_message
 
 logger = get_logger(__name__)
 
@@ -74,14 +74,6 @@ class StreamingResponse:
         else:
             # Subsequent updates - edit existing message
             logger.debug("Editing streaming message", event_id=self.event_id)
-            from .matrix import edit_message
-
-            response = await edit_message(
-                client,
-                self.room_id,
-                self.event_id,
-                content,
-                display_text,
-            )
+            response = await edit_message(client, self.room_id, self.event_id, content, display_text)
             if not isinstance(response, nio.RoomSendResponse):
                 logger.error("Failed to edit streaming message", error=str(response))
