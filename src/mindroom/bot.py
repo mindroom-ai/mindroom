@@ -183,36 +183,18 @@ class AgentBot:
             self.logger.debug("Ignoring mention from agent - streaming not complete", sender=event.sender)
             return
 
-        # Router agent only routes, never participates in conversations
+        # Router agent has one simple job: route messages when no specific agent is mentioned
         if self.agent_name == ROUTER_AGENT_NAME:
-            # Router should handle routing when no specific agent is mentioned
             if not context.mentioned_agents:
-                # For threads, check if a team should be formed
-                if context.is_thread:
-                    agents_in_thread = get_agents_in_thread(context.thread_history)
+                await self._handle_ai_routing(room, event, context.thread_history)
+            return
 
-                    # Check if team should form - if so, don't route
-                    form_team = should_form_team(
-                        tagged_agents=context.mentioned_agents,
-                        agents_in_thread=agents_in_thread,
-                    )
-                    if form_team.should_form_team:
-                        return
-
-                    # Only route if no agent has participated yet
-                    if not agents_in_thread:
-                        await self._handle_ai_routing(room, event, context.thread_history)
-                else:
-                    # For non-thread messages (when no agents are mentioned), always route
-                    await self._handle_ai_routing(room, event, context.thread_history)
+        if self._should_skip_duplicate_response(event):
             return
 
         # Check if we should form a team first
         agents_in_thread = get_agents_in_thread(context.thread_history)
-        form_team = should_form_team(
-            tagged_agents=context.mentioned_agents,
-            agents_in_thread=agents_in_thread,
-        )
+        form_team = should_form_team(context.mentioned_agents, agents_in_thread)
 
         # If team should form and this is the first agent mentioned (or first in thread)
         if form_team.should_form_team and (
@@ -253,9 +235,6 @@ class AgentBot:
             self.logger.info("Will respond: only agent in thread")
 
         if not should_respond:
-            return
-
-        if self._should_skip_duplicate_response(event):
             return
 
         # Process and send response
