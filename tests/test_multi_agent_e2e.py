@@ -241,8 +241,9 @@ async def test_agent_responds_in_threads_based_on_participation(
             # Non-streaming makes 1 call
             assert bot.client.room_send.call_count == 1
 
-        # Test 2: Thread with multiple agents - should NOT respond without mention
+        # Test 2: Thread with multiple agents - should form team and respond
         bot.client.room_send.reset_mock()
+        mock_team_arun.reset_mock()
 
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
@@ -267,9 +268,14 @@ async def test_agent_responds_in_threads_based_on_participation(
 
             await bot._on_message(room, message_event)
 
-            # Should NOT process without mention when multiple agents
+            # Should form team and send team response when multiple agents in thread
             mock_ai.assert_not_called()
-            bot.client.room_send.assert_not_called()
+            mock_team_arun.assert_called_once()
+            bot.client.room_send.assert_called_once()  # Team response sent
+
+        # Reset mocks for Test 3
+        bot.client.room_send.reset_mock()
+        mock_team_arun.reset_mock()
 
         # Test 3: Thread with multiple agents WITH mention - should respond
         message_event_with_mention = nio.RoomMessageText(
