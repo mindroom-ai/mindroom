@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from mindroom.cli import _run
 from mindroom.matrix import MATRIX_HOMESERVER, matrix_client
+from mindroom.matrix.mentions import create_mention_content_from_text
 
 # Load environment variables
 load_dotenv()
@@ -72,16 +73,13 @@ async def send_message(client: nio.AsyncClient, room_id: str, message: str) -> s
         return ""
 
 
-async def send_message_with_mentions(client: nio.AsyncClient, room_id: str, message: str, user_ids: list[str]) -> str:
+async def send_message_with_mentions(client: nio.AsyncClient, room_id: str, message: str) -> str:
     """Send a message with proper Matrix mentions and return the event ID."""
+    content = create_mention_content_from_text(message)
     response = await client.room_send(
         room_id=room_id,
         message_type="m.room.message",
-        content={
-            "msgtype": "m.text",
-            "body": message,
-            "m.mentions": {"user_ids": user_ids},
-        },
+        content=content,
     )
     if isinstance(response, nio.RoomSendResponse):
         return response.event_id
@@ -138,7 +136,6 @@ async def test_team_collaboration():
             client,
             TEST_ROOM_ID,
             "@mindroom_calculator @mindroom_general what is 10 + 20 and explain why",
-            ["@mindroom_calculator:localhost", "@mindroom_general:localhost"],
         )
         print(f"   ✓ Sent (event_id: {event_id})")
         print("   ⏳ Waiting 8s for team response...")
@@ -153,7 +150,6 @@ async def test_team_collaboration():
             client,
             TEST_ROOM_ID,
             "@mindroom_code @mindroom_security how should we implement user authentication?",
-            ["@mindroom_code:localhost", "@mindroom_security:localhost"],
         )
         print(f"   ✓ Thread started (root: {thread_root})")
         await asyncio.sleep(5)
