@@ -298,9 +298,9 @@ pre-commit run --all-files
 - Slash commands: `/invite`, `/uninvite`, `/list_invites`, `/help`
 - Multiple AI model support (OpenAI, Anthropic, Ollama, etc.)
 - End-to-end encryption via Matrix
+- Team-based agent collaboration (using Agno Teams)
 
 ### 🚧 In Development
-- Team-based agent collaboration (using Agno Teams)
 - Memory rating and quality feedback
 - Thread tagging and memory sharing
 - Progress widget for real-time monitoring
@@ -311,7 +311,6 @@ pre-commit run --all-files
 ## Roadmap
 
 ### Near Term
-- [ ] Team-based agent collaboration for multi-agent threads
 - [ ] Widget API for real-time progress monitoring
 - [ ] Advanced scheduling system with YAML configuration
 - [ ] Voice interaction (STT/TTS) support
