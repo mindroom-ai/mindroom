@@ -196,6 +196,11 @@ class AgentBot:
 
         # If message is from another agent and we're not mentioned, ignore it
         sender_is_agent = extract_agent_name(event.sender) is not None
+
+        # Don't respond to error messages from other agents
+        if sender_is_agent and event.body.strip().startswith("❌"):
+            self.logger.debug("Ignoring error message from other agent")
+            return
         if sender_is_agent and not context.am_i_mentioned:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return

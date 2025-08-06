@@ -148,6 +148,30 @@ class TestScheduleTimeParsing:
             assert "tell me in 1 min again" in call_args
 
     @pytest.mark.asyncio
+    async def test_parse_let_me_know_tomorrow(self):
+        """Test parsing 'let me know tomorrow' pattern."""
+        tomorrow = datetime.now(UTC) + timedelta(days=1)
+        mock_response = MagicMock()
+        mock_response.content = ScheduledTimeResponse(
+            execute_at=tomorrow.replace(hour=9, minute=0, second=0, microsecond=0),
+            message="Reminder",
+            interpretation="Tomorrow at 9:00 AM",
+        )
+
+        with patch("mindroom.scheduling.Agent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.arun.return_value = mock_response
+            mock_agent_class.return_value = mock_agent
+
+            result = await parse_schedule("let me know tomorrow")
+
+            assert isinstance(result, ScheduledTimeResponse)
+            assert result.message == "Reminder"
+            # Verify the AI received the full text
+            call_args = mock_agent.arun.call_args[0][0]
+            assert "let me know tomorrow" in call_args
+
+    @pytest.mark.asyncio
     async def test_parse_with_custom_current_time(self):
         """Test parsing with a custom current time."""
         custom_time = datetime(2024, 1, 15, 10, 0, 0)
