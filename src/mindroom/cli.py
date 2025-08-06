@@ -200,20 +200,77 @@ async def _ensure_rooms_and_agents(client: nio.AsyncClient, required_rooms: set[
     )
 
 
+async def _invite_agent_to_room(
+    client: nio.AsyncClient, room_id: str, agent_id: str, agent_name: str | None = None
+) -> bool:
+    """Invite a single agent to a room.
+
+    Returns True if invitation was successful, False otherwise.
+    """
+    response = await client.room_invite(room_id, agent_id)
+
+    display_name = agent_name or agent_id
+    if isinstance(response, nio.RoomInviteResponse):
+        console.print(f"  ✅ Invited {display_name}")
+        return True
+    else:
+        console.print(f"  ❌ Failed to invite {display_name}: {response}")
+        return False
+
+
 async def _invite_router_to_room(client: nio.AsyncClient, room_id: str) -> bool:
     """Invite the router agent to a room.
 
     Returns True if invitation was successful, False otherwise.
     """
     router_id = MatrixID.from_agent("router", "localhost").full_id
-    response = await client.room_invite(room_id, router_id)
+    return await _invite_agent_to_room(client, room_id, router_id, "router")
 
-    if isinstance(response, nio.RoomInviteResponse):
-        console.print("  ✅ Invited router to room")
-        return True
-    else:
-        console.print(f"  ❌ Failed to invite router: {response}")
-        return False
+
+async def _invite_agents_from_config(
+    client: nio.AsyncClient, room_id: str, room_key: str, config: Config, include_router: bool = True
+) -> int:
+    """Invite agents to a room based on config.yaml room assignments.
+
+    Returns the number of agents successfully invited.
+    """
+    invited_count = 0
+
+    # Always invite the router first if requested
+    if include_router and await _invite_router_to_room(client, room_id):
+        invited_count += 1
+
+    # Invite configured agents
+    for agent_name, agent_cfg in config.agents.items():
+        if room_key in agent_cfg.rooms:
+            agent_id = MatrixID.from_agent(agent_name, "localhost").full_id
+            if await _invite_agent_to_room(client, room_id, agent_id, agent_name):
+                invited_count += 1
+
+    return invited_count
+
+
+async def _invite_all_agents_to_room(
+    client: nio.AsyncClient, room_id: str, state: MatrixState, include_router: bool = True
+) -> int:
+    """Invite all available agents to a room.
+
+    Returns the number of agents successfully invited.
+    """
+    invited_count = 0
+
+    # Always invite the router first if requested
+    if include_router and await _invite_router_to_room(client, room_id):
+        invited_count += 1
+
+    # Invite all other agents
+    for key, account in state.accounts.items():
+        if key.startswith("agent_"):
+            agent_id = f"@{account.username}:localhost"
+            if await _invite_agent_to_room(client, room_id, agent_id):
+                invited_count += 1
+
+    return invited_count
 
 
 async def _create_room_and_invite_all_agents(
@@ -240,20 +297,8 @@ async def _create_room_and_invite_all_agents(
         # Save room info
         add_room(room_key, room_id, f"#{room_key}:localhost", room_name)
 
-        invited_count = 0
-
-        # Always invite the router first
-        if await _invite_router_to_room(client, room_id):
-            invited_count += 1
-
-        # Invite configured agents
-        for agent_name, agent_config in config.agents.items():
-            if room_key in agent_config.rooms:
-                agent_id = MatrixID.from_agent(agent_name, "localhost").full_id
-                invite_response = await client.room_invite(room_id, agent_id)
-                if isinstance(invite_response, nio.RoomInviteResponse):
-                    invited_count += 1
-                # Ignore failures - agent might not exist yet
+        # Invite agents based on config
+        invited_count = await _invite_agents_from_config(client, room_id, room_key, config)
 
         if invited_count > 0:
             console.print(f"   Invited {invited_count} agents to the room")
@@ -436,42 +481,12 @@ async def _invite_agents(room_id: str) -> None:
 
                 agent_config = load_config()
 
-                invited_count = 0
-
-                # Always invite the router first
-                if await _invite_router_to_room(client, room_id):
-                    invited_count += 1
-
-                for agent_name, agent_cfg in agent_config.agents.items():
-                    if room_key in agent_cfg.rooms:
-                        agent_id = MatrixID.from_agent(agent_name, "localhost").full_id
-                        response = await client.room_invite(room_id, agent_id)
-                        if isinstance(response, nio.RoomInviteResponse):
-                            console.print(f"✅ Invited {agent_id}")
-                            invited_count += 1
-                        else:
-                            console.print(f"❌ Failed to invite {agent_id}: {response}")
-
+                invited_count = await _invite_agents_from_config(client, room_id, room_key, agent_config)
                 console.print(f"\n✨ Invited {invited_count} agents to room")
             else:
                 # Invite all agents if room not in config
-                agent_count = 0
-
-                # Always invite the router first
-                if await _invite_router_to_room(client, room_id):
-                    agent_count += 1
-
-                for key, account in state.accounts.items():
-                    if key.startswith("agent_"):
-                        agent_id = f"@{account.username}:localhost"
-                        response = await client.room_invite(room_id, agent_id)
-                        if isinstance(response, nio.RoomInviteResponse):
-                            console.print(f"✅ Invited {agent_id}")
-                            agent_count += 1
-                        else:
-                            console.print(f"❌ Failed to invite {agent_id}: {response}")
-
-                console.print(f"\n✨ Invited {agent_count} agents to room")
+                invited_count = await _invite_all_agents_to_room(client, room_id, state)
+                console.print(f"\n✨ Invited {invited_count} agents to room")
         else:
             console.print(f"❌ Failed to login: {response}")
 
