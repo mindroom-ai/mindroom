@@ -3,7 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from mindroom.memory.config import create_memory_instance, get_memory_config
+from mindroom.memory.config import get_memory_config
 
 
 class TestMemoryConfig:
@@ -99,26 +99,6 @@ class TestMemoryConfig:
         assert config["llm"]["provider"] == "ollama"
         assert config["llm"]["config"]["model"] == "llama3.2"
         assert config["llm"]["config"]["ollama_base_url"] == "http://localhost:11434"
-
-    @patch("mindroom.memory.config.AsyncMemory")
-    @patch("mindroom.memory.config.get_memory_config")
-    def test_create_memory_instance(self, mock_get_config, mock_memory_class):
-        """Test memory instance creation."""
-        # Mock config
-        mock_config = {
-            "embedder": {"provider": "ollama", "config": {"model": "test"}},
-            "vector_store": {"provider": "chroma", "config": {"path": "/tmp/chroma"}},
-            "llm": {"provider": "ollama", "config": {"model": "test"}},
-        }
-        mock_get_config.return_value = mock_config
-
-        # Test instance creation
-        storage_path = Path("/tmp/test")
-        instance = create_memory_instance(storage_path)
-
-        # Verify Memory.from_config was called
-        mock_memory_class.from_config.assert_called_once_with(mock_config)
-        assert instance == mock_memory_class.from_config.return_value
 
     def test_chroma_directory_creation(self, tmp_path):
         """Test that ChromaDB directory is created."""

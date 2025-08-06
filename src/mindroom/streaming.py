@@ -5,8 +5,9 @@ from dataclasses import dataclass
 
 import nio
 
+from . import interactive
 from .logging_config import get_logger
-from .matrix import create_mention_content_from_text
+from .matrix import create_mention_content_from_text, edit_message
 
 logger = get_logger(__name__)
 
@@ -47,8 +48,12 @@ class StreamingResponse:
         # Always ensure we have a thread_id - use the original message as thread root if needed
         effective_thread_id = self.thread_id if self.thread_id else self.reply_to_event_id
 
+        # Format the text (handles interactive questions if present)
+        response = interactive.parse_and_format_interactive(self.accumulated_text, extract_mapping=False)
+        display_text = response.formatted_text
+
         content = create_mention_content_from_text(
-            self.accumulated_text,
+            display_text,
             sender_domain=self.sender_domain,
             thread_event_id=effective_thread_id,
             reply_to_event_id=self.reply_to_event_id,
@@ -70,19 +75,6 @@ class StreamingResponse:
         else:
             # Subsequent updates - edit existing message
             logger.debug("Editing streaming message", event_id=self.event_id)
-            edit_content = {
-                "msgtype": "m.text",
-                "body": f"* {self.accumulated_text}",
-                "format": "org.matrix.custom.html",
-                "formatted_body": content.get("formatted_body", self.accumulated_text),
-                "m.new_content": content,
-                "m.relates_to": {"rel_type": "m.replace", "event_id": self.event_id},
-            }
-
-            response = await client.room_send(
-                room_id=self.room_id,
-                message_type="m.room.message",
-                content=edit_content,
-            )
+            response = await edit_message(client, self.room_id, self.event_id, content, display_text)
             if not isinstance(response, nio.RoomSendResponse):
                 logger.error("Failed to edit streaming message", error=str(response))

@@ -112,6 +112,8 @@ def create_agent(agent_name: str, storage_path: Path, config_path: Path | None =
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
     logger.info(f"Storage path: {storage_path}, DB file: {storage_path / f'{agent_name}.db'}")
 
+    instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
+
     agent = Agent(
         name=agent_config.display_name,
         role=role,

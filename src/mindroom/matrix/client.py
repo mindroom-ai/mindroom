@@ -323,3 +323,38 @@ def markdown_to_html(text: str) -> str:
     )
     html_text: str = md.convert(text)
     return html_text
+
+
+async def edit_message(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    new_content: dict[str, Any],
+    new_text: str,
+) -> nio.RoomSendResponse | nio.ErrorResponse:
+    """Edit an existing Matrix message.
+
+    Args:
+        client: The Matrix client
+        room_id: The room ID where the message is
+        event_id: The event ID of the message to edit
+        new_content: The new content dictionary (from create_mention_content_from_text)
+        new_text: The new text (plain text version)
+
+    Returns:
+        The response from the room_send call
+    """
+    edit_content = {
+        "msgtype": "m.text",
+        "body": f"* {new_text}",
+        "format": "org.matrix.custom.html",
+        "formatted_body": new_content.get("formatted_body", new_text),
+        "m.new_content": new_content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+    }
+
+    return await client.room_send(
+        room_id=room_id,
+        message_type="m.room.message",
+        content=edit_content,
+    )

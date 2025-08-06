@@ -90,7 +90,7 @@ class TestMemoryIntegration:
 
         with (
             patch("mindroom.ai.get_model_instance", side_effect=Exception("Model error")),
-            patch("mindroom.memory.functions.get_memory", return_value=mock_memory),
+            patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
         ):
             response = await ai_response(
                 agent_name="general", prompt="Test", session_id="session", storage_path=tmp_path
@@ -110,7 +110,7 @@ class TestMemoryIntegration:
         mock_memory.search.return_value = {"results": []}
 
         with (
-            patch("mindroom.memory.functions.get_memory", return_value=mock_memory),
+            patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
             patch("mindroom.ai._cached_agent_run", AsyncMock(return_value=MagicMock(content="First response"))),
             patch("mindroom.ai.get_model_instance", return_value=MagicMock()),
             patch("mindroom.agent_config.create_agent", return_value=MagicMock()),

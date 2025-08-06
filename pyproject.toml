@@ -59,6 +59,7 @@ dev = [
   "pytest-xdist>=3.8",
   "ruff>=0.12.5",
   "types-markdown>=3.7",
+  "types-pyyaml>=6.0.12.20250516",
 ]
 
 [tool.hatch.version]
@@ -126,23 +127,11 @@ module = "nio.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "yaml"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "agno.*"
+module = "mem0.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "diskcache.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "sqlalchemy.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "aioresponses.*"
 ignore_missing_imports = true
 
 [tool.versioningit]

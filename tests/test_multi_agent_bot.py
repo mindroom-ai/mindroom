@@ -93,7 +93,7 @@ class TestAgentBot:
         assert bot.running
         assert bot.client == mock_client
         mock_login.assert_called_once_with("http://localhost:8008", mock_agent_user)
-        assert mock_client.add_event_callback.call_count == 2  # invite and message callbacks
+        assert mock_client.add_event_callback.call_count == 3  # invite, message, and reaction callbacks
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -189,7 +189,6 @@ class TestAgentBot:
         bot.client.room_send.return_value = mock_send_response
 
         # Initialize response tracker with isolated path
-
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
@@ -286,7 +285,6 @@ class TestAgentBot:
         bot.client.room_send.return_value = mock_send_response
 
         # Initialize response tracker with isolated path
-
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
@@ -438,7 +436,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
         # Initialize response tracker with isolated path
-
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
