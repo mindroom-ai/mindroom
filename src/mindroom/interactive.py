@@ -26,9 +26,8 @@ class InteractiveQuestion(NamedTuple):
 _active_questions: dict[str, InteractiveQuestion] = {}
 
 # Constants
-INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
-# Also match when the backticks are followed by a checkmark with optional whitespace
-INTERACTIVE_PATTERN_WITH_CHECK = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```\s*✓"
+# Match interactive code blocks with optional trailing checkmark
+INTERACTIVE_PATTERN = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```(?:\s*✓)?"
 MAX_OPTIONS = 5
 DEFAULT_QUESTION = "Please choose an option:"
 INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
@@ -43,10 +42,6 @@ def should_create_interactive_question(response_text: str) -> bool:
     Returns:
         True if an interactive code block is found
     """
-    # Try with checkmark first (more specific pattern)
-    if re.search(INTERACTIVE_PATTERN_WITH_CHECK, response_text, re.DOTALL):
-        return True
-    # Try without checkmark
     return bool(re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL))
 
 
@@ -71,11 +66,7 @@ async def handle_interactive_response(
         event_id: The event ID of the message to edit (if in streaming mode)
     """
     # Extract JSON from interactive code block
-    # Try with checkmark first (more specific pattern)
-    match = re.search(INTERACTIVE_PATTERN_WITH_CHECK, response_text, re.DOTALL)
-    if not match:
-        # Try without checkmark
-        match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
+    match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
 
     if not match:
         logger.warning("Interactive block found but couldn't extract JSON", response_preview=response_text[:200])
@@ -355,16 +346,14 @@ def _extract_thread_id_from_event(event: nio.Event) -> str | None:
     return None
 
 
-def _format_interactive_text_only(response_text: str) -> str | None:
+def format_interactive_text_only(response_text: str) -> str | None:
     """Format text containing an interactive question block.
 
     This is a pure formatting function without side effects, useful for streaming.
     Returns None if formatting fails.
     """
     # Extract JSON from interactive code block
-    match = re.search(INTERACTIVE_PATTERN_WITH_CHECK, response_text, re.DOTALL)
-    if not match:
-        match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
+    match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
 
     if not match:
         return None

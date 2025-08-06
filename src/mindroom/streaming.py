@@ -34,10 +34,6 @@ class StreamingResponse:
             await self._send_or_edit_message(client)
             self.last_update = current_time
 
-    def has_complete_interactive_block(self) -> bool:
-        """Check if we have a complete interactive block that can be processed."""
-        return interactive.should_create_interactive_question(self.accumulated_text)
-
     async def finalize(self, client: nio.AsyncClient) -> None:
         """Send final message update with completion marker."""
         if not self.accumulated_text.endswith(" ✓"):
@@ -53,12 +49,11 @@ class StreamingResponse:
         effective_thread_id = self.thread_id if self.thread_id else self.reply_to_event_id
 
         # Check if we should format as interactive question
-        display_text = self.accumulated_text
-        if interactive.should_create_interactive_question(self.accumulated_text):
-            # Extract and format the interactive question
-            formatted_text = await self._format_interactive_text()
-            if formatted_text:
-                display_text = formatted_text
+        display_text = (
+            await self._format_interactive_text()
+            if interactive.should_create_interactive_question(self.accumulated_text)
+            else self.accumulated_text
+        )
 
         content = create_mention_content_from_text(
             display_text,
@@ -100,15 +95,15 @@ class StreamingResponse:
             if not isinstance(response, nio.RoomSendResponse):
                 logger.error("Failed to edit streaming message", error=str(response))
 
-    async def _format_interactive_text(self) -> str | None:
+    async def _format_interactive_text(self) -> str:
         """Format text containing an interactive question block.
 
-        Returns the formatted text or None if formatting fails.
+        Returns the formatted text or the original text if formatting fails.
         """
         # Simply reuse the formatting logic from interactive module
-        # This is a dummy agent name since we're just formatting
         try:
-            return interactive._format_interactive_text_only(self.accumulated_text)
+            formatted = interactive.format_interactive_text_only(self.accumulated_text)
+            return formatted if formatted else self.accumulated_text
         except Exception as e:
             logger.error("Failed to format interactive text", error=str(e))
-            return None
+            return self.accumulated_text
