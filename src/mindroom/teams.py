@@ -38,6 +38,7 @@ class ShouldFormTeamResult(NamedTuple):
 def should_form_team(
     tagged_agents: list[str],
     agents_in_thread: list[str],
+    all_mentioned_in_thread: list[str],
 ) -> ShouldFormTeamResult:
     """Determine if a team should form and with which mode."""
     # Case 1: Multiple agents explicitly tagged
@@ -49,7 +50,16 @@ def should_form_team(
             mode=TeamMode.COORDINATE,
         )
 
-    # Case 2: No agents tagged but multiple in thread
+    # Case 2: No agents tagged but multiple were mentioned before in thread
+    if len(tagged_agents) == 0 and len(all_mentioned_in_thread) > 1:
+        logger.info(f"Team formation needed for previously mentioned agents: {all_mentioned_in_thread}")
+        return ShouldFormTeamResult(
+            should_form_team=True,
+            agents=all_mentioned_in_thread,
+            mode=TeamMode.COLLABORATE,
+        )
+
+    # Case 3: No agents tagged but multiple in thread (backwards compatibility)
     if len(tagged_agents) == 0 and len(agents_in_thread) > 1:
         logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
         return ShouldFormTeamResult(

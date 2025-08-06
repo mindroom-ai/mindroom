@@ -80,6 +80,19 @@ def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]]) -> bo
     return False
 
 
+def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
+    """Get all unique agents that have been mentioned anywhere in the thread."""
+    mentioned_agents = set()
+
+    for msg in thread_history:
+        content = msg.get("content", {})
+        mentions = content.get("m.mentions", {})
+        agents = get_mentioned_agents(mentions)
+        mentioned_agents.update(agents)
+
+    return sorted(list(mentioned_agents))
+
+
 def should_agent_respond(
     agent_name: str,
     am_i_mentioned: bool,
