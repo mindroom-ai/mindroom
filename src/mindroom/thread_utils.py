@@ -84,13 +84,10 @@ def should_agent_respond(
     agent_name: str,
     am_i_mentioned: bool,
     is_thread: bool,
-    is_invited_to_thread: bool,
     room_id: str,
     configured_rooms: list[str],
     thread_history: list[dict],
-    mentioned_agents: list[str] | None = None,
-    team_manager: Any = None,
-    thread_id: str | None = None,
+    mentioned_agents: list[str],
 ) -> bool:
     """Determine if an agent should respond to a message.
 
