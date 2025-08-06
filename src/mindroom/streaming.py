@@ -23,6 +23,7 @@ class StreamingResponse:
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
     update_interval: float = 0.1  # 100ms updates
+    interactive_processed: bool = False  # Track if we've already processed an interactive block
 
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
@@ -33,8 +34,25 @@ class StreamingResponse:
             await self._send_or_edit_message(client)
             self.last_update = current_time
 
+    def has_complete_interactive_block(self) -> bool:
+        """Check if we have a complete interactive block that can be processed."""
+        if self.interactive_processed:
+            return False
+
+        # Check for both formats: ```interactive...``` and ```\ninteractive...```
+        import re
+
+        pattern = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
+        match = re.search(pattern, self.accumulated_text, re.DOTALL)
+        return match is not None
+
     async def finalize(self, client: nio.AsyncClient) -> None:
         """Send final message update with completion marker."""
+        # Don't finalize if we've already processed an interactive block
+        # The interactive handler has already edited the message properly
+        if self.interactive_processed:
+            return
+
         if not self.accumulated_text.endswith(" ✓"):
             self.accumulated_text += " ✓"
         await self._send_or_edit_message(client)
