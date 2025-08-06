@@ -8,17 +8,7 @@ from agno.agent import Agent
 from agno.models.base import Model
 from agno.storage.sqlite import SqliteStorage
 
-from .agent_prompts import (
-    CALCULATOR_AGENT_PROMPT,
-    CODE_AGENT_PROMPT,
-    DATA_ANALYST_AGENT_PROMPT,
-    FINANCE_AGENT_PROMPT,
-    GENERAL_AGENT_PROMPT,
-    NEWS_AGENT_PROMPT,
-    RESEARCH_AGENT_PROMPT,
-    SHELL_AGENT_PROMPT,
-    SUMMARY_AGENT_PROMPT,
-)
+from . import agent_prompts
 from .logging_config import get_logger
 from .models import Config
 from .tools import get_tool_by_name
@@ -34,18 +24,6 @@ DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 # Global caches
 _agent_cache: dict[str, Agent] = {}
 
-# Rich prompt mapping - agents that use detailed prompts instead of simple roles
-RICH_PROMPTS = {
-    "code": CODE_AGENT_PROMPT,
-    "research": RESEARCH_AGENT_PROMPT,
-    "calculator": CALCULATOR_AGENT_PROMPT,
-    "general": GENERAL_AGENT_PROMPT,
-    "shell": SHELL_AGENT_PROMPT,
-    "summary": SUMMARY_AGENT_PROMPT,
-    "finance": FINANCE_AGENT_PROMPT,
-    "news": NEWS_AGENT_PROMPT,
-    "data_analyst": DATA_ANALYST_AGENT_PROMPT,
-}
 
 
 @functools.cache
@@ -115,9 +93,10 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
     storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
 
     # Use rich prompt if available, otherwise use YAML config
-    if agent_name in RICH_PROMPTS:
+    rich_prompt_name = f"{agent_name.upper()}_AGENT_PROMPT"
+    if hasattr(agent_prompts, rich_prompt_name):
         logger.info(f"Using rich prompt for agent: {agent_name}")
-        role = RICH_PROMPTS[agent_name]
+        role = getattr(agent_prompts, rich_prompt_name)
         instructions = []  # Instructions are in the rich prompt
     else:
         logger.info(f"Using YAML config for agent: {agent_name}")
