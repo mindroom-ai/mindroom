@@ -117,8 +117,7 @@ def should_agent_respond(
 
     # Thread logic
     if am_i_mentioned:
-        # Single agent mentioned - respond normally
-        return len(mentioned_agents) <= 1
+        return True
 
     # For threads, check agent participation
     agents_in_thread = get_agents_in_thread(thread_history)
