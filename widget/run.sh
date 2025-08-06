@@ -19,17 +19,28 @@ trap cleanup EXIT INT TERM
 # Start backend
 echo -e "${GREEN}Starting backend server...${NC}"
 cd backend
-if [ ! -d "venv" ]; then
+
+# Check if we have uv or should use venv
+if command -v uv &> /dev/null; then
+    echo "Using uv for Python dependencies..."
+    if [ ! -d ".venv" ]; then
+        uv sync
+    fi
+    uv run uvicorn src.main:app --reload &
+    BACKEND_PID=$!
+elif [ ! -d ".venv" ]; then
     echo "Creating Python virtual environment..."
-    python3 -m venv venv
-    source venv/bin/activate
+    python3 -m venv .venv
+    source .venv/bin/activate
     pip install -r requirements.txt
+    python -m uvicorn src.main:app --reload &
+    BACKEND_PID=$!
 else
-    source venv/bin/activate
+    source .venv/bin/activate
+    python -m uvicorn src.main:app --reload &
+    BACKEND_PID=$!
 fi
 
-python src/main.py &
-BACKEND_PID=$!
 cd ..
 
 # Wait a moment for backend to start

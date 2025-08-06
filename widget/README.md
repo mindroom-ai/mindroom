@@ -32,7 +32,11 @@ npm run dev
 ### Using the Convenience Script
 
 ```bash
+# Standard systems
 ./widget/run.sh
+
+# On Nix systems (ensures all dependencies available)
+./widget/run-nix.sh
 ```
 
 ## Architecture
