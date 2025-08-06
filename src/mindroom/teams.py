@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from agno.agent import Agent
 from agno.team import Team
@@ -14,6 +14,8 @@ from .logging_config import get_logger
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from .bot import MultiAgentOrchestrator
 
 
 logger = get_logger(__name__)
@@ -48,7 +50,7 @@ async def create_team_response(
     agent_names: list[str],
     mode: TeamMode,
     message: str,
-    orchestrator: Any,
+    orchestrator: MultiAgentOrchestrator,
     storage_path: Path,
     thread_history: list[dict] | None = None,
 ) -> str:
