@@ -248,7 +248,28 @@ class AgentBot:
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
-        await interactive.handle_reaction(self.client, room, event, self.agent_name)
+        result = await interactive.handle_reaction(self.client, room, event, self.agent_name)
+
+        if result:
+            selected_value, thread_id = result
+            # User selected an option from an interactive question
+            # Trigger the agent to respond based on this selection
+
+            # Create a session for the response
+            session_id = create_session_id(room.room_id, thread_id)
+
+            # Generate agent response based on the selection
+            response_text = await ai_response(
+                agent_name=self.agent_name,
+                prompt=f"The user selected: {selected_value}",
+                session_id=session_id,
+                storage_path=self.storage_path,
+                thread_history=[],  # Could fetch if needed
+                room_id=room.room_id,
+            )
+
+            # Send the response
+            await self._send_response(room, event.reacts_to, response_text, thread_id)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)

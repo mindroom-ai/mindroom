@@ -167,13 +167,17 @@ async def handle_reaction(
     room: nio.MatrixRoom,
     event: nio.ReactionEvent,
     agent_name: str,
-) -> None:
+) -> tuple[str, str | None] | None:
     """Handle a reaction event that might be an answer to a question.
 
     Args:
         client: The Matrix client
         room: The room the reaction occurred in
         event: The reaction event
+        agent_name: The name of the agent handling this
+
+    Returns:
+        Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
     """
     # Check if this reaction relates to an active question
     question_data = _active_questions.get(event.reacts_to)
@@ -185,7 +189,7 @@ async def handle_reaction(
             reaction=event.key,
             active_questions=list(_active_questions.keys()),
         )
-        return
+        return None
 
     room_id, thread_id, option_map, question_creator = question_data
 
@@ -197,23 +201,23 @@ async def handle_reaction(
             question_creator=question_creator,
             reaction=event.key,
         )
-        return
+        return None
 
     # Check if the reaction is one of our options
     reaction_key = event.key
     if reaction_key not in option_map:
-        return
+        return None
 
     # Don't process our own reactions
     if event.sender == client.user_id:
-        return
+        return None
 
     # Ignore reactions from other agents
     from .matrix.identity import is_agent_id
 
     if is_agent_id(event.sender):
         logger.debug("Ignoring reaction from agent", sender=event.sender, reaction=reaction_key)
-        return
+        return None
 
     # Get the value for this reaction
     selected_value = option_map[reaction_key]
@@ -225,12 +229,16 @@ async def handle_reaction(
         value=selected_value,
     )
 
-    # Send confirmation
-    await _send_confirmation(client, room_id, thread_id, event.reacts_to, reaction_key, selected_value)
+    # Store the response for the agent to process
+    # The agent will continue the conversation based on this selection
+    # No confirmation message needed - the emoji reaction itself is the user's response
 
-    # Remove the question after successful response
+    # Remove the question after receiving response
     with suppress(KeyError):
         del _active_questions[event.reacts_to]
+
+    # Return the selected value and thread_id so the agent can respond
+    return (selected_value, thread_id)
 
 
 async def handle_text_response(
@@ -285,10 +293,10 @@ async def handle_text_response(
             value=selected_value,
         )
 
-        # Send confirmation
-        await _send_confirmation(client, q_room_id, q_thread_id, question_event_id, message_text, selected_value)
+        # Store the response for the agent to process
+        # No confirmation needed - the user's message is their response
 
-        # Remove the question after successful response
+        # Remove the question after receiving response
         del _active_questions[question_event_id]
         break
 
@@ -346,32 +354,6 @@ async def _edit_message_with_question(
 
     if not isinstance(response, nio.RoomSendResponse):
         logger.error("Failed to edit message with interactive question", error=str(response))
-
-
-async def _send_confirmation(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str | None,
-    question_event_id: str,
-    response: str,
-    value: str,
-) -> None:
-    """Send a confirmation message after a user responds."""
-    confirmation = f"✅ You selected: {value}"
-
-    sender_domain = extract_domain_from_user_id(client.user_id)
-    content = create_mention_content_from_text(
-        confirmation,
-        sender_domain=sender_domain,
-        thread_event_id=thread_id,
-        reply_to_event_id=question_event_id,
-    )
-
-    await client.room_send(
-        room_id=room_id,
-        message_type="m.room.message",
-        content=content,
-    )
 
 
 def cleanup() -> None:

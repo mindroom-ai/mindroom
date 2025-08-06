@@ -166,12 +166,13 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$question123"
         event.key = "🚀"
 
-        await interactive.handle_reaction(mock_client, room, event, "test_agent")
+        result = await interactive.handle_reaction(mock_client, room, event, "test_agent")
 
-        # Should send confirmation
-        mock_client.room_send.assert_called_once()
-        call_args = mock_client.room_send.call_args[1]
-        assert "✅ You selected: fast" in call_args["content"]["body"]
+        # Should return the selected value and thread_id
+        assert result == ("fast", "$thread123")
+
+        # Should NOT send confirmation (user's reaction is the response)
+        mock_client.room_send.assert_not_called()
 
         # Question should be removed
         assert "$question123" not in interactive._active_questions
@@ -190,7 +191,10 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$unknown123"
         event.key = "👍"
 
-        await interactive.handle_reaction(mock_client, room, event, "test_agent")
+        result = await interactive.handle_reaction(mock_client, room, event, "test_agent")
+
+        # Should return None for unknown reaction
+        assert result is None
 
         # Should not send anything
         mock_client.room_send.assert_not_called()
@@ -210,7 +214,10 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$question123"
         event.key = "✅"
 
-        await interactive.handle_reaction(mock_client, room, event, "test_agent")
+        result = await interactive.handle_reaction(mock_client, room, event, "test_agent")
+
+        # Should return None (ignoring own reaction)
+        assert result is None
 
         # Should not send anything
         mock_client.room_send.assert_not_called()
@@ -245,10 +252,8 @@ Based on your choice, I'll proceed accordingly."""
 
         await interactive.handle_text_response(mock_client, room, event, "test_agent")
 
-        # Should send confirmation
-        mock_client.room_send.assert_called_once()
-        call_args = mock_client.room_send.call_args[1]
-        assert "✅ You selected: second" in call_args["content"]["body"]
+        # Should NOT send confirmation (user's message is the response)
+        mock_client.room_send.assert_not_called()
 
         # Question should be removed
         assert "$question123" not in interactive._active_questions
@@ -448,9 +453,10 @@ Just let me know your preference!"""
         reaction_event.reacts_to = "$q123"
         reaction_event.key = "🔍"
 
-        await interactive.handle_reaction(mock_client, room, reaction_event, "test_agent")
+        result = await interactive.handle_reaction(mock_client, room, reaction_event, "test_agent")
 
-        # Verify confirmation was sent
+        # Verify reaction was processed
+        assert result == ("detailed", "$thread123")  # Thread ID from the question
         assert "$q123" not in interactive._active_questions
-        # We expect 5 calls: 1 question + 3 reactions + 1 confirmation
-        assert mock_client.room_send.call_count == 5
+        # We expect 4 calls: 1 question + 3 reactions (no confirmation)
+        assert mock_client.room_send.call_count == 4
