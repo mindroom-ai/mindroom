@@ -100,7 +100,7 @@ class TestMemoryConfig:
         assert config["llm"]["config"]["model"] == "llama3.2"
         assert config["llm"]["config"]["ollama_base_url"] == "http://localhost:11434"
 
-    @patch("mindroom.memory.config.Memory")
+    @patch("mindroom.memory.config.AsyncMemory")
     @patch("mindroom.memory.config.get_memory_config")
     def test_create_memory_instance(self, mock_get_config, mock_memory_class):
         """Test memory instance creation."""
