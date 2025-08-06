@@ -104,6 +104,66 @@ def test_invalid_commands():
         assert command is None
 
 
+def test_schedule_command():
+    """Test schedule command parsing."""
+    # Basic schedule with time and message
+    command = command_parser.parse("/schedule in 5 minutes Check the deployment")
+    assert command is not None
+    assert command.type == CommandType.SCHEDULE
+    assert "in 5 minutes" in command.args["time_expression"]
+    # The parsing is simple - AI will handle the actual time extraction
+
+    # Schedule with just time expression
+    command = command_parser.parse("/schedule tomorrow")
+    assert command is not None
+    assert command.type == CommandType.SCHEDULE
+    assert command.args["time_expression"] == "tomorrow"
+    assert command.args["message"] == ""
+
+    # Schedule with complex expression
+    command = command_parser.parse("/schedule tomorrow at 3pm Send the weekly report")
+    assert command is not None
+    assert command.type == CommandType.SCHEDULE
+    assert "tomorrow at 3pm" in command.args["time_expression"]
+
+
+def test_list_schedules_command():
+    """Test list schedules command parsing."""
+    variations = [
+        "/list_schedules",
+        "/listschedules",
+        "/list-schedules",
+        "/list_schedule",  # singular
+        "/LIST_SCHEDULES",  # case insensitive
+    ]
+
+    for cmd_text in variations:
+        command = command_parser.parse(cmd_text)
+        assert command is not None
+        assert command.type == CommandType.LIST_SCHEDULES
+        assert command.args == {}
+
+
+def test_cancel_schedule_command():
+    """Test cancel schedule command parsing."""
+    # Basic cancel
+    command = command_parser.parse("/cancel_schedule abc123")
+    assert command is not None
+    assert command.type == CommandType.CANCEL_SCHEDULE
+    assert command.args["task_id"] == "abc123"
+
+    # With hyphen
+    command = command_parser.parse("/cancel-schedule xyz789")
+    assert command is not None
+    assert command.type == CommandType.CANCEL_SCHEDULE
+    assert command.args["task_id"] == "xyz789"
+
+    # Case insensitive
+    command = command_parser.parse("/CANCEL_SCHEDULE task456")
+    assert command is not None
+    assert command.type == CommandType.CANCEL_SCHEDULE
+
+
 def test_get_command_help():
     """Test help text generation."""
     # General help
@@ -113,6 +173,9 @@ def test_get_command_help():
     assert "/uninvite" in help_text
     assert "/list_invites" in help_text
     assert "/help" in help_text
+    assert "/schedule" in help_text
+    assert "/list_schedules" in help_text
+    assert "/cancel_schedule" in help_text
 
     # Specific command help
     invite_help = get_command_help("invite")
@@ -125,3 +188,16 @@ def test_get_command_help():
 
     list_help = get_command_help("list_invites")
     assert "List Invites Command" in list_help
+
+    # Schedule command help
+    schedule_help = get_command_help("schedule")
+    assert "Schedule Command" in schedule_help
+    assert "Examples:" in schedule_help
+    assert "in 5 minutes" in schedule_help
+
+    list_schedules_help = get_command_help("list_schedules")
+    assert "List Schedules Command" in list_schedules_help
+
+    cancel_help = get_command_help("cancel_schedule")
+    assert "Cancel Schedule Command" in cancel_help
+    assert "cancel_schedule" in cancel_help

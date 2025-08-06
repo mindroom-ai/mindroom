@@ -21,6 +21,9 @@ class CommandType(Enum):
     UNINVITE = "uninvite"
     LIST_INVITES = "list_invites"
     HELP = "help"
+    SCHEDULE = "schedule"
+    LIST_SCHEDULES = "list_schedules"
+    CANCEL_SCHEDULE = "cancel_schedule"
 
 
 @dataclass
@@ -44,6 +47,9 @@ class CommandParser:
     UNINVITE_PATTERN = re.compile(r"^/uninvite\s+@?(\w+)$", re.IGNORECASE)
     LIST_INVITES_PATTERN = re.compile(r"^/list[_-]?invites?$", re.IGNORECASE)
     HELP_PATTERN = re.compile(r"^/help(?:\s+(.+))?$", re.IGNORECASE)
+    SCHEDULE_PATTERN = re.compile(r"^/schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
+    LIST_SCHEDULES_PATTERN = re.compile(r"^/list[_-]?schedules?$", re.IGNORECASE)
+    CANCEL_SCHEDULE_PATTERN = re.compile(r"^/cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
 
     def parse(self, message: str) -> Command | None:
         """Parse a message for commands.
@@ -101,6 +107,60 @@ class CommandParser:
                 raw_text=message,
             )
 
+        # /schedule command
+        match = self.SCHEDULE_PATTERN.match(message)
+        if match:
+            full_text = match.group(1).strip()
+            # Try to split time expression and message
+            # Look for "in X" or "at X" patterns at the start
+            parts = full_text.split(maxsplit=1)
+            if len(parts) >= 2:
+                # Check if we have both time and message
+                # Simple heuristic: if second word starts with a number or time word
+                time_words = ["minute", "hour", "day", "week", "tomorrow", "later", "soon"]
+                if parts[0].lower() in ["in", "at"] or any(word in parts[1].lower() for word in time_words):
+                    # Find where the message likely starts
+                    # This is a simple approach - the AI will handle the actual parsing
+                    time_expression = full_text
+                    message_text = ""
+                    # Try to find a natural break
+                    for i, _char in enumerate(full_text):
+                        if i > 10 and full_text[i - 1] == " " and full_text[i].isupper():
+                            time_expression = full_text[:i].strip()
+                            message_text = full_text[i:].strip()
+                            break
+
+                    return Command(
+                        type=CommandType.SCHEDULE,
+                        args={"time_expression": time_expression, "message": message_text or full_text},
+                        raw_text=message,
+                    )
+
+            # Fallback: treat it all as time expression
+            return Command(
+                type=CommandType.SCHEDULE,
+                args={"time_expression": full_text, "message": ""},
+                raw_text=message,
+            )
+
+        # /list_schedules command
+        if self.LIST_SCHEDULES_PATTERN.match(message):
+            return Command(
+                type=CommandType.LIST_SCHEDULES,
+                args={},
+                raw_text=message,
+            )
+
+        # /cancel_schedule command
+        match = self.CANCEL_SCHEDULE_PATTERN.match(message)
+        if match:
+            task_id = match.group(1).strip()
+            return Command(
+                type=CommandType.CANCEL_SCHEDULE,
+                args={"task_id": task_id},
+                raw_text=message,
+            )
+
         # Unknown command
         logger.debug(f"Unknown command: {message}")
         return None
@@ -143,6 +203,35 @@ Usage: `/list_invites` or `/listinvites`
 
 Shows all agents currently invited to this thread."""
 
+    elif topic == "schedule":
+        return """**Schedule Command**
+
+Usage: `/schedule <time> <message>` - Schedule a reminder
+
+Examples:
+- `/schedule in 5 minutes Check the deployment`
+- `/schedule tomorrow at 3pm Send the weekly report`
+- `/schedule later Ping me about the meeting`
+
+The agent will send you a reminder at the specified time."""
+
+    elif topic == "list_schedules":
+        return """**List Schedules Command**
+
+Usage: `/list_schedules` or `/listschedules`
+
+Shows all pending scheduled tasks in this thread."""
+
+    elif topic == "cancel" or topic == "cancel_schedule":
+        return """**Cancel Schedule Command**
+
+Usage: `/cancel_schedule <id>` - Cancel a scheduled task
+
+Example:
+- `/cancel_schedule abc123` - Cancel the task with ID abc123
+
+Use `/list_schedules` to see task IDs."""
+
     else:
         # General help
         return """**Available Commands**
@@ -150,6 +239,9 @@ Shows all agents currently invited to this thread."""
 - `/invite <agent>` - Invite an agent to this thread
 - `/uninvite <agent>` - Remove an agent from this thread
 - `/list_invites` - List all invited agents
+- `/schedule <time> <message>` - Schedule a reminder
+- `/list_schedules` - List scheduled tasks
+- `/cancel_schedule <id>` - Cancel a scheduled task
 - `/help [topic]` - Show this help or help for a specific command
 
 Note: All commands only work within threads, not in main room messages.

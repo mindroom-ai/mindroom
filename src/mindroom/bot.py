@@ -39,6 +39,12 @@ from .matrix import (
 )
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
+from .scheduling import (
+    cancel_scheduled_task,
+    list_scheduled_tasks,
+    restore_scheduled_tasks,
+    schedule_task,
+)
 from .streaming import IN_PROGRESS_MARKER, StreamingResponse
 from .teams import create_team_response, should_form_team
 from .thread_invites import ThreadInviteManager
@@ -131,6 +137,10 @@ class AgentBot:
         for room_id in self.rooms:
             if await join_room(self.client, room_id):
                 self.logger.info("Joined room", room_id=room_id)
+                # Restore scheduled tasks for this room
+                restored = await restore_scheduled_tasks(self.client, room_id)
+                if restored > 0:
+                    self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
@@ -592,6 +602,39 @@ class AgentBot:
         elif command.type == CommandType.HELP:
             topic = command.args.get("topic")
             response_text = get_command_help(topic)
+
+        elif command.type == CommandType.SCHEDULE:
+            time_expression = command.args["time_expression"]
+            message = command.args.get("message", "")
+
+            # If no message provided, use a default
+            if not message:
+                message = "Reminder"
+
+            task_id, response_text = await schedule_task(
+                client=self.client,
+                room_id=room.room_id,
+                thread_id=thread_id,
+                agent_user_id=self.agent_user.user_id,
+                scheduled_by=event.sender,
+                time_expression=time_expression,
+                message=message,
+            )
+
+        elif command.type == CommandType.LIST_SCHEDULES:
+            response_text = await list_scheduled_tasks(
+                client=self.client,
+                room_id=room.room_id,
+                thread_id=thread_id,
+            )
+
+        elif command.type == CommandType.CANCEL_SCHEDULE:
+            task_id = command.args["task_id"]
+            response_text = await cancel_scheduled_task(
+                client=self.client,
+                room_id=room.room_id,
+                task_id=task_id,
+            )
 
         if response_text:
             await self._send_response(room, event.event_id, response_text, thread_id)
