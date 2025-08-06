@@ -6,6 +6,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple
 
 from agno.agent import Agent
+from agno.run.team import TeamRunResponse
 from agno.team import Team
 
 from .agent_config import ROUTER_AGENT_NAME
@@ -112,7 +113,11 @@ async def create_team_response(
     response = await team.arun(prompt)
 
     # Extract response content
-    team_response = str(response)
+    if isinstance(response, TeamRunResponse):
+        team_response = str(response.content)
+    else:
+        logger.warning(f"Unexpected response type: {type(response)}", response=response)
+        team_response = str(response)
 
     # Prepend team information to the response
     agent_mentions = " ".join([f"@{name}" for name in agent_names if name != ROUTER_AGENT_NAME])

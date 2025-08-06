@@ -186,7 +186,10 @@ class AgentBot:
         # Router agent has one simple job: route messages when no specific agent is mentioned
         if self.agent_name == ROUTER_AGENT_NAME:
             if not context.mentioned_agents:
-                await self._handle_ai_routing(room, event, context.thread_history)
+                # Only route if no agents have participated in the thread yet
+                agents_in_thread = get_agents_in_thread(context.thread_history)
+                if len(agents_in_thread) == 0:
+                    await self._handle_ai_routing(room, event, context.thread_history)
             return
 
         if self._should_skip_duplicate_response(event):
@@ -217,8 +220,6 @@ class AgentBot:
                 orchestrator=self.orchestrator,
                 thread_history=context.thread_history,
             )
-
-            # Send the team response
             await self._send_response(room, event.event_id, team_response, context.thread_id)
             return
 
