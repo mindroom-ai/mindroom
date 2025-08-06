@@ -258,13 +258,29 @@ class AgentBot:
             selected_value, thread_id = result
             # User selected an option from an interactive question
 
-            # Check if we've already responded to this interactive question
-            if self.response_tracker.has_responded(event.reacts_to):
-                self.logger.info(
-                    "Ignoring reaction - already responded to this question",
-                    reacted_to=event.reacts_to,
-                )
-                return
+            # Fetch thread history to check if agent has already responded
+            thread_history = []
+            if thread_id:
+                thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
+
+                # Find the position of the interactive question in the thread
+                question_position = -1
+                for i, msg in enumerate(thread_history):
+                    if msg["event_id"] == event.reacts_to:
+                        question_position = i
+                        break
+
+                if question_position >= 0:
+                    # Check if this agent has sent any messages after the interactive question
+                    for i in range(question_position + 1, len(thread_history)):
+                        msg = thread_history[i]
+                        if msg["sender"] == self.client.user_id:
+                            self.logger.info(
+                                "Ignoring reaction - agent already responded after this question",
+                                reacted_to=event.reacts_to,
+                                newer_agent_msg=msg["event_id"],
+                            )
+                            return
 
             # Send immediate acknowledgment
             ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
@@ -274,10 +290,7 @@ class AgentBot:
                 self.logger.error("Failed to send acknowledgment for reaction")
                 return
 
-            # Fetch thread history if we're in a thread
-            thread_history = []
-            if thread_id:
-                thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
+            # Thread history already fetched above, no need to fetch again
 
             # Generate the response, editing the acknowledgment message
             prompt = f"The user selected: {selected_value}"
