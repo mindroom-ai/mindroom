@@ -74,19 +74,14 @@ class StreamingResponse:
         else:
             # Subsequent updates - edit existing message
             logger.debug("Editing streaming message", event_id=self.event_id)
-            edit_content = {
-                "msgtype": "m.text",
-                "body": f"* {self.accumulated_text}",
-                "format": "org.matrix.custom.html",
-                "formatted_body": content.get("formatted_body", self.accumulated_text),
-                "m.new_content": content,
-                "m.relates_to": {"rel_type": "m.replace", "event_id": self.event_id},
-            }
+            from .matrix import edit_message
 
-            response = await client.room_send(
-                room_id=self.room_id,
-                message_type="m.room.message",
-                content=edit_content,
+            response = await edit_message(
+                client,
+                self.room_id,
+                self.event_id,
+                content,
+                display_text,
             )
             if not isinstance(response, nio.RoomSendResponse):
                 logger.error("Failed to edit streaming message", error=str(response))

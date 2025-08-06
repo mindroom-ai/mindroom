@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from .client import (
     create_room,
+    edit_message,
     extract_thread_info,
     fetch_thread_history,
     get_room_members,
@@ -52,6 +53,7 @@ MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
 __all__ = [
     # Client functions
     "create_room",
+    "edit_message",
     "extract_thread_info",
     "fetch_thread_history",
     "get_room_members",

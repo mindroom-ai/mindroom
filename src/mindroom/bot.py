@@ -256,7 +256,11 @@ class AgentBot:
 
             # Send immediate acknowledgment
             ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
-            await self._send_response(room, event.reacts_to, ack_text, thread_id)
+            ack_event_id = await self._send_response(room, event.reacts_to, ack_text, thread_id)
+
+            if not ack_event_id:
+                self.logger.error("Failed to send acknowledgment for reaction")
+                return
 
             # Create a session for the full response
             session_id = create_session_id(room.room_id, thread_id)
@@ -271,8 +275,8 @@ class AgentBot:
                 room_id=room.room_id,
             )
 
-            # Send the full response
-            await self._send_response(room, event.reacts_to, response_text, thread_id)
+            # Edit the acknowledgment message with the full response
+            await self._edit_message(room.room_id, ack_event_id, response_text, thread_id)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -380,11 +384,11 @@ class AgentBot:
 
     async def _send_response(
         self, room: nio.MatrixRoom, reply_to_event_id: str, response_text: str, thread_id: str | None
-    ) -> bool:
+    ) -> str | None:
         """Send a response message to a room.
 
         Returns:
-            True if message was sent successfully, False otherwise.
+            Event ID if message was sent successfully, None otherwise.
         """
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
@@ -406,9 +410,38 @@ class AgentBot:
         if isinstance(response, nio.RoomSendResponse):
             self.response_tracker.mark_responded(reply_to_event_id)
             self.logger.info("Sent response", event_id=response.event_id, room_name=room.name)
-            return True
+            return response.event_id
         else:
             self.logger.error("Failed to send response", error=str(response))
+            return None
+
+    async def _edit_message(self, room_id: str, event_id: str, new_text: str, thread_id: str | None) -> bool:
+        """Edit an existing message.
+
+        Returns:
+            True if edit was successful, False otherwise.
+        """
+        from .matrix import edit_message
+
+        sender_id = self.matrix_id
+        sender_domain = sender_id.domain
+
+        if not new_text.rstrip().endswith("✓"):
+            new_text += " ✓"
+
+        content = create_mention_content_from_text(
+            new_text,
+            sender_domain=sender_domain,
+            thread_event_id=thread_id,
+        )
+
+        response = await edit_message(self.client, room_id, event_id, content, new_text)
+
+        if isinstance(response, nio.RoomSendResponse):
+            self.logger.info("Edited message", event_id=event_id)
+            return True
+        else:
+            self.logger.error("Failed to edit message", event_id=event_id, error=str(response))
             return False
 
     async def _handle_ai_routing(
