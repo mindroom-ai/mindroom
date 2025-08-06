@@ -87,6 +87,7 @@ class TestUserAccountManagement:
             patch("mindroom.cli.matrix_client", return_value=mock_context),
             patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
             patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
+            patch("mindroom.matrix.client.register_user", return_value="@mindroom_user:localhost") as mock_register,
         ):
             state = await _ensure_user_account()
 
@@ -96,7 +97,7 @@ class TestUserAccountManagement:
             assert state.accounts["user"].password.startswith("mindroom_password_")
 
             # Verify registration was called
-            mock_client.register.assert_called_once()
+            mock_register.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_uses_existing_valid(self, tmp_path: Path, mock_matrix_client) -> None:
@@ -155,6 +156,7 @@ class TestUserAccountManagement:
             with (
                 patch("mindroom.cli.matrix_client", return_value=mock_context),
                 patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+                patch("mindroom.matrix.client.register_user", return_value="@mindroom_user:localhost") as mock_register,
             ):
                 result_config = await _ensure_user_account()
 
@@ -166,4 +168,4 @@ class TestUserAccountManagement:
                 # Should have tried old credentials first
                 assert mock_client.login.call_count >= 1
                 # Should have registered new user
-                mock_client.register.assert_called_once()
+                mock_register.assert_called_once()

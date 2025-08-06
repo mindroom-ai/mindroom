@@ -56,9 +56,7 @@ class TestMemoryIntegration:
             assert call_args[1] == "[Enhanced] What is 2+2?"  # Enhanced prompt
 
             # Verify conversation was stored
-            mock_store.assert_called_once_with(
-                "What is 2+2?", "Test response", "calculator", tmp_path, "test_session", "!test:room"
-            )
+            mock_store.assert_called_once_with("What is 2+2?", "calculator", tmp_path, "test_session", "!test:room")
 
     @pytest.mark.asyncio
     async def test_ai_response_without_room_id(self, mock_agent_run, mock_memory_functions, tmp_path):
@@ -77,7 +75,7 @@ class TestMemoryIntegration:
             mock_build.assert_called_once_with("Hello", "general", tmp_path, None)
 
             # Verify storage without room_id
-            mock_store.assert_called_once_with("Hello", "Test response", "general", tmp_path, "test_session", None)
+            mock_store.assert_called_once_with("Hello", "general", tmp_path, "test_session", None)
 
     @pytest.mark.asyncio
     async def test_ai_response_error_handling(self, tmp_path):
@@ -111,19 +109,16 @@ class TestMemoryIntegration:
                 agent_name="general", prompt="Remember this: A=1", session_id="session1", storage_path=tmp_path
             )
 
-            # Verify memory was stored
+            # Verify memory was stored (only user prompt)
             assert mock_memory.add.called
             stored_content = mock_memory.add.call_args[0][0][0]["content"]
-            assert "A=1" in stored_content
-            assert "First response" in stored_content
+            assert stored_content == "Remember this: A=1"
 
             # Reset for second call
             mock_memory.reset_mock()
 
-            # Second call - should find previous memory
-            mock_memory.search.return_value = {
-                "results": [{"memory": "User asked: Remember this: A=1 I responded: First response", "id": "1"}]
-            }
+            # Second call - should find previous memory (only user prompt stored)
+            mock_memory.search.return_value = {"results": [{"memory": "Remember this: A=1", "id": "1"}]}
 
             await ai_response(agent_name="general", prompt="What is A?", session_id="session2", storage_path=tmp_path)
 
