@@ -46,15 +46,10 @@ class TestInteractiveFunctions:
         interactive._active_questions.clear()
 
         # Mock room_send responses
-        mock_question_response = MagicMock(spec=nio.RoomSendResponse)
-        mock_question_response.event_id = "$question123"
         mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
-
-        # Setup reaction responses with event_id
         mock_reaction_response.event_id = "$react123"
 
         mock_client.room_send.side_effect = [
-            mock_question_response,  # Question send (now combined)
             mock_reaction_response,  # Reactions
             mock_reaction_response,
         ]
@@ -74,22 +69,32 @@ class TestInteractiveFunctions:
 
 Based on your choice, I'll proceed accordingly."""
 
-        await interactive.handle_interactive_response(
-            mock_client, "!room:localhost", "$thread123", response_text, "test_agent"
-        )
+        # Test the new approach
+        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
 
-        # Should send formatted message with question
-        first_call = mock_client.room_send.call_args_list[0]
-        assert "Let me help you decide." in first_call[1]["content"]["body"]
-        assert "Based on your choice" in first_call[1]["content"]["body"]
-        assert "What approach would you prefer?" in first_call[1]["content"]["body"]
-        assert "1. 🚀 Fast and automated" in first_call[1]["content"]["body"]
-        assert "2. 🔍 Careful and manual" in first_call[1]["content"]["body"]
-        assert "```interactive" not in first_call[1]["content"]["body"]
+        # Should format the message correctly
+        assert "Let me help you decide." in formatted_text
+        assert "Based on your choice" in formatted_text
+        assert "What approach would you prefer?" in formatted_text
+        assert "1. 🚀 Fast and automated" in formatted_text
+        assert "2. 🔍 Careful and manual" in formatted_text
+        assert "```interactive" not in formatted_text
+
+        # Should extract options correctly
+        assert option_map is not None
+        assert options is not None
+        assert option_map["🚀"] == "fast"
+        assert option_map["🔍"] == "careful"
+        assert option_map["1"] == "fast"
+        assert option_map["2"] == "careful"
+
+        # Register the question
+        event_id = "$question123"
+        interactive.register_interactive_question(event_id, "!room:localhost", "$thread123", option_map, "test_agent")
 
         # Should create question
-        assert "$question123" in interactive._active_questions
-        question = interactive._active_questions["$question123"]
+        assert event_id in interactive._active_questions
+        question = interactive._active_questions[event_id]
         assert question.room_id == "!room:localhost"
         assert question.thread_id == "$thread123"
         assert question.options["🚀"] == "fast"
@@ -97,13 +102,16 @@ Based on your choice, I'll proceed accordingly."""
         assert question.options["1"] == "fast"
         assert question.options["2"] == "careful"
 
+        # Add reaction buttons
+        await interactive.add_reaction_buttons(mock_client, "!room:localhost", event_id, options)
+
+        # Should have added reactions
+        assert mock_client.room_send.call_count == 2
+
     @pytest.mark.asyncio
     async def test_handle_interactive_response_invalid_json(self, mock_client):
         """Test handling invalid JSON in interactive block."""
         interactive._active_questions.clear()
-
-        mock_response = MagicMock(spec=nio.RoomSendResponse)
-        mock_client.room_send.return_value = mock_response
 
         response_text = """Here's a question:
 
@@ -111,12 +119,13 @@ Based on your choice, I'll proceed accordingly."""
 {invalid json}
 ```"""
 
-        await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text, "test_agent")
+        # Test the new approach - should return original text when JSON is invalid
+        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
 
-        # Should send the original response
-        mock_client.room_send.assert_called_once()
-        call_args = mock_client.room_send.call_args[1]
-        assert "Here's a question:" in call_args["content"]["body"]
+        # Should return original text unchanged
+        assert formatted_text == response_text
+        assert option_map is None
+        assert options is None
 
         # Should not create any question
         assert len(interactive._active_questions) == 0
@@ -125,9 +134,6 @@ Based on your choice, I'll proceed accordingly."""
     async def test_handle_interactive_response_missing_options(self, mock_client):
         """Test handling JSON without options."""
         interactive._active_questions.clear()
-
-        mock_response = MagicMock(spec=nio.RoomSendResponse)
-        mock_client.room_send.return_value = mock_response
 
         response_text = """Question:
 
@@ -138,10 +144,15 @@ Based on your choice, I'll proceed accordingly."""
 }
 ```"""
 
-        await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text, "test_agent")
+        # Test the new approach - should return original text when options are empty
+        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
 
-        # Should not send anything or create any question when options are empty
-        mock_client.room_send.assert_not_called()
+        # Should return original text unchanged when no options
+        assert formatted_text == response_text
+        assert option_map is None
+        assert options is None
+
+        # Should not create any question when options are empty
         assert len(interactive._active_questions) == 0
 
     @pytest.mark.asyncio
@@ -306,13 +317,10 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Mock room_send responses
-        mock_question_response = MagicMock(spec=nio.RoomSendResponse)
-        mock_question_response.event_id = "$question456"
         mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
         mock_reaction_response.event_id = "$react456"
 
         mock_client.room_send.side_effect = [
-            mock_question_response,  # Question send (now combined)
             mock_reaction_response,  # Reaction
         ]
 
@@ -329,95 +337,48 @@ interactive
 }
 ```"""
 
-        await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text, "test_agent")
+        # Test the new approach
+        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
+
+        # Should format despite the newline format
+        assert "Let me help." in formatted_text
+        assert "Choose an option:" in formatted_text
+        assert "1. ✅ Yes" in formatted_text
+        assert "```" not in formatted_text
+        assert "interactive" not in formatted_text
+
+        assert option_map is not None
+        assert options is not None
+        assert option_map["✅"] == "yes"
+        assert option_map["1"] == "yes"
+
+        # Register the question
+        event_id = "$question456"
+        interactive.register_interactive_question(event_id, "!room:localhost", None, option_map, "test_agent")
 
         # Should create question despite the format
-        assert "$question456" in interactive._active_questions
-        question = interactive._active_questions["$question456"]
+        assert event_id in interactive._active_questions
+        question = interactive._active_questions[event_id]
         assert question.room_id == "!room:localhost"
         assert question.options["✅"] == "yes"
         assert question.options["1"] == "yes"
-
-    @pytest.mark.asyncio
-    async def test_handle_interactive_response_streaming_mode(self, mock_client):
-        """Test creating interactive question in streaming mode (message already formatted)."""
-        interactive._active_questions.clear()
-
-        # Mock room_send responses for reactions only (no edit needed)
-        mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
-        mock_reaction_response.event_id = "$react123"
-
-        mock_client.room_send.side_effect = [
-            mock_reaction_response,  # First reaction
-            mock_reaction_response,  # Second reaction
-        ]
-
-        response_text = """I'll help you with that.
-
-```interactive
-{
-    "question": "How should I proceed?",
-    "options": [
-        {"emoji": "⚡", "label": "Fast", "value": "fast"},
-        {"emoji": "🐢", "label": "Slow", "value": "slow"}
-    ]
-}
-```"""
-
-        # Simulate streaming mode with existing event_id
-        existing_event_id = "$existing123"
-        await interactive.handle_interactive_response(
-            mock_client,
-            "!room:localhost",
-            "$thread123",
-            response_text,
-            "test_agent",
-            response_already_sent=True,
-            event_id=existing_event_id,
-        )
-
-        # Should NOT edit the existing message (streaming already formatted it)
-        # Should only add reactions
-        first_call = mock_client.room_send.call_args_list[0]
-        assert first_call[1]["content"]["m.relates_to"]["rel_type"] == "m.annotation"
-        assert first_call[1]["content"]["m.relates_to"]["event_id"] == existing_event_id
-
-        # Should store question with existing event_id
-        assert existing_event_id in interactive._active_questions
 
     @pytest.mark.asyncio
     async def test_complete_flow(self, mock_client):
         """Test complete flow from AI response to user reaction."""
         interactive._active_questions.clear()
 
-        # Mock all room_send responses
-        mock_question_send = MagicMock(spec=nio.RoomSendResponse)
-        mock_question_send.event_id = "$q123"
+        # Mock all room_send responses for reactions
         mock_reaction_send = MagicMock(spec=nio.RoomSendResponse)
         mock_reaction_send.event_id = "$r123"
-        mock_confirm_send = MagicMock(spec=nio.RoomSendResponse)
 
-        # Use a function to return responses in order
-        call_count = 0
+        mock_client.room_send.side_effect = [
+            mock_reaction_send,  # First reaction
+            mock_reaction_send,  # Second reaction
+            mock_reaction_send,  # Third reaction
+        ]
 
-        def room_send_side_effect(*args, **kwargs):
-            nonlocal call_count
-            responses = [
-                mock_question_send,  # Question (now combined)
-                mock_reaction_send,  # First reaction
-                mock_reaction_send,  # Second reaction
-                mock_reaction_send,  # Third reaction
-                mock_confirm_send,  # Confirmation
-            ]
-            if call_count < len(responses):
-                response = responses[call_count]
-                call_count += 1
-                return response
-            return mock_confirm_send  # Default response
-
-        mock_client.room_send.side_effect = room_send_side_effect
-
-        # Step 1: AI sends response with interactive JSON
+        # Step 1: Process AI response with interactive JSON
         ai_response = """I can help you with that task.
 
 ```interactive
@@ -434,16 +395,33 @@ interactive
 
 Just let me know your preference!"""
 
-        await interactive.handle_interactive_response(
-            mock_client, "!room:localhost", "$thread123", ai_response, "test_agent"
-        )
+        # Test the new approach
+        formatted_text, option_map, options = interactive.prepare_interactive_response(ai_response)
+
+        # Verify formatting
+        assert "I can help you with that task." in formatted_text
+        assert "How would you like me to proceed?" in formatted_text
+        assert "1. ⚡ Quick mode" in formatted_text
+        assert "2. 🔍 Detailed analysis" in formatted_text
+        assert "3. 📊 Show statistics" in formatted_text
+        assert "Just let me know your preference!" in formatted_text
+
+        # Register the question
+        event_id = "$q123"
+        interactive.register_interactive_question(event_id, "!room:localhost", "$thread123", option_map, "test_agent")
 
         # Verify question was created
-        assert "$q123" in interactive._active_questions
-        question = interactive._active_questions["$q123"]
+        assert event_id in interactive._active_questions
+        question = interactive._active_questions[event_id]
         assert question.room_id == "!room:localhost"
         assert question.thread_id == "$thread123"
         assert len(question.options) == 6  # 3 emojis + 3 numbers
+
+        # Add reaction buttons
+        await interactive.add_reaction_buttons(mock_client, "!room:localhost", event_id, options)
+
+        # Should have added 3 reactions
+        assert mock_client.room_send.call_count == 3
 
         # Step 2: User reacts with emoji
         room = MagicMock()
@@ -451,16 +429,14 @@ Just let me know your preference!"""
 
         reaction_event = MagicMock(spec=nio.ReactionEvent)
         reaction_event.sender = "@user:localhost"
-        reaction_event.reacts_to = "$q123"
+        reaction_event.reacts_to = event_id
         reaction_event.key = "🔍"
 
         result = await interactive.handle_reaction(mock_client, room, reaction_event, "test_agent")
 
         # Verify reaction was processed
         assert result == ("detailed", "$thread123")  # Thread ID from the question
-        assert "$q123" not in interactive._active_questions
-        # We expect 4 calls: 1 question + 3 reactions (no confirmation)
-        assert mock_client.room_send.call_count == 4
+        assert event_id not in interactive._active_questions
 
     @pytest.mark.asyncio
     async def test_handle_interactive_response_with_checkmark(self, mock_client):
@@ -469,13 +445,10 @@ Just let me know your preference!"""
         interactive._active_questions.clear()
 
         # Mock room_send responses
-        mock_question_response = MagicMock(spec=nio.RoomSendResponse)
-        mock_question_response.event_id = "$question789"
         mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
         mock_reaction_response.event_id = "$react789"
 
         mock_client.room_send.side_effect = [
-            mock_question_response,  # Question send
             mock_reaction_response,  # Reaction
         ]
 
@@ -490,20 +463,29 @@ Just let me know your preference!"""
 }
 ``` ✓"""
 
-        await interactive.handle_interactive_response(
-            mock_client, "!room:localhost", "$thread123", response_text, "test_agent"
-        )
+        # Test the new approach
+        formatted_text, option_map, options = interactive.prepare_interactive_response(response_text)
 
-        # Should send formatted message with question
-        first_call = mock_client.room_send.call_args_list[0]
-        assert "Let's play rock paper scissors!" in first_call[1]["content"]["body"]
-        assert "What do you choose?" in first_call[1]["content"]["body"]
-        assert "1. 🪨 Rock" in first_call[1]["content"]["body"]
-        assert "```interactive" not in first_call[1]["content"]["body"]
+        # Should format the message correctly even with checkmark
+        assert "Let's play rock paper scissors!" in formatted_text
+        assert "What do you choose?" in formatted_text
+        assert "1. 🪨 Rock" in formatted_text
+        assert "```interactive" not in formatted_text
+        assert formatted_text.endswith("✓")  # Should preserve the checkmark
+
+        # Should extract options correctly
+        assert option_map is not None
+        assert options is not None
+        assert option_map["🪨"] == "rock"
+        assert option_map["1"] == "rock"
+
+        # Register the question
+        event_id = "$question789"
+        interactive.register_interactive_question(event_id, "!room:localhost", "$thread123", option_map, "test_agent")
 
         # Should create question
-        assert "$question789" in interactive._active_questions
-        question = interactive._active_questions["$question789"]
+        assert event_id in interactive._active_questions
+        question = interactive._active_questions[event_id]
         assert question.room_id == "!room:localhost"
         assert question.thread_id == "$thread123"
         assert question.options["🪨"] == "rock"

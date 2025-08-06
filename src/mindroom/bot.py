@@ -337,15 +337,9 @@ class AgentBot:
 
         # Send the response (formatted or not)
         event_id = await self._send_response(room, reply_to_event_id, formatted_text, thread_id)
-        if event_id:
-            self.response_tracker.mark_responded(reply_to_event_id)
-
-            # If it was an interactive question, register it and add reactions
-            if option_map and options:
-                interactive.register_interactive_question(
-                    event_id, room.room_id, thread_id, option_map, self.agent_name
-                )
-                await interactive.add_reaction_buttons(self.client, room.room_id, event_id, options)
+        if event_id and option_map and options:
+            interactive.register_interactive_question(event_id, room.room_id, thread_id, option_map, self.agent_name)
+            await interactive.add_reaction_buttons(self.client, room.room_id, event_id, options)
 
     async def _process_and_respond_streaming(
         self,
