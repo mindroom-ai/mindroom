@@ -267,6 +267,11 @@ class AgentBot:
                 self.logger.error("Failed to send acknowledgment for reaction")
                 return
 
+            # Fetch thread history if we're in a thread
+            thread_history = []
+            if thread_id:
+                thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
+
             # Generate the response, editing the acknowledgment message
             prompt = f"The user selected: {selected_value}"
             await self._generate_response(
@@ -274,7 +279,7 @@ class AgentBot:
                 prompt=prompt,
                 reply_to_event_id=event.reacts_to,
                 thread_id=thread_id,
-                thread_history=[],  # Could fetch if needed
+                thread_history=thread_history,
                 existing_event_id=ack_event_id,  # Edit the acknowledgment
             )
 
