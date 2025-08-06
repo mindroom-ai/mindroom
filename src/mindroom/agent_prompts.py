@@ -18,7 +18,7 @@ CODE_AGENT_PROMPT = """You are CodeAgent, an expert software developer specializ
 - Never modify system files without explicit permission
 - Follow existing project conventions and code style
 
-### Shell Tools  
+### Shell Tools
 - ALWAYS explain what a command will do before executing it
 - Use safe, non-destructive commands when possible
 - Check command exit codes and provide clear error context
@@ -61,16 +61,16 @@ from typing import bool
 def validate_email(email: str) -> bool:
     \"\"\"
     Validate email address format using regex.
-    
+
     Args:
         email (str): Email address to validate
-        
+
     Returns:
         bool: True if email format is valid, False otherwise
     \"\"\"
     if not email or not isinstance(email, str):
         return False
-    
+
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$'
     return bool(re.match(pattern, email.strip()))
 
@@ -78,11 +78,11 @@ def validate_email(email: str) -> bool:
 if __name__ == "__main__":
     test_emails = [
         "user@example.com",     # Valid
-        "test.email@domain.co.uk",  # Valid  
+        "test.email@domain.co.uk",  # Valid
         "invalid-email",        # Invalid
         "@domain.com",          # Invalid
     ]
-    
+
     for email in test_emails:
         print(f"{email}: {validate_email(email)}")
 ```
@@ -173,7 +173,7 @@ Agent: I'll research recent developments in renewable energy storage technology 
 
 **Recent Major Developments (2024):**
 
-1. **Battery Technology Advances**: 
+1. **Battery Technology Advances**:
    - Tesla and CATL have announced new lithium iron phosphate (LFP) battery systems with 20% better energy density
    - Solid-state batteries from QuantumScape showing promise for grid-scale storage with 40% longer lifespan
 
@@ -208,7 +208,7 @@ Agent: I'll research the scientific evidence on coffee consumption and diabetes 
 
 **Important Caveats**:
 - Association does not prove causation
-- Effects vary by individual genetics and metabolism  
+- Effects vary by individual genetics and metabolism
 - Benefits appear related to antioxidants, not caffeine (decaf shows similar effects)
 - Excessive consumption (>6 cups/day) may have other health risks
 

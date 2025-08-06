@@ -8,20 +8,20 @@ from agno.agent import Agent
 from agno.models.base import Model
 from agno.storage.sqlite import SqliteStorage
 
+from .agent_prompts import (
+    CALCULATOR_AGENT_PROMPT,
+    CODE_AGENT_PROMPT,
+    DATA_ANALYST_AGENT_PROMPT,
+    FINANCE_AGENT_PROMPT,
+    GENERAL_AGENT_PROMPT,
+    NEWS_AGENT_PROMPT,
+    RESEARCH_AGENT_PROMPT,
+    SHELL_AGENT_PROMPT,
+    SUMMARY_AGENT_PROMPT,
+)
 from .logging_config import get_logger
 from .models import Config
 from .tools import get_tool_by_name
-from .agent_prompts import (
-    CODE_AGENT_PROMPT,
-    RESEARCH_AGENT_PROMPT,
-    CALCULATOR_AGENT_PROMPT,
-    GENERAL_AGENT_PROMPT,
-    SHELL_AGENT_PROMPT,
-    SUMMARY_AGENT_PROMPT,
-    FINANCE_AGENT_PROMPT,
-    NEWS_AGENT_PROMPT,
-    DATA_ANALYST_AGENT_PROMPT,
-)
 
 logger = get_logger(__name__)
 

@@ -8,7 +8,7 @@ Implemented a simple but powerful rich prompts system inspired by `prompts.py` t
 
 ### 1. Created Rich Prompts (`src/mindroom/agent_prompts.py`)
 - **CODE_AGENT_PROMPT**: Expert software developer with detailed tool usage guidelines
-- **RESEARCH_AGENT_PROMPT**: Information researcher with source evaluation expertise  
+- **RESEARCH_AGENT_PROMPT**: Information researcher with source evaluation expertise
 - **CALCULATOR_AGENT_PROMPT**: Mathematical specialist with step-by-step explanations
 - **GENERAL_AGENT_PROMPT**: Conversational assistant with helpful guidelines
 - **SHELL_AGENT_PROMPT**: System administrator with safety-first approach
@@ -76,7 +76,7 @@ You are CodeAgent, an expert software developer specialized in code generation, 
 ## Impact
 
 - **Much More Specific**: Agents now have detailed, expert-level instructions
-- **Better Tool Usage**: Clear guidelines for how to use each tool properly  
+- **Better Tool Usage**: Clear guidelines for how to use each tool properly
 - **Consistent Behavior**: Well-defined behavioral rules and decision frameworks
 - **Educational Value**: Examples and explanations help agents be more helpful
 - **Maintainable**: Easy to modify and extend agent behavior
@@ -88,7 +88,7 @@ The system automatically detects which agents have rich prompts:
 ```python
 # These agents now use rich prompts:
 agents_with_rich_prompts = [
-    "code", "research", "calculator", "general", 
+    "code", "research", "calculator", "general",
     "shell", "summary", "finance", "news", "data_analyst"
 ]
 
