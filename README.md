@@ -92,17 +92,17 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - **Editing**: Modify AI responses for better context (planned)
 - **Context Control**: Fine-grained memory permissions (planned)
 
-#### Slash Commands
-- `/invite <agent> [for <hours>]` - Invite an agent to a thread (only works in threads)
-- `/uninvite <agent>` - Remove an agent from a thread
-- `/list_invites` - List all invited agents in current thread
-- `/help [topic]` - Get help on available commands
-- `/link [thread-id]` - Link another thread's context (planned)
-- `/agents` - List available agents (planned)
-- `/context` - Show token usage (planned)
-- `/tag [name]` - Tag thread for memory sharing (planned)
-- `/branch` - Fork the conversation (planned)
-- `/schedule` - Manage agent automation (planned)
+#### Commands
+- `!invite <agent>` - Invite an agent to a thread (only works in threads)
+- `!uninvite <agent>` - Remove an agent from a thread
+- `!list_invites` - List all invited agents in current thread
+- `!help [topic]` - Get help on available commands
+- `!link [thread-id]` - Link another thread's context (planned)
+- `!agents` - List available agents (planned)
+- `!context` - Show token usage (planned)
+- `!tag [name]` - Tag thread for memory sharing (planned)
+- `!branch` - Fork the conversation (planned)
+- `!schedule` - Manage agent automation (planned)
 - And many more...
 
 ## Quick Start
@@ -162,7 +162,7 @@ Agents ONLY respond in threads - never in main room messages. Within threads, th
 2. **Single agent continues conversation** - If only one agent is in a thread, it continues responding without mentions
 3. **Multiple agents collaborate** - When 2+ agents are in a thread, they form a team and provide coordinated responses
 4. **Smart routing for new threads** - If no agents have participated in the thread, the system picks the most suitable one(s)
-5. **Invited agents act like natives** - Agents invited via `/invite` follow the same rules as room natives
+5. **Invited agents act like natives** - Agents invited via `!invite` follow the same rules as room natives
 
 #### Team Collaboration Modes
 
@@ -295,7 +295,7 @@ pre-commit run --all-files
 - Thread-based conversations
 - Cross-room agent invitations with time limits
 - Agent response routing based on context
-- Slash commands: `/invite`, `/uninvite`, `/list_invites`, `/help`
+- Commands: `!invite`, `!uninvite`, `!list_invites`, `!help`
 - Multiple AI model support (OpenAI, Anthropic, Ollama, etc.)
 - End-to-end encryption via Matrix
 - Team-based agent collaboration (using Agno Teams)
