@@ -258,29 +258,16 @@ class AgentBot:
             selected_value, thread_id = result
             # User selected an option from an interactive question
 
-            # Fetch thread history to check if agent has already responded
+            # Check if we should process this reaction
             thread_history = []
             if thread_id:
                 thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-
-                # Find the position of the interactive question in the thread
-                question_position = -1
-                for i, msg in enumerate(thread_history):
-                    if msg["event_id"] == event.reacts_to:
-                        question_position = i
-                        break
-
-                if question_position >= 0:
-                    # Check if this agent has sent any messages after the interactive question
-                    for i in range(question_position + 1, len(thread_history)):
-                        msg = thread_history[i]
-                        if msg["sender"] == self.client.user_id:
-                            self.logger.info(
-                                "Ignoring reaction - agent already responded after this question",
-                                reacted_to=event.reacts_to,
-                                newer_agent_msg=msg["event_id"],
-                            )
-                            return
+                if await self._has_agent_responded_after_message(thread_history, event.reacts_to):
+                    self.logger.info(
+                        "Ignoring reaction - agent already responded after this question",
+                        reacted_to=event.reacts_to,
+                    )
+                    return
 
             # Send immediate acknowledgment
             ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
@@ -641,6 +628,25 @@ class AgentBot:
                 break
             except Exception as e:
                 self.logger.error("Error in periodic cleanup", error=str(e))
+
+    async def _has_agent_responded_after_message(self, thread_history: list[dict], target_event_id: str) -> bool:
+        """Check if this agent has sent any messages after a specific message in the thread.
+
+        Args:
+            thread_history: List of messages in the thread
+            target_event_id: The event ID to check after
+
+        Returns:
+            True if the agent has responded after the target message
+        """
+        # Find the target message and check for agent responses after it
+        found_target = False
+        for msg in thread_history:
+            if msg["event_id"] == target_event_id:
+                found_target = True
+            elif found_target and msg["sender"] == self.client.user_id:
+                return True
+        return False
 
     def _should_skip_duplicate_response(self, event: nio.RoomMessageText) -> bool:
         """Check if we should skip responding to avoid duplicates.
