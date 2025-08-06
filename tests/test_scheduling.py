@@ -125,6 +125,29 @@ class TestScheduleTimeParsing:
             assert result.suggestion is not None
 
     @pytest.mark.asyncio
+    async def test_parse_tell_me_in_time_pattern(self):
+        """Test parsing phrases like 'tell me in 1 min again'."""
+        mock_response = MagicMock()
+        mock_response.content = ScheduledTimeResponse(
+            execute_at=datetime.now(UTC) + timedelta(minutes=1),
+            message="Reminder",
+            interpretation="1 minute from now",
+        )
+
+        with patch("mindroom.scheduling.Agent") as mock_agent_class:
+            mock_agent = AsyncMock()
+            mock_agent.arun.return_value = mock_response
+            mock_agent_class.return_value = mock_agent
+
+            result = await parse_schedule("tell me in 1 min again")
+
+            assert isinstance(result, ScheduledTimeResponse)
+            assert "1 minute" in result.interpretation
+            # Verify the AI received the full text for parsing
+            call_args = mock_agent.arun.call_args[0][0]
+            assert "tell me in 1 min again" in call_args
+
+    @pytest.mark.asyncio
     async def test_parse_with_custom_current_time(self):
         """Test parsing with a custom current time."""
         custom_time = datetime(2024, 1, 15, 10, 0, 0)

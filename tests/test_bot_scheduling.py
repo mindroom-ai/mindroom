@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom.bot import AgentBot
@@ -39,7 +40,7 @@ class TestBotScheduleCommands:
         event = MagicMock()
         event.event_id = "$event123"
         event.sender = "@user:server"
-        event.body = "/schedule in 5 minutes Check deployment"
+        event.body = "!schedule in 5 minutes Check deployment"
         event.source = {"content": {"m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"}}}
 
         command = Command(
@@ -78,7 +79,7 @@ class TestBotScheduleCommands:
         event = MagicMock()
         event.event_id = "$event123"
         event.sender = "@user:server"
-        event.body = "/schedule tomorrow"
+        event.body = "!schedule tomorrow"
         event.source = {"content": {"m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"}}}
 
         command = Command(type=CommandType.SCHEDULE, args={"full_text": "tomorrow"}, raw_text=event.body)
@@ -100,7 +101,7 @@ class TestBotScheduleCommands:
 
         event = MagicMock()
         event.event_id = "$event123"
-        event.body = "/list_schedules"
+        event.body = "!list_schedules"
         event.source = {"content": {"m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"}}}
 
         command = Command(type=CommandType.LIST_SCHEDULES, args={}, raw_text=event.body)
@@ -124,7 +125,7 @@ class TestBotScheduleCommands:
 
         event = MagicMock()
         event.event_id = "$event123"
-        event.body = "/cancel_schedule task123"
+        event.body = "!cancel_schedule task123"
         event.source = {"content": {"m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"}}}
 
         command = Command(type=CommandType.CANCEL_SCHEDULE, args={"task_id": "task123"}, raw_text=event.body)
@@ -144,7 +145,7 @@ class TestBotScheduleCommands:
 
         event = MagicMock()
         event.event_id = "$event123"
-        event.body = "/schedule in 5 minutes Test"
+        event.body = "!schedule in 5 minutes Test"
         event.source = {"content": {}}  # No thread relation
 
         command = Command(type=CommandType.SCHEDULE, args={"full_text": "in 5 minutes Test"}, raw_text=event.body)
@@ -226,3 +227,127 @@ class TestBotTaskRestoration:
 
                 # Just verify restore was called with 0 - logger testing is complex with the bind() method
                 assert mock_restore.return_value == 0
+
+
+class TestCommandHandling:
+    """Test command handling behavior across different agents."""
+
+    @pytest.mark.asyncio
+    async def test_non_router_agent_ignores_commands(self):
+        """Test that non-router agents ignore command messages."""
+        # Create a calculator agent (not router)
+        agent_user = AgentMatrixUser(
+            agent_name="calculator",
+            user_id="@mindroom_calculator:localhost",
+            display_name="Calculator Agent",
+            password="mock_password",
+            access_token="mock_token",
+        )
+
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._generate_response = AsyncMock()
+        bot._extract_message_context = AsyncMock()
+
+        # Create a room and event
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@user:server",
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": "!schedule in 5 minutes test"},
+            }
+        )
+
+        # Call _on_message
+        await bot._on_message(room, event)
+
+        # Verify the agent didn't try to process the command
+        bot._generate_response.assert_not_called()
+        bot.logger.debug.assert_called_with("Ignoring command (not router agent)")
+
+    @pytest.mark.asyncio
+    async def test_router_agent_handles_commands(self):
+        """Test that router agent does handle commands."""
+        # Create router agent
+        agent_user = AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password="mock_password",
+            access_token="mock_token",
+        )
+
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._handle_command = AsyncMock()
+
+        # Create a room and event with thread info
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@user:server",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "!schedule in 5 minutes test",
+                    "m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"},
+                },
+            }
+        )
+
+        with patch("mindroom.bot.ROUTER_AGENT_NAME", "router"):
+            await bot._on_message(room, event)
+
+        # Verify the command was handled
+        bot._handle_command.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_non_router_agent_responds_to_non_commands(self):
+        """Test that non-router agents still respond to regular messages."""
+        # Create a calculator agent (not router)
+        agent_user = AgentMatrixUser(
+            agent_name="calculator",
+            user_id="@mindroom_calculator:localhost",
+            display_name="Calculator Agent",
+            password="mock_password",
+            access_token="mock_token",
+        )
+
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._generate_response = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+
+        # Mock context extraction to say agent is mentioned
+        mock_context = MagicMock()
+        mock_context.am_i_mentioned = True
+        mock_context.is_thread = True
+        mock_context.thread_id = "$thread123"
+        mock_context.thread_history = []
+        mock_context.mentioned_agents = ["calculator"]
+        bot._extract_message_context = AsyncMock(return_value=mock_context)
+
+        # Mock should_agent_respond to return True
+        with patch("mindroom.bot.should_agent_respond", return_value=True):
+            # Create a room and event with a regular message
+            room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+            event = nio.RoomMessageText.from_dict(
+                {
+                    "event_id": "$event123",
+                    "sender": "@user:server",
+                    "origin_server_ts": 1234567890,
+                    "content": {"msgtype": "m.text", "body": "@calculator what is 2+2?"},
+                }
+            )
+
+            await bot._on_message(room, event)
+
+            # Verify the agent processed the message
+            bot._generate_response.assert_called_once()
