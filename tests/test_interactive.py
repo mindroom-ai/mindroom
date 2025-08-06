@@ -73,7 +73,9 @@ class TestInteractiveFunctions:
 
 Based on your choice, I'll proceed accordingly."""
 
-        await interactive.handle_interactive_response(mock_client, "!room:localhost", "$thread123", response_text)
+        await interactive.handle_interactive_response(
+            mock_client, "!room:localhost", "$thread123", response_text, "test_agent"
+        )
 
         # Should send clean text first
         first_call = mock_client.room_send.call_args_list[0]
@@ -83,7 +85,7 @@ Based on your choice, I'll proceed accordingly."""
 
         # Should create question
         assert "$question123" in interactive._active_questions
-        room_id, thread_id, options = interactive._active_questions["$question123"]
+        room_id, thread_id, options, agent_name = interactive._active_questions["$question123"]
         assert room_id == "!room:localhost"
         assert thread_id == "$thread123"
         assert options["🚀"] == "fast"
@@ -105,7 +107,7 @@ Based on your choice, I'll proceed accordingly."""
 {invalid json}
 ```"""
 
-        await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text)
+        await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text, "test_agent")
 
         # Should send the original response
         mock_client.room_send.assert_called_once()
@@ -132,7 +134,7 @@ Based on your choice, I'll proceed accordingly."""
 }
 ```"""
 
-        await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text)
+        await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text, "test_agent")
 
         # Should send the clean response
         mock_client.room_send.assert_called_once()
@@ -150,6 +152,7 @@ Based on your choice, I'll proceed accordingly."""
             "!room:localhost",
             "$thread123",
             {"🚀": "fast", "🐢": "slow", "1": "fast", "2": "slow"},
+            "test_agent",
         )
 
         # Mock confirmation send
@@ -164,7 +167,7 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$question123"
         event.key = "🚀"
 
-        await interactive.handle_reaction(mock_client, room, event)
+        await interactive.handle_reaction(mock_client, room, event, "test_agent")
 
         # Should send confirmation
         mock_client.room_send.assert_called_once()
@@ -188,7 +191,7 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$unknown123"
         event.key = "👍"
 
-        await interactive.handle_reaction(mock_client, room, event)
+        await interactive.handle_reaction(mock_client, room, event, "test_agent")
 
         # Should not send anything
         mock_client.room_send.assert_not_called()
@@ -199,7 +202,7 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Set up a question
-        interactive._active_questions["$question123"] = ("!room:localhost", None, {"✅": "yes"})
+        interactive._active_questions["$question123"] = ("!room:localhost", None, {"✅": "yes"}, "test_agent")
 
         # Create reaction event from bot itself
         room = MagicMock()
@@ -208,7 +211,7 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$question123"
         event.key = "✅"
 
-        await interactive.handle_reaction(mock_client, room, event)
+        await interactive.handle_reaction(mock_client, room, event, "test_agent")
 
         # Should not send anything
         mock_client.room_send.assert_not_called()
@@ -226,6 +229,7 @@ Based on your choice, I'll proceed accordingly."""
             "!room:localhost",
             "$thread123",
             {"1": "first", "2": "second", "3": "third"},
+            "test_agent",
         )
 
         # Mock confirmation send
@@ -240,7 +244,7 @@ Based on your choice, I'll proceed accordingly."""
         event.body = "2"
         event.source = {"content": {"m.relates_to": {"rel_type": "m.thread", "event_id": "$thread123"}}}
 
-        await interactive.handle_text_response(mock_client, room, event)
+        await interactive.handle_text_response(mock_client, room, event, "test_agent")
 
         # Should send confirmation
         mock_client.room_send.assert_called_once()
@@ -256,7 +260,12 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Set up a question
-        interactive._active_questions["$question123"] = ("!room:localhost", None, {"1": "one", "2": "two"})
+        interactive._active_questions["$question123"] = (
+            "!room:localhost",
+            None,
+            {"1": "one", "2": "two"},
+            "test_agent",
+        )
 
         room = MagicMock()
         room.room_id = "!room:localhost"
@@ -270,7 +279,7 @@ Based on your choice, I'll proceed accordingly."""
             event.body = body
             event.source = {"content": {}}
 
-            await interactive.handle_text_response(mock_client, room, event)
+            await interactive.handle_text_response(mock_client, room, event, "test_agent")
 
             # Should never send anything
             mock_client.room_send.assert_not_called()
@@ -310,11 +319,11 @@ interactive
 }
 ```"""
 
-        await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text)
+        await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text, "test_agent")
 
         # Should create question despite the format
         assert "$question456" in interactive._active_questions
-        room_id, thread_id, options = interactive._active_questions["$question456"]
+        room_id, thread_id, options, agent_name = interactive._active_questions["$question456"]
         assert room_id == "!room:localhost"
         assert options["✅"] == "yes"
         assert options["1"] == "yes"
@@ -337,9 +346,11 @@ interactive
             {"emoji": "6️⃣", "label": "Option 6", "value": "opt6"},  # This should be truncated
         ]
 
-        await interactive.create_interactive_question(mock_client, "!room:localhost", None, "Choose one:", options)
+        await interactive.create_interactive_question(
+            mock_client, "!room:localhost", None, "Choose one:", options, "test_agent"
+        )
 
-        _, _, saved_options = interactive._active_questions["$question123"]
+        _, _, saved_options, _ = interactive._active_questions["$question123"]
         # Should only have 5 options (plus their numeric equivalents)
         numeric_keys = [k for k in saved_options if k.isdigit()]
         assert len(numeric_keys) == 5
@@ -395,11 +406,13 @@ interactive
 
 Just let me know your preference!"""
 
-        await interactive.handle_interactive_response(mock_client, "!room:localhost", "$thread123", ai_response)
+        await interactive.handle_interactive_response(
+            mock_client, "!room:localhost", "$thread123", ai_response, "test_agent"
+        )
 
         # Verify question was created
         assert "$q123" in interactive._active_questions
-        room_id, thread_id, options = interactive._active_questions["$q123"]
+        room_id, thread_id, options, agent_name = interactive._active_questions["$q123"]
         assert room_id == "!room:localhost"
         assert thread_id == "$thread123"
         assert len(options) == 6  # 3 emojis + 3 numbers
@@ -413,7 +426,7 @@ Just let me know your preference!"""
         reaction_event.reacts_to = "$q123"
         reaction_event.key = "🔍"
 
-        await interactive.handle_reaction(mock_client, room, reaction_event)
+        await interactive.handle_reaction(mock_client, room, reaction_event, "test_agent")
 
         # Verify confirmation was sent
         assert "$q123" not in interactive._active_questions

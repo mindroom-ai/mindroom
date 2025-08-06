@@ -11,8 +11,8 @@ from .matrix import create_mention_content_from_text, extract_domain_from_user_i
 
 logger = get_logger(__name__)
 
-# Track active interactive questions: event_id -> (room_id, thread_id, options)
-_active_questions: dict[str, tuple[str, str | None, dict[str, str]]] = {}
+# Track active interactive questions: event_id -> (room_id, thread_id, options, creator_agent_name)
+_active_questions: dict[str, tuple[str, str | None, dict[str, str], str]] = {}
 
 
 def should_create_interactive_question(response_text: str) -> bool:
@@ -33,6 +33,7 @@ async def handle_interactive_response(
     room_id: str,
     thread_id: str | None,
     response_text: str,
+    agent_name: str,
     response_already_sent: bool = False,
 ) -> None:
     """Create an interactive question from JSON in the AI response.
@@ -78,6 +79,7 @@ async def handle_interactive_response(
         thread_id=thread_id,
         question=interactive_data.get("question", "Please choose an option:"),
         options=interactive_data.get("options", []),
+        agent_name=agent_name,
     )
 
     if question_event_id:
@@ -90,6 +92,7 @@ async def create_interactive_question(
     thread_id: str | None,
     question: str,
     options: list[dict[str, str]],
+    agent_name: str,
 ) -> str | None:
     """Send an interactive question with reaction options.
 
@@ -148,8 +151,8 @@ async def create_interactive_question(
 
     question_event_id: str = response.event_id
 
-    # Store the active question
-    _active_questions[question_event_id] = (room_id, thread_id, option_map)
+    # Store the active question with the agent who created it
+    _active_questions[question_event_id] = (room_id, thread_id, option_map, agent_name)
 
     # Add reaction buttons (bot pre-adds them for better UX)
     for opt in options:
@@ -181,6 +184,7 @@ async def handle_reaction(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
     event: nio.ReactionEvent,
+    agent_name: str,
 ) -> None:
     """Handle a reaction event that might be an answer to a question.
 
@@ -201,7 +205,17 @@ async def handle_reaction(
         )
         return
 
-    room_id, thread_id, option_map = question_data
+    room_id, thread_id, option_map, question_creator = question_data
+
+    # Only the agent who created the question should respond to reactions
+    if agent_name != question_creator:
+        logger.debug(
+            "Ignoring reaction to question created by another agent",
+            reacting_agent=agent_name,
+            question_creator=question_creator,
+            reaction=event.key,
+        )
+        return
 
     # Check if the reaction is one of our options
     reaction_key = event.key
@@ -241,6 +255,7 @@ async def handle_text_response(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
     event: nio.RoomMessageText,
+    agent_name: str,
 ) -> None:
     """Handle text responses to interactive questions (e.g., "1", "2", "3").
 
@@ -265,7 +280,7 @@ async def handle_text_response(
             thread_id = relates_to.get("event_id")
 
     # Find matching active questions in this room/thread
-    for question_event_id, (q_room_id, q_thread_id, option_map) in _active_questions.items():
+    for question_event_id, (q_room_id, q_thread_id, option_map, question_creator) in _active_questions.items():
         if q_room_id != room.room_id:
             continue
         if q_thread_id != thread_id:
@@ -273,6 +288,9 @@ async def handle_text_response(
         if message_text not in option_map:
             continue
         if event.sender == client.user_id:
+            continue
+        # Only respond if this agent created the question
+        if agent_name != question_creator:
             continue
 
         # Found a matching question

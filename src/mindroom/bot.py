@@ -161,7 +161,7 @@ class AgentBot:
             return
 
         # Check if this might be a text response to an interactive question
-        await interactive.handle_text_response(self.client, room, event)
+        await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
         sender_id = MatrixID.parse(event.sender)
 
@@ -248,7 +248,7 @@ class AgentBot:
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
-        await interactive.handle_reaction(self.client, room, event)
+        await interactive.handle_reaction(self.client, room, event, self.agent_name)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -297,7 +297,9 @@ class AgentBot:
 
         # Check if the response suggests multiple options or needs user input
         if interactive.should_create_interactive_question(response_text):
-            await interactive.handle_interactive_response(self.client, room.room_id, thread_id, response_text)
+            await interactive.handle_interactive_response(
+                self.client, room.room_id, thread_id, response_text, self.agent_name
+            )
         else:
             await self._send_response(room, event.event_id, response_text, thread_id)
 
@@ -341,7 +343,12 @@ class AgentBot:
                 if interactive.should_create_interactive_question(streaming.accumulated_text):
                     # Handle the interactive question
                     await interactive.handle_interactive_response(
-                        self.client, room.room_id, thread_id, streaming.accumulated_text, response_already_sent=True
+                        self.client,
+                        room.room_id,
+                        thread_id,
+                        streaming.accumulated_text,
+                        self.agent_name,
+                        response_already_sent=True,
                     )
 
         except Exception as e:
