@@ -212,7 +212,7 @@ def store_conversation_memory(
 
     Args:
         prompt: The user's prompt
-        response: The agent's response (kept for compatibility but not stored)
+        response: The agent's response (not stored)
         agent_name: Name of the agent
         storage_path: Path for memory storage
         session_id: Session ID for the conversation
