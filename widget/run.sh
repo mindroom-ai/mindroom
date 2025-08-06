@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -20,26 +20,20 @@ trap cleanup EXIT INT TERM
 echo -e "${GREEN}Starting backend server...${NC}"
 cd backend
 
-# Check if we have uv or should use venv
-if command -v uv &> /dev/null; then
-    echo "Using uv for Python dependencies..."
-    if [ ! -d ".venv" ]; then
-        uv sync
-    fi
-    uv run uvicorn src.main:app --reload &
-    BACKEND_PID=$!
-elif [ ! -d ".venv" ]; then
-    echo "Creating Python virtual environment..."
-    python3 -m venv .venv
-    source .venv/bin/activate
-    pip install -r requirements.txt
-    python -m uvicorn src.main:app --reload &
-    BACKEND_PID=$!
-else
-    source .venv/bin/activate
-    python -m uvicorn src.main:app --reload &
-    BACKEND_PID=$!
+# Check if uv is available
+if ! command -v uv &> /dev/null; then
+    echo -e "${BLUE}Error: 'uv' is not installed.${NC}"
+    echo "Please install uv: https://github.com/astral-sh/uv"
+    echo "Or use run-nix.sh which provides all dependencies."
+    exit 1
 fi
+
+echo "Using uv for Python dependencies..."
+if [ ! -d ".venv" ]; then
+    uv sync
+fi
+uv run uvicorn src.main:app --reload &
+BACKEND_PID=$!
 
 cd ..
 
