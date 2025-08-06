@@ -332,6 +332,7 @@ interactive
 
         # Mock room_send responses for edit and reactions
         mock_edit_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_edit_response.event_id = "$edit123"
         mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
 
         mock_client.room_send.side_effect = [

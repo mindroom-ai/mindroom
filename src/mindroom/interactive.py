@@ -82,6 +82,7 @@ async def handle_interactive_response(
         options = options[:5]
 
     # Build the formatted question text
+    # Remove the JSON block and any surrounding backticks
     clean_response = response_text.replace(match.group(0), "").strip()
 
     # Build option lines

@@ -29,6 +29,11 @@ class StreamingResponse:
         """Add new content and potentially update the message."""
         self.accumulated_text += new_chunk
 
+        # Don't send updates if we've already processed an interactive block
+        # The interactive handler has taken over message editing
+        if self.interactive_processed:
+            return
+
         current_time = time.time()
         if current_time - self.last_update >= self.update_interval:
             await self._send_or_edit_message(client)
