@@ -263,53 +263,16 @@ class AgentBot:
                 self.logger.error("Failed to send acknowledgment for reaction")
                 return
 
-            # Create a session for the full response
-            session_id = create_session_id(room.room_id, thread_id)
+            # Generate the response, editing the acknowledgment message
             prompt = f"The user selected: {selected_value}"
-
-            if self.enable_streaming:
-                # Use streaming to update the acknowledgment message
-                sender_id = self.matrix_id
-
-                # Create a StreamingResponse that will edit our acknowledgment message
-                streaming = StreamingResponse(
-                    room_id=room.room_id,
-                    reply_to_event_id=event.reacts_to,
-                    thread_id=thread_id,
-                    sender_domain=sender_id.domain,
-                )
-                # Set the event_id to our acknowledgment message so it gets edited
-                streaming.event_id = ack_event_id
-                streaming.accumulated_text = ""  # Start fresh, will replace the acknowledgment
-
-                try:
-                    async for chunk in ai_response_streaming(
-                        agent_name=self.agent_name,
-                        prompt=prompt,
-                        session_id=session_id,
-                        storage_path=self.storage_path,
-                        thread_history=[],  # Could fetch if needed
-                        room_id=room.room_id,
-                    ):
-                        await streaming.update_content(chunk, self.client)
-
-                    await streaming.finalize(self.client)
-
-                except Exception as e:
-                    self.logger.error("Error in streaming response for reaction", error=str(e))
-            else:
-                # Non-streaming: Generate full response and edit once
-                response_text = await ai_response(
-                    agent_name=self.agent_name,
-                    prompt=prompt,
-                    session_id=session_id,
-                    storage_path=self.storage_path,
-                    thread_history=[],  # Could fetch if needed
-                    room_id=room.room_id,
-                )
-
-                # Edit the acknowledgment message with the full response
-                await self._edit_message(room.room_id, ack_event_id, response_text, thread_id)
+            await self._generate_response(
+                room_id=room.room_id,
+                prompt=prompt,
+                reply_to_event_id=event.reacts_to,
+                thread_id=thread_id,
+                thread_history=[],  # Could fetch if needed
+                existing_event_id=ack_event_id,  # Edit the acknowledgment
+            )
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -336,75 +299,67 @@ class AgentBot:
             mentioned_agents=mentioned_agents,
         )
 
-    async def _process_and_respond(
-        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
+    async def _generate_response(
+        self,
+        room_id: str,
+        prompt: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: list[dict],
+        existing_event_id: str | None = None,
     ) -> None:
-        self.logger.info("Processing", event_id=event.event_id)
+        """Generate and send/edit a response using AI.
 
-        prompt = event.body.strip()
-        if not prompt:
+        Args:
+            room_id: The room to send the response to
+            prompt: The prompt to send to the AI
+            reply_to_event_id: The event to reply to
+            thread_id: Thread ID if in a thread
+            thread_history: Thread history for context
+            existing_event_id: If provided, edit this message instead of sending a new one
+        """
+        if not prompt.strip():
             return
 
-        session_id = create_session_id(room.room_id, thread_id)
+        session_id = create_session_id(room_id, thread_id)
 
-        response_text = await ai_response(
-            agent_name=self.agent_name,
-            prompt=prompt,
-            session_id=session_id,
-            storage_path=self.storage_path,
-            thread_history=thread_history,
-            room_id=room.room_id,
-        )
-
-        # Check if the response suggests multiple options or needs user input
-        if interactive.should_create_interactive_question(response_text):
-            await interactive.handle_interactive_response(
-                self.client, room.room_id, thread_id, response_text, self.agent_name
+        if self.enable_streaming:
+            # Streaming response
+            sender_id = self.matrix_id
+            streaming = StreamingResponse(
+                room_id=room_id,
+                reply_to_event_id=reply_to_event_id,
+                thread_id=thread_id,
+                sender_domain=sender_id.domain,
             )
-        else:
-            await self._send_response(room, event.event_id, response_text, thread_id)
 
-    async def _process_and_respond_streaming(
-        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
-    ) -> None:
-        self.logger.info("Processing streaming", event_id=event.event_id)
+            # If we have an existing event to edit, set it
+            if existing_event_id:
+                streaming.event_id = existing_event_id
+                streaming.accumulated_text = ""  # Start fresh
 
-        prompt = event.body.strip()
-        if not prompt:
-            return
+            try:
+                async for chunk in ai_response_streaming(
+                    agent_name=self.agent_name,
+                    prompt=prompt,
+                    session_id=session_id,
+                    storage_path=self.storage_path,
+                    thread_history=thread_history,
+                    room_id=room_id,
+                ):
+                    await streaming.update_content(chunk, self.client)
 
-        session_id = create_session_id(room.room_id, thread_id)
-        sender_id = self.matrix_id
+                await streaming.finalize(self.client)
 
-        streaming = StreamingResponse(
-            room_id=room.room_id,
-            reply_to_event_id=event.event_id,
-            thread_id=thread_id,
-            sender_domain=sender_id.domain,
-        )
+                if streaming.event_id and not existing_event_id:
+                    self.response_tracker.mark_responded(reply_to_event_id)
+                    self.logger.info("Sent streaming response", event_id=streaming.event_id)
 
-        try:
-            async for chunk in ai_response_streaming(
-                agent_name=self.agent_name,
-                prompt=prompt,
-                session_id=session_id,
-                storage_path=self.storage_path,
-                thread_history=thread_history,
-                room_id=room.room_id,
-            ):
-                await streaming.update_content(chunk, self.client)
-
-            await streaming.finalize(self.client)
-
-            if streaming.event_id:
-                self.response_tracker.mark_responded(event.event_id)
-                self.logger.info("Sent streaming response", event_id=streaming.event_id)
-
-                # If the message contains an interactive question, handle it
-                if interactive.should_create_interactive_question(streaming.accumulated_text):
+                # Handle interactive questions if present
+                if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
                     await interactive.handle_interactive_response(
                         self.client,
-                        room.room_id,
+                        room_id,
                         thread_id,
                         streaming.accumulated_text,
                         self.agent_name,
@@ -412,8 +367,58 @@ class AgentBot:
                         event_id=streaming.event_id,
                     )
 
-        except Exception as e:
-            self.logger.error("Error in streaming response", error=str(e))
+            except Exception as e:
+                self.logger.error("Error in streaming response", error=str(e))
+        else:
+            # Non-streaming response
+            response_text = await ai_response(
+                agent_name=self.agent_name,
+                prompt=prompt,
+                session_id=session_id,
+                storage_path=self.storage_path,
+                thread_history=thread_history,
+                room_id=room_id,
+            )
+
+            if existing_event_id:
+                # Edit existing message
+                room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
+                await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+            else:
+                # Send new message or handle interactive
+                room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
+                if interactive.should_create_interactive_question(response_text):
+                    await interactive.handle_interactive_response(
+                        self.client, room_id, thread_id, response_text, self.agent_name
+                    )
+                else:
+                    event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
+                    if event_id:
+                        self.response_tracker.mark_responded(reply_to_event_id)
+
+    async def _process_and_respond(
+        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
+    ) -> None:
+        self.logger.info("Processing", event_id=event.event_id)
+        await self._generate_response(
+            room_id=room.room_id,
+            prompt=event.body,
+            reply_to_event_id=event.event_id,
+            thread_id=thread_id,
+            thread_history=thread_history,
+        )
+
+    async def _process_and_respond_streaming(
+        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_id: str | None, thread_history: list[dict]
+    ) -> None:
+        self.logger.info("Processing streaming", event_id=event.event_id)
+        await self._generate_response(
+            room_id=room.room_id,
+            prompt=event.body,
+            reply_to_event_id=event.event_id,
+            thread_id=thread_id,
+            thread_history=thread_history,
+        )
 
     async def _send_response(
         self, room: nio.MatrixRoom, reply_to_event_id: str, response_text: str, thread_id: str | None
