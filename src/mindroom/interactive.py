@@ -71,7 +71,6 @@ async def handle_reaction(
     Returns:
         Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
     """
-    # Check if this reaction relates to an active question
     question = _active_questions.get(event.reacts_to)
     if not question:
         logger.debug(
@@ -93,7 +92,6 @@ async def handle_reaction(
         )
         return None
 
-    # Check if the reaction is one of our options
     reaction_key = event.key
     if reaction_key not in question.options:
         return None
@@ -107,7 +105,6 @@ async def handle_reaction(
         logger.debug("Ignoring reaction from agent", sender=event.sender, reaction=reaction_key)
         return None
 
-    # Get the value for this reaction
     selected_value = question.options[reaction_key]
 
     logger.info(
@@ -121,7 +118,6 @@ async def handle_reaction(
     # The agent will continue the conversation based on this selection
     # No confirmation message needed - the emoji reaction itself is the user's response
 
-    # Remove the question after receiving response
     with suppress(KeyError):
         del _active_questions[event.reacts_to]
 
@@ -146,14 +142,12 @@ async def handle_text_response(
     Returns:
         Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
     """
-    # Check if this might be a response to a question
     message_text = event.body.strip()
 
     # Look for numeric responses
     if not message_text.isdigit() or len(message_text) > 1:
-        return
+        return None
 
-    # Extract thread info from the event
     _, thread_id = extract_thread_info(event.source)
 
     # Find matching active questions in this room/thread
@@ -180,7 +174,6 @@ async def handle_text_response(
             value=selected_value,
         )
 
-        # Remove the question after receiving response
         del _active_questions[question_event_id]
 
         return (selected_value, question.thread_id)
@@ -198,7 +191,6 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     Returns:
         InteractiveResponse with formatted_text, option_map, and options_list
     """
-    # Extract JSON from interactive code block
     match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
 
     if not match:
@@ -209,29 +201,24 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     except json.JSONDecodeError:
         return InteractiveResponse(response_text, None, None)
 
-    # Extract question and options
     question = interactive_data.get("question", DEFAULT_QUESTION)
     options = interactive_data.get("options", [])
 
     if not options:
         return InteractiveResponse(response_text, None, None)
 
-    # Limit options
     options = options[:MAX_OPTIONS]
-
-    # Remove the JSON block from the original text
     clean_response = response_text.replace(match.group(0), "").strip()
 
-    # Build option lines and optionally the mapping
     option_lines = []
-    option_map = {} if extract_mapping else None
+    option_map: dict[str, str] | None = {} if extract_mapping else None
 
     for i, opt in enumerate(options, 1):
         emoji_char = opt.get("emoji", "❓")
         label = opt.get("label", "Option")
         option_lines.append(f"{i}. {emoji_char} {label}")
 
-        if extract_mapping:
+        if extract_mapping and option_map is not None:
             value = opt.get("value", label.lower())
             option_map[emoji_char] = value
             option_map[str(i)] = value

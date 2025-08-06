@@ -161,7 +161,6 @@ class AgentBot:
         if room.room_id not in self.rooms:
             return
 
-        # Check if this might be a text response to an interactive question
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
         sender_id = MatrixID.parse(event.sender)
@@ -337,10 +336,7 @@ class AgentBot:
             await self._edit_message(room.room_id, existing_event_id, response_text, thread_id)
             return
 
-        # Check if the response contains an interactive question and format it
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
-
-        # Send the response (formatted or not)
         event_id = await self._send_response(room, reply_to_event_id, response.formatted_text, thread_id)
         if event_id and response.option_map and response.options_list:
             interactive.register_interactive_question(
@@ -395,7 +391,6 @@ class AgentBot:
 
             # If the message contains an interactive question, register it and add reactions
             if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
-                # The message is already formatted by parse_and_format_interactive in streaming
                 response = interactive.parse_and_format_interactive(streaming.accumulated_text, extract_mapping=True)
                 if response.option_map and response.options_list:
                     interactive.register_interactive_question(
