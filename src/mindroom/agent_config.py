@@ -7,6 +7,7 @@ import yaml
 from agno.agent import Agent
 from agno.storage.sqlite import SqliteStorage
 
+from . import agent_prompts
 from .logging_config import get_logger
 from .models import Config
 from .tools import get_tool_by_name
@@ -18,6 +19,19 @@ ROUTER_AGENT_NAME = "router"
 
 # Default path to agents configuration file
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
+
+# Rich prompt mapping - agents that use detailed prompts instead of simple roles
+RICH_PROMPTS = {
+    "code": agent_prompts.CODE_AGENT_PROMPT,
+    "research": agent_prompts.RESEARCH_AGENT_PROMPT,
+    "calculator": agent_prompts.CALCULATOR_AGENT_PROMPT,
+    "general": agent_prompts.GENERAL_AGENT_PROMPT,
+    "shell": agent_prompts.SHELL_AGENT_PROMPT,
+    "summary": agent_prompts.SUMMARY_AGENT_PROMPT,
+    "finance": agent_prompts.FINANCE_AGENT_PROMPT,
+    "news": agent_prompts.NEWS_AGENT_PROMPT,
+    "data_analyst": agent_prompts.DATA_ANALYST_AGENT_PROMPT,
+}
 
 
 @functools.cache
@@ -83,6 +97,16 @@ def create_agent(agent_name: str, storage_path: Path, config_path: Path | None =
     storage_path.mkdir(parents=True, exist_ok=True)
     storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
 
+    # Use rich prompt if available, otherwise use YAML config
+    if agent_name in RICH_PROMPTS:
+        logger.info(f"Using rich prompt for agent: {agent_name}")
+        role = RICH_PROMPTS[agent_name]
+        instructions = []  # Instructions are in the rich prompt
+    else:
+        logger.info(f"Using YAML config for agent: {agent_name}")
+        role = agent_config.role
+        instructions = agent_config.instructions
+
     # Create agent with defaults applied
     model = get_model_instance(agent_config.model)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
@@ -90,10 +114,10 @@ def create_agent(agent_name: str, storage_path: Path, config_path: Path | None =
 
     agent = Agent(
         name=agent_config.display_name,
-        role=agent_config.role,
+        role=role,
         model=model,
         tools=tools,
-        instructions=agent_config.instructions,
+        instructions=instructions,
         storage=storage,
         add_history_to_messages=agent_config.add_history_to_messages
         if agent_config.add_history_to_messages is not None
