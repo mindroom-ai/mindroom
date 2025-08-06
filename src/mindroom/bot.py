@@ -349,6 +349,7 @@ class AgentBot:
                         streaming.accumulated_text,
                         self.agent_name,
                         response_already_sent=True,
+                        event_id=streaming.event_id,
                     )
 
         except Exception as e:

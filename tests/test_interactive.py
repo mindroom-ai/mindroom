@@ -43,7 +43,6 @@ class TestInteractiveFunctions:
         interactive._active_questions.clear()
 
         # Mock room_send responses
-        mock_text_response = MagicMock(spec=nio.RoomSendResponse)
         mock_question_response = MagicMock(spec=nio.RoomSendResponse)
         mock_question_response.event_id = "$question123"
         mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
@@ -52,8 +51,7 @@ class TestInteractiveFunctions:
         mock_reaction_response.event_id = "$react123"
 
         mock_client.room_send.side_effect = [
-            mock_text_response,  # Clean text send
-            mock_question_response,  # Question send
+            mock_question_response,  # Question send (now combined)
             mock_reaction_response,  # Reactions
             mock_reaction_response,
         ]
@@ -77,10 +75,13 @@ Based on your choice, I'll proceed accordingly."""
             mock_client, "!room:localhost", "$thread123", response_text, "test_agent"
         )
 
-        # Should send clean text first
+        # Should send formatted message with question
         first_call = mock_client.room_send.call_args_list[0]
         assert "Let me help you decide." in first_call[1]["content"]["body"]
         assert "Based on your choice" in first_call[1]["content"]["body"]
+        assert "What approach would you prefer?" in first_call[1]["content"]["body"]
+        assert "🚀 Fast and automated" in first_call[1]["content"]["body"]
+        assert "🔍 Careful and manual" in first_call[1]["content"]["body"]
         assert "```interactive" not in first_call[1]["content"]["body"]
 
         # Should create question
@@ -136,10 +137,8 @@ Based on your choice, I'll proceed accordingly."""
 
         await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text, "test_agent")
 
-        # Should send the clean response
-        mock_client.room_send.assert_called_once()
-
-        # Should not create any question
+        # Should not send anything or create any question when options are empty
+        mock_client.room_send.assert_not_called()
         assert len(interactive._active_questions) == 0
 
     @pytest.mark.asyncio
@@ -294,15 +293,13 @@ Based on your choice, I'll proceed accordingly."""
         interactive._active_questions.clear()
 
         # Mock room_send responses
-        mock_text_response = MagicMock(spec=nio.RoomSendResponse)
         mock_question_response = MagicMock(spec=nio.RoomSendResponse)
         mock_question_response.event_id = "$question456"
         mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
         mock_reaction_response.event_id = "$react456"
 
         mock_client.room_send.side_effect = [
-            mock_text_response,  # Clean text send
-            mock_question_response,  # Question send
+            mock_question_response,  # Question send (now combined)
             mock_reaction_response,  # Reaction
         ]
 
@@ -329,31 +326,57 @@ interactive
         assert options["1"] == "yes"
 
     @pytest.mark.asyncio
-    async def test_create_interactive_question_too_many_options(self, mock_client):
-        """Test that too many options get truncated to 5."""
+    async def test_handle_interactive_response_streaming_mode(self, mock_client):
+        """Test creating interactive question in streaming mode (editing existing message)."""
         interactive._active_questions.clear()
 
-        mock_response = MagicMock(spec=nio.RoomSendResponse)
-        mock_response.event_id = "$question123"
-        mock_client.room_send.return_value = mock_response
+        # Mock room_send responses for edit and reactions
+        mock_edit_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
 
-        options = [
-            {"emoji": "1️⃣", "label": "Option 1", "value": "opt1"},
-            {"emoji": "2️⃣", "label": "Option 2", "value": "opt2"},
-            {"emoji": "3️⃣", "label": "Option 3", "value": "opt3"},
-            {"emoji": "4️⃣", "label": "Option 4", "value": "opt4"},
-            {"emoji": "5️⃣", "label": "Option 5", "value": "opt5"},
-            {"emoji": "6️⃣", "label": "Option 6", "value": "opt6"},  # This should be truncated
+        mock_client.room_send.side_effect = [
+            mock_edit_response,  # Edit message
+            mock_reaction_response,  # First reaction
+            mock_reaction_response,  # Second reaction
         ]
 
-        await interactive.create_interactive_question(
-            mock_client, "!room:localhost", None, "Choose one:", options, "test_agent"
+        response_text = """I'll help you with that.
+
+```interactive
+{
+    "question": "How should I proceed?",
+    "options": [
+        {"emoji": "⚡", "label": "Fast", "value": "fast"},
+        {"emoji": "🐢", "label": "Slow", "value": "slow"}
+    ]
+}
+```"""
+
+        # Simulate streaming mode with existing event_id
+        existing_event_id = "$existing123"
+        await interactive.handle_interactive_response(
+            mock_client,
+            "!room:localhost",
+            "$thread123",
+            response_text,
+            "test_agent",
+            response_already_sent=True,
+            event_id=existing_event_id,
         )
 
-        _, _, saved_options, _ = interactive._active_questions["$question123"]
-        # Should only have 5 options (plus their numeric equivalents)
-        numeric_keys = [k for k in saved_options if k.isdigit()]
-        assert len(numeric_keys) == 5
+        # Should edit the existing message
+        first_call = mock_client.room_send.call_args_list[0]
+        assert first_call[1]["content"]["m.relates_to"]["rel_type"] == "m.replace"
+        assert first_call[1]["content"]["m.relates_to"]["event_id"] == existing_event_id
+
+        # Check edited content
+        assert "I'll help you with that." in first_call[1]["content"]["body"]
+        assert "How should I proceed?" in first_call[1]["content"]["body"]
+        assert "⚡ Fast" in first_call[1]["content"]["body"]
+        assert "```interactive" not in first_call[1]["content"]["body"]
+
+        # Should store question with existing event_id
+        assert existing_event_id in interactive._active_questions
 
     @pytest.mark.asyncio
     async def test_complete_flow(self, mock_client):
@@ -361,7 +384,6 @@ interactive
         interactive._active_questions.clear()
 
         # Mock all room_send responses
-        mock_text_send = MagicMock(spec=nio.RoomSendResponse)
         mock_question_send = MagicMock(spec=nio.RoomSendResponse)
         mock_question_send.event_id = "$q123"
         mock_reaction_send = MagicMock(spec=nio.RoomSendResponse)
@@ -374,8 +396,7 @@ interactive
         def room_send_side_effect(*args, **kwargs):
             nonlocal call_count
             responses = [
-                mock_text_send,  # Initial text
-                mock_question_send,  # Question
+                mock_question_send,  # Question (now combined)
                 mock_reaction_send,  # First reaction
                 mock_reaction_send,  # Second reaction
                 mock_reaction_send,  # Third reaction
@@ -430,5 +451,5 @@ Just let me know your preference!"""
 
         # Verify confirmation was sent
         assert "$q123" not in interactive._active_questions
-        # We expect 6 calls: 1 clean text + 1 question + 3 reactions + 1 confirmation
-        assert mock_client.room_send.call_count == 6
+        # We expect 5 calls: 1 question + 3 reactions + 1 confirmation
+        assert mock_client.room_send.call_count == 5

@@ -35,6 +35,7 @@ async def handle_interactive_response(
     response_text: str,
     agent_name: str,
     response_already_sent: bool = False,
+    event_id: str | None = None,
 ) -> None:
     """Create an interactive question from JSON in the AI response.
 
@@ -43,7 +44,9 @@ async def handle_interactive_response(
         room_id: The room ID
         thread_id: Thread ID if in a thread
         response_text: The AI's response containing an interactive code block
+        agent_name: The name of the agent creating the question
         response_already_sent: Whether the response text has already been sent (e.g., in streaming mode)
+        event_id: The event ID of the message to edit (if in streaming mode)
     """
     # Extract JSON from interactive code block
     # Handle both ```interactive and ```\ninteractive formats
@@ -66,95 +69,78 @@ async def handle_interactive_response(
             await _send_response_text(client, room_id, thread_id, response_text)
         return
 
-    # Send the original response first (without the interactive block) if not already sent
-    if not response_already_sent:
-        clean_response = response_text.replace(match.group(0), "").strip()
-        if clean_response:
-            await _send_response_text(client, room_id, thread_id, clean_response)
+    # Extract question and options
+    question = interactive_data.get("question", "Please choose an option:")
+    options = interactive_data.get("options", [])
 
-    # Create the interactive question
-    question_event_id = await create_interactive_question(
-        client=client,
-        room_id=room_id,
-        thread_id=thread_id,
-        question=interactive_data.get("question", "Please choose an option:"),
-        options=interactive_data.get("options", []),
-        agent_name=agent_name,
-    )
-
-    if question_event_id:
-        logger.info("Created interactive question from response", event_id=question_event_id)
-
-
-async def create_interactive_question(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str | None,
-    question: str,
-    options: list[dict[str, str]],
-    agent_name: str,
-) -> str | None:
-    """Send an interactive question with reaction options.
-
-    Args:
-        client: The Matrix client
-        room_id: The room to send the question in
-        thread_id: Thread ID if in a thread
-        question: The question text
-        options: List of option dicts with emoji, label, and value
-
-    Returns:
-        Event ID of the question message, or None if failed
-    """
     if not options:
         logger.warning("No options provided for interactive question")
-        return None
+        return
 
     if len(options) > 5:
         logger.warning("Too many options for interactive question", count=len(options))
         options = options[:5]
 
-    # Build the message content
-    message_lines = [question, ""]
-    option_map = {}
+    # Build the formatted question text
+    clean_response = response_text.replace(match.group(0), "").strip()
 
+    # Build option lines
+    option_lines = []
+    option_map = {}
     for i, opt in enumerate(options, 1):
         emoji_char = opt.get("emoji", "❓")
         label = opt.get("label", "Option")
         value = opt.get("value", label.lower())
 
-        message_lines.append(f"{emoji_char} {label}")
+        option_lines.append(f"{emoji_char} {label}")
         # Support both emoji and numeric responses
         option_map[emoji_char] = value
         option_map[str(i)] = value
 
-    message_lines.extend(["", "React with an emoji or type the number to respond."])
-    message_text = "\n".join(message_lines)
+    # Combine everything into the final message
+    message_parts = []
+    if clean_response:
+        message_parts.append(clean_response)
+    message_parts.append("")  # Empty line
+    message_parts.append(question)
+    message_parts.append("")  # Empty line
+    message_parts.extend(option_lines)
+    message_parts.append("")  # Empty line
+    message_parts.append("React with an emoji or type the number to respond.")
 
-    # Send the message
-    sender_domain = extract_domain_from_user_id(client.user_id)
-    content = create_mention_content_from_text(
-        message_text,
-        sender_domain=sender_domain,
-        thread_event_id=thread_id,
-    )
+    final_text = "\n".join(message_parts)
+    if not final_text.rstrip().endswith("✓"):
+        final_text += " ✓"
 
-    response = await client.room_send(
-        room_id=room_id,
-        message_type="m.room.message",
-        content=content,
-    )
+    # If we have an event_id (streaming mode), edit the existing message
+    if event_id and response_already_sent:
+        await _edit_message_with_question(client, room_id, event_id, final_text, thread_id)
+        question_event_id = event_id
+    else:
+        # Otherwise, send a new message
+        sender_domain = extract_domain_from_user_id(client.user_id)
+        content = create_mention_content_from_text(
+            final_text,
+            sender_domain=sender_domain,
+            thread_event_id=thread_id,
+        )
 
-    if not isinstance(response, nio.RoomSendResponse):
-        logger.error("Failed to send interactive question", error=str(response))
-        return None
+        response = await client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content,
+        )
 
-    question_event_id: str = response.event_id
+        if not isinstance(response, nio.RoomSendResponse):
+            logger.error("Failed to send interactive question", error=str(response))
+            return
 
-    # Store the active question with the agent who created it
+        question_event_id = response.event_id
+
+    # Store the active question
     _active_questions[question_event_id] = (room_id, thread_id, option_map, agent_name)
 
-    # Add reaction buttons (bot pre-adds them for better UX)
+    # Add reaction buttons
     for opt in options:
         emoji_char = opt.get("emoji", "❓")
         reaction_response = await client.room_send(
@@ -171,13 +157,7 @@ async def create_interactive_question(
         if not isinstance(reaction_response, nio.RoomSendResponse):
             logger.warning("Failed to add reaction", emoji=emoji_char, error=str(reaction_response))
 
-    logger.info(
-        "Sent interactive question",
-        event_id=question_event_id,
-        options=len(options),
-    )
-
-    return question_event_id
+    logger.info("Created interactive question", event_id=question_event_id, options=len(options))
 
 
 async def handle_reaction(
@@ -330,6 +310,40 @@ async def _send_response_text(
         message_type="m.room.message",
         content=content,
     )
+
+
+async def _edit_message_with_question(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_id: str,
+    new_text: str,
+    thread_id: str | None,
+) -> None:
+    """Edit an existing message to show the interactive question."""
+    sender_domain = extract_domain_from_user_id(client.user_id)
+    content = create_mention_content_from_text(
+        new_text,
+        sender_domain=sender_domain,
+        thread_event_id=thread_id,
+    )
+
+    edit_content = {
+        "msgtype": "m.text",
+        "body": f"* {new_text}",
+        "format": "org.matrix.custom.html",
+        "formatted_body": content.get("formatted_body", new_text),
+        "m.new_content": content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+    }
+
+    response = await client.room_send(
+        room_id=room_id,
+        message_type="m.room.message",
+        content=edit_content,
+    )
+
+    if not isinstance(response, nio.RoomSendResponse):
+        logger.error("Failed to edit message with interactive question", error=str(response))
 
 
 async def _send_confirmation(
