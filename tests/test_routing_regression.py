@@ -272,10 +272,10 @@ class TestRoutingRegression:
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test that router messages include completion marker so mentioned agents respond.
+        """Test that router messages trigger responses from mentioned agents.
 
         Regression test for potential issue where router mentions an agent but
-        that agent ignores it because there's no completion marker.
+        that agent ignores it.
         """
         test_room_id = "!research:localhost"
 
@@ -308,14 +308,14 @@ class TestRoutingRegression:
         mock_room.room_id = test_room_id
 
         # Simulate router message from router agent mentioning research
-        # The router always includes completion marker in its messages
+        # The router sends its messages
         router_message = MagicMock(spec=nio.RoomMessageText)
         router_message.sender = "@mindroom_router:localhost"
-        router_message.body = "@research could you help with this? ✓"
+        router_message.body = "@research could you help with this?"
         router_message.event_id = "$router_msg"
         router_message.source = {
             "content": {
-                "body": "@research could you help with this? ✓",
+                "body": "@research could you help with this?",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
             }
         }
@@ -323,6 +323,6 @@ class TestRoutingRegression:
         # Process router message with research bot
         await research_bot._on_message(mock_room, router_message)
 
-        # Research bot SHOULD respond (router messages always have completion marker)
+        # Research bot SHOULD respond
         assert research_bot.client.room_send.call_count == 1
         assert mock_ai_response.call_count == 1

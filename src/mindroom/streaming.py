@@ -24,6 +24,7 @@ class StreamingResponse:
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
     update_interval: float = 0.1  # 100ms updates
+    in_progress_marker: str = " ⋯"  # Marker shown during streaming
 
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
@@ -35,12 +36,10 @@ class StreamingResponse:
             self.last_update = current_time
 
     async def finalize(self, client: nio.AsyncClient) -> None:
-        """Send final message update with completion marker."""
-        if not self.accumulated_text.endswith(" ✓"):
-            self.accumulated_text += " ✓"
-        await self._send_or_edit_message(client)
+        """Send final message update."""
+        await self._send_or_edit_message(client, is_final=True)
 
-    async def _send_or_edit_message(self, client: nio.AsyncClient) -> None:
+    async def _send_or_edit_message(self, client: nio.AsyncClient, is_final: bool = False) -> None:
         """Send new message or edit existing one."""
         if not self.accumulated_text.strip():
             return
@@ -48,8 +47,13 @@ class StreamingResponse:
         # Always ensure we have a thread_id - use the original message as thread root if needed
         effective_thread_id = self.thread_id if self.thread_id else self.reply_to_event_id
 
+        # Add in-progress marker during streaming (not on final update)
+        text_to_send = self.accumulated_text
+        if not is_final:
+            text_to_send += self.in_progress_marker
+
         # Format the text (handles interactive questions if present)
-        response = interactive.parse_and_format_interactive(self.accumulated_text, extract_mapping=False)
+        response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=False)
         display_text = response.formatted_text
 
         content = create_mention_content_from_text(

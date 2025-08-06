@@ -113,8 +113,8 @@ async def test_agent_processes_direct_mention(
                 assert bot.client.room_send.call_count == 2
                 call_args = bot.client.room_send.call_args
                 assert call_args[1]["room_id"] == test_room_id
-                # Since streaming is enabled, the final message will have the completion marker
-                assert call_args[1]["content"]["body"] == "15% of 200 is 30 ✓"
+                # Check the final message content
+                assert call_args[1]["content"]["body"] == "15% of 200 is 30"
 
 
 @pytest.mark.asyncio

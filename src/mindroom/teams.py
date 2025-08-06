@@ -59,7 +59,7 @@ def should_form_team(
             mode=TeamMode.COLLABORATE,
         )
 
-    # Case 3: No agents tagged but multiple in thread (backwards compatibility)
+    # Case 3: No agents tagged but multiple in thread
     if not tagged_agents and len(agents_in_thread) > 1:
         logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
         return ShouldFormTeamResult(

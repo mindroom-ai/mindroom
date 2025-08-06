@@ -218,21 +218,21 @@ class TestStreamingEdits:
         assert bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0
 
-        # Edit from agent that NOW mentions calculator
+        # Edit from agent that NOW mentions calculator (with in-progress marker)
         edit_event = MagicMock()
         edit_event.sender = "@mindroom_helper:localhost"  # Same agent
-        edit_event.body = "* Let me calculate something... @mindroom_calculator:localhost can you help?"
+        edit_event.body = "* Let me calculate something... @mindroom_calculator:localhost can you help? ⋯"
         edit_event.event_id = "$edit1"
         edit_event.source = {
             "content": {
-                "body": "* Let me calculate something... @mindroom_calculator:localhost can you help?",
+                "body": "* Let me calculate something... @mindroom_calculator:localhost can you help? ⋯",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 "m.relates_to": {
                     "rel_type": "m.replace",
                     "event_id": "$initial123",
                 },
                 "m.new_content": {
-                    "body": "Let me calculate something... @mindroom_calculator:localhost can you help?",
+                    "body": "Let me calculate something... @mindroom_calculator:localhost can you help? ⋯",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
             }

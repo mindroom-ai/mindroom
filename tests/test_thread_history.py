@@ -33,12 +33,12 @@ class TestThreadHistory:
         router_event = MagicMock(spec=nio.RoomMessageText)
         router_event.event_id = "$router_msg"
         router_event.sender = "@mindroom_news:localhost"
-        router_event.body = "@mindroom_research:localhost could you help with this? ✓"
+        router_event.body = "@mindroom_research:localhost could you help with this?"
         router_event.server_timestamp = 2000
         router_event.source = {
             "type": "m.room.message",
             "content": {
-                "body": "@mindroom_research:localhost could you help with this? ✓",
+                "body": "@mindroom_research:localhost could you help with this?",
                 "m.relates_to": {
                     "rel_type": "m.thread",
                     "event_id": "$thread_root",
@@ -65,7 +65,7 @@ class TestThreadHistory:
         assert history[0]["sender"] == "@user:localhost"
 
         assert history[1]["event_id"] == "$router_msg"
-        assert history[1]["body"] == "@mindroom_research:localhost could you help with this? ✓"
+        assert history[1]["body"] == "@mindroom_research:localhost could you help with this?"
         assert history[1]["sender"] == "@mindroom_news:localhost"
 
     @pytest.mark.asyncio

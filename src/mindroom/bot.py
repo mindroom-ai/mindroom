@@ -185,7 +185,8 @@ class AgentBot:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
-        if sender_is_agent and context.am_i_mentioned and not event.body.rstrip().endswith("✓"):
+        # Check if message is still being streamed (has in-progress marker)
+        if sender_is_agent and context.am_i_mentioned and event.body.rstrip().endswith("⋯"):
             self.logger.debug("Ignoring mention from agent - streaming not complete", sender=event.sender)
             return
 
@@ -462,9 +463,6 @@ class AgentBot:
         # Always ensure we have a thread_id - use the original message as thread root if needed
         effective_thread_id = thread_id if thread_id else reply_to_event_id
 
-        if not response_text.rstrip().endswith("✓"):
-            response_text += " ✓"
-
         content = create_mention_content_from_text(
             response_text,
             sender_domain=sender_domain,
@@ -489,9 +487,6 @@ class AgentBot:
         """
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
-
-        if not new_text.rstrip().endswith("✓"):
-            new_text += " ✓"
 
         content = create_mention_content_from_text(
             new_text,
@@ -535,7 +530,7 @@ class AgentBot:
             return
 
         # Router mentions the suggested agent and asks them to help
-        response_text = f"@{suggested_agent} could you help with this? ✓"
+        response_text = f"@{suggested_agent} could you help with this?"
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
