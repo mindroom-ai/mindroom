@@ -1,14 +1,17 @@
 """Multi-agent bot implementation where each agent has its own Matrix user account."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import nio
 
-from .agent_config import load_config
+from .agent_config import ROUTER_AGENT_NAME, create_agent, load_config
 from .ai import ai_response, ai_response_streaming
 from .commands import (
     Command,
@@ -35,21 +38,25 @@ from .matrix import (
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .streaming import StreamingResponse
+from .teams import create_team_response, should_form_team
 from .thread_invites import ThreadInviteManager
 from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
     get_agents_in_thread,
+    get_all_mentioned_agents_in_thread,
     get_available_agents_in_room,
     should_agent_respond,
 )
+
+if TYPE_CHECKING:
+    from agno.agent import Agent
 
 logger = get_logger(__name__)
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
-ROUTER_AGENT_NAME = "router"
 
 
 @dataclass
@@ -78,6 +85,7 @@ class AgentBot:
     thread_invite_manager: ThreadInviteManager = field(init=False)
     invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
+    orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
 
     @property
     def agent_name(self) -> str:
@@ -93,6 +101,11 @@ class AgentBot:
     def matrix_id(self) -> MatrixID:
         """Get the Matrix ID for this agent bot."""
         return MatrixID.parse(self.agent_user.user_id)
+
+    @cached_property
+    def agent(self) -> Agent:
+        """Get the Agno Agent instance for this bot."""
+        return create_agent(agent_name=self.agent_name, storage_path=self.storage_path / "agents")
 
     async def start(self) -> None:
         """Start the agent bot."""
@@ -170,39 +183,56 @@ class AgentBot:
             self.logger.debug("Ignoring mention from agent - streaming not complete", sender=event.sender)
             return
 
-        # Router agent only routes, never participates in conversations
+        # Router agent has one simple job: route messages when no specific agent is mentioned
         if self.agent_name == ROUTER_AGENT_NAME:
-            # Router should handle routing when no specific agent is mentioned
             if not context.mentioned_agents:
-                # For threads, only route if no agent has participated yet
-                if context.is_thread:
-                    agents_in_thread = get_agents_in_thread(context.thread_history)
-                    if not agents_in_thread:
-                        await self._handle_ai_routing(room, event, context.thread_history)
-                else:
-                    # For non-thread messages (when no agents are mentioned), always route
+                # Only route if no agents have participated in the thread yet
+                agents_in_thread = get_agents_in_thread(context.thread_history)
+                if not agents_in_thread:
                     await self._handle_ai_routing(room, event, context.thread_history)
             return
 
-        # Determine if this agent should respond to the message
+        if self._should_skip_duplicate_response(event):
+            return
+
+        # Check if we should form a team first
+        agents_in_thread = get_agents_in_thread(context.thread_history)
+        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history)
+        form_team = should_form_team(context.mentioned_agents, agents_in_thread, all_mentioned_in_thread)
+
+        # Simple team formation: only the first agent (alphabetically) handles team formation
+        if form_team.should_form_team and self.agent_name in form_team.agents:
+            # Simple coordination: let the first agent alphabetically handle the team
+            first_agent = min(form_team.agents)
+            if self.agent_name != first_agent:
+                # Other agents in the team don't respond individually
+                return
+
+            # Create and execute team response
+            team_response = await create_team_response(
+                agent_names=form_team.agents,
+                mode=form_team.mode,
+                message=event.body,
+                orchestrator=self.orchestrator,
+                thread_history=context.thread_history,
+            )
+            await self._send_response(room, event.event_id, team_response, context.thread_id)
+            return
+
+        # Determine if this agent should respond individually
         should_respond = should_agent_respond(
-            self.agent_name,
-            context.am_i_mentioned,
-            context.is_thread,
-            context.is_invited_to_thread,
-            room.room_id,
-            self.rooms,
-            context.thread_history,
-            context.mentioned_agents,
+            agent_name=self.agent_name,
+            am_i_mentioned=context.am_i_mentioned,
+            is_thread=context.is_thread,
+            room_id=room.room_id,
+            configured_rooms=self.rooms,
+            thread_history=context.thread_history,
         )
 
         if should_respond and not context.am_i_mentioned:
             self.logger.info("Will respond: only agent in thread")
 
         if not should_respond:
-            return
-
-        if self._should_skip_duplicate_response(event):
             return
 
         # Process and send response
@@ -324,7 +354,7 @@ class AgentBot:
         response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
         if isinstance(response, nio.RoomSendResponse):
             self.response_tracker.mark_responded(reply_to_event_id)
-            self.logger.info("Sent response", event_id=response.event_id)
+            self.logger.info("Sent response", event_id=response.event_id, room_name=room.name)
             return True
         else:
             self.logger.error("Failed to send response", error=str(response))
@@ -517,7 +547,13 @@ class MultiAgentOrchestrator:
 
             enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
 
-            bot = AgentBot(agent_user, self.storage_path, rooms=resolved_rooms, enable_streaming=enable_streaming)
+            bot = AgentBot(
+                agent_user,
+                self.storage_path,
+                rooms=resolved_rooms,
+                enable_streaming=enable_streaming,
+            )
+            bot.orchestrator = self  # Set orchestrator reference
             self.agent_bots[agent_name] = bot
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))

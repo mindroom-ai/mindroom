@@ -1,5 +1,6 @@
 import functools
 import os
+import traceback
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -10,10 +11,11 @@ from agno.models.anthropic import Claude
 from agno.models.base import Model
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
+from agno.models.openrouter import OpenRouter
 from agno.run.response import RunResponse, RunResponseContentEvent
 from dotenv import load_dotenv
 
-from .agent_config import create_agent, load_config
+from .agent_config import load_config
 from .logging_config import get_logger
 from .memory import (
     build_memory_enhanced_prompt,
@@ -64,6 +66,8 @@ def get_model_instance(model_name: str = "default") -> Model:
         return OpenAIChat(id=model_id)
     if provider == "anthropic":
         return Claude(id=model_id)
+    if provider == "openrouter":
+        return OpenRouter(id=model_id)
 
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)
@@ -127,11 +131,12 @@ async def _prepare_agent_and_prompt(
     Returns:
         Tuple of (agent, full_prompt, session_id)
     """
-    model = get_model_instance()
+    from .agent_config import create_agent
+
     enhanced_prompt = build_memory_enhanced_prompt(prompt, agent_name, storage_path, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
-    agent = create_agent(agent_name, model, storage_path=storage_path)
+    agent = create_agent(agent_name, storage_path=storage_path)
     return agent, full_prompt
 
 
@@ -167,7 +172,10 @@ async def ai_response(
         return response_text
     except Exception as e:
         # AI models can fail for various reasons (network, API limits, etc)
-        logger.exception(f"Error generating AI response: {e}")
+        logger.exception(f"Error generating AI response for agent {agent_name}: {e}")
+        logger.error(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
+        logger.error(f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}")
+        logger.error(f"Traceback:\n{traceback.format_exc()}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"
 
 

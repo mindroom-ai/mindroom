@@ -143,7 +143,9 @@ class TestMatrixRegistration:
         """Test successful user registration."""
         mock_client = AsyncMock()
         # Mock successful registration
-        mock_response = MagicMock(spec=nio.RegisterResponse)
+        mock_response = nio.RegisterResponse(
+            user_id="@test_user:localhost", device_id="TEST_DEVICE", access_token="test_token"
+        )
         mock_client.register.return_value = mock_response
         mock_login_response = MagicMock(spec=nio.LoginResponse)
         mock_client.login.return_value = mock_login_response

@@ -161,7 +161,9 @@ async def test_agent_ignores_other_agents(
 
 
 @pytest.mark.asyncio
+@patch("mindroom.teams.Team.arun")
 async def test_agent_responds_in_threads_based_on_participation(
+    mock_team_arun: AsyncMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
 ) -> None:
@@ -177,6 +179,15 @@ async def test_agent_responds_in_threads_based_on_participation(
         mock_login.return_value = mock_client
 
         bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
+
+        # Mock orchestrator
+        mock_orchestrator = MagicMock()
+        mock_agent_bot = MagicMock()
+        mock_agent_bot.agent = MagicMock()
+        mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
+        bot.orchestrator = mock_orchestrator
+        mock_team_arun.return_value = "Team response"
+
         await bot.start()
 
         # Test 1: Thread with only this agent - should respond without mention
@@ -230,8 +241,9 @@ async def test_agent_responds_in_threads_based_on_participation(
             # Non-streaming makes 1 call
             assert bot.client.room_send.call_count == 1
 
-        # Test 2: Thread with multiple agents - should NOT respond without mention
+        # Test 2: Thread with multiple agents - should form team and respond
         bot.client.room_send.reset_mock()
+        mock_team_arun.reset_mock()
 
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
@@ -256,9 +268,14 @@ async def test_agent_responds_in_threads_based_on_participation(
 
             await bot._on_message(room, message_event)
 
-            # Should NOT process without mention when multiple agents
+            # Should form team and send team response when multiple agents in thread
             mock_ai.assert_not_called()
-            bot.client.room_send.assert_not_called()
+            mock_team_arun.assert_called_once()
+            bot.client.room_send.assert_called_once()  # Team response sent
+
+        # Reset mocks for Test 3
+        bot.client.room_send.reset_mock()
+        mock_team_arun.reset_mock()
 
         # Test 3: Thread with multiple agents WITH mention - should respond
         message_event_with_mention = nio.RoomMessageText(
