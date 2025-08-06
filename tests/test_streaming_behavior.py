@@ -135,7 +135,7 @@ class TestStreamingBehavior:
         assert calc_bot.client.room_send.call_count == 0
         assert mock_ai_response.call_count == 0  # Calculator didn't process anything
 
-        # Now simulate the final message with completion marker
+        # Now simulate the final message
         final_event = MagicMock(spec=nio.RoomMessageText)
         final_event.sender = "@mindroom_helper:localhost"
         final_event.body = "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?"
@@ -318,14 +318,12 @@ class TestStreamingBehavior:
         # The body should contain the in-progress marker
         assert streaming.in_progress_marker in content["body"]
         assert "Hello world" in content["body"]
-        # No completion marker anymore
 
         # Finalize the message
         await streaming.finalize(mock_client)
 
-        # Check the final message has completion marker but no in-progress marker
+        # Check the final message has no in-progress marker
         final_call = mock_client.room_send.call_args_list[-1]
         final_content = final_call[1]["content"]
-        # Check the final message has no in-progress marker
         assert streaming.in_progress_marker not in final_content["body"]
         assert "Hello world" in final_content["body"]

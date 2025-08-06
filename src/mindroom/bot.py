@@ -463,8 +463,6 @@ class AgentBot:
         # Always ensure we have a thread_id - use the original message as thread root if needed
         effective_thread_id = thread_id if thread_id else reply_to_event_id
 
-        # No completion marker needed anymore
-
         content = create_mention_content_from_text(
             response_text,
             sender_domain=sender_domain,
@@ -489,8 +487,6 @@ class AgentBot:
         """
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
-
-        # No completion marker needed anymore
 
         content = create_mention_content_from_text(
             new_text,
