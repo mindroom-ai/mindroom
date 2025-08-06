@@ -23,7 +23,8 @@ def should_create_interactive_question(response_text: str) -> bool:
     Returns:
         True if an interactive code block is found
     """
-    return "```interactive" in response_text
+    # Check for both formats: ```interactive and ```\ninteractive
+    return "```interactive" in response_text or "```\ninteractive" in response_text
 
 
 async def handle_interactive_response(
@@ -43,7 +44,8 @@ async def handle_interactive_response(
         response_already_sent: Whether the response text has already been sent (e.g., in streaming mode)
     """
     # Extract JSON from interactive code block
-    pattern = r"```interactive\s*\n(.*?)\n```"
+    # Handle both ```interactive and ```\ninteractive formats
+    pattern = r"```(?:interactive\s*)?\n(?:interactive\s*\n)?(.*?)\n```"
     match = re.search(pattern, response_text, re.DOTALL)
 
     if not match:

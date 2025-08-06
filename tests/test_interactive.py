@@ -21,12 +21,15 @@ class TestInteractiveFunctions:
 
     def test_should_create_interactive_question(self):
         """Test detection of interactive code blocks."""
-        # Should detect
+        # Should detect - standard format
         assert interactive.should_create_interactive_question("Here's a question:\n```interactive\n{}\n```")
 
         assert interactive.should_create_interactive_question(
             'Text before\n```interactive\n{"question": "test"}\n```\nText after'
         )
+
+        # Should detect - newline format (agent mistake)
+        assert interactive.should_create_interactive_question("Here's a question:\n```\ninteractive\n{}\n```")
 
         # Should not detect
         assert not interactive.should_create_interactive_question("Regular message without code block")
@@ -274,6 +277,47 @@ Based on your choice, I'll proceed accordingly."""
 
         # Question should still be active
         assert "$question123" in interactive._active_questions
+
+    @pytest.mark.asyncio
+    async def test_handle_interactive_response_newline_format(self, mock_client):
+        """Test creating interactive question from JSON with newline format."""
+        # Clear any existing questions
+        interactive._active_questions.clear()
+
+        # Mock room_send responses
+        mock_text_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_question_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_question_response.event_id = "$question456"
+        mock_reaction_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_reaction_response.event_id = "$react456"
+
+        mock_client.room_send.side_effect = [
+            mock_text_response,  # Clean text send
+            mock_question_response,  # Question send
+            mock_reaction_response,  # Reaction
+        ]
+
+        # Test with newline format (agent mistake)
+        response_text = """Let me help.
+
+```
+interactive
+{
+    "question": "Choose an option:",
+    "options": [
+        {"emoji": "✅", "label": "Yes", "value": "yes"}
+    ]
+}
+```"""
+
+        await interactive.handle_interactive_response(mock_client, "!room:localhost", None, response_text)
+
+        # Should create question despite the format
+        assert "$question456" in interactive._active_questions
+        room_id, thread_id, options = interactive._active_questions["$question456"]
+        assert room_id == "!room:localhost"
+        assert options["✅"] == "yes"
+        assert options["1"] == "yes"
 
     @pytest.mark.asyncio
     async def test_create_interactive_question_too_many_options(self, mock_client):

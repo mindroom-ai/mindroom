@@ -14,7 +14,8 @@ memory:
 models:
   default:  # Default model used when agent doesn't specify one
     provider: "ollama"
-    id: "gpt-oss:20b"
+    id: "devstral:24b"
+    #id: "gpt-oss:20b"
 
   anthropic:
     provider: "anthropic"

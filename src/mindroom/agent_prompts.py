@@ -12,7 +12,7 @@ INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between option
 }
 ```
 
-You must include the interactive block in a code block with the language `interactive`, including the opening and closing triple backticks.
+IMPORTANT: You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word "interactive").
 
 The user can respond by:
 - Clicking the emoji reaction
