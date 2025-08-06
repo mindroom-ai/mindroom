@@ -42,7 +42,7 @@ def should_form_team(
     """Determine if a team should form and with which mode."""
     # Case 1: Multiple agents explicitly tagged
     if len(tagged_agents) > 1:
-        logger.info(f"Forming explicit team with tagged agents: {tagged_agents}")
+        logger.info(f"Team formation needed for tagged agents: {tagged_agents}")
         return ShouldFormTeamResult(
             should_form_team=True,
             agents=tagged_agents,
@@ -51,7 +51,7 @@ def should_form_team(
 
     # Case 2: No agents tagged but multiple in thread
     if len(tagged_agents) == 0 and len(agents_in_thread) > 1:
-        logger.info(f"Forming implicit team with thread agents: {agents_in_thread}")
+        logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
         return ShouldFormTeamResult(
             should_form_team=True,
             agents=agents_in_thread,
