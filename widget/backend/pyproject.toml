@@ -1,0 +1,30 @@
+[project]
+name = "mindroom-widget-backend"
+version = "0.1.0"
+description = "Backend for MindRoom Configuration Widget"
+requires-python = ">=3.11"
+classifiers = [
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "cryptography>=42",
+  "fastapi>=0.109",
+  "httpx>=0.26",
+  "pydantic>=2.5.3",
+  "pydantic-settings>=2.1",
+  "python-jose[cryptography]>=3.3",
+  "python-multipart>=0.0.6",
+  "pyyaml>=6.0.1",
+  "redis>=5.0.1",
+  "uvicorn>=0.27",
+  "watchdog>=3",
+]
+
+[tool.uv]
+dev-dependencies = [
+  "pytest>=7.4.0",
+  "pytest-asyncio>=0.21.0",
+]
