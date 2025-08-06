@@ -39,7 +39,7 @@ from .matrix import (
 )
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
-from .streaming import StreamingResponse
+from .streaming import IN_PROGRESS_MARKER, StreamingResponse
 from .teams import create_team_response, should_form_team
 from .thread_invites import ThreadInviteManager
 from .thread_utils import (
@@ -186,7 +186,7 @@ class AgentBot:
             return
 
         # Check if message is still being streamed (has in-progress marker)
-        if sender_is_agent and context.am_i_mentioned and event.body.rstrip().endswith("⋯"):
+        if sender_is_agent and context.am_i_mentioned and event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
             self.logger.debug("Ignoring mention from agent - streaming not complete", sender=event.sender)
             return
 

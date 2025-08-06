@@ -11,6 +11,9 @@ from .matrix import create_mention_content_from_text, edit_message
 
 logger = get_logger(__name__)
 
+# Global constant for the in-progress marker
+IN_PROGRESS_MARKER = " ⋯"
+
 
 @dataclass
 class StreamingResponse:
@@ -24,7 +27,6 @@ class StreamingResponse:
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
     update_interval: float = 0.1  # 100ms updates
-    in_progress_marker: str = " ⋯"  # Marker shown during streaming
 
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
@@ -50,7 +52,7 @@ class StreamingResponse:
         # Add in-progress marker during streaming (not on final update)
         text_to_send = self.accumulated_text
         if not is_final:
-            text_to_send += self.in_progress_marker
+            text_to_send += IN_PROGRESS_MARKER
 
         # Format the text (handles interactive questions if present)
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=False)

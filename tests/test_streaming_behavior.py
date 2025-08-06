@@ -10,7 +10,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.matrix import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
-from mindroom.streaming import StreamingResponse
+from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse
 from mindroom.thread_invites import ThreadInviteManager
 
 
@@ -316,7 +316,7 @@ class TestStreamingBehavior:
         first_call = mock_client.room_send.call_args_list[0]
         content = first_call[1]["content"]
         # The body should contain the in-progress marker
-        assert streaming.in_progress_marker in content["body"]
+        assert IN_PROGRESS_MARKER in content["body"]
         assert "Hello world" in content["body"]
 
         # Finalize the message
@@ -325,5 +325,5 @@ class TestStreamingBehavior:
         # Check the final message has no in-progress marker
         final_call = mock_client.room_send.call_args_list[-1]
         final_content = final_call[1]["content"]
-        assert streaming.in_progress_marker not in final_content["body"]
+        assert IN_PROGRESS_MARKER not in final_content["body"]
         assert "Hello world" in final_content["body"]
