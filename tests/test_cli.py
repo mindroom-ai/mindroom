@@ -85,6 +85,7 @@ class TestUserAccountManagement:
 
         with (
             patch("mindroom.cli.matrix_client", return_value=mock_context),
+            patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
             patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
         ):
             state = await _ensure_user_account()
@@ -151,7 +152,10 @@ class TestUserAccountManagement:
             )
             mock_client.set_displayname.return_value = AsyncMock()
 
-            with patch("mindroom.cli.matrix_client", return_value=mock_context):
+            with (
+                patch("mindroom.cli.matrix_client", return_value=mock_context),
+                patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+            ):
                 result_config = await _ensure_user_account()
 
                 # Should have created new account
