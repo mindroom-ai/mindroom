@@ -81,11 +81,7 @@ class TestBotScheduleCommands:
         event.body = "/schedule tomorrow"
         event.source = {"content": {"m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"}}}
 
-        command = Command(
-            type=CommandType.SCHEDULE, 
-            args={"full_text": "tomorrow"}, 
-            raw_text=event.body
-        )
+        command = Command(type=CommandType.SCHEDULE, args={"full_text": "tomorrow"}, raw_text=event.body)
 
         with patch("mindroom.bot.schedule_task") as mock_schedule:
             mock_schedule.return_value = ("task456", "✅ Scheduled for tomorrow")
@@ -151,11 +147,7 @@ class TestBotScheduleCommands:
         event.body = "/schedule in 5 minutes Test"
         event.source = {"content": {}}  # No thread relation
 
-        command = Command(
-            type=CommandType.SCHEDULE, 
-            args={"full_text": "in 5 minutes Test"}, 
-            raw_text=event.body
-        )
+        command = Command(type=CommandType.SCHEDULE, args={"full_text": "in 5 minutes Test"}, raw_text=event.body)
 
         await mock_agent_bot._handle_command(room, event, command)
 

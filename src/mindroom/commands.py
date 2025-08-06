@@ -39,17 +39,17 @@ class CommandParser:
     """Parser for user commands in messages."""
 
     # Command patterns
-    # Match: /invite agent
+    # Match: !invite agent
     INVITE_PATTERN = re.compile(
-        r"^/invite\s+@?(\w+)$",  # agent name
+        r"^!invite\s+@?(\w+)$",  # agent name
         re.IGNORECASE,
     )
-    UNINVITE_PATTERN = re.compile(r"^/uninvite\s+@?(\w+)$", re.IGNORECASE)
-    LIST_INVITES_PATTERN = re.compile(r"^/list[_-]?invites?$", re.IGNORECASE)
-    HELP_PATTERN = re.compile(r"^/help(?:\s+(.+))?$", re.IGNORECASE)
-    SCHEDULE_PATTERN = re.compile(r"^/schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
-    LIST_SCHEDULES_PATTERN = re.compile(r"^/list[_-]?schedules?$", re.IGNORECASE)
-    CANCEL_SCHEDULE_PATTERN = re.compile(r"^/cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
+    UNINVITE_PATTERN = re.compile(r"^!uninvite\s+@?(\w+)$", re.IGNORECASE)
+    LIST_INVITES_PATTERN = re.compile(r"^!list[_-]?invites?$", re.IGNORECASE)
+    HELP_PATTERN = re.compile(r"^!help(?:\s+(.+))?$", re.IGNORECASE)
+    SCHEDULE_PATTERN = re.compile(r"^!schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
+    LIST_SCHEDULES_PATTERN = re.compile(r"^!list[_-]?schedules?$", re.IGNORECASE)
+    CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
 
     def parse(self, message: str) -> Command | None:
         """Parse a message for commands.
@@ -61,12 +61,12 @@ class CommandParser:
             Parsed command or None if no command found
         """
         message = message.strip()
-        if not message.startswith("/"):
+        if not message.startswith("!"):
             return None
 
         # Try to match each command pattern
 
-        # /invite command
+        # !invite command
         match = self.INVITE_PATTERN.match(message)
         if match:
             agent_name = match.group(1)
@@ -79,7 +79,7 @@ class CommandParser:
                 raw_text=message,
             )
 
-        # /uninvite command
+        # !uninvite command
         match = self.UNINVITE_PATTERN.match(message)
         if match:
             agent_name = match.group(1)
@@ -89,7 +89,7 @@ class CommandParser:
                 raw_text=message,
             )
 
-        # /list_invites command
+        # !list_invites command
         if self.LIST_INVITES_PATTERN.match(message):
             return Command(
                 type=CommandType.LIST_INVITES,
@@ -97,7 +97,7 @@ class CommandParser:
                 raw_text=message,
             )
 
-        # /help command
+        # !help command
         match = self.HELP_PATTERN.match(message)
         if match:
             topic = match.group(1)
@@ -107,7 +107,7 @@ class CommandParser:
                 raw_text=message,
             )
 
-        # /schedule command
+        # !schedule command
         match = self.SCHEDULE_PATTERN.match(message)
         if match:
             full_text = match.group(1).strip()
@@ -118,7 +118,7 @@ class CommandParser:
                 raw_text=message,
             )
 
-        # /list_schedules command
+        # !list_schedules command
         if self.LIST_SCHEDULES_PATTERN.match(message):
             return Command(
                 type=CommandType.LIST_SCHEDULES,
@@ -126,7 +126,7 @@ class CommandParser:
                 raw_text=message,
             )
 
-        # /cancel_schedule command
+        # !cancel_schedule command
         match = self.CANCEL_SCHEDULE_PATTERN.match(message)
         if match:
             task_id = match.group(1).strip()
@@ -153,10 +153,10 @@ def get_command_help(topic: str | None = None) -> str:
     if topic == "invite":
         return """**Invite Command**
 
-Usage: `/invite <agent>` - Invite an agent to this thread
+Usage: `!invite <agent>` - Invite an agent to this thread
 
 Example:
-- `/invite calculator` - Invite calculator agent to this thread
+- `!invite calculator` - Invite calculator agent to this thread
 
 Note: Invites only work in threads. The agent will be able to participate in this thread only.
 Agents are automatically removed from the room 24 hours after being invited."""
@@ -164,64 +164,64 @@ Agents are automatically removed from the room 24 hours after being invited."""
     elif topic == "uninvite":
         return """**Uninvite Command**
 
-Usage: `/uninvite <agent>`
+Usage: `!uninvite <agent>`
 
 Example:
-- `/uninvite calculator` - Remove calculator agent from this thread
+- `!uninvite calculator` - Remove calculator agent from this thread
 
 The agent will no longer receive messages from this thread."""
 
     elif topic == "list" or topic == "list_invites":
         return """**List Invites Command**
 
-Usage: `/list_invites` or `/listinvites`
+Usage: `!list_invites` or `!listinvites`
 
 Shows all agents currently invited to this thread."""
 
     elif topic == "schedule":
         return """**Schedule Command**
 
-Usage: `/schedule <time> <message>` - Schedule a reminder
+Usage: `!schedule <time> <message>` - Schedule a reminder
 
 Examples:
-- `/schedule in 5 minutes Check the deployment`
-- `/schedule tomorrow at 3pm Send the weekly report`
-- `/schedule later Ping me about the meeting`
+- `!schedule in 5 minutes Check the deployment`
+- `!schedule tomorrow at 3pm Send the weekly report`
+- `!schedule later Ping me about the meeting`
 
 The agent will send you a reminder at the specified time."""
 
     elif topic == "list_schedules":
         return """**List Schedules Command**
 
-Usage: `/list_schedules` or `/listschedules`
+Usage: `!list_schedules` or `!listschedules`
 
 Shows all pending scheduled tasks in this thread."""
 
     elif topic == "cancel" or topic == "cancel_schedule":
         return """**Cancel Schedule Command**
 
-Usage: `/cancel_schedule <id>` - Cancel a scheduled task
+Usage: `!cancel_schedule <id>` - Cancel a scheduled task
 
 Example:
-- `/cancel_schedule abc123` - Cancel the task with ID abc123
+- `!cancel_schedule abc123` - Cancel the task with ID abc123
 
-Use `/list_schedules` to see task IDs."""
+Use `!list_schedules` to see task IDs."""
 
     else:
         # General help
         return """**Available Commands**
 
-- `/invite <agent>` - Invite an agent to this thread
-- `/uninvite <agent>` - Remove an agent from this thread
-- `/list_invites` - List all invited agents
-- `/schedule <time> <message>` - Schedule a reminder
-- `/list_schedules` - List scheduled tasks
-- `/cancel_schedule <id>` - Cancel a scheduled task
-- `/help [topic]` - Show this help or help for a specific command
+- `!invite <agent>` - Invite an agent to this thread
+- `!uninvite <agent>` - Remove an agent from this thread
+- `!list_invites` - List all invited agents
+- `!schedule <time> <message>` - Schedule a reminder
+- `!list_schedules` - List scheduled tasks
+- `!cancel_schedule <id>` - Cancel a scheduled task
+- `!help [topic]` - Show this help or help for a specific command
 
 Note: All commands only work within threads, not in main room messages.
 
-For detailed help on a command, use: `/help <command>`"""
+For detailed help on a command, use: `!help <command>`"""
 
 
 async def handle_invite_command(

@@ -27,7 +27,9 @@ class TestScheduleTimeParsing:
         # Mock the AI agent to return a realistic response
         mock_response = MagicMock()
         mock_response.content = ScheduledTimeResponse(
-            execute_at=datetime.now(UTC) + timedelta(minutes=5), interpretation="5 minutes from now"
+            execute_at=datetime.now(UTC) + timedelta(minutes=5),
+            message="Check the deployment",
+            interpretation="5 minutes from now",
         )
 
         with patch("mindroom.scheduling.Agent") as mock_agent_class:
@@ -47,7 +49,7 @@ class TestScheduleTimeParsing:
         """Test parsing 'in X hours' expressions."""
         mock_response = MagicMock()
         mock_response.content = ScheduledTimeResponse(
-            execute_at=datetime.now(UTC) + timedelta(hours=2), interpretation="2 hours from now"
+            execute_at=datetime.now(UTC) + timedelta(hours=2), message="Reminder", interpretation="2 hours from now"
         )
 
         with patch("mindroom.scheduling.Agent") as mock_agent_class:
@@ -55,7 +57,7 @@ class TestScheduleTimeParsing:
             mock_agent.arun.return_value = mock_response
             mock_agent_class.return_value = mock_agent
 
-            result = await parse_schedule_time("in 2 hours")
+            result = await parse_schedule("in 2 hours")
 
             assert isinstance(result, ScheduledTimeResponse)
             assert result.interpretation == "2 hours from now"
@@ -66,7 +68,9 @@ class TestScheduleTimeParsing:
         tomorrow = datetime.now(UTC) + timedelta(days=1)
         mock_response = MagicMock()
         mock_response.content = ScheduledTimeResponse(
-            execute_at=tomorrow.replace(hour=9, minute=0, second=0, microsecond=0), interpretation="Tomorrow at 9:00 AM"
+            execute_at=tomorrow.replace(hour=9, minute=0, second=0, microsecond=0),
+            message="Reminder",
+            interpretation="Tomorrow at 9:00 AM",
         )
 
         with patch("mindroom.scheduling.Agent") as mock_agent_class:
@@ -74,7 +78,7 @@ class TestScheduleTimeParsing:
             mock_agent.arun.return_value = mock_response
             mock_agent_class.return_value = mock_agent
 
-            result = await parse_schedule_time("tomorrow at 9am")
+            result = await parse_schedule("tomorrow at 9am")
 
             assert isinstance(result, ScheduledTimeResponse)
             assert "Tomorrow" in result.interpretation
@@ -84,7 +88,9 @@ class TestScheduleTimeParsing:
         """Test parsing contextual expressions like 'later'."""
         mock_response = MagicMock()
         mock_response.content = ScheduledTimeResponse(
-            execute_at=datetime.now(UTC) + timedelta(minutes=30), interpretation="30 minutes from now (later)"
+            execute_at=datetime.now(UTC) + timedelta(minutes=30),
+            message="Reminder",
+            interpretation="30 minutes from now (later)",
         )
 
         with patch("mindroom.scheduling.Agent") as mock_agent_class:
@@ -92,7 +98,7 @@ class TestScheduleTimeParsing:
             mock_agent.arun.return_value = mock_response
             mock_agent_class.return_value = mock_agent
 
-            result = await parse_schedule_time("later")
+            result = await parse_schedule("later")
 
             assert isinstance(result, ScheduledTimeResponse)
             assert "30 minutes" in result.interpretation or "later" in result.interpretation
@@ -100,24 +106,19 @@ class TestScheduleTimeParsing:
     @pytest.mark.asyncio
     async def test_parse_invalid_time(self):
         """Test parsing invalid time expressions."""
-        # First attempt fails, second attempt returns error
+        # Mock the AI agent to return an error response
+        mock_response = MagicMock()
+        mock_response.content = ScheduleParseError(
+            error="Cannot parse 'gibberish' as a time",
+            suggestion="Try something like 'in 5 minutes' or 'tomorrow at 3pm'",
+        )
+
         with patch("mindroom.scheduling.Agent") as mock_agent_class:
-            # First agent raises exception
-            mock_agent1 = AsyncMock()
-            mock_agent1.arun.side_effect = Exception("Cannot parse")
+            mock_agent = AsyncMock()
+            mock_agent.arun.return_value = mock_response
+            mock_agent_class.return_value = mock_agent
 
-            # Second agent returns error response
-            mock_response = MagicMock()
-            mock_response.content = ScheduleParseError(
-                error="Cannot parse 'gibberish' as a time",
-                suggestion="Try something like 'in 5 minutes' or 'tomorrow at 3pm'",
-            )
-            mock_agent2 = AsyncMock()
-            mock_agent2.arun.return_value = mock_response
-
-            mock_agent_class.side_effect = [mock_agent1, mock_agent2]
-
-            result = await parse_schedule_time("gibberish")
+            result = await parse_schedule("gibberish")
 
             assert isinstance(result, ScheduleParseError)
             assert "Cannot parse" in result.error
@@ -129,7 +130,7 @@ class TestScheduleTimeParsing:
         custom_time = datetime(2024, 1, 15, 10, 0, 0)
         mock_response = MagicMock()
         mock_response.content = ScheduledTimeResponse(
-            execute_at=custom_time + timedelta(minutes=15), interpretation="15 minutes from now"
+            execute_at=custom_time + timedelta(minutes=15), message="Reminder", interpretation="15 minutes from now"
         )
 
         with patch("mindroom.scheduling.Agent") as mock_agent_class:
@@ -137,7 +138,7 @@ class TestScheduleTimeParsing:
             mock_agent.arun.return_value = mock_response
             mock_agent_class.return_value = mock_agent
 
-            result = await parse_schedule_time("in 15 minutes", current_time=custom_time)
+            result = await parse_schedule("in 15 minutes", current_time=custom_time)
 
             assert isinstance(result, ScheduledTimeResponse)
             # Verify the prompt included the custom time
@@ -157,9 +158,9 @@ class TestScheduleTask:
         # Mock successful time parsing
         with patch("mindroom.scheduling.parse_schedule") as mock_parse:
             mock_parse.return_value = ScheduledTimeResponse(
-                execute_at=datetime.now(UTC) + timedelta(minutes=5), 
+                execute_at=datetime.now(UTC) + timedelta(minutes=5),
                 message="Check the deployment",
-                interpretation="5 minutes from now"
+                interpretation="5 minutes from now",
             )
 
             task_id, message = await schedule_task(
@@ -194,7 +195,9 @@ class TestScheduleTask:
         mock_client = AsyncMock()
 
         with patch("mindroom.scheduling.parse_schedule") as mock_parse:
-            mock_parse.return_value = ScheduleParseError(error="Cannot parse request", suggestion="Try 'in 5 minutes Check deployment'")
+            mock_parse.return_value = ScheduleParseError(
+                error="Cannot parse request", suggestion="Try 'in 5 minutes Check deployment'"
+            )
 
             task_id, message = await schedule_task(
                 client=mock_client,
@@ -219,9 +222,9 @@ class TestScheduleTask:
 
         with patch("mindroom.scheduling.parse_schedule") as mock_parse:
             mock_parse.return_value = ScheduledTimeResponse(
-                execute_at=datetime.now(UTC) + timedelta(minutes=5), 
+                execute_at=datetime.now(UTC) + timedelta(minutes=5),
                 message="Reminder",  # AI provides default
-                interpretation="5 minutes from now"
+                interpretation="5 minutes from now",
             )
 
             task_id, message = await schedule_task(

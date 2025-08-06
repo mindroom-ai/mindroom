@@ -70,7 +70,7 @@ If you cannot parse the request, return an error with a helpful suggestion."""
         name="ScheduleParser",
         role="Parse natural language schedule requests",
         model=model,
-        response_model=ScheduledTimeResponse | ScheduleParseError,
+        response_model=ScheduledTimeResponse | ScheduleParseError,  # type: ignore[arg-type]
     )
 
     response = await agent.arun(prompt, session_id=f"schedule_parse_{uuid.uuid4()}")
