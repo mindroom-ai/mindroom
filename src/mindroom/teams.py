@@ -57,7 +57,7 @@ async def create_team_response(
         return "Team collaboration not available (no orchestrator)"
 
     # Create agents for the team
-    agents = []
+    agents: list[Agent] = []
     for name in agent_names:
         if name == ROUTER_AGENT_NAME:
             continue
