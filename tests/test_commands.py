@@ -110,21 +110,19 @@ def test_schedule_command():
     command = command_parser.parse("/schedule in 5 minutes Check the deployment")
     assert command is not None
     assert command.type == CommandType.SCHEDULE
-    assert "in 5 minutes" in command.args["time_expression"]
-    # The parsing is simple - AI will handle the actual time extraction
+    assert command.args["full_text"] == "in 5 minutes Check the deployment"
 
     # Schedule with just time expression
     command = command_parser.parse("/schedule tomorrow")
     assert command is not None
     assert command.type == CommandType.SCHEDULE
-    assert command.args["time_expression"] == "tomorrow"
-    assert command.args["message"] == ""
+    assert command.args["full_text"] == "tomorrow"
 
     # Schedule with complex expression
     command = command_parser.parse("/schedule tomorrow at 3pm Send the weekly report")
     assert command is not None
     assert command.type == CommandType.SCHEDULE
-    assert "tomorrow at 3pm" in command.args["time_expression"]
+    assert command.args["full_text"] == "tomorrow at 3pm Send the weekly report"
 
 
 def test_list_schedules_command():

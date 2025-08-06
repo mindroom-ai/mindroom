@@ -44,7 +44,7 @@ class TestBotScheduleCommands:
 
         command = Command(
             type=CommandType.SCHEDULE,
-            args={"time_expression": "in 5 minutes", "message": "Check deployment"},
+            args={"full_text": "in 5 minutes Check deployment"},
             raw_text=event.body,
         )
 
@@ -61,8 +61,7 @@ class TestBotScheduleCommands:
                 thread_id="$thread123",
                 agent_user_id="@mindroom_general:localhost",
                 scheduled_by="@user:server",
-                time_expression="in 5 minutes",
-                message="Check deployment",
+                full_text="in 5 minutes Check deployment",
             )
 
             # Verify response was sent
@@ -83,7 +82,9 @@ class TestBotScheduleCommands:
         event.source = {"content": {"m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"}}}
 
         command = Command(
-            type=CommandType.SCHEDULE, args={"time_expression": "tomorrow", "message": ""}, raw_text=event.body
+            type=CommandType.SCHEDULE, 
+            args={"full_text": "tomorrow"}, 
+            raw_text=event.body
         )
 
         with patch("mindroom.bot.schedule_task") as mock_schedule:
@@ -91,9 +92,9 @@ class TestBotScheduleCommands:
 
             await mock_agent_bot._handle_command(room, event, command)
 
-            # Verify default message was used
+            # Verify the full text was passed
             call_args = mock_schedule.call_args
-            assert call_args[1]["message"] == "Reminder"
+            assert call_args[1]["full_text"] == "tomorrow"
 
     @pytest.mark.asyncio
     async def test_handle_list_schedules_command(self, mock_agent_bot):
@@ -151,7 +152,9 @@ class TestBotScheduleCommands:
         event.source = {"content": {}}  # No thread relation
 
         command = Command(
-            type=CommandType.SCHEDULE, args={"time_expression": "in 5 minutes", "message": "Test"}, raw_text=event.body
+            type=CommandType.SCHEDULE, 
+            args={"full_text": "in 5 minutes Test"}, 
+            raw_text=event.body
         )
 
         await mock_agent_bot._handle_command(room, event, command)

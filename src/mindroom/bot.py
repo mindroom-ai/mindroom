@@ -604,12 +604,7 @@ class AgentBot:
             response_text = get_command_help(topic)
 
         elif command.type == CommandType.SCHEDULE:
-            time_expression = command.args["time_expression"]
-            message = command.args.get("message", "")
-
-            # If no message provided, use a default
-            if not message:
-                message = "Reminder"
+            full_text = command.args["full_text"]
 
             task_id, response_text = await schedule_task(
                 client=self.client,
@@ -617,8 +612,7 @@ class AgentBot:
                 thread_id=thread_id,
                 agent_user_id=self.agent_user.user_id,
                 scheduled_by=event.sender,
-                time_expression=time_expression,
-                message=message,
+                full_text=full_text,
             )
 
         elif command.type == CommandType.LIST_SCHEDULES:

@@ -111,35 +111,10 @@ class CommandParser:
         match = self.SCHEDULE_PATTERN.match(message)
         if match:
             full_text = match.group(1).strip()
-            # Try to split time expression and message
-            # Look for "in X" or "at X" patterns at the start
-            parts = full_text.split(maxsplit=1)
-            if len(parts) >= 2:
-                # Check if we have both time and message
-                # Simple heuristic: if second word starts with a number or time word
-                time_words = ["minute", "hour", "day", "week", "tomorrow", "later", "soon"]
-                if parts[0].lower() in ["in", "at"] or any(word in parts[1].lower() for word in time_words):
-                    # Find where the message likely starts
-                    # This is a simple approach - the AI will handle the actual parsing
-                    time_expression = full_text
-                    message_text = ""
-                    # Try to find a natural break
-                    for i, _char in enumerate(full_text):
-                        if i > 10 and full_text[i - 1] == " " and full_text[i].isupper():
-                            time_expression = full_text[:i].strip()
-                            message_text = full_text[i:].strip()
-                            break
-
-                    return Command(
-                        type=CommandType.SCHEDULE,
-                        args={"time_expression": time_expression, "message": message_text or full_text},
-                        raw_text=message,
-                    )
-
-            # Fallback: treat it all as time expression
+            # Pass the entire text to AI - it will parse both time and message
             return Command(
                 type=CommandType.SCHEDULE,
-                args={"time_expression": full_text, "message": ""},
+                args={"full_text": full_text},
                 raw_text=message,
             )
 

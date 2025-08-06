@@ -12,7 +12,7 @@ from mindroom.scheduling import (
     ScheduleParseError,
     cancel_scheduled_task,
     list_scheduled_tasks,
-    parse_schedule_time,
+    parse_schedule,
     restore_scheduled_tasks,
     schedule_task,
 )
@@ -35,7 +35,7 @@ class TestScheduleTimeParsing:
             mock_agent.arun.return_value = mock_response
             mock_agent_class.return_value = mock_agent
 
-            result = await parse_schedule_time("in 5 minutes")
+            result = await parse_schedule("in 5 minutes Check the deployment")
 
             assert isinstance(result, ScheduledTimeResponse)
             assert result.interpretation == "5 minutes from now"
@@ -155,9 +155,11 @@ class TestScheduleTask:
         mock_client.room_put_state = AsyncMock(return_value=MagicMock())
 
         # Mock successful time parsing
-        with patch("mindroom.scheduling.parse_schedule_time") as mock_parse:
+        with patch("mindroom.scheduling.parse_schedule") as mock_parse:
             mock_parse.return_value = ScheduledTimeResponse(
-                execute_at=datetime.now(UTC) + timedelta(minutes=5), interpretation="5 minutes from now"
+                execute_at=datetime.now(UTC) + timedelta(minutes=5), 
+                message="Check the deployment",
+                interpretation="5 minutes from now"
             )
 
             task_id, message = await schedule_task(
@@ -166,8 +168,7 @@ class TestScheduleTask:
                 thread_id="$thread123",
                 agent_user_id="@agent:server",
                 scheduled_by="@user:server",
-                time_expression="in 5 minutes",
-                message="Check the deployment",
+                full_text="in 5 minutes Check the deployment",
             )
 
             assert task_id is not None
@@ -192,8 +193,8 @@ class TestScheduleTask:
         """Test scheduling with invalid time expression."""
         mock_client = AsyncMock()
 
-        with patch("mindroom.scheduling.parse_schedule_time") as mock_parse:
-            mock_parse.return_value = ScheduleParseError(error="Cannot parse time", suggestion="Try 'in 5 minutes'")
+        with patch("mindroom.scheduling.parse_schedule") as mock_parse:
+            mock_parse.return_value = ScheduleParseError(error="Cannot parse request", suggestion="Try 'in 5 minutes Check deployment'")
 
             task_id, message = await schedule_task(
                 client=mock_client,
@@ -201,25 +202,26 @@ class TestScheduleTask:
                 thread_id="$thread123",
                 agent_user_id="@agent:server",
                 scheduled_by="@user:server",
-                time_expression="invalid",
-                message="Test",
+                full_text="invalid gibberish",
             )
 
             assert task_id is None
             assert "❌" in message
-            assert "Cannot parse time" in message
+            assert "Cannot parse request" in message
             assert "💡" in message
-            assert "Try 'in 5 minutes'" in message
+            assert "Try 'in 5 minutes Check deployment'" in message
 
     @pytest.mark.asyncio
     async def test_schedule_task_default_message(self):
-        """Test scheduling with empty message uses default."""
+        """Test scheduling with only time expression (AI provides default)."""
         mock_client = AsyncMock()
         mock_client.room_put_state = AsyncMock(return_value=MagicMock())
 
-        with patch("mindroom.scheduling.parse_schedule_time") as mock_parse:
+        with patch("mindroom.scheduling.parse_schedule") as mock_parse:
             mock_parse.return_value = ScheduledTimeResponse(
-                execute_at=datetime.now(UTC) + timedelta(minutes=5), interpretation="5 minutes from now"
+                execute_at=datetime.now(UTC) + timedelta(minutes=5), 
+                message="Reminder",  # AI provides default
+                interpretation="5 minutes from now"
             )
 
             task_id, message = await schedule_task(
@@ -228,13 +230,11 @@ class TestScheduleTask:
                 thread_id=None,
                 agent_user_id="@agent:server",
                 scheduled_by="@user:server",
-                time_expression="in 5 minutes",
-                message="",  # Empty message
+                full_text="in 5 minutes",  # Just time, no message
             )
 
             assert task_id is not None
-            # Should use the empty message as is
-            assert '""' in message  # Shows empty quotes
+            assert '"Reminder"' in message  # Shows the default message
 
 
 class TestListScheduledTasks:
