@@ -7,7 +7,7 @@ from ..logging_config import get_logger
 from .config import create_memory_instance
 
 if TYPE_CHECKING:
-    from mem0 import Memory  # type: ignore[import-untyped]
+    from mem0 import AsyncMemory  # type: ignore[import-untyped]
 
 
 class MemoryResult(TypedDict, total=False):
@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 _memory_instance = None
 
 
-def get_memory(storage_path: Path) -> "Memory":
+def get_memory(storage_path: Path) -> "AsyncMemory":
     """Get or create the global memory instance."""
     global _memory_instance
     if _memory_instance is None:
@@ -38,7 +38,7 @@ def get_memory(storage_path: Path) -> "Memory":
     return _memory_instance
 
 
-def add_agent_memory(
+async def add_agent_memory(
     content: str, agent_name: str, storage_path: Path, user_id: str | None = None, metadata: dict | None = None
 ) -> None:
     """Add a memory for an agent.
@@ -60,13 +60,13 @@ def add_agent_memory(
 
     # Use agent_name as user_id to namespace memories per agent
     try:
-        memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
+        await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
         logger.info("Memory added", agent=agent_name)
     except Exception as e:
         logger.error("Failed to add memory", agent=agent_name, error=str(e))
 
 
-def search_agent_memories(query: str, agent_name: str, storage_path: Path, limit: int = 3) -> list[MemoryResult]:
+async def search_agent_memories(query: str, agent_name: str, storage_path: Path, limit: int = 3) -> list[MemoryResult]:
     """Search agent memories.
 
     Args:
@@ -79,7 +79,7 @@ def search_agent_memories(query: str, agent_name: str, storage_path: Path, limit
         List of relevant memories
     """
     memory = get_memory(storage_path)
-    search_result = memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
+    search_result = await memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
 
     results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
 
@@ -87,7 +87,7 @@ def search_agent_memories(query: str, agent_name: str, storage_path: Path, limit
     return results
 
 
-def add_room_memory(
+async def add_room_memory(
     content: str, room_id: str, storage_path: Path, agent_name: str | None = None, metadata: dict | None = None
 ) -> None:
     """Add a memory for a room.
@@ -110,11 +110,11 @@ def add_room_memory(
     messages = [{"role": "assistant", "content": content}]
 
     safe_room_id = room_id.replace(":", "_").replace("!", "")
-    memory.add(messages, user_id=f"room_{safe_room_id}", metadata=metadata)
+    await memory.add(messages, user_id=f"room_{safe_room_id}", metadata=metadata)
     logger.debug("Room memory added", room_id=room_id)
 
 
-def search_room_memories(query: str, room_id: str, storage_path: Path, limit: int = 3) -> list[MemoryResult]:
+async def search_room_memories(query: str, room_id: str, storage_path: Path, limit: int = 3) -> list[MemoryResult]:
     """Search room memories.
 
     Args:
@@ -128,7 +128,7 @@ def search_room_memories(query: str, room_id: str, storage_path: Path, limit: in
     """
     memory = get_memory(storage_path)
     safe_room_id = room_id.replace(":", "_").replace("!", "")
-    search_result = memory.search(query, user_id=f"room_{safe_room_id}", limit=limit)
+    search_result = await memory.search(query, user_id=f"room_{safe_room_id}", limit=limit)
 
     results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
 
@@ -160,7 +160,7 @@ def format_memories_as_context(memories: list[MemoryResult], context_type: str =
     return "\n".join(context_parts)
 
 
-def build_memory_enhanced_prompt(
+async def build_memory_enhanced_prompt(
     prompt: str,
     agent_name: str,
     storage_path: Path,
@@ -180,14 +180,14 @@ def build_memory_enhanced_prompt(
     logger.debug("Building enhanced prompt", agent=agent_name)
     enhanced_prompt = prompt
 
-    agent_memories = search_agent_memories(prompt, agent_name, storage_path)
+    agent_memories = await search_agent_memories(prompt, agent_name, storage_path)
     if agent_memories:
         agent_context = format_memories_as_context(agent_memories, "agent")
         enhanced_prompt = f"{agent_context}\n\n{prompt}"
         logger.debug("Agent memories added", count=len(agent_memories))
 
     if room_id:
-        room_memories = search_room_memories(prompt, room_id, storage_path)
+        room_memories = await search_room_memories(prompt, room_id, storage_path)
         if room_memories:
             room_context = format_memories_as_context(room_memories, "room")
             enhanced_prompt = f"{room_context}\n\n{enhanced_prompt}"
@@ -196,7 +196,7 @@ def build_memory_enhanced_prompt(
     return enhanced_prompt
 
 
-def store_conversation_memory(
+async def store_conversation_memory(
     prompt: str,
     agent_name: str,
     storage_path: Path,
@@ -220,7 +220,7 @@ def store_conversation_memory(
         return
 
     # Store only the user's input - let mem0 extract what's valuable
-    add_agent_memory(
+    await add_agent_memory(
         prompt,
         agent_name,
         storage_path,
@@ -229,7 +229,7 @@ def store_conversation_memory(
 
     if room_id:
         # For room memory, also store user input for room context
-        add_room_memory(
+        await add_room_memory(
             prompt,
             room_id,
             storage_path,

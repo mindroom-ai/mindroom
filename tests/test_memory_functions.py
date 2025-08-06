@@ -1,6 +1,6 @@
 """Tests for memory functions."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -22,7 +22,7 @@ class TestMemoryFunctions:
     @pytest.fixture
     def mock_memory(self):
         """Create a mock memory instance."""
-        memory = MagicMock()
+        memory = AsyncMock()
         memory.add.return_value = None
         memory.search.return_value = {"results": []}
         return memory
@@ -46,10 +46,11 @@ class TestMemoryFunctions:
             # create_memory_instance should only be called once
             mock_create.assert_called_once_with(storage_path)
 
-    def test_add_agent_memory(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_add_agent_memory(self, mock_memory, storage_path):
         """Test adding agent memory."""
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            add_agent_memory("Test memory content", "test_agent", storage_path, metadata={"test": "value"})
+            await add_agent_memory("Test memory content", "test_agent", storage_path, metadata={"test": "value"})
 
             # Verify memory.add was called correctly
             mock_memory.add.assert_called_once()
@@ -64,15 +65,17 @@ class TestMemoryFunctions:
             assert call_args[1]["metadata"]["agent"] == "test_agent"
             assert call_args[1]["metadata"]["test"] == "value"
 
-    def test_add_agent_memory_error_handling(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_add_agent_memory_error_handling(self, mock_memory, storage_path):
         """Test error handling in add_agent_memory."""
         mock_memory.add.side_effect = Exception("Memory error")
 
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
             # Should not raise, just log error
-            add_agent_memory("Test content", "test_agent", storage_path)
+            await add_agent_memory("Test content", "test_agent", storage_path)
 
-    def test_search_agent_memories(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_search_agent_memories(self, mock_memory, storage_path):
         """Test searching agent memories."""
         # Mock search results
         mock_results = [
@@ -81,7 +84,7 @@ class TestMemoryFunctions:
         mock_memory.search.return_value = {"results": mock_results}
 
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            results = search_agent_memories("calculation", "calculator", storage_path, limit=5)
+            results = await search_agent_memories("calculation", "calculator", storage_path, limit=5)
 
             # Verify search was called correctly
             mock_memory.search.assert_called_once_with("calculation", user_id="agent_calculator", limit=5)
@@ -89,28 +92,31 @@ class TestMemoryFunctions:
             # Verify results
             assert results == mock_results
 
-    def test_search_agent_memories_handles_dict_response(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_search_agent_memories_handles_dict_response(self, mock_memory, storage_path):
         """Test that search handles dict response with 'results' key."""
         # This tests the bug we found where Mem0 returns dict not list
         mock_memory.search.return_value = {"results": [{"memory": "test"}]}
 
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            results = search_agent_memories("query", "agent", storage_path)
+            results = await search_agent_memories("query", "agent", storage_path)
             assert results == [{"memory": "test"}]
 
-    def test_search_agent_memories_handles_list_response(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_search_agent_memories_handles_list_response(self, mock_memory, storage_path):
         """Test that search handles direct list response."""
         # In case Mem0 API changes to return list directly
         mock_memory.search.return_value = [{"memory": "test"}]
 
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            results = search_agent_memories("query", "agent", storage_path)
+            results = await search_agent_memories("query", "agent", storage_path)
             assert results == []  # Current implementation expects dict
 
-    def test_add_room_memory(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_add_room_memory(self, mock_memory, storage_path):
         """Test adding room memory."""
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            add_room_memory(
+            await add_room_memory(
                 "Room discussion content", "!room:server", storage_path, agent_name="helper", metadata={"topic": "math"}
             )
 
@@ -140,7 +146,8 @@ class TestMemoryFunctions:
         context = format_memories_as_context([], "room")
         assert context == ""
 
-    def test_build_memory_enhanced_prompt(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_build_memory_enhanced_prompt(self, mock_memory, storage_path):
         """Test building memory-enhanced prompts."""
         # Mock search results
         agent_memories = [{"memory": "I previously calculated 2+2=4", "id": "1"}]
@@ -149,7 +156,9 @@ class TestMemoryFunctions:
         mock_memory.search.side_effect = [{"results": agent_memories}, {"results": room_memories}]
 
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            enhanced = build_memory_enhanced_prompt("What is 3+3?", "calculator", storage_path, room_id="!room:server")
+            enhanced = await build_memory_enhanced_prompt(
+                "What is 3+3?", "calculator", storage_path, room_id="!room:server"
+            )
 
             # Should include both contexts
             assert "[Automatically extracted agent memories - may not be relevant to current context]" in enhanced
@@ -158,20 +167,24 @@ class TestMemoryFunctions:
             assert "We discussed math earlier" in enhanced
             assert "What is 3+3?" in enhanced
 
-    def test_build_memory_enhanced_prompt_no_memories(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_build_memory_enhanced_prompt_no_memories(self, mock_memory, storage_path):
         """Test prompt enhancement with no memories found."""
         mock_memory.search.return_value = {"results": []}
 
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            enhanced = build_memory_enhanced_prompt("Original prompt", "agent", storage_path)
+            enhanced = await build_memory_enhanced_prompt("Original prompt", "agent", storage_path)
 
             # Should return original prompt unchanged
             assert enhanced == "Original prompt"
 
-    def test_store_conversation_memory(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_store_conversation_memory(self, mock_memory, storage_path):
         """Test storing conversation memory."""
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            store_conversation_memory("What is 2+2?", "calculator", storage_path, "session123", room_id="!room:server")
+            await store_conversation_memory(
+                "What is 2+2?", "calculator", storage_path, "session123", room_id="!room:server"
+            )
 
             # Should be called twice (agent and room)
             assert mock_memory.add.call_count == 2
@@ -190,10 +203,11 @@ class TestMemoryFunctions:
             assert room_call[1]["user_id"] == "room_room_server"
             assert room_call[1]["metadata"]["type"] == "user_input"
 
-    def test_store_conversation_memory_no_prompt(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_store_conversation_memory_no_prompt(self, mock_memory, storage_path):
         """Test that empty prompts are not stored."""
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            store_conversation_memory(
+            await store_conversation_memory(
                 "",  # Empty prompt
                 "agent",
                 storage_path,
@@ -203,10 +217,11 @@ class TestMemoryFunctions:
             # Should not call add when prompt is empty
             mock_memory.add.assert_not_called()
 
-    def test_store_conversation_memory_with_empty_response(self, mock_memory, storage_path):
+    @pytest.mark.asyncio
+    async def test_store_conversation_memory_with_empty_response(self, mock_memory, storage_path):
         """Test that user prompts are still stored even with empty responses."""
         with patch("mindroom.memory.functions.get_memory", return_value=mock_memory):
-            store_conversation_memory(
+            await store_conversation_memory(
                 "What is 2+2?",
                 "calculator",
                 storage_path,
