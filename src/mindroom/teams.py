@@ -51,7 +51,7 @@ def should_form_team(
         )
 
     # Case 2: No agents tagged but multiple were mentioned before in thread
-    if len(tagged_agents) == 0 and len(all_mentioned_in_thread) > 1:
+    if not tagged_agents and len(all_mentioned_in_thread) > 1:
         logger.info(f"Team formation needed for previously mentioned agents: {all_mentioned_in_thread}")
         return ShouldFormTeamResult(
             should_form_team=True,
@@ -60,7 +60,7 @@ def should_form_team(
         )
 
     # Case 3: No agents tagged but multiple in thread (backwards compatibility)
-    if len(tagged_agents) == 0 and len(agents_in_thread) > 1:
+    if not tagged_agents and len(agents_in_thread) > 1:
         logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
         return ShouldFormTeamResult(
             should_form_team=True,
@@ -109,11 +109,11 @@ async def create_team_response(
                 context_parts.append(f"{sender}: {body}")
 
         if context_parts:
-            prompt = f"Context:\n{chr(10).join(context_parts)}\n\nUser: {message}"
+            prompt = f"Context:\n{'\n'.join(context_parts)}\n\nUser: {message}"
 
     # Create and run team
     team = Team(
-        members=agents,  # type: ignore[arg-type]
+        members=agents,
         mode=mode.value,
         name=f"Team-{'-'.join(agent_names)}",
         model=get_model_instance("default"),

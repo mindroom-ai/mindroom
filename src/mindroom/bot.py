@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from .agent_config import create_agent, load_config
+from .agent_config import ROUTER_AGENT_NAME, create_agent, load_config
 from .ai import ai_response, ai_response_streaming
 from .commands import (
     Command,
@@ -57,7 +57,6 @@ logger = get_logger(__name__)
 # Constants
 SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
-ROUTER_AGENT_NAME = "router"
 
 
 @dataclass
@@ -86,7 +85,7 @@ class AgentBot:
     thread_invite_manager: ThreadInviteManager = field(init=False)
     invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
-    orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator (avoid circular import)
+    orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
 
     @property
     def agent_name(self) -> str:
@@ -189,7 +188,7 @@ class AgentBot:
             if not context.mentioned_agents:
                 # Only route if no agents have participated in the thread yet
                 agents_in_thread = get_agents_in_thread(context.thread_history)
-                if len(agents_in_thread) == 0:
+                if not agents_in_thread:
                     await self._handle_ai_routing(room, event, context.thread_history)
             return
 
@@ -208,11 +207,6 @@ class AgentBot:
             if self.agent_name != first_agent:
                 # Other agents in the team don't respond individually
                 return
-            self.logger.info(
-                "Forming team for collaborative response",
-                agents=form_team.agents,
-                mode=form_team.mode,
-            )
 
             # Create and execute team response
             team_response = await create_team_response(
@@ -551,7 +545,7 @@ class MultiAgentOrchestrator:
             # Resolve all room aliases to IDs
             resolved_rooms = [room_aliases.get(room, room) for room in rooms_to_resolve]
 
-            enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "false").lower() == "true"
+            enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
 
             bot = AgentBot(
                 agent_user,

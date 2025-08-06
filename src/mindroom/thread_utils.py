@@ -2,10 +2,8 @@
 
 from typing import Any
 
+from .agent_config import ROUTER_AGENT_NAME
 from .matrix import extract_agent_name
-
-# Constants
-ROUTER_AGENT_NAME = "router"
 
 
 def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str], bool]:
