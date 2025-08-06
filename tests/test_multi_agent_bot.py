@@ -1,6 +1,7 @@
 """Tests for the multi-agent bot system."""
 
 import asyncio
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,6 +11,8 @@ import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.matrix import AgentMatrixUser
+from mindroom.response_tracker import ResponseTracker
+from mindroom.thread_invites import ThreadInviteManager
 
 
 @dataclass
@@ -67,6 +70,11 @@ class TestAgentBot:
         assert bot.agent_name == "calculator"
         assert bot.rooms == ["!test:localhost"]
         assert not bot.running
+        assert bot.enable_streaming is True  # Default value
+
+        # Test with streaming disabled
+        bot_no_stream = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
+        assert bot_no_stream.enable_streaming is False
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.login_agent_user")
@@ -148,20 +156,31 @@ class TestAgentBot:
         bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.bot.ai_response")
+    @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
     async def test_agent_bot_on_message_mentioned(
         self,
         mock_fetch_history: AsyncMock,
+        mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,
+        enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test agent bot responding to mentions."""
+        """Test agent bot responding to mentions with both streaming and non-streaming modes."""
+
+        # Mock streaming response - return an async generator
+        async def mock_streaming_response():
+            yield "Test"
+            yield " response"
+
+        mock_ai_response_streaming.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Test response"
         mock_fetch_history.return_value = []
 
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"])
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming)
         bot.client = AsyncMock()
 
         # Mock successful room_send response
@@ -171,8 +190,6 @@ class TestAgentBot:
 
         # Initialize response tracker with isolated path
         from mindroom.interactive import InteractiveManager
-        from mindroom.response_tracker import ResponseTracker
-        from mindroom.thread_invites import ThreadInviteManager
 
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
@@ -195,16 +212,31 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event)
 
-        # Should call AI and send response
-        mock_ai_response.assert_called_once_with(
-            agent_name="calculator",
-            prompt="@mindroom_calculator:localhost: What's 2+2?",
-            session_id="!test:localhost:$thread_root_id",
-            storage_path=tmp_path,
-            thread_history=[],
-            room_id="!test:localhost",
-        )
-        bot.client.room_send.assert_called_once()
+        # Should call AI and send response based on streaming mode
+        if enable_streaming:
+            mock_ai_response_streaming.assert_called_once_with(
+                agent_name="calculator",
+                prompt="@mindroom_calculator:localhost: What's 2+2?",
+                session_id="!test:localhost:$thread_root_id",
+                storage_path=tmp_path,
+                thread_history=[],
+                room_id="!test:localhost",
+            )
+            mock_ai_response.assert_not_called()
+            # With streaming, we expect 2 calls: initial message + final edit
+            assert bot.client.room_send.call_count == 2
+        else:
+            mock_ai_response.assert_called_once_with(
+                agent_name="calculator",
+                prompt="@mindroom_calculator:localhost: What's 2+2?",
+                session_id="!test:localhost:$thread_root_id",
+                storage_path=tmp_path,
+                thread_history=[],
+                room_id="!test:localhost",
+            )
+            mock_ai_response_streaming.assert_not_called()
+            # Without streaming, we expect 1 call
+            assert bot.client.room_send.call_count == 1
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -224,18 +256,31 @@ class TestAgentBot:
         bot.client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("enable_streaming", [True, False])
+    @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
+    @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
     async def test_agent_bot_thread_response(
         self,
         mock_fetch_history: AsyncMock,
+        mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,
+        mock_team_arun: AsyncMock,
+        enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Test agent bot thread response behavior based on agent participation."""
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"])
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming)
         bot.client = AsyncMock()
+
+        # Mock orchestrator with agent_bots
+        mock_orchestrator = MagicMock()
+        mock_agent_bot = MagicMock()
+        mock_agent_bot.agent = MagicMock()
+        mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
+        bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -244,8 +289,6 @@ class TestAgentBot:
 
         # Initialize response tracker with isolated path
         from mindroom.interactive import InteractiveManager
-        from mindroom.response_tracker import ResponseTracker
-        from mindroom.thread_invites import ThreadInviteManager
 
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
@@ -253,6 +296,8 @@ class TestAgentBot:
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
+        # Mock room users to include the agent
+        mock_room.users = {"@mindroom_calculator:localhost": MagicMock()}
 
         # Test 1: Thread with only this agent - should respond without mention
         mock_fetch_history.return_value = [
@@ -264,7 +309,15 @@ class TestAgentBot:
                 "event_id": "prev2",
             },
         ]
+
+        # Mock streaming response - return an async generator
+        async def mock_streaming_response():
+            yield "Thread"
+            yield " response"
+
+        mock_ai_response_streaming.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Thread response"
+        mock_team_arun.return_value = "Team response"
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
@@ -282,15 +335,26 @@ class TestAgentBot:
         await bot._on_message(mock_room, mock_event)
 
         # Should respond as only agent in thread
-        mock_ai_response.assert_called_once()
-        bot.client.room_send.assert_called_once()
+        if enable_streaming:
+            mock_ai_response_streaming.assert_called_once()
+            mock_ai_response.assert_not_called()
+            # With streaming, we expect 2 calls: initial message + final edit
+            assert bot.client.room_send.call_count == 2
+        else:
+            mock_ai_response.assert_called_once()
+            mock_ai_response_streaming.assert_not_called()
+            # Without streaming, we expect 1 call
+            assert bot.client.room_send.call_count == 1
 
         # Reset mocks
+        mock_ai_response_streaming.reset_mock()
         mock_ai_response.reset_mock()
+        mock_team_arun.reset_mock()
         bot.client.room_send.reset_mock()
+        mock_fetch_history.reset_mock()
 
         # Test 2: Thread with multiple agents - should NOT respond without mention
-        mock_fetch_history.return_value = [
+        test2_history = [
             {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
             {"sender": "@mindroom_calculator:localhost", "body": "My response", "timestamp": 124, "event_id": "prev2"},
             {
@@ -300,18 +364,41 @@ class TestAgentBot:
                 "event_id": "prev3",
             },
         ]
+        mock_fetch_history.return_value = test2_history
 
-        await bot._on_message(mock_room, mock_event)
+        # Create a new event with a different ID for Test 2
+        mock_event_2 = MagicMock()
+        mock_event_2.sender = "@user:localhost"
+        mock_event_2.body = "Thread message without mention"
+        mock_event_2.event_id = "event456"  # Different event ID
+        mock_event_2.source = {
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "thread_root",
+                },
+            },
+        }
 
-        # Should NOT respond when multiple agents in thread
+        await bot._on_message(mock_room, mock_event_2)
+
+        # Should form team and send team response when multiple agents in thread
+        mock_ai_response_streaming.assert_not_called()
         mock_ai_response.assert_not_called()
-        bot.client.room_send.assert_not_called()
+        mock_team_arun.assert_called_once()
+        bot.client.room_send.assert_called_once()  # Team response sent
+
+        # Reset mocks
+        mock_ai_response_streaming.reset_mock()
+        mock_ai_response.reset_mock()
+        mock_team_arun.reset_mock()
+        bot.client.room_send.reset_mock()
 
         # Test 3: Thread with multiple agents WITH mention - should respond
         mock_event_with_mention = MagicMock()
         mock_event_with_mention.sender = "@user:localhost"
         mock_event_with_mention.body = "@mindroom_calculator:localhost What's 2+2?"
-        mock_event_with_mention.event_id = "event456"
+        mock_event_with_mention.event_id = "event789"  # Unique event ID for Test 3
         mock_event_with_mention.source = {
             "content": {
                 "body": "@mindroom_calculator:localhost What's 2+2?",
@@ -323,11 +410,27 @@ class TestAgentBot:
             },
         }
 
+        # Set up fresh async generator for the second call
+        async def mock_streaming_response2():
+            yield "Mentioned"
+            yield " response"
+
+        mock_ai_response_streaming.return_value = mock_streaming_response2()
+        mock_ai_response.return_value = "Mentioned response"
+
         await bot._on_message(mock_room, mock_event_with_mention)
 
         # Should respond when explicitly mentioned
-        mock_ai_response.assert_called_once()
-        bot.client.room_send.assert_called_once()
+        if enable_streaming:
+            mock_ai_response_streaming.assert_called_once()
+            mock_ai_response.assert_not_called()
+            # With streaming, we expect 2 calls: initial message + final edit
+            assert bot.client.room_send.call_count == 2
+        else:
+            mock_ai_response.assert_called_once()
+            mock_ai_response_streaming.assert_not_called()
+            # Without streaming, we expect 1 call
+            assert bot.client.room_send.call_count == 1
 
     @pytest.mark.asyncio
     async def test_agent_bot_skips_already_responded_messages(
@@ -340,8 +443,6 @@ class TestAgentBot:
         bot.client = AsyncMock()
         # Initialize response tracker with isolated path
         from mindroom.interactive import InteractiveManager
-        from mindroom.response_tracker import ResponseTracker
-        from mindroom.thread_invites import ThreadInviteManager
 
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
@@ -457,6 +558,25 @@ class TestMultiAgentOrchestrator:
         for bot in orchestrator.agent_bots.values():
             assert not bot.running
             bot.client.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("mindroom.bot.ensure_all_agent_users")
+    @patch.dict(os.environ, {"MINDROOM_ENABLE_STREAMING": "false"})
+    async def test_orchestrator_streaming_env_var(
+        self,
+        mock_ensure_users: AsyncMock,
+        mock_agent_users: dict[str, AgentMatrixUser],
+        tmp_path: Path,
+    ) -> None:
+        """Test that orchestrator respects MINDROOM_ENABLE_STREAMING environment variable."""
+        mock_ensure_users.return_value = mock_agent_users
+
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        await orchestrator.initialize()
+
+        # All bots should have streaming disabled
+        for bot in orchestrator.agent_bots.values():
+            assert bot.enable_streaming is False
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ensure_all_agent_users")

@@ -189,8 +189,3 @@ def get_tool_by_name(tool_name: str) -> Any:
         logger.warning(f"Could not import tool '{tool_name}': {e}")
         logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
         raise
-
-
-def list_tools() -> list[str]:
-    """Get a list of all registered tool names."""
-    return sorted(TOOL_REGISTRY.keys())

@@ -14,6 +14,7 @@ import yaml
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+from mindroom.cli import _run
 from mindroom.matrix import MATRIX_HOMESERVER
 
 
@@ -180,8 +181,6 @@ async def main():
     # Start mindroom
     print("🚀 Starting Mindroom...")
     import tempfile
-
-    from mindroom.cli import _run
 
     temp_dir = tempfile.mkdtemp(prefix="mindroom_test_")
     bot_task = asyncio.create_task(_run(log_level="INFO", storage_path=Path(temp_dir)))

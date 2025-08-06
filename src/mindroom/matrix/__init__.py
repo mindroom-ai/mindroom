@@ -13,8 +13,16 @@ from .client import (
     join_room,
     login,
     matrix_client,
-    prepare_response_content,
     register_user,
+)
+from .identity import (
+    MatrixID,
+    ThreadStateKey,
+    extract_agent_name,
+    extract_server_name_from_homeserver,
+    get_known_agents,
+    is_agent_id,
+    parse_matrix_id,
 )
 from .mentions import create_mention_content, create_mention_content_from_text
 from .rooms import (
@@ -27,13 +35,9 @@ from .rooms import (
 from .state import MatrixAccount, MatrixRoom, MatrixState
 from .users import (
     AgentMatrixUser,
-    construct_agent_user_id,
     create_agent_user,
     ensure_all_agent_users,
-    extract_agent_name,
     extract_domain_from_user_id,
-    extract_server_name_from_homeserver,
-    extract_username_from_user_id,
     get_agent_credentials,
     login_agent_user,
     save_agent_credentials,
@@ -55,8 +59,15 @@ __all__ = [
     "join_room",
     "login",
     "matrix_client",
-    "prepare_response_content",
     "register_user",
+    # Identity classes and functions
+    "MatrixID",
+    "ThreadStateKey",
+    "extract_agent_name",
+    "extract_server_name_from_homeserver",
+    "get_known_agents",
+    "is_agent_id",
+    "parse_matrix_id",
     # Config models
     "MatrixAccount",
     "MatrixState",
@@ -72,13 +83,9 @@ __all__ = [
     "create_mention_content_from_text",
     # User functions
     "AgentMatrixUser",
-    "construct_agent_user_id",
     "create_agent_user",
     "ensure_all_agent_users",
-    "extract_agent_name",
     "extract_domain_from_user_id",
-    "extract_server_name_from_homeserver",
-    "extract_username_from_user_id",
     "get_agent_credentials",
     "login_agent_user",
     "save_agent_credentials",

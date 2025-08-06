@@ -7,7 +7,7 @@ from typing import Any
 import markdown
 import nio
 
-from ..logging_config import emoji, get_logger
+from ..logging_config import get_logger
 from .users import extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
@@ -114,13 +114,13 @@ async def register_user(
         )
 
         if isinstance(response, nio.RegisterResponse):
-            logger.info(f"Successfully registered user: {user_id}")
-            # Set display name
-            login_response = await client.login(password)
-            if not isinstance(login_response, nio.LoginResponse):
-                logger.error(f"Failed to login after registration: {login_response}")
-                raise ValueError(f"Failed to login after registration: {login_response}")
+            logger.info(f"✅ Successfully registered user: {user_id}")
+            # After registration, we already have an access token
+            client.user_id = response.user_id
+            client.access_token = response.access_token
+            client.device_id = response.device_id
 
+            # Set display name using the existing session
             display_response = await client.set_displayname(display_name)
             if isinstance(display_response, nio.ErrorResponse):
                 logger.warning(f"Failed to set display name: {display_response}")
@@ -226,8 +226,19 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
     if isinstance(response, nio.JoinedMembersResponse):
         return {member.user_id for member in response.members}
     else:
-        logger.warning(f"Could not check members for room {room_id}")
+        logger.warning(f"⚠️ Could not check members for room {room_id}")
         return set()
+
+
+def _extract_message_data(event: nio.RoomMessageText) -> dict[str, Any]:
+    """Extract message data from a RoomMessageText event."""
+    return {
+        "sender": event.sender,
+        "body": event.body,
+        "timestamp": event.server_timestamp,
+        "event_id": event.event_id,
+        "content": event.source.get("content", {}),
+    }
 
 
 async def fetch_thread_history(
@@ -247,6 +258,7 @@ async def fetch_thread_history(
     """
     messages = []
     from_token = None
+    root_message_found = False
 
     while True:
         response = await client.room_messages(
@@ -261,20 +273,24 @@ async def fetch_thread_history(
             logger.error("Failed to fetch thread history", room_id=room_id, error=str(response))
             break
 
-        for event in response.chunk:
-            if hasattr(event, "source") and event.source.get("type") == "m.room.message":
-                relates_to = event.source.get("content", {}).get("m.relates_to", {})
-                if relates_to.get("rel_type") == "m.thread" and relates_to.get("event_id") == thread_id:
-                    messages.append(
-                        {
-                            "sender": event.sender,
-                            "body": getattr(event, "body", ""),
-                            "timestamp": event.server_timestamp,
-                            "event_id": event.event_id,
-                        },
-                    )
+        # Break if no new messages found
+        if not response.chunk:
+            break
 
-        if not response.end:
+        thread_messages_found = 0
+        for event in response.chunk:
+            if isinstance(event, nio.RoomMessageText):
+                if event.event_id == thread_id and not root_message_found:
+                    messages.append(_extract_message_data(event))
+                    root_message_found = True
+                    thread_messages_found += 1
+                else:
+                    relates_to = event.source.get("content", {}).get("m.relates_to", {})
+                    if relates_to.get("rel_type") == "m.thread" and relates_to.get("event_id") == thread_id:
+                        messages.append(_extract_message_data(event))
+                        thread_messages_found += 1
+
+        if not response.end or thread_messages_found == 0:
             break
         from_token = response.end
 
@@ -307,55 +323,3 @@ def markdown_to_html(text: str) -> str:
     )
     html_text: str = md.convert(text)
     return html_text
-
-
-def prepare_response_content(
-    response_text: str,
-    event: nio.RoomMessageText,
-    agent_name: str = "",
-) -> dict[str, Any]:
-    """Prepares the content for the response message.
-
-    Args:
-        response_text: The text to send
-        event: The event being responded to
-        agent_name: Optional agent name for logging
-
-    Returns:
-        Message content dictionary
-    """
-    content: dict[str, Any] = {
-        "msgtype": "m.text",
-        "body": response_text,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(response_text),
-    }
-
-    is_thread_reply, thread_id = extract_thread_info(event.source)
-    relates_to = event.source.get("content", {}).get("m.relates_to")
-
-    agent_prefix = emoji(agent_name) if agent_name else ""
-
-    logger.debug(
-        f"{agent_prefix} Preparing response content - Original event_id: {event.event_id}, "
-        f"Original relates_to: {relates_to}, Is thread reply: {is_thread_reply}"
-    )
-
-    if relates_to:
-        if is_thread_reply:
-            content["m.relates_to"] = {
-                "rel_type": "m.thread",
-                "event_id": relates_to.get("event_id"),
-                "m.in_reply_to": {"event_id": event.event_id},
-            }
-            logger.debug(f"{agent_prefix} Setting thread reply with thread_id: {relates_to.get('event_id')}")
-        else:
-            content["m.relates_to"] = {"m.in_reply_to": {"event_id": event.event_id}}
-            logger.debug(f"{agent_prefix} Setting regular reply (not thread)")
-    else:
-        content["m.relates_to"] = {"m.in_reply_to": {"event_id": event.event_id}}
-        logger.debug(f"{agent_prefix} No relates_to in original message, setting regular reply")
-
-    logger.debug(f"{agent_prefix} Final content m.relates_to: {content.get('m.relates_to')}")
-
-    return content

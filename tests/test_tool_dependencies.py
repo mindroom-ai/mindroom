@@ -2,7 +2,7 @@
 
 import pytest
 
-from mindroom.tools import get_tool_by_name, list_tools
+from mindroom.tools import TOOL_REGISTRY, get_tool_by_name
 
 # Tools that require configuration to instantiate
 TOOLS_REQUIRING_CONFIG = {
@@ -20,7 +20,7 @@ def test_all_tools_can_be_imported():
     config_required = []
     failed = []
 
-    for tool_name in list_tools():
+    for tool_name in TOOL_REGISTRY:
         try:
             tool_instance = get_tool_by_name(tool_name)
             assert tool_instance is not None

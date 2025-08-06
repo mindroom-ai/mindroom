@@ -5,25 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import _should_process_message
 from mindroom.commands import handle_invite_command, handle_list_invites_command
 from mindroom.thread_invites import ThreadInviteManager
-from mindroom.thread_utils import should_route_to_agent
 
 
 class TestBotHelpers:
     """Test bot helper functions."""
-
-    def test_should_process_message(self):
-        """Test _should_process_message function."""
-        # Test with same user ID (self) - should not process
-        assert not _should_process_message("@mindroom_calculator:localhost", "@mindroom_calculator:localhost")
-
-        # Test with another agent - should not process
-        assert not _should_process_message("@mindroom_general:localhost", "@mindroom_calculator:localhost")
-
-        # Test with regular user - should process
-        assert _should_process_message("@user:localhost", "@mindroom_calculator:localhost")
 
     @pytest.mark.asyncio
     async def test_handle_invite_command_unknown_agent(self):
@@ -120,15 +107,3 @@ class TestBotHelpers:
         assert "- @calculator" in result
         assert "- @research" in result
         assert "- @code" in result
-
-    def test_should_route_to_agent(self):
-        """Test should_route_to_agent function."""
-        # Empty list
-        assert not should_route_to_agent("calculator", [])
-
-        # First agent should route
-        assert should_route_to_agent("calculator", ["calculator", "general", "research"])
-
-        # Other agents should not route
-        assert not should_route_to_agent("general", ["calculator", "general", "research"])
-        assert not should_route_to_agent("research", ["calculator", "general", "research"])

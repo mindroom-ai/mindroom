@@ -34,7 +34,7 @@ class TestMemoryFunctions:
 
     def test_get_memory_singleton(self, mock_memory, storage_path):
         """Test that get_memory returns singleton instance."""
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
             # First call creates instance
             memory1 = get_memory(storage_path)
             assert memory1 == mock_memory
@@ -44,9 +44,7 @@ class TestMemoryFunctions:
             assert memory2 == memory1
 
             # create_memory_instance should only be called once
-            from mindroom.memory.functions import create_memory_instance
-
-            create_memory_instance.assert_called_once_with(storage_path)
+            mock_create.assert_called_once_with(storage_path)
 
     def test_add_agent_memory(self, mock_memory, storage_path):
         """Test adding agent memory."""
@@ -134,7 +132,7 @@ class TestMemoryFunctions:
 
         context = format_memories_as_context(memories, "agent")
 
-        expected = "Relevant agent memories:\n- First memory\n- Second memory"
+        expected = "[Automatically extracted agent memories - may not be relevant to current context]\nPrevious agent memories that might be related:\n- First memory\n- Second memory"
         assert context == expected
 
     def test_format_memories_as_context_empty(self):
@@ -154,9 +152,9 @@ class TestMemoryFunctions:
             enhanced = build_memory_enhanced_prompt("What is 3+3?", "calculator", storage_path, room_id="!room:server")
 
             # Should include both contexts
-            assert "Relevant agent memories:" in enhanced
+            assert "[Automatically extracted agent memories - may not be relevant to current context]" in enhanced
             assert "I previously calculated 2+2=4" in enhanced
-            assert "Relevant room memories:" in enhanced
+            assert "[Automatically extracted room memories - may not be relevant to current context]" in enhanced
             assert "We discussed math earlier" in enhanced
             assert "What is 3+3?" in enhanced
 

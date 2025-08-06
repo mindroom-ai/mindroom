@@ -11,14 +11,29 @@ memory:
       model: "nomic-embed-text"  # Ollama embedding model
       host: "http://localhost:11434"  # Ollama host URL
 
-# Model configuration
 models:
   default:  # Default model used when agent doesn't specify one
+    provider: "ollama"
+    id: "gpt-oss:20b"
+
+  anthropic:
+    provider: "anthropic"
+    id: "claude-3-5-haiku-latest"
+
+  ollama:
     provider: "ollama"
     id: "devstral:24b"
     # Add any provider-specific config here
     # For ollama, you can add:
     # host: "http://localhost:11434"
+
+  openrouter:
+    provider: "openrouter"
+    id: "z-ai/glm-4.5-air:free"
+
+  deepseek:
+    provider: "openrouter"
+    id: "deepseek-ai/deepseek-chat:free"
 
   # Example of other model configurations:
   # gpt4:
@@ -27,7 +42,7 @@ models:
   #
   # claude:
   #   provider: "anthropic"
-  #   id: "claude-3-opus-20240229"
+  #   id: "claude-4-opus-latest"
 
 agents:
   # General conversation agent
@@ -207,9 +222,43 @@ agents:
       - business  # Business analytics
     num_history_runs: 5
 
+  # Security analysis agent (for testing)
+  security:
+    display_name: "SecurityAgent"
+    role: "Analyze security aspects and provide recommendations."
+    tools: []
+    instructions:
+      - "Analyze security implications thoroughly."
+      - "Provide security best practices."
+      - "Identify potential vulnerabilities."
+      - "Suggest mitigation strategies."
+    rooms:
+      - lobby     # Main coordination room
+      - dev       # Development security
+    num_history_runs: 5
+
+  # Analyst agent (for testing)
+  analyst:
+    display_name: "AnalystAgent"
+    role: "Provide analytical insights and recommendations."
+    tools: []
+    instructions:
+      - "Analyze information comprehensively."
+      - "Provide structured insights."
+      - "Consider multiple perspectives."
+      - "Make evidence-based recommendations."
+    rooms:
+      - lobby     # Main coordination room
+      - analysis  # Analysis tasks
+    num_history_runs: 5
+
 
 # Configuration for agent defaults
 defaults:
   num_history_runs: 5
   markdown: true
   add_history_to_messages: true
+
+# Router configuration
+router:
+  model: "ollama"  # Which model to use for routing decisions (references models section)

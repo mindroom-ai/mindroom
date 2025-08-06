@@ -13,7 +13,8 @@ import nio
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from mindroom.matrix import MATRIX_HOMESERVER
+from mindroom.cli import _run
+from mindroom.matrix import MATRIX_HOMESERVER, MatrixID
 
 
 class InviteE2ETest:
@@ -113,7 +114,8 @@ class InviteE2ETest:
 
     async def send_mention(self, room_id: str, agent_name: str, message: str, thread_id: str = None):
         """Send a message with proper Matrix mention."""
-        user_id = f"@mindroom_{agent_name}:localhost"
+
+        user_id = MatrixID.from_agent(agent_name, "localhost").full_id
 
         content = {"msgtype": "m.text", "body": f"{user_id} {message}", "m.mentions": {"user_ids": [user_id]}}
 
@@ -145,7 +147,8 @@ class InviteE2ETest:
                 # Check if it's part of the thread
                 relates_to = event.source.get("content", {}).get("m.relates_to", {})
                 if relates_to.get("event_id") == thread_id and relates_to.get("rel_type") == "m.thread":
-                    sender = event.sender.split(":")[0].replace("@", "")
+                    sender_id = MatrixID.parse(event.sender)
+                    sender = sender_id.username
                     messages.append(
                         {
                             "sender": sender,
@@ -166,7 +169,8 @@ class InviteE2ETest:
         messages = []
         for event in reversed(response.chunk):
             if isinstance(event, nio.RoomMessageText):
-                sender = event.sender.split(":")[0].replace("@", "")
+                sender_id = MatrixID.parse(event.sender)
+                sender = sender_id.username
                 messages.append(
                     {
                         "sender": sender,
@@ -246,7 +250,8 @@ async def test_no_response_outside_threads(test):
     messages = await test.get_recent_messages(test.lobby_room_id, limit=10)
 
     recent = [m for m in messages if m["timestamp"] > (time.time() - 30) * 1000]
-    calculator_responded = any(m["sender"] == "@mindroom_calculator:localhost" for m in recent)
+
+    calculator_responded = any(m["sender"] == MatrixID.from_agent("calculator", "localhost").full_id for m in recent)
 
     if calculator_responded:
         print("   ❌ ERROR: Calculator responded outside of thread!")
@@ -333,8 +338,6 @@ async def main():
     # Start mindroom
     print("🚀 Starting Mindroom...")
     import tempfile
-
-    from mindroom.cli import _run
 
     temp_dir = tempfile.mkdtemp(prefix="mindroom_invite_test_")
     bot_task = asyncio.create_task(_run(log_level="INFO", storage_path=Path(temp_dir)))

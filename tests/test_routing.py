@@ -9,7 +9,7 @@ from mindroom.agent_config import describe_agent
 from mindroom.bot import AgentBot
 from mindroom.matrix import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
-from mindroom.thread_utils import has_any_agent_mentions_in_thread
+from mindroom.thread_utils import extract_agent_name, has_any_agent_mentions_in_thread
 
 
 class TestAIRouting:
@@ -93,9 +93,9 @@ class TestAIRouting:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_only_first_agent_routes(self) -> None:
-        """Test that only the first agent (alphabetically) handles routing."""
-        # Create general agent (not first alphabetically)
+    async def test_only_router_agent_routes(self) -> None:
+        """Test that only the router agent handles routing."""
+        # Create general agent (not router)
         agent = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -109,7 +109,7 @@ class TestAIRouting:
         mock_room = MagicMock()
         mock_room.users = MagicMock()
         mock_room.users.keys.return_value = [
-            "@mindroom_calculator:localhost",  # First alphabetically
+            "@mindroom_calculator:localhost",
             "@mindroom_general:localhost",
             "@user:localhost",
         ]
@@ -120,7 +120,7 @@ class TestAIRouting:
         with patch("mindroom.bot.suggest_agent_for_message") as mock_suggest:
             await bot._handle_ai_routing(mock_room, mock_event, [])
 
-            # Should not call routing since general is not first
+            # Should not call routing since general is not the router agent
             mock_suggest.assert_not_called()
 
 
@@ -175,8 +175,6 @@ class TestThreadUtils:
 
     def test_extract_agent_name_rejects_unconfigured(self) -> None:
         """Test that unconfigured agents are not recognized."""
-        from mindroom.thread_utils import extract_agent_name
-
         # This should return None because "fake_agent" is not in config.yaml
         assert extract_agent_name("@mindroom_fake_agent:localhost") is None
 

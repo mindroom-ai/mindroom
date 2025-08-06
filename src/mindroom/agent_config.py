@@ -1,26 +1,40 @@
 """Agent loader that reads agent configurations from YAML file."""
 
+import functools
 from pathlib import Path
 
 import yaml
 from agno.agent import Agent
-from agno.models.base import Model
 from agno.storage.sqlite import SqliteStorage
 
+from . import agent_prompts
 from .logging_config import get_logger
 from .models import Config
 from .tools import get_tool_by_name
 
 logger = get_logger(__name__)
 
+# Constants
+ROUTER_AGENT_NAME = "router"
+
 # Default path to agents configuration file
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 
-# Global caches
-_config_cache: dict[Path, Config] = {}
-_agent_cache: dict[str, Agent] = {}
+# Rich prompt mapping - agents that use detailed prompts instead of simple roles
+RICH_PROMPTS = {
+    "code": agent_prompts.CODE_AGENT_PROMPT,
+    "research": agent_prompts.RESEARCH_AGENT_PROMPT,
+    "calculator": agent_prompts.CALCULATOR_AGENT_PROMPT,
+    "general": agent_prompts.GENERAL_AGENT_PROMPT,
+    "shell": agent_prompts.SHELL_AGENT_PROMPT,
+    "summary": agent_prompts.SUMMARY_AGENT_PROMPT,
+    "finance": agent_prompts.FINANCE_AGENT_PROMPT,
+    "news": agent_prompts.NEWS_AGENT_PROMPT,
+    "data_analyst": agent_prompts.DATA_ANALYST_AGENT_PROMPT,
+}
 
 
+@functools.cache
 def load_config(config_path: Path | None = None) -> Config:
     """Load agent configuration from YAML file.
 
@@ -35,10 +49,6 @@ def load_config(config_path: Path | None = None) -> Config:
     """
     path = config_path or DEFAULT_AGENTS_CONFIG
 
-    # Check cache
-    if path in _config_cache:
-        return _config_cache[path]
-
     if not path.exists():
         raise FileNotFoundError(f"Agent configuration file not found: {path}")
 
@@ -46,14 +56,13 @@ def load_config(config_path: Path | None = None) -> Config:
         data = yaml.safe_load(f)
 
     config = Config(**data)
-    _config_cache[path] = config
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")
 
     return config
 
 
-def create_agent(agent_name: str, model: Model, storage_path: Path, config_path: Path | None = None) -> Agent:
+def create_agent(agent_name: str, storage_path: Path, config_path: Path | None = None) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
@@ -68,10 +77,7 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
     Raises:
         ValueError: If agent_name is not found in configuration
     """
-    # Check cache
-    cache_key = f"{agent_name}:{model.__class__.__name__}:{model.id}"
-    if cache_key in _agent_cache:
-        return _agent_cache[cache_key]
+    from .ai import get_model_instance
 
     # Load config and get agent
     config = load_config(config_path)
@@ -91,13 +97,27 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
     storage_path.mkdir(parents=True, exist_ok=True)
     storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
 
+    # Use rich prompt if available, otherwise use YAML config
+    if agent_name in RICH_PROMPTS:
+        logger.info(f"Using rich prompt for agent: {agent_name}")
+        role = RICH_PROMPTS[agent_name]
+        instructions = []  # Instructions are in the rich prompt
+    else:
+        logger.info(f"Using YAML config for agent: {agent_name}")
+        role = agent_config.role
+        instructions = agent_config.instructions
+
     # Create agent with defaults applied
+    model = get_model_instance(agent_config.model)
+    logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
+    logger.info(f"Storage path: {storage_path}, DB file: {storage_path / f'{agent_name}.db'}")
+
     agent = Agent(
         name=agent_config.display_name,
-        role=agent_config.role,
+        role=role,
         model=model,
         tools=tools,
-        instructions=agent_config.instructions,
+        instructions=instructions,
         storage=storage,
         add_history_to_messages=agent_config.add_history_to_messages
         if agent_config.add_history_to_messages is not None
@@ -105,9 +125,6 @@ def create_agent(agent_name: str, model: Model, storage_path: Path, config_path:
         num_history_runs=agent_config.num_history_runs or defaults.num_history_runs,
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
     )
-
-    # Cache the agent
-    _agent_cache[cache_key] = agent
     logger.info(f"Created agent '{agent_name}' ({agent_config.display_name}) with {len(tools)} tools")
 
     return agent
@@ -123,6 +140,14 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
     Returns:
         Human-readable description of the agent
     """
+    # Handle built-in router agent
+    if agent_name == ROUTER_AGENT_NAME:
+        return (
+            "router\n"
+            "  - Route messages to the most appropriate agent based on context and expertise.\n"
+            "  - Analyzes incoming messages and determines which agent is best suited to respond."
+        )
+
     config = load_config(config_path)
 
     # Check if agent exists
@@ -149,9 +174,3 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
             parts.append(f"- {first_instruction}")
 
     return "\n  ".join(parts)
-
-
-def clear_cache() -> None:
-    """Clear all caches."""
-    _config_cache.clear()
-    _agent_cache.clear()

@@ -36,6 +36,8 @@ class ResponseTracker:
         self._store_path.mkdir(parents=True, exist_ok=True)
         self._responses_file = self._store_path / "responded_events.json"
         self._responded_events = self._load_responded_events()
+        # Perform automatic cleanup on initialization
+        self.cleanup_old_events()
 
     def _load_responded_events(self) -> dict[str, float]:
         """Load the event IDs and timestamps that have been responded to."""
