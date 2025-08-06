@@ -8,6 +8,7 @@ from typing import NamedTuple
 import nio
 
 from .logging_config import get_logger
+from .matrix import extract_thread_info
 from .matrix.identity import is_agent_id
 
 logger = get_logger(__name__)
@@ -153,7 +154,7 @@ async def handle_text_response(
         return
 
     # Extract thread info from the event
-    thread_id = _extract_thread_id_from_event(event)
+    _, thread_id = extract_thread_info(event.source)
 
     # Find matching active questions in this room/thread
     for question_event_id, question in _active_questions.items():
@@ -184,17 +185,6 @@ async def handle_text_response(
 
         return (selected_value, question.thread_id)
 
-    return None
-
-
-def _extract_thread_id_from_event(event: nio.Event) -> str | None:
-    """Extract thread ID from a Matrix event."""
-    content = getattr(event, "source", {}).get("content", {})
-    relates_to = content.get("m.relates_to", {})
-
-    if relates_to.get("rel_type") == "m.thread":
-        event_id = relates_to.get("event_id")
-        return event_id if isinstance(event_id, str) else None
     return None
 
 
