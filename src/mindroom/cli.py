@@ -1,5 +1,7 @@
 """Mindroom CLI - Simplified multi-agent Matrix bot system."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 import sys
