@@ -346,29 +346,29 @@ def _extract_thread_id_from_event(event: nio.Event) -> str | None:
     return None
 
 
-def format_interactive_text_only(response_text: str) -> str | None:
+def format_interactive_text_only(response_text: str) -> str:
     """Format text containing an interactive question block.
 
     This is a pure formatting function without side effects, useful for streaming.
-    Returns None if formatting fails.
+    Returns the original text if formatting fails.
     """
     # Extract JSON from interactive code block
     match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
 
     if not match:
-        return None
+        return response_text
 
     try:
         interactive_data = json.loads(match.group(1))
     except json.JSONDecodeError:
-        return None
+        return response_text
 
     # Extract question and options
     question = interactive_data.get("question", DEFAULT_QUESTION)
     options = interactive_data.get("options", [])
 
     if not options or len(options) == 0:
-        return None
+        return response_text
 
     # Limit options
     options = options[:MAX_OPTIONS]

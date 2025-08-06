@@ -102,8 +102,7 @@ class StreamingResponse:
         """
         # Simply reuse the formatting logic from interactive module
         try:
-            formatted = interactive.format_interactive_text_only(self.accumulated_text)
-            return formatted if formatted else self.accumulated_text
+            return interactive.format_interactive_text_only(self.accumulated_text)
         except Exception as e:
             logger.error("Failed to format interactive text", error=str(e))
             return self.accumulated_text
