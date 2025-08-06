@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useCallback } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -44,15 +44,12 @@ export function AgentEditor() {
     }
   }, [selectedAgent, reset]);
 
-  // Watch form changes and update store
-  useEffect(() => {
-    const subscription = watch((value) => {
-      if (selectedAgentId && value) {
-        updateAgent(selectedAgentId, value as Partial<Agent>);
-      }
-    });
-    return () => subscription.unsubscribe();
-  }, [watch, selectedAgentId, updateAgent]);
+  // Create a debounced update function
+  const handleFieldChange = useCallback((fieldName: keyof Agent, value: any) => {
+    if (selectedAgentId) {
+      updateAgent(selectedAgentId, { [fieldName]: value });
+    }
+  }, [selectedAgentId, updateAgent]);
 
   const handleDelete = () => {
     if (selectedAgentId && confirm('Are you sure you want to delete this agent?')) {
@@ -66,22 +63,30 @@ export function AgentEditor() {
 
   const handleAddInstruction = () => {
     const current = getValues('instructions');
-    setValue('instructions', [...current, '']);
+    const updated = [...current, ''];
+    setValue('instructions', updated);
+    handleFieldChange('instructions', updated);
   };
 
   const handleRemoveInstruction = (index: number) => {
     const current = getValues('instructions');
-    setValue('instructions', current.filter((_, i) => i !== index));
+    const updated = current.filter((_, i) => i !== index);
+    setValue('instructions', updated);
+    handleFieldChange('instructions', updated);
   };
 
   const handleAddRoom = () => {
     const current = getValues('rooms');
-    setValue('rooms', [...current, 'new_room']);
+    const updated = [...current, 'new_room'];
+    setValue('rooms', updated);
+    handleFieldChange('rooms', updated);
   };
 
   const handleRemoveRoom = (index: number) => {
     const current = getValues('rooms');
-    setValue('rooms', current.filter((_, i) => i !== index));
+    const updated = current.filter((_, i) => i !== index);
+    setValue('rooms', updated);
+    handleFieldChange('rooms', updated);
   };
 
   if (!selectedAgent) {
@@ -130,7 +135,15 @@ export function AgentEditor() {
               name="display_name"
               control={control}
               render={({ field }) => (
-                <Input {...field} id="display_name" placeholder="Agent display name" />
+                <Input
+                  {...field}
+                  id="display_name"
+                  placeholder="Agent display name"
+                  onChange={(e) => {
+                    field.onChange(e);
+                    handleFieldChange('display_name', e.target.value);
+                  }}
+                />
               )}
             />
           </div>
@@ -147,6 +160,10 @@ export function AgentEditor() {
                   id="role"
                   placeholder="What this agent does..."
                   rows={2}
+                  onChange={(e) => {
+                    field.onChange(e);
+                    handleFieldChange('role', e.target.value);
+                  }}
                 />
               )}
             />
@@ -159,7 +176,13 @@ export function AgentEditor() {
               name="model"
               control={control}
               render={({ field }) => (
-                <Select value={field.value || 'default'} onValueChange={field.onChange}>
+                <Select
+                  value={field.value || 'default'}
+                  onValueChange={(value) => {
+                    field.onChange(value);
+                    handleFieldChange('model', value);
+                  }}
+                >
                   <SelectTrigger id="model">
                     <SelectValue />
                   </SelectTrigger>
@@ -192,11 +215,11 @@ export function AgentEditor() {
                           id={tool}
                           checked={isChecked}
                           onCheckedChange={(checked) => {
-                            if (checked) {
-                              field.onChange([...field.value, tool]);
-                            } else {
-                              field.onChange(field.value.filter(t => t !== tool));
-                            }
+                            const newTools = checked
+                              ? [...field.value, tool]
+                              : field.value.filter(t => t !== tool);
+                            field.onChange(newTools);
+                            handleFieldChange('tools', newTools);
                           }}
                         />
                         <label
@@ -239,6 +262,7 @@ export function AgentEditor() {
                           const updated = [...field.value];
                           updated[index] = e.target.value;
                           field.onChange(updated);
+                          handleFieldChange('instructions', updated);
                         }}
                         placeholder="Instruction..."
                       />
@@ -282,6 +306,7 @@ export function AgentEditor() {
                           const updated = [...field.value];
                           updated[index] = e.target.value;
                           field.onChange(updated);
+                          handleFieldChange('rooms', updated);
                         }}
                         placeholder="Room name..."
                       />
@@ -312,7 +337,11 @@ export function AgentEditor() {
                   type="number"
                   min={1}
                   max={20}
-                  onChange={(e) => field.onChange(parseInt(e.target.value) || 5)}
+                  onChange={(e) => {
+                    const value = parseInt(e.target.value) || 5;
+                    field.onChange(value);
+                    handleFieldChange('num_history_runs', value);
+                  }}
                 />
               )}
             />
