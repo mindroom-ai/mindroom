@@ -109,7 +109,8 @@ async def handle_interactive_response(
     message_parts.append("React with an emoji or type the number to respond.")
 
     final_text = "\n".join(message_parts)
-    if not final_text.rstrip().endswith("✓"):
+    # Don't add checkmark in streaming mode - it's already there
+    if not response_already_sent and not final_text.rstrip().endswith("✓"):
         final_text += " ✓"
 
     # If we have an event_id (streaming mode), edit the existing message
