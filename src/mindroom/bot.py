@@ -265,19 +265,51 @@ class AgentBot:
 
             # Create a session for the full response
             session_id = create_session_id(room.room_id, thread_id)
+            prompt = f"The user selected: {selected_value}"
 
-            # Generate agent response based on the selection
-            response_text = await ai_response(
-                agent_name=self.agent_name,
-                prompt=f"The user selected: {selected_value}",
-                session_id=session_id,
-                storage_path=self.storage_path,
-                thread_history=[],  # Could fetch if needed
-                room_id=room.room_id,
-            )
+            if self.enable_streaming:
+                # Use streaming to update the acknowledgment message
+                sender_id = self.matrix_id
 
-            # Edit the acknowledgment message with the full response
-            await self._edit_message(room.room_id, ack_event_id, response_text, thread_id)
+                # Create a StreamingResponse that will edit our acknowledgment message
+                streaming = StreamingResponse(
+                    room_id=room.room_id,
+                    reply_to_event_id=event.reacts_to,
+                    thread_id=thread_id,
+                    sender_domain=sender_id.domain,
+                )
+                # Set the event_id to our acknowledgment message so it gets edited
+                streaming.event_id = ack_event_id
+                streaming.accumulated_text = ""  # Start fresh, will replace the acknowledgment
+
+                try:
+                    async for chunk in ai_response_streaming(
+                        agent_name=self.agent_name,
+                        prompt=prompt,
+                        session_id=session_id,
+                        storage_path=self.storage_path,
+                        thread_history=[],  # Could fetch if needed
+                        room_id=room.room_id,
+                    ):
+                        await streaming.update_content(chunk, self.client)
+
+                    await streaming.finalize(self.client)
+
+                except Exception as e:
+                    self.logger.error("Error in streaming response for reaction", error=str(e))
+            else:
+                # Non-streaming: Generate full response and edit once
+                response_text = await ai_response(
+                    agent_name=self.agent_name,
+                    prompt=prompt,
+                    session_id=session_id,
+                    storage_path=self.storage_path,
+                    thread_history=[],  # Could fetch if needed
+                    room_id=room.room_id,
+                )
+
+                # Edit the acknowledgment message with the full response
+                await self._edit_message(room.room_id, ack_event_id, response_text, thread_id)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
