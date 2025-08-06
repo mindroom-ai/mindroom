@@ -121,58 +121,6 @@ warn_unused_ignores = true
 warn_no_return = true
 strict_equality = true
 
-[[tool.mypy.overrides]]
-module = "nio.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "yaml"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "agno.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "diskcache.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "sqlalchemy.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "aioresponses.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "loguru.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "pydantic.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "structlog.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "markdown.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "dotenv.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "typer.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "rich.*"
-ignore_missing_imports = true
-
 [tool.versioningit]
 default-version = "0.0.0"
 

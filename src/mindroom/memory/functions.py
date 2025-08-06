@@ -7,7 +7,7 @@ from ..logging_config import get_logger
 from .config import create_memory_instance
 
 if TYPE_CHECKING:
-    from mem0 import Memory  # type: ignore[import-not-found]
+    from mem0 import Memory  # type: ignore[import-untyped]
 
 
 class MemoryResult(TypedDict, total=False):

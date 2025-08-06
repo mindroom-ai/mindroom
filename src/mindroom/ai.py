@@ -101,7 +101,7 @@ async def _cached_agent_run(
     """Cached wrapper for agent.arun() calls."""
     cache = get_cache(storage_path)
     if cache is None:
-        return await agent.arun(full_prompt, session_id=session_id)
+        return await agent.arun(full_prompt, session_id=session_id)  # type: ignore[no-any-return]
 
     model = agent.model
     assert model is not None, "Agent should always have a model in our implementation"
@@ -109,14 +109,14 @@ async def _cached_agent_run(
     cached_result = cache.get(cache_key)
     if cached_result is not None:
         logger.info("Cache hit", agent=agent_name)
-        return cached_result
+        return cached_result  # type: ignore[no-any-return]
 
     response = await agent.arun(full_prompt, session_id=session_id)
 
     cache.set(cache_key, response)
     logger.info("Response cached", agent=agent_name)
 
-    return response
+    return response  # type: ignore[no-any-return]
 
 
 async def _prepare_agent_and_prompt(
