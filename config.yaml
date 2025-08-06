@@ -207,6 +207,14 @@ agents:
     - lobby
     - analysis
     num_history_runs: 5
+  new_agent:
+    display_name: New Agent
+    role: A new agent that needs configuration
+    tools: []
+    instructions: []
+    rooms:
+    - lobby
+    num_history_runs: 5
 defaults:
   num_history_runs: 5
   markdown: true
