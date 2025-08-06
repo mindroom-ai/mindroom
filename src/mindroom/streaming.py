@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import nio
 
+from . import interactive
 from .logging_config import get_logger
 from .matrix import create_mention_content_from_text
 
@@ -43,9 +44,6 @@ class StreamingResponse:
         """Check if we have a complete interactive block that can be processed."""
         if self.interactive_processed:
             return False
-
-        # Use the same detection logic as interactive.should_create_interactive_question
-        from . import interactive
 
         return interactive.should_create_interactive_question(self.accumulated_text)
 
