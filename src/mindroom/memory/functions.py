@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import Any, TypedDict
 
 from ..logging_config import get_logger
 from .config import create_memory_instance
-
-if TYPE_CHECKING:
-    pass  # type: ignore[import-untyped]
 
 
 class MemoryResult(TypedDict, total=False):
