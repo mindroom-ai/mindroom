@@ -393,24 +393,23 @@ class AgentBot:
                 await streaming.update_content(chunk, self.client)
 
             await streaming.finalize(self.client)
-
-            if streaming.event_id and not existing_event_id:
-                self.response_tracker.mark_responded(reply_to_event_id)
-                self.logger.info("Sent streaming response", event_id=streaming.event_id)
-
-            # If the message contains an interactive question, register it and add reactions
-            if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
-                response = interactive.parse_and_format_interactive(streaming.accumulated_text, extract_mapping=True)
-                if response.option_map and response.options_list:
-                    interactive.register_interactive_question(
-                        streaming.event_id, room.room_id, thread_id, response.option_map, self.agent_name
-                    )
-                    await interactive.add_reaction_buttons(
-                        self.client, room.room_id, streaming.event_id, response.options_list
-                    )
-
         except Exception as e:
-            self.logger.error("Error in streaming response", error=str(e))
+            self.logger.exception("Error in streaming response", error=str(e))
+
+        if streaming.event_id and not existing_event_id:
+            self.response_tracker.mark_responded(reply_to_event_id)
+            self.logger.info("Sent streaming response", event_id=streaming.event_id)
+
+        # If the message contains an interactive question, register it and add reactions
+        if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
+            response = interactive.parse_and_format_interactive(streaming.accumulated_text, extract_mapping=True)
+            if response.option_map and response.options_list:
+                interactive.register_interactive_question(
+                    streaming.event_id, room.room_id, thread_id, response.option_map, self.agent_name
+                )
+                await interactive.add_reaction_buttons(
+                    self.client, room.room_id, streaming.event_id, response.options_list
+                )
 
     async def _generate_response(
         self,

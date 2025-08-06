@@ -95,7 +95,7 @@ def get_memory_config(storage_path: Path) -> dict:
     return config
 
 
-def create_memory_instance(storage_path: Path) -> AsyncMemory:
+async def create_memory_instance(storage_path: Path) -> AsyncMemory:
     """Create a Mem0 memory instance with ChromaDB backend.
 
     Args:
@@ -108,7 +108,7 @@ def create_memory_instance(storage_path: Path) -> AsyncMemory:
 
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
-    memory = AsyncMemory.from_config(config_dict)
+    memory = await AsyncMemory.from_config(config_dict)
 
     logger.info(f"Created memory instance with ChromaDB at {storage_path}")
     return memory

@@ -1,5 +1,7 @@
 """Simple memory management functions following Mem0 patterns."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -7,7 +9,7 @@ from ..logging_config import get_logger
 from .config import create_memory_instance
 
 if TYPE_CHECKING:
-    from mem0 import AsyncMemory  # type: ignore[import-untyped]
+    pass  # type: ignore[import-untyped]
 
 
 class MemoryResult(TypedDict, total=False):
@@ -25,18 +27,6 @@ class MemoryResult(TypedDict, total=False):
 
 logger = get_logger(__name__)
 
-# Global memory instance cache
-_memory_instance = None
-
-
-def get_memory(storage_path: Path) -> "AsyncMemory":
-    """Get or create the global memory instance."""
-    global _memory_instance
-    if _memory_instance is None:
-        logger.info("Creating memory instance", path=storage_path)
-        _memory_instance = create_memory_instance(storage_path)
-    return _memory_instance
-
 
 async def add_agent_memory(
     content: str, agent_name: str, storage_path: Path, user_id: str | None = None, metadata: dict | None = None
@@ -50,7 +40,7 @@ async def add_agent_memory(
         user_id: Optional user ID to associate memory with
         metadata: Optional metadata to store with memory
     """
-    memory = get_memory(storage_path)
+    memory = await create_memory_instance(storage_path)
 
     if metadata is None:
         metadata = {}
@@ -78,7 +68,7 @@ async def search_agent_memories(query: str, agent_name: str, storage_path: Path,
     Returns:
         List of relevant memories
     """
-    memory = get_memory(storage_path)
+    memory = await create_memory_instance(storage_path)
     search_result = await memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
 
     results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
@@ -99,7 +89,7 @@ async def add_room_memory(
         agent_name: Optional agent that created this memory
         metadata: Optional metadata to store with memory
     """
-    memory = get_memory(storage_path)
+    memory = await create_memory_instance(storage_path)
 
     if metadata is None:
         metadata = {}
@@ -126,7 +116,7 @@ async def search_room_memories(query: str, room_id: str, storage_path: Path, lim
     Returns:
         List of relevant memories
     """
-    memory = get_memory(storage_path)
+    memory = await create_memory_instance(storage_path)
     safe_room_id = room_id.replace(":", "_").replace("!", "")
     search_result = await memory.search(query, user_id=f"room_{safe_room_id}", limit=limit)
 
