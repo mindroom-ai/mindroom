@@ -46,7 +46,7 @@ class MatrixState(BaseModel):
         with open(MATRIX_STATE_FILE) as f:
             data = yaml.safe_load(f) or {}
 
-        return cls.model_validate(data)  # type: ignore[no-any-return]
+        return cls.model_validate(data)
 
     def save(self) -> None:
         """Save state to file."""

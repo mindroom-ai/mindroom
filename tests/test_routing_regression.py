@@ -12,7 +12,6 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.interactive import InteractiveManager
 from mindroom.matrix import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
@@ -26,7 +25,6 @@ def setup_test_bot(
     bot.client = AsyncMock()
     bot.response_tracker = ResponseTracker(bot.agent_name, base_path=storage_path)
     bot.thread_invite_manager = ThreadInviteManager(bot.client)
-    bot.interactive_manager = InteractiveManager(bot.client, bot.agent_name)
     return bot
 
 

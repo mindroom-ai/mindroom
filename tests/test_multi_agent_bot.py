@@ -189,11 +189,8 @@ class TestAgentBot:
         bot.client.room_send.return_value = mock_send_response
 
         # Initialize response tracker with isolated path
-        from mindroom.interactive import InteractiveManager
-
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
-        bot.interactive_manager = InteractiveManager(bot.client, bot.agent_name)
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
@@ -288,11 +285,8 @@ class TestAgentBot:
         bot.client.room_send.return_value = mock_send_response
 
         # Initialize response tracker with isolated path
-        from mindroom.interactive import InteractiveManager
-
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
-        bot.interactive_manager = InteractiveManager(bot.client, bot.agent_name)
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
@@ -442,11 +436,8 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path)
         bot.client = AsyncMock()
         # Initialize response tracker with isolated path
-        from mindroom.interactive import InteractiveManager
-
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
         bot.thread_invite_manager = ThreadInviteManager(bot.client)
-        bot.interactive_manager = InteractiveManager(bot.client, bot.agent_name)
 
         # Mark an event as already responded
         bot.response_tracker.mark_responded("event123")

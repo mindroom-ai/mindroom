@@ -8,7 +8,6 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.interactive import InteractiveManager
 from mindroom.matrix import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.streaming import StreamingResponse
@@ -57,14 +56,12 @@ class TestStreamingBehavior:
         helper_bot.client = AsyncMock()
         helper_bot.response_tracker = ResponseTracker(helper_bot.agent_name, base_path=tmp_path)
         helper_bot.thread_invite_manager = ThreadInviteManager(helper_bot.client)
-        helper_bot.interactive_manager = InteractiveManager(helper_bot.client, helper_bot.agent_name)
 
         # Set up calculator bot (the one that will be mentioned)
         calc_bot = AgentBot(mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
         calc_bot.client = AsyncMock()
         calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
         calc_bot.thread_invite_manager = ThreadInviteManager(calc_bot.client)
-        calc_bot.interactive_manager = InteractiveManager(calc_bot.client, calc_bot.agent_name)
 
         # Mock successful room_send responses
         mock_send_response = MagicMock()
@@ -176,7 +173,6 @@ class TestStreamingBehavior:
         calc_bot.client = AsyncMock()
         calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
         calc_bot.thread_invite_manager = ThreadInviteManager(calc_bot.client)
-        calc_bot.interactive_manager = InteractiveManager(calc_bot.client, calc_bot.agent_name)
 
         # Mock successful room_send response
         mock_send_response = MagicMock()

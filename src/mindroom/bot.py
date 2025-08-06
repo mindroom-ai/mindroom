@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
+from . import interactive
 from .agent_config import ROUTER_AGENT_NAME, create_agent, load_config
 from .ai import ai_response, ai_response_streaming
 from .commands import (
@@ -21,7 +22,6 @@ from .commands import (
     handle_invite_command,
     handle_list_invites_command,
 )
-from .interactive import InteractiveManager
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
     MATRIX_HOMESERVER,
@@ -84,7 +84,6 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
     thread_invite_manager: ThreadInviteManager = field(init=False)
-    interactive_manager: InteractiveManager = field(init=False)
     invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
@@ -118,9 +117,6 @@ class AgentBot:
 
         # Initialize thread invite manager
         self.thread_invite_manager = ThreadInviteManager(self.client)
-
-        # Initialize interactive manager
-        self.interactive_manager = InteractiveManager(self.client, self.agent_name)
 
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
         self.client.add_event_callback(self._on_message, nio.RoomMessageText)
@@ -165,7 +161,7 @@ class AgentBot:
             return
 
         # Check if this might be a text response to an interactive question
-        await self.interactive_manager.on_text_response(room, event)
+        await interactive.handle_text_response(self.client, room, event)
 
         sender_id = MatrixID.parse(event.sender)
 
@@ -252,7 +248,7 @@ class AgentBot:
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
-        await self.interactive_manager.on_reaction(room, event)
+        await interactive.handle_reaction(self.client, room, event)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -300,8 +296,8 @@ class AgentBot:
         )
 
         # Check if the response suggests multiple options or needs user input
-        if InteractiveManager.should_create_interactive_question(response_text):
-            await self.interactive_manager.handle_interactive_response(room.room_id, thread_id, response_text)
+        if interactive.should_create_interactive_question(response_text):
+            await interactive.handle_interactive_response(self.client, room.room_id, thread_id, response_text)
         else:
             await self._send_response(room, event.event_id, response_text, thread_id)
 
