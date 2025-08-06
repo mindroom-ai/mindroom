@@ -5,6 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from agno.agent import Agent
 from agno.team import Team
 
 from .agent_config import ROUTER_AGENT_NAME, create_agent
@@ -93,7 +94,7 @@ async def create_team_response(
 
     # Create and run team
     team = Team(
-        members=agents,
+        members=agents,  # type: ignore[arg-type]
         mode=mode.value,
         name=f"Team-{'-'.join(agent_names)}",
         model=get_model_instance("default"),
