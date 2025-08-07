@@ -266,7 +266,7 @@ class TestCommandHandling:
 
         # Verify the agent didn't try to process the command
         bot._generate_response.assert_not_called()
-        bot.logger.debug.assert_called_with("Ignoring command (not router agent)")
+        bot.logger.debug.assert_called_with("Ignoring command message (not router agent)")
 
     @pytest.mark.asyncio
     async def test_router_agent_handles_commands(self):

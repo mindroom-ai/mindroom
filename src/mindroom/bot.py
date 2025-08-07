@@ -179,26 +179,30 @@ class AgentBot:
         if sender_id.is_agent and sender_id.agent_name:
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
-        # Handle commands (only router agent handles commands to avoid duplicates)
-        if self.agent_name == ROUTER_AGENT_NAME:
-            command = command_parser.parse(event.body)
-            if command:
-                await self._handle_command(room, event, command)
-                return
+        # IMPORTANT: Only router agent should process commands
+        # All other agents must ignore messages that start with !
+        is_command = event.body.strip().startswith("!")
 
-        # Extract message context
-        context = await self._extract_message_context(room, event)
-
-        # Check if this is a command (starts with !) - non-router agents should ignore commands
-        if self.agent_name != ROUTER_AGENT_NAME and event.body.strip().startswith("!"):
-            self.logger.debug("Ignoring command (not router agent)")
+        if is_command:
+            if self.agent_name == ROUTER_AGENT_NAME:
+                # Router handles the command
+                command = command_parser.parse(event.body)
+                if command:
+                    await self._handle_command(room, event, command)
+            else:
+                # Non-router agents completely ignore commands
+                self.logger.debug("Ignoring command message (not router agent)")
             return
 
-        # If message is from another agent and we're not mentioned, ignore it
+        # Check if sender is an agent BEFORE extracting context
         sender_is_agent = extract_agent_name(event.sender) is not None
+
+        # Extract message context for non-command messages
+        context = await self._extract_message_context(room, event)
 
         # IMPORTANT: If ANY agent sends a message without mentioning anyone,
         # other agents should not respond (prevents cascade effects)
+        # This MUST happen before any response decision is made
         if sender_is_agent and not context.mentioned_agents:
             self.logger.debug("Ignoring agent message without any mentions", sender=event.sender)
             return
