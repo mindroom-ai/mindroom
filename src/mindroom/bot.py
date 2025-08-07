@@ -179,19 +179,18 @@ class AgentBot:
         if sender_id.is_agent and sender_id.agent_name:
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
-        # IMPORTANT: Only router agent should process commands
-        # All other agents must ignore messages that start with !
         is_command = event.body.strip().startswith("!")
-
-        if is_command:
-            if self.agent_name != ROUTER_AGENT_NAME:  # Router handles the command
+        if is_command:  # ONLY router handles the command
+            if self.agent_name != ROUTER_AGENT_NAME:
                 return
             command = command_parser.parse(event.body)
             if command:
                 await self._handle_command(room, event, command)
+            else:
+                help_text = "❌ Unknown command. Try !help for available commands."
+                await self._send_response(room, event.event_id, help_text, thread_id=None)
             return
 
-        # Extract message context for non-command messages
         context = await self._extract_message_context(room, event)
 
         # If message is from another agent and we're not mentioned, ignore it
