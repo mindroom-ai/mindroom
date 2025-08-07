@@ -1,5 +1,7 @@
 """Pydantic models for configuration."""
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -40,12 +42,20 @@ class MemoryEmbedderConfig(BaseModel):
     config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
 
 
+class MemoryLLMConfig(BaseModel):
+    """Memory LLM configuration."""
+
+    provider: str = Field(default="ollama", description="LLM provider (ollama, openai, anthropic)")
+    config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific LLM config")
+
+
 class MemoryConfig(BaseModel):
     """Memory system configuration."""
 
     embedder: MemoryEmbedderConfig = Field(
         default_factory=MemoryEmbedderConfig, description="Embedder configuration for memory"
     )
+    llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
 
 
 class ModelConfig(BaseModel):

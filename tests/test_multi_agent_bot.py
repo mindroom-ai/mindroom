@@ -77,6 +77,7 @@ class TestAgentBot:
         assert bot_no_stream.enable_streaming is False
 
     @pytest.mark.asyncio
+    @patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     async def test_agent_bot_start(
         self, mock_login: AsyncMock, mock_agent_user: AgentMatrixUser, tmp_path: Path
