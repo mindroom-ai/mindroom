@@ -18,12 +18,14 @@ class TestMemoryConfig:
         mock_config.memory.embedder.config.model = "nomic-embed-text"
         mock_config.memory.embedder.config.host = "http://localhost:11434"
 
-        # Mock default model
-        mock_model = MagicMock()
-        mock_model.provider = "ollama"
-        mock_model.id = "llama3.2"
-        mock_model.host = "http://localhost:11434"
-        mock_config.models.get.return_value = mock_model
+        # Mock memory LLM config
+        mock_config.memory.llm.provider = "ollama"
+        mock_config.memory.llm.config = {
+            "model": "llama3.2",
+            "host": "http://localhost:11434",
+            "temperature": 0.1,
+            "top_p": 1,
+        }
 
         mock_load_config.return_value = mock_config
 
@@ -55,12 +57,9 @@ class TestMemoryConfig:
         mock_config.memory.embedder.provider = "openai"
         mock_config.memory.embedder.config.model = "text-embedding-ada-002"
 
-        # Mock OpenAI model
-        mock_model = MagicMock()
-        mock_model.provider = "openai"
-        mock_model.id = "gpt-4"
-        mock_model.host = None
-        mock_config.models.get.return_value = mock_model
+        # Mock memory LLM config
+        mock_config.memory.llm.provider = "openai"
+        mock_config.memory.llm.config = {"model": "gpt-4", "temperature": 0.1, "top_p": 1}
 
         mock_load_config.return_value = mock_config
 
@@ -87,7 +86,9 @@ class TestMemoryConfig:
         mock_config.memory.embedder.provider = "ollama"
         mock_config.memory.embedder.config.model = "nomic-embed-text"
         mock_config.memory.embedder.config.host = None
-        mock_config.models.get.return_value = None
+
+        # No memory.llm configured - should trigger fallback
+        mock_config.memory.llm = None
 
         mock_load_config.return_value = mock_config
 
