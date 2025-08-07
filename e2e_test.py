@@ -51,9 +51,20 @@ class MindRoomE2ETest:
 
     async def send_mention(self, agent_name: str, message: str):
         """Send a message with proper Matrix mention."""
-        user_id = f"@mindroom_{agent_name}:localhost"
+        from mindroom.matrix.mentions import parse_mentions_in_text
 
-        content = {"msgtype": "m.text", "body": f"{user_id} {message}", "m.mentions": {"user_ids": [user_id]}}
+        # Start with the primary agent mention
+        full_message = f"@{agent_name} {message}"
+
+        # Parse ALL mentions in the text (including ones in the message body)
+        processed_text, all_mentioned_ids = parse_mentions_in_text(full_message, "localhost")
+
+        # Create content with all mentions properly set
+        content = {
+            "msgtype": "m.text",
+            "body": processed_text,
+            "m.mentions": {"user_ids": all_mentioned_ids} if all_mentioned_ids else {},
+        }
 
         response = await self.client.room_send(room_id=self.room_id, message_type="m.room.message", content=content)
 
