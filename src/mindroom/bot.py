@@ -188,10 +188,7 @@ class AgentBot:
                 await self._handle_command(room, event, command)
             else:
                 help_text = "❌ Unknown command. Try !help for available commands."
-                # If the command itself is a reply to another message, we can't create a thread from it
-                # Use the message the command is replying to as the thread root instead
-                thread_root = self._get_safe_thread_root(event)
-                await self._send_response(room, event.event_id, help_text, thread_id=thread_root)
+                await self._send_response(room, event.event_id, help_text, thread_id=None, reply_to_event=event)
             return
 
         context = await self._extract_message_context(room, event)
@@ -467,9 +464,21 @@ class AgentBot:
             )
 
     async def _send_response(
-        self, room: nio.MatrixRoom, reply_to_event_id: str, response_text: str, thread_id: str | None
+        self,
+        room: nio.MatrixRoom,
+        reply_to_event_id: str,
+        response_text: str,
+        thread_id: str | None,
+        reply_to_event: nio.RoomMessageText | None = None,
     ) -> str | None:
         """Send a response message to a room.
+
+        Args:
+            room: The room to send to
+            reply_to_event_id: The event ID to reply to
+            response_text: The text to send
+            thread_id: The thread ID if already in a thread
+            reply_to_event: Optional event object for the message we're replying to (used to check for safe thread root)
 
         Returns:
             Event ID if message was sent successfully, None otherwise.
@@ -479,7 +488,17 @@ class AgentBot:
 
         # Always ensure we have a thread_id - use the original message as thread root if needed
         # This ensures agents always respond in threads, even when mentioned in main room
-        effective_thread_id = thread_id if thread_id else reply_to_event_id
+        if not thread_id:
+            # If we have the event object, check if it's safe to use as thread root
+            if reply_to_event:
+                from .thread_utils import get_safe_thread_root
+
+                safe_root = get_safe_thread_root(reply_to_event)
+                effective_thread_id = safe_root if safe_root else reply_to_event_id
+            else:
+                effective_thread_id = reply_to_event_id
+        else:
+            effective_thread_id = thread_id
 
         content = create_mention_content_from_text(
             response_text,
@@ -575,10 +594,7 @@ class AgentBot:
         is_thread, thread_id = extract_thread_info(event.source)
         if not is_thread or not thread_id:
             response_text = "❌ Commands only work within threads. Please start a thread first."
-            # If the command itself is a reply to another message, we can't create a thread from it
-            # Use the message the command is replying to as the thread root instead
-            thread_root = self._get_safe_thread_root(event)
-            await self._send_response(room, event.event_id, response_text, thread_id=thread_root)
+            await self._send_response(room, event.event_id, response_text, thread_id=None, reply_to_event=event)
             return
 
         response_text = ""
@@ -673,31 +689,6 @@ class AgentBot:
                 break
             except Exception as e:
                 self.logger.error("Error in periodic cleanup", error=str(e))
-
-    def _get_safe_thread_root(self, event: nio.RoomMessageText) -> str | None:
-        """Get a safe thread root for a message.
-
-        If the message is a reply to another message (has m.in_reply_to relation),
-        we can't create a thread from it. Instead, return the message it's replying to
-        as the thread root, or None if we should create a thread from this message itself.
-
-        Args:
-            event: The Matrix message event
-
-        Returns:
-            The event ID to use as thread root, or None to use the event itself
-        """
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-
-        # Check if this message is a reply to another message
-        in_reply_to = relates_to.get("m.in_reply_to", {})
-        if in_reply_to and "event_id" in in_reply_to:
-            # This message is a reply, so we can't create a thread from it
-            # Use the message it's replying to as the thread root
-            return in_reply_to["event_id"]
-
-        # Not a reply, so we can safely use this message as the thread root
-        return None
 
     def _should_skip_duplicate_response(self, event: nio.RoomMessageText) -> bool:
         """Check if we should skip responding to avoid duplicates.
