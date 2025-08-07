@@ -97,7 +97,7 @@ export function AgentEditor() {
 
   if (!selectedAgent) {
     return (
-      <Card className="flex items-center justify-center" style={{ minHeight: '500px' }}>
+      <Card className="h-full flex items-center justify-center">
         <div className="text-gray-500 text-center">
           <FileCode className="h-12 w-12 mx-auto mb-2 text-gray-300" />
           <p>Select an agent to edit</p>
