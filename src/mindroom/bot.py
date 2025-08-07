@@ -585,7 +585,7 @@ class AgentBot:
 
         is_thread, thread_id = extract_thread_info(event.source)
 
-        # Widget command is special - it works in the main room
+        # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
             url = command.args.get("url")
             response_text = await handle_widget_command(client=self.client, room_id=room.room_id, url=url)
@@ -593,11 +593,9 @@ class AgentBot:
             await self._send_response(room, event.event_id, response_text, thread_id)
             return
 
-        # All other commands require a thread
-        if not is_thread or not thread_id:
-            response_text = "❌ Commands only work within threads. Please start a thread first."
-            await self._send_response(room, event.event_id, response_text, thread_id=None, reply_to_event=event)
-            return
+        # For commands that need thread context, use the existing thread or the event will start a new one
+        # The _send_response method will automatically create a thread if needed
+        effective_thread_id = thread_id or event.event_id
 
         response_text = ""
 
@@ -608,7 +606,7 @@ class AgentBot:
 
             response_text = await handle_invite_command(
                 room_id=room.room_id,
-                thread_id=thread_id,
+                thread_id=effective_thread_id,
                 agent_name=agent_name,
                 sender=event.sender,
                 agent_domain=agent_domain,
@@ -618,14 +616,16 @@ class AgentBot:
 
         elif command.type == CommandType.UNINVITE:
             agent_name = command.args["agent_name"]
-            removed = await self.thread_invite_manager.remove_invite(thread_id, room.room_id, agent_name)
+            removed = await self.thread_invite_manager.remove_invite(effective_thread_id, room.room_id, agent_name)
             if removed:
                 response_text = f"✅ Removed @{agent_name} from this thread."
             else:
                 response_text = f"❌ @{agent_name} was not invited to this thread."
 
         elif command.type == CommandType.LIST_INVITES:
-            response_text = await handle_list_invites_command(room.room_id, thread_id, self.thread_invite_manager)
+            response_text = await handle_list_invites_command(
+                room.room_id, effective_thread_id, self.thread_invite_manager
+            )
 
         elif command.type == CommandType.HELP:
             topic = command.args.get("topic")
@@ -637,7 +637,7 @@ class AgentBot:
             task_id, response_text = await schedule_task(
                 client=self.client,
                 room_id=room.room_id,
-                thread_id=thread_id,
+                thread_id=effective_thread_id,
                 agent_user_id=self.agent_user.user_id,
                 scheduled_by=event.sender,
                 full_text=full_text,
@@ -647,7 +647,7 @@ class AgentBot:
             response_text = await list_scheduled_tasks(
                 client=self.client,
                 room_id=room.room_id,
-                thread_id=thread_id,
+                thread_id=effective_thread_id,
             )
 
         elif command.type == CommandType.CANCEL_SCHEDULE:
@@ -659,7 +659,7 @@ class AgentBot:
             )
 
         if response_text:
-            await self._send_response(room, event.event_id, response_text, thread_id)
+            await self._send_response(room, event.event_id, response_text, thread_id, reply_to_event=event)
 
     async def _periodic_cleanup(self) -> None:
         """Periodically clean up expired thread invitations."""
