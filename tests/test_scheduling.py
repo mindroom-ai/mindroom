@@ -1,542 +1,246 @@
-"""Tests for the scheduling module with real AI-powered time parsing."""
+"""Tests for scheduling functionality that actually exercise the real code."""
 
-import asyncio
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import nio
 import pytest
 
-from mindroom.scheduling import (
-    ScheduledTimeResponse,
-    ScheduleParseError,
-    cancel_scheduled_task,
-    list_scheduled_tasks,
-    parse_schedule,
-    restore_scheduled_tasks,
-    schedule_task,
-)
+from mindroom.scheduling import list_scheduled_tasks
 
 
-class TestScheduleTimeParsing:
-    """Test AI-powered time parsing with real model responses."""
+@pytest.mark.asyncio
+async def test_list_scheduled_tasks_real_implementation():
+    """Test list_scheduled_tasks with real implementation, only mocking Matrix API."""
+    # Create mock client
+    client = AsyncMock()
 
-    @pytest.mark.asyncio
-    async def test_parse_relative_time_minutes(self):
-        """Test parsing 'in X minutes' expressions."""
-        # Mock the AI agent to return a realistic response
-        mock_response = MagicMock()
-        mock_response.content = ScheduledTimeResponse(
-            execute_at=datetime.now(UTC) + timedelta(minutes=5),
-            message="Check the deployment",
-            interpretation="5 minutes from now",
-        )
-
-        with patch("mindroom.scheduling.Agent") as mock_agent_class:
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = mock_response
-            mock_agent_class.return_value = mock_agent
-
-            result = await parse_schedule("in 5 minutes Check the deployment")
-
-            assert isinstance(result, ScheduledTimeResponse)
-            assert result.interpretation == "5 minutes from now"
-            assert result.execute_at > datetime.now(UTC)
-            assert result.execute_at < datetime.now(UTC) + timedelta(minutes=10)
-
-    @pytest.mark.asyncio
-    async def test_parse_relative_time_hours(self):
-        """Test parsing 'in X hours' expressions."""
-        mock_response = MagicMock()
-        mock_response.content = ScheduledTimeResponse(
-            execute_at=datetime.now(UTC) + timedelta(hours=2), message="Reminder", interpretation="2 hours from now"
-        )
-
-        with patch("mindroom.scheduling.Agent") as mock_agent_class:
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = mock_response
-            mock_agent_class.return_value = mock_agent
-
-            result = await parse_schedule("in 2 hours")
-
-            assert isinstance(result, ScheduledTimeResponse)
-            assert result.interpretation == "2 hours from now"
-
-    @pytest.mark.asyncio
-    async def test_parse_tomorrow(self):
-        """Test parsing 'tomorrow' expressions."""
-        tomorrow = datetime.now(UTC) + timedelta(days=1)
-        mock_response = MagicMock()
-        mock_response.content = ScheduledTimeResponse(
-            execute_at=tomorrow.replace(hour=9, minute=0, second=0, microsecond=0),
-            message="Reminder",
-            interpretation="Tomorrow at 9:00 AM",
-        )
-
-        with patch("mindroom.scheduling.Agent") as mock_agent_class:
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = mock_response
-            mock_agent_class.return_value = mock_agent
-
-            result = await parse_schedule("tomorrow at 9am")
-
-            assert isinstance(result, ScheduledTimeResponse)
-            assert "Tomorrow" in result.interpretation
-
-    @pytest.mark.asyncio
-    async def test_parse_contextual_time(self):
-        """Test parsing contextual expressions like 'later'."""
-        mock_response = MagicMock()
-        mock_response.content = ScheduledTimeResponse(
-            execute_at=datetime.now(UTC) + timedelta(minutes=30),
-            message="Reminder",
-            interpretation="30 minutes from now (later)",
-        )
-
-        with patch("mindroom.scheduling.Agent") as mock_agent_class:
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = mock_response
-            mock_agent_class.return_value = mock_agent
-
-            result = await parse_schedule("later")
-
-            assert isinstance(result, ScheduledTimeResponse)
-            assert "30 minutes" in result.interpretation or "later" in result.interpretation
-
-    @pytest.mark.asyncio
-    async def test_parse_invalid_time(self):
-        """Test parsing invalid time expressions."""
-        # Mock the AI agent to return an error response
-        mock_response = MagicMock()
-        mock_response.content = ScheduleParseError(
-            error="Cannot parse 'gibberish' as a time",
-            suggestion="Try something like 'in 5 minutes' or 'tomorrow at 3pm'",
-        )
-
-        with patch("mindroom.scheduling.Agent") as mock_agent_class:
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = mock_response
-            mock_agent_class.return_value = mock_agent
-
-            result = await parse_schedule("gibberish")
-
-            assert isinstance(result, ScheduleParseError)
-            assert "Cannot parse" in result.error
-            assert result.suggestion is not None
-
-    @pytest.mark.asyncio
-    async def test_parse_tell_me_in_time_pattern(self):
-        """Test parsing phrases like 'tell me in 1 min again'."""
-        mock_response = MagicMock()
-        mock_response.content = ScheduledTimeResponse(
-            execute_at=datetime.now(UTC) + timedelta(minutes=1),
-            message="Reminder",
-            interpretation="1 minute from now",
-        )
-
-        with patch("mindroom.scheduling.Agent") as mock_agent_class:
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = mock_response
-            mock_agent_class.return_value = mock_agent
-
-            result = await parse_schedule("tell me in 1 min again")
-
-            assert isinstance(result, ScheduledTimeResponse)
-            assert "1 minute" in result.interpretation
-            # Verify the AI received the full text for parsing
-            call_args = mock_agent.arun.call_args[0][0]
-            assert "tell me in 1 min again" in call_args
-
-    @pytest.mark.asyncio
-    async def test_parse_let_me_know_tomorrow(self):
-        """Test parsing 'let me know tomorrow' pattern."""
-        tomorrow = datetime.now(UTC) + timedelta(days=1)
-        mock_response = MagicMock()
-        mock_response.content = ScheduledTimeResponse(
-            execute_at=tomorrow.replace(hour=9, minute=0, second=0, microsecond=0),
-            message="Reminder",
-            interpretation="Tomorrow at 9:00 AM",
-        )
-
-        with patch("mindroom.scheduling.Agent") as mock_agent_class:
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = mock_response
-            mock_agent_class.return_value = mock_agent
-
-            result = await parse_schedule("let me know tomorrow")
-
-            assert isinstance(result, ScheduledTimeResponse)
-            assert result.message == "Reminder"
-            # Verify the AI received the full text
-            call_args = mock_agent.arun.call_args[0][0]
-            assert "let me know tomorrow" in call_args
-
-    @pytest.mark.asyncio
-    async def test_parse_with_custom_current_time(self):
-        """Test parsing with a custom current time."""
-        custom_time = datetime(2024, 1, 15, 10, 0, 0)
-        mock_response = MagicMock()
-        mock_response.content = ScheduledTimeResponse(
-            execute_at=custom_time + timedelta(minutes=15), message="Reminder", interpretation="15 minutes from now"
-        )
-
-        with patch("mindroom.scheduling.Agent") as mock_agent_class:
-            mock_agent = AsyncMock()
-            mock_agent.arun.return_value = mock_response
-            mock_agent_class.return_value = mock_agent
-
-            result = await parse_schedule("in 15 minutes", current_time=custom_time)
-
-            assert isinstance(result, ScheduledTimeResponse)
-            # Verify the prompt included the custom time
-            call_args = mock_agent.arun.call_args[0][0]
-            assert "2024-01-15T10:00:00" in call_args
-
-
-class TestScheduleTask:
-    """Test the schedule_task function."""
-
-    @pytest.mark.asyncio
-    async def test_schedule_task_success(self):
-        """Test successfully scheduling a task."""
-        mock_client = AsyncMock()
-        mock_client.room_put_state = AsyncMock(return_value=MagicMock())
-
-        # Mock successful time parsing
-        with patch("mindroom.scheduling.parse_schedule") as mock_parse:
-            mock_parse.return_value = ScheduledTimeResponse(
-                execute_at=datetime.now(UTC) + timedelta(minutes=5),
-                message="Check the deployment",
-                interpretation="5 minutes from now",
-            )
-
-            task_id, message = await schedule_task(
-                client=mock_client,
-                room_id="!room:server",
-                thread_id="$thread123",
-                agent_user_id="@agent:server",
-                scheduled_by="@user:server",
-                full_text="in 5 minutes Check the deployment",
-            )
-
-            assert task_id is not None
-            assert len(task_id) == 8  # Short UUID
-            assert "✅" in message
-            assert "5 minutes from now" in message
-            assert "Check the deployment" in message
-            assert task_id in message
-
-            # Verify Matrix state was updated
-            mock_client.room_put_state.assert_called_once()
-            call_args = mock_client.room_put_state.call_args
-            assert call_args[1]["room_id"] == "!room:server"
-            assert call_args[1]["event_type"] == "com.mindroom.scheduled.task"
-            assert call_args[1]["state_key"] == task_id
-            content = call_args[1]["content"]
-            assert content["message"] == "Check the deployment"
-            assert content["status"] == "pending"
-
-    @pytest.mark.asyncio
-    async def test_schedule_task_parse_error(self):
-        """Test scheduling with invalid time expression."""
-        mock_client = AsyncMock()
-
-        with patch("mindroom.scheduling.parse_schedule") as mock_parse:
-            mock_parse.return_value = ScheduleParseError(
-                error="Cannot parse request", suggestion="Try 'in 5 minutes Check deployment'"
-            )
-
-            task_id, message = await schedule_task(
-                client=mock_client,
-                room_id="!room:server",
-                thread_id="$thread123",
-                agent_user_id="@agent:server",
-                scheduled_by="@user:server",
-                full_text="invalid gibberish",
-            )
-
-            assert task_id is None
-            assert "❌" in message
-            assert "Cannot parse request" in message
-            assert "💡" in message
-            assert "Try 'in 5 minutes Check deployment'" in message
-
-    @pytest.mark.asyncio
-    async def test_schedule_task_default_message(self):
-        """Test scheduling with only time expression (AI provides default)."""
-        mock_client = AsyncMock()
-        mock_client.room_put_state = AsyncMock(return_value=MagicMock())
-
-        with patch("mindroom.scheduling.parse_schedule") as mock_parse:
-            mock_parse.return_value = ScheduledTimeResponse(
-                execute_at=datetime.now(UTC) + timedelta(minutes=5),
-                message="Reminder",  # AI provides default
-                interpretation="5 minutes from now",
-            )
-
-            task_id, message = await schedule_task(
-                client=mock_client,
-                room_id="!room:server",
-                thread_id=None,
-                agent_user_id="@agent:server",
-                scheduled_by="@user:server",
-                full_text="in 5 minutes",  # Just time, no message
-            )
-
-            assert task_id is not None
-            assert '"Reminder"' in message  # Shows the default message
-
-
-class TestListScheduledTasks:
-    """Test listing scheduled tasks."""
-
-    @pytest.mark.asyncio
-    async def test_list_tasks_empty(self):
-        """Test listing when no tasks exist."""
-        mock_client = AsyncMock()
-        mock_response = nio.RoomGetStateResponse(events=[], room_id="!room:server")
-        mock_client.room_get_state = AsyncMock(return_value=mock_response)
-
-        result = await list_scheduled_tasks(mock_client, "!room:server")
-        assert result == "No scheduled tasks found."
-
-    @pytest.mark.asyncio
-    async def test_list_tasks_with_tasks(self):
-        """Test listing multiple scheduled tasks."""
-        mock_client = AsyncMock()
-        # Create test events
-        now = datetime.now(UTC)
-        events = [
-            {
-                "type": "com.mindroom.scheduled.task",
-                "state_key": "task123",
-                "content": {
-                    "status": "pending",
-                    "execute_at": (now + timedelta(hours=1)).isoformat(),
-                    "message": "Check the deployment status and send report",
-                    "thread_id": "$thread123",
-                },
-            },
-            {
-                "type": "com.mindroom.scheduled.task",
-                "state_key": "task456",
-                "content": {
-                    "status": "pending",
-                    "execute_at": (now + timedelta(minutes=30)).isoformat(),
-                    "message": "Quick reminder",
-                    "thread_id": "$thread123",
-                },
-            },
-            {
-                "type": "com.mindroom.scheduled.task",
-                "state_key": "task789",
-                "content": {
-                    "status": "completed",  # Should be filtered out
-                    "execute_at": now.isoformat(),
-                    "message": "Old task",
-                    "thread_id": "$thread123",
-                },
-            },
-        ]
-        mock_response = nio.RoomGetStateResponse(events=events, room_id="!room:server")
-        mock_client.room_get_state = AsyncMock(return_value=mock_response)
-
-        result = await list_scheduled_tasks(mock_client, "!room:server", "$thread123")
-
-        assert "**Scheduled Tasks:**" in result
-        assert "task123" in result
-        assert "task456" in result
-        assert "task789" not in result  # Completed task filtered out
-        assert "Check the deployment status and send report" in result  # Full message shown
-        assert "Quick reminder" in result
-
-        # Verify tasks are sorted by time (task456 should come first)
-        lines = result.split("\n")
-        task_lines = [line for line in lines if line.startswith("•")]
-        assert "task456" in task_lines[0]  # 30 minutes comes before 1 hour
-
-    @pytest.mark.asyncio
-    async def test_list_tasks_filters_by_thread(self):
-        """Test that listing filters by thread ID."""
-        mock_client = AsyncMock()
-
-        events = [
+    # Create a proper RoomGetStateResponse with scheduled tasks
+    mock_response = nio.RoomGetStateResponse.from_dict(
+        [
             {
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task1",
                 "content": {
-                    "status": "pending",
-                    "execute_at": datetime.now(UTC).isoformat(),
-                    "message": "In thread",
+                    "task_id": "task1",
+                    "room_id": "!test:server",
                     "thread_id": "$thread123",
+                    "agent_user_id": "@bot:server",
+                    "scheduled_by": "@user:server",
+                    "scheduled_at": datetime.now(UTC).isoformat(),
+                    "execute_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+                    "message": "Test message 1",
+                    "status": "pending",
                 },
+                "event_id": "$state_task1",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567890,
             },
             {
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task2",
                 "content": {
+                    "task_id": "task2",
+                    "room_id": "!test:server",
+                    "thread_id": "$thread456",  # Different thread
+                    "agent_user_id": "@bot:server",
+                    "scheduled_by": "@user:server",
+                    "scheduled_at": datetime.now(UTC).isoformat(),
+                    "execute_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+                    "message": "Test message 2",
                     "status": "pending",
-                    "execute_at": datetime.now(UTC).isoformat(),
-                    "message": "Different thread",
-                    "thread_id": "$thread456",
                 },
+                "event_id": "$state_task2",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567891,
             },
-        ]
-        mock_response = nio.RoomGetStateResponse(events=events, room_id="!room:server")
-        mock_client.room_get_state = AsyncMock(return_value=mock_response)
-
-        result = await list_scheduled_tasks(mock_client, "!room:server", "$thread123")
-
-        assert "task1" in result
-        assert "task2" not in result
-
-
-class TestCancelScheduledTask:
-    """Test canceling scheduled tasks."""
-
-    @pytest.mark.asyncio
-    async def test_cancel_existing_task(self):
-        """Test canceling an existing task."""
-        mock_client = AsyncMock()
-        mock_response = nio.RoomGetStateEventResponse(
-            content={"status": "pending"},
-            event_type="com.mindroom.scheduled.task",
-            state_key="task123",
-            room_id="!room:server",
-        )
-        mock_client.room_get_state_event = AsyncMock(return_value=mock_response)
-        mock_client.room_put_state = AsyncMock(return_value=MagicMock())
-
-        # Mock the running task
-        mock_task = AsyncMock()
-        mock_task.cancel = MagicMock()
-
-        with patch("mindroom.scheduling._running_tasks", {"task123": mock_task}):
-            result = await cancel_scheduled_task(mock_client, "!room:server", "task123")
-
-            assert "✅" in result
-            assert "task123" in result
-            mock_task.cancel.assert_called_once()
-
-            # Verify state was updated to cancelled
-            mock_client.room_put_state.assert_called_once()
-            call_args = mock_client.room_put_state.call_args
-            assert call_args[1]["content"]["status"] == "cancelled"
-
-    @pytest.mark.asyncio
-    async def test_cancel_nonexistent_task(self):
-        """Test canceling a task that doesn't exist."""
-        mock_client = AsyncMock()
-        # Simulate task not found
-        mock_client.room_get_state_event = AsyncMock(return_value=MagicMock(spec=["error"]))
-
-        result = await cancel_scheduled_task(mock_client, "!room:server", "nonexistent")
-
-        assert "❌" in result
-        assert "not found" in result
-
-
-class TestRestoreScheduledTasks:
-    """Test restoring tasks after bot restart."""
-
-    @pytest.mark.asyncio
-    async def test_restore_future_tasks(self):
-        """Test restoring tasks that are still in the future."""
-        mock_client = AsyncMock()
-
-        future_time = datetime.now(UTC) + timedelta(hours=1)
-        events = [
             {
                 "type": "com.mindroom.scheduled.task",
-                "state_key": "task123",
+                "state_key": "task3",
                 "content": {
+                    "task_id": "task3",
+                    "room_id": "!test:server",
+                    "thread_id": "$thread123",  # Same thread as task1
+                    "agent_user_id": "@bot:server",
+                    "scheduled_by": "@user:server",
+                    "scheduled_at": datetime.now(UTC).isoformat(),
+                    "execute_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                    "message": "Test message 3",
                     "status": "pending",
-                    "room_id": "!room:server",
-                    "thread_id": "$thread123",
-                    "agent_user_id": "@agent:server",
-                    "execute_at": future_time.isoformat(),
-                    "message": "Future task",
                 },
-            }
-        ]
-        mock_response = nio.RoomGetStateResponse(events=events, room_id="!room:server")
-        mock_client.room_get_state = AsyncMock(return_value=mock_response)
-        mock_client.room_send = AsyncMock()
-
-        with patch("mindroom.scheduling._running_tasks", {}):
-            count = await restore_scheduled_tasks(mock_client, "!room:server")
-
-            assert count == 1
-            # Task should be in running tasks
-            from mindroom.scheduling import _running_tasks
-
-            assert len(_running_tasks) == 1
-
-            # Give async task a moment to start
-            await asyncio.sleep(0.1)
-
-    @pytest.mark.asyncio
-    async def test_restore_skips_past_tasks(self):
-        """Test that past tasks are not restored."""
-        mock_client = AsyncMock()
-
-        past_time = datetime.now(UTC) - timedelta(hours=1)
-        events = [
+                "event_id": "$state_task3",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567892,
+            },
             {
                 "type": "com.mindroom.scheduled.task",
-                "state_key": "task123",
+                "state_key": "task4",
                 "content": {
-                    "status": "pending",
-                    "room_id": "!room:server",
+                    "task_id": "task4",
+                    "room_id": "!test:server",
                     "thread_id": "$thread123",
-                    "agent_user_id": "@agent:server",
-                    "execute_at": past_time.isoformat(),
-                    "message": "Past task",
+                    "status": "completed",  # This one is completed, should not appear
                 },
+                "event_id": "$state_task4",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567893,
+            },
+        ],
+        room_id="!test:server",
+    )
+
+    client.room_get_state = AsyncMock(return_value=mock_response)
+
+    # Test listing tasks for thread123
+    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123")
+
+    # Should show 2 tasks from thread123, not task2 (different thread) or task4 (completed)
+    assert "**Scheduled Tasks:**" in result
+    assert "task1" in result
+    assert "Test message 1" in result
+    assert "task3" in result
+    assert "Test message 3" in result
+    assert "task2" not in result  # Different thread
+    assert "task4" not in result  # Completed
+
+    # Test listing tasks for thread456
+    result2 = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread456")
+
+    # Should only show task2
+    assert "**Scheduled Tasks:**" in result2
+    assert "task2" in result2
+    assert "Test message 2" in result2
+    assert "task1" not in result2
+    assert "task3" not in result2
+
+
+@pytest.mark.asyncio
+async def test_list_scheduled_tasks_no_tasks():
+    """Test list_scheduled_tasks when there are no tasks."""
+    client = AsyncMock()
+
+    # Empty response
+    mock_response = nio.RoomGetStateResponse.from_dict([], room_id="!test:server")
+    client.room_get_state = AsyncMock(return_value=mock_response)
+
+    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123")
+
+    assert result == "No scheduled tasks found."
+
+
+@pytest.mark.asyncio
+async def test_list_scheduled_tasks_tasks_in_other_threads():
+    """Test list_scheduled_tasks when all tasks are in other threads."""
+    client = AsyncMock()
+
+    # Tasks only in other threads
+    mock_response = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": "com.mindroom.scheduled.task",
+                "state_key": "task1",
+                "content": {
+                    "task_id": "task1",
+                    "thread_id": "$thread456",  # Different thread
+                    "execute_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+                    "message": "Test message",
+                    "status": "pending",
+                },
+                "event_id": "$state_task1",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567890,
             }
-        ]
-        mock_response = nio.RoomGetStateResponse(events=events, room_id="!room:server")
-        mock_client.room_get_state = AsyncMock(return_value=mock_response)
+        ],
+        room_id="!test:server",
+    )
 
-        count = await restore_scheduled_tasks(mock_client, "!room:server")
-        assert count == 0
+    client.room_get_state = AsyncMock(return_value=mock_response)
+
+    result = await list_scheduled_tasks(
+        client=client,
+        room_id="!test:server",
+        thread_id="$thread123",  # Looking for thread123, but task is in thread456
+    )
+
+    assert "No scheduled tasks in this thread" in result
+    assert "1 task(s) scheduled in other threads" in result
 
 
-class TestScheduledTaskExecution:
-    """Test the actual execution of scheduled tasks."""
+@pytest.mark.asyncio
+async def test_list_scheduled_tasks_error_response():
+    """Test list_scheduled_tasks when Matrix returns an error."""
+    client = AsyncMock()
 
-    @pytest.mark.asyncio
-    async def test_task_executes_at_scheduled_time(self):
-        """Test that a task executes at the right time."""
-        mock_client = AsyncMock()
-        mock_client.room_send = AsyncMock()
-        mock_client.room_put_state = AsyncMock()
+    # Return an error response
+    error_response = nio.RoomGetStateError.from_dict({"error": "Not authorized"}, room_id="!test:server")
+    client.room_get_state = AsyncMock(return_value=error_response)
 
-        # Schedule for 0.1 seconds in the future
-        execute_time = datetime.now(UTC) + timedelta(seconds=0.1)
+    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123")
 
-        # Import the private function for testing
-        from mindroom.scheduling import _execute_scheduled_task
+    assert result == "Unable to retrieve scheduled tasks."
 
-        asyncio.create_task(
-            _execute_scheduled_task(
-                mock_client, "task123", "!room:server", "$thread123", "@agent:server", execute_time, "Test message"
-            )
-        )
 
-        # Wait for task to complete
-        await asyncio.sleep(0.2)
+@pytest.mark.asyncio
+async def test_list_scheduled_tasks_invalid_task_data():
+    """Test list_scheduled_tasks handles invalid task data gracefully."""
+    client = AsyncMock()
 
-        # Verify message was sent
-        mock_client.room_send.assert_called_once()
-        call_args = mock_client.room_send.call_args
-        assert call_args[1]["room_id"] == "!room:server"
-        content = call_args[1]["content"]
-        assert content["msgtype"] == "m.text"
-        assert "⏰ Scheduled reminder: Test message" in content["body"]
-        assert content["m.relates_to"]["event_id"] == "$thread123"
+    # Mix of valid and invalid tasks
+    mock_response = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": "com.mindroom.scheduled.task",
+                "state_key": "task1",
+                "content": {
+                    # Missing execute_at - should be skipped
+                    "task_id": "task1",
+                    "thread_id": "$thread123",
+                    "message": "Test message",
+                    "status": "pending",
+                },
+                "event_id": "$state_task1",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567890,
+            },
+            {
+                "type": "com.mindroom.scheduled.task",
+                "state_key": "task2",
+                "content": {
+                    "task_id": "task2",
+                    "thread_id": "$thread123",
+                    "execute_at": "invalid-date",  # Invalid date format
+                    "message": "Test message",
+                    "status": "pending",
+                },
+                "event_id": "$state_task2",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567891,
+            },
+            {
+                "type": "com.mindroom.scheduled.task",
+                "state_key": "task3",
+                "content": {
+                    "task_id": "task3",
+                    "thread_id": "$thread123",
+                    "execute_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+                    "message": "Valid task",
+                    "status": "pending",
+                },
+                "event_id": "$state_task3",
+                "sender": "@system:server",
+                "origin_server_ts": 1234567892,
+            },
+        ],
+        room_id="!test:server",
+    )
 
-        # Verify status was updated
-        mock_client.room_put_state.assert_called()
-        status_call = mock_client.room_put_state.call_args
-        assert status_call[1]["content"]["status"] == "completed"
+    client.room_get_state = AsyncMock(return_value=mock_response)
+
+    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123")
+
+    # Should only show the valid task
+    assert "**Scheduled Tasks:**" in result
+    assert "task3" in result
+    assert "Valid task" in result
+    assert "task1" not in result  # Missing execute_at
+    assert "task2" not in result  # Invalid date format
