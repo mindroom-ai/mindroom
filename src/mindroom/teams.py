@@ -122,19 +122,33 @@ async def create_team_response(
         # No need for custom descriptions or instructions
     )
 
-    logger.info(f"Executing team response with {len(agents)} agents")
+    # Create agent list for logging
+    agent_list = ", ".join([name for name in agent_names if name != ROUTER_AGENT_NAME])
+
+    logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
+    logger.info(f"TEAM PROMPT: {prompt[:500]}")  # Log first 500 chars of prompt
+
     response = await team.arun(prompt)
 
     # Extract response content
     if isinstance(response, TeamRunResponse):
-        team_response = str(response.content)
+        # The content field contains the final aggregated response from the team
+        team_response = str(response.content or "")
+
+        # Log member responses if available for debugging
+        if hasattr(response, "member_responses") and response.member_responses:
+            logger.debug(f"Team had {len(response.member_responses)} member responses")
     else:
         logger.warning(f"Unexpected response type: {type(response)}", response=response)
         team_response = str(response)
 
+    # Log the team response
+    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:500]}")
+    if len(team_response) > 500:
+        logger.debug(f"TEAM RESPONSE (full): {team_response}")
+
     # Prepend team information to the response
     # Don't use @ mentions as that would trigger the agents again
-    agent_list = ", ".join([name for name in agent_names if name != ROUTER_AGENT_NAME])
     team_header = f"🤝 **Team Response** ({agent_list}):\n\n"
 
     return team_header + team_response
