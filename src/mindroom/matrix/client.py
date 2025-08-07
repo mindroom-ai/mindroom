@@ -166,6 +166,7 @@ async def create_room(
     name: str,
     alias: str | None = None,
     topic: str | None = None,
+    power_users: list[str] | None = None,
 ) -> str | None:
     """Create a new Matrix room.
 
@@ -174,15 +175,26 @@ async def create_room(
         name: Room name
         alias: Optional room alias (without # and domain)
         topic: Optional room topic
+        power_users: Optional list of user IDs to grant power level 50
 
     Returns:
         Room ID if successful, None otherwise
     """
-    room_config = {"name": name}
+    room_config: dict[str, Any] = {"name": name}
     if alias:
         room_config["room_alias_name"] = alias
     if topic:
         room_config["topic"] = topic
+
+    if power_users:
+        power_level_content: dict[str, Any] = {
+            "users": {user_id: 50 for user_id in power_users},
+            "state_default": 50,  # Set default required power for state events
+        }
+        # Ensure the creator is an admin
+        if client.user_id:
+            power_level_content["users"][client.user_id] = 100
+        room_config["initial_state"] = [{"type": "m.room.power_levels", "content": power_level_content}]
 
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
