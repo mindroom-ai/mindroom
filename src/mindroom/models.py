@@ -16,6 +16,38 @@ class AgentConfig(BaseModel):
     add_history_to_messages: bool | None = Field(default=None, description="Whether to add history to messages")
     model: str = Field(default="default", description="Model name")
 
+    def get_brief_description(self) -> str:
+        """Get a brief description of the agent for team contexts.
+
+        Returns the role if it's short enough, otherwise the first instruction,
+        or a generic description.
+        """
+        # If role is a simple one-liner, use it
+        if self.role and len(self.role) <= 150 and "\n" not in self.role:
+            return self.role
+
+        # If we have instructions, use the first one (often the most descriptive)
+        if self.instructions:
+            first_instruction = self.instructions[0]
+            if len(first_instruction) <= 150:
+                return first_instruction
+            # Truncate if too long
+            return first_instruction[:147] + "..."
+
+        # Fall back to role even if it's multi-line (just take first part)
+        if self.role:
+            # Take up to the first sentence or line break
+            for delimiter in [".", "\n", ";"]:
+                if delimiter in self.role:
+                    first_part = self.role.split(delimiter)[0]
+                    if first_part.strip():
+                        return first_part.strip()[:150]
+            # If no good delimiter, just truncate
+            return self.role[:147] + "..." if len(self.role) > 150 else self.role
+
+        # Generic fallback
+        return "Team member"
+
 
 class DefaultsConfig(BaseModel):
     """Default configuration values for agents."""

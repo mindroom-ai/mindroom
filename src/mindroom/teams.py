@@ -9,7 +9,7 @@ from agno.agent import Agent
 from agno.run.team import TeamRunResponse
 from agno.team import Team
 
-from .agent_config import ROUTER_AGENT_NAME
+from .agent_config import ROUTER_AGENT_NAME, load_config
 from .ai import get_model_instance
 from .logging_config import get_logger
 
@@ -18,6 +18,56 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+
+def get_agent_description(agent: Agent, agent_name: str | None = None) -> str:
+    """Get a brief description of an agent for team contexts.
+
+    This function provides a clean abstraction for extracting agent descriptions
+    without needing to parse role strings or make assumptions about format.
+
+    Args:
+        agent: The Agno Agent instance
+        agent_name: Optional agent name to look up config
+
+    Returns:
+        A brief description suitable for team contexts
+    """
+    # Try to get description from our config if we have the agent name
+    if agent_name:
+        try:
+            config = load_config()
+            if agent_name in config.agents:
+                agent_config = config.agents[agent_name]
+                return agent_config.get_brief_description()
+        except Exception:
+            # Fall through to other methods if config lookup fails
+            pass
+
+    # Check if agent has a simple role we can use
+    agent_role = getattr(agent, "role", None)
+    if agent_role:
+        # If it's a simple one-liner, use it directly
+        role_str = str(agent_role)
+        if len(role_str) <= 150 and "\n" not in role_str:
+            return role_str
+
+        # For multi-line roles, try to extract something meaningful
+        # Look for the first sentence that's not a header or identity statement
+        for line in role_str.split("\n"):
+            stripped = line.strip()
+            # Skip empty lines, headers, and identity statements
+            if (
+                stripped
+                and not stripped.startswith("#")
+                and not stripped.startswith("You are")
+                and not stripped.startswith("## ")
+            ):
+                # Return the first meaningful line, truncated if needed
+                return stripped[:150] if len(stripped) > 150 else stripped
+
+    # Final fallback
+    return "Team member with specialized expertise"
 
 
 class TeamMode(str, Enum):
@@ -99,25 +149,24 @@ async def create_team_response(
 
     # Build team identity context
     agent_identities = []
-    for agent in agents:
-        # Extract a brief role description
-        # Agent.role is Optional[str] in the Agno library
-        agent_role = getattr(agent, "role", None)
-        if agent_role:
-            # Take the first substantive line from the role (skip headers and empty lines)
-            role_lines = str(agent_role).split("\n")
-            role_desc = "Team member"
-            for line in role_lines:
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#") and not stripped.startswith("You are"):
-                    role_desc = stripped[:150]  # Allow slightly longer descriptions
-                    break
-        else:
-            role_desc = "Team member"
 
-        # Agent.name should always be present but use a fallback just in case
-        agent_name = getattr(agent, "name", "Unknown")
-        agent_identities.append(f"- **{agent_name}**: {role_desc}")
+    # Map agents back to their original names from the orchestrator
+    agent_name_map = {}
+    for name, bot in orchestrator.agent_bots.items():
+        if bot.agent in agents:
+            agent_name_map[bot.agent] = name
+
+    for agent in agents:
+        # Get the agent's display name
+        agent_display_name = getattr(agent, "name", "Unknown")
+
+        # Get the original agent name for config lookup
+        original_name = agent_name_map.get(agent)
+
+        # Get a clean description using our helper function
+        description = get_agent_description(agent, original_name)
+
+        agent_identities.append(f"- **{agent_display_name}**: {description}")
 
     # Determine team mode instruction
     mode_instruction = ""
