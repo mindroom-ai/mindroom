@@ -55,6 +55,7 @@ from .thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     get_available_agents_in_room,
+    get_safe_thread_root,
     has_user_responded_after_message,
     should_agent_respond,
 )
@@ -189,7 +190,7 @@ class AgentBot:
                 await self._handle_command(room, event, command)
             else:
                 help_text = "❌ Unknown command. Try !help for available commands."
-                await self._send_response(room, event.event_id, help_text, thread_id=None)
+                await self._send_response(room, event.event_id, help_text, thread_id=None, reply_to_event=event)
             return
 
         context = await self._extract_message_context(room, event)
@@ -465,9 +466,21 @@ class AgentBot:
             )
 
     async def _send_response(
-        self, room: nio.MatrixRoom, reply_to_event_id: str, response_text: str, thread_id: str | None
+        self,
+        room: nio.MatrixRoom,
+        reply_to_event_id: str,
+        response_text: str,
+        thread_id: str | None,
+        reply_to_event: nio.RoomMessageText | None = None,
     ) -> str | None:
         """Send a response message to a room.
+
+        Args:
+            room: The room to send to
+            reply_to_event_id: The event ID to reply to
+            response_text: The text to send
+            thread_id: The thread ID if already in a thread
+            reply_to_event: Optional event object for the message we're replying to (used to check for safe thread root)
 
         Returns:
             Event ID if message was sent successfully, None otherwise.
@@ -476,7 +489,8 @@ class AgentBot:
         sender_domain = sender_id.domain
 
         # Always ensure we have a thread_id - use the original message as thread root if needed
-        effective_thread_id = thread_id if thread_id else reply_to_event_id
+        # This ensures agents always respond in threads, even when mentioned in main room
+        effective_thread_id = thread_id or get_safe_thread_root(reply_to_event) or reply_to_event_id
 
         content = create_mention_content_from_text(
             response_text,
@@ -582,8 +596,7 @@ class AgentBot:
         # All other commands require a thread
         if not is_thread or not thread_id:
             response_text = "❌ Commands only work within threads. Please start a thread first."
-            # Create a thread even for this error message
-            await self._send_response(room, event.event_id, response_text, thread_id=None)
+            await self._send_response(room, event.event_id, response_text, thread_id=None, reply_to_event=event)
             return
 
         response_text = ""

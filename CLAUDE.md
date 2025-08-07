@@ -12,6 +12,7 @@ This document outlines the core principles and practices for developing this pro
 - **Be Ruthless with Code Removal**: Aggressively remove any unused code, including functions, imports, and variables.
 - **Prefer dataclasses**: Use `dataclasses` that can be typed over dictionaries for better type safety and clarity.
 - Do not wrap things in try-excepts unless it's necessary. Avoid wrapping things that should not fail.
+- NEVER put imports in the function, unless it is to avoid circular imports. Imports should be at the top of the file.
 
 ## 2. Workflow
 
