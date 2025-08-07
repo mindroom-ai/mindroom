@@ -489,15 +489,7 @@ class AgentBot:
 
         # Always ensure we have a thread_id - use the original message as thread root if needed
         # This ensures agents always respond in threads, even when mentioned in main room
-        if not thread_id:
-            # If we have the event object, check if it's safe to use as thread root
-            if reply_to_event:
-                safe_root = get_safe_thread_root(reply_to_event)
-                effective_thread_id = safe_root if safe_root else reply_to_event_id
-            else:
-                effective_thread_id = reply_to_event_id
-        else:
-            effective_thread_id = thread_id
+        effective_thread_id = thread_id or get_safe_thread_root(reply_to_event) or reply_to_event_id
 
         content = create_mention_content_from_text(
             response_text,

@@ -148,7 +148,7 @@ def should_agent_respond(
     return [agent_name] == agents_in_thread
 
 
-def get_safe_thread_root(event: nio.RoomMessageText) -> str | None:
+def get_safe_thread_root(event: nio.RoomMessageText | None) -> str | None:
     """Get a safe thread root for a message.
 
     If the message is a reply to another message (has m.in_reply_to relation),
@@ -156,11 +156,14 @@ def get_safe_thread_root(event: nio.RoomMessageText) -> str | None:
     as the thread root.
 
     Args:
-        event: The Matrix message event
+        event: The Matrix message event (or None)
 
     Returns:
         The event ID to use as thread root, or None to use the event itself
     """
+    if not event:
+        return None
+
     relates_to = event.source.get("content", {}).get("m.relates_to", {})
 
     # Check if this message is a reply to another message
