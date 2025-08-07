@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback, useState } from 'react';
+import { useEffect, useCallback, useState } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -6,7 +6,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Save, Trash2, Plus, X, FileCode, Settings } from 'lucide-react';
 import { AVAILABLE_TOOLS } from '@/types/config';
 import { useForm, Controller } from 'react-hook-form';
@@ -16,15 +22,8 @@ import { TOOL_SCHEMAS, toolNeedsConfiguration } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
 
 export function AgentEditor() {
-  const {
-    agents,
-    selectedAgentId,
-    updateAgent,
-    deleteAgent,
-    saveConfig,
-    config,
-    isDirty
-  } = useConfigStore();
+  const { agents, selectedAgentId, updateAgent, deleteAgent, saveConfig, config, isDirty } =
+    useConfigStore();
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
@@ -49,11 +48,14 @@ export function AgentEditor() {
   }, [selectedAgent, reset]);
 
   // Create a debounced update function
-  const handleFieldChange = useCallback((fieldName: keyof Agent, value: any) => {
-    if (selectedAgentId) {
-      updateAgent(selectedAgentId, { [fieldName]: value });
-    }
-  }, [selectedAgentId, updateAgent]);
+  const handleFieldChange = useCallback(
+    (fieldName: keyof Agent, value: any) => {
+      if (selectedAgentId) {
+        updateAgent(selectedAgentId, { [fieldName]: value });
+      }
+    },
+    [selectedAgentId, updateAgent]
+  );
 
   const handleDelete = () => {
     if (selectedAgentId && confirm('Are you sure you want to delete this agent?')) {
@@ -110,20 +112,11 @@ export function AgentEditor() {
         <div className="flex items-center justify-between">
           <CardTitle>Agent Details</CardTitle>
           <div className="flex gap-2">
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={handleDelete}
-            >
+            <Button variant="destructive" size="sm" onClick={handleDelete}>
               <Trash2 className="h-4 w-4 mr-1" />
               Delete
             </Button>
-            <Button
-              variant="default"
-              size="sm"
-              onClick={handleSave}
-              disabled={!isDirty}
-            >
+            <Button variant="default" size="sm" onClick={handleSave} disabled={!isDirty}>
               <Save className="h-4 w-4 mr-1" />
               Save
             </Button>
@@ -143,7 +136,7 @@ export function AgentEditor() {
                   {...field}
                   id="display_name"
                   placeholder="Agent display name"
-                  onChange={(e) => {
+                  onChange={e => {
                     field.onChange(e);
                     handleFieldChange('display_name', e.target.value);
                   }}
@@ -164,7 +157,7 @@ export function AgentEditor() {
                   id="role"
                   placeholder="What this agent does..."
                   rows={2}
-                  onChange={(e) => {
+                  onChange={e => {
                     field.onChange(e);
                     handleFieldChange('role', e.target.value);
                   }}
@@ -182,7 +175,7 @@ export function AgentEditor() {
               render={({ field }) => (
                 <Select
                   value={field.value || 'default'}
-                  onValueChange={(value) => {
+                  onValueChange={value => {
                     field.onChange(value);
                     handleFieldChange('model', value);
                   }}
@@ -191,11 +184,12 @@ export function AgentEditor() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {config && Object.keys(config.models).map((modelId) => (
-                      <SelectItem key={modelId} value={modelId}>
-                        {modelId}
-                      </SelectItem>
-                    ))}
+                    {config &&
+                      Object.keys(config.models).map(modelId => (
+                        <SelectItem key={modelId} value={modelId}>
+                          {modelId}
+                        </SelectItem>
+                      ))}
                   </SelectContent>
                 </Select>
               )}
@@ -206,7 +200,7 @@ export function AgentEditor() {
           <div>
             <Label>Tools</Label>
             <div className="space-y-2 mt-2">
-              {AVAILABLE_TOOLS.map((tool) => (
+              {AVAILABLE_TOOLS.map(tool => (
                 <Controller
                   key={tool}
                   name="tools"
@@ -215,7 +209,8 @@ export function AgentEditor() {
                     const isChecked = field.value.includes(tool);
                     const hasSchema = !!TOOL_SCHEMAS[tool];
                     const needsConfig = toolNeedsConfiguration(tool);
-                    const isConfigured = config?.tools?.[tool] && Object.keys(config.tools[tool]).length > 0;
+                    const isConfigured =
+                      config?.tools?.[tool] && Object.keys(config.tools[tool]).length > 0;
 
                     return (
                       <div className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 transition-colors">
@@ -223,10 +218,10 @@ export function AgentEditor() {
                           <Checkbox
                             id={tool}
                             checked={isChecked}
-                            onCheckedChange={(checked) => {
+                            onCheckedChange={checked => {
                               const newTools = checked
                                 ? [...field.value, tool]
-                              : field.value.filter(t => t !== tool);
+                                : field.value.filter(t => t !== tool);
                               field.onChange(newTools);
                               handleFieldChange('tools', newTools);
                             }}
@@ -243,7 +238,10 @@ export function AgentEditor() {
                             </Badge>
                           )}
                           {isChecked && isConfigured && (
-                            <Badge variant="default" className="text-xs bg-green-100 text-green-800">
+                            <Badge
+                              variant="default"
+                              className="text-xs bg-green-100 text-green-800"
+                            >
                               Configured
                             </Badge>
                           )}
@@ -271,11 +269,7 @@ export function AgentEditor() {
           <div>
             <div className="flex items-center justify-between mb-2">
               <Label>Instructions</Label>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleAddInstruction}
-              >
+              <Button variant="outline" size="sm" onClick={handleAddInstruction}>
                 <Plus className="h-3 w-3 mr-1" />
                 Add
               </Button>
@@ -289,7 +283,7 @@ export function AgentEditor() {
                     <div key={index} className="flex gap-2">
                       <Input
                         value={instruction}
-                        onChange={(e) => {
+                        onChange={e => {
                           const updated = [...field.value];
                           updated[index] = e.target.value;
                           field.onChange(updated);
@@ -315,11 +309,7 @@ export function AgentEditor() {
           <div>
             <div className="flex items-center justify-between mb-2">
               <Label>Rooms</Label>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleAddRoom}
-              >
+              <Button variant="outline" size="sm" onClick={handleAddRoom}>
                 <Plus className="h-3 w-3 mr-1" />
                 Add
               </Button>
@@ -333,7 +323,7 @@ export function AgentEditor() {
                     <div key={index} className="flex gap-2">
                       <Input
                         value={room}
-                        onChange={(e) => {
+                        onChange={e => {
                           const updated = [...field.value];
                           updated[index] = e.target.value;
                           field.onChange(updated);
@@ -341,11 +331,7 @@ export function AgentEditor() {
                         }}
                         placeholder="Room name..."
                       />
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => handleRemoveRoom(index)}
-                      >
+                      <Button variant="ghost" size="icon" onClick={() => handleRemoveRoom(index)}>
                         <X className="h-4 w-4" />
                       </Button>
                     </div>
@@ -368,7 +354,7 @@ export function AgentEditor() {
                   type="number"
                   min={1}
                   max={20}
-                  onChange={(e) => {
+                  onChange={e => {
                     const value = parseInt(e.target.value) || 5;
                     field.onChange(value);
                     handleFieldChange('num_history_runs', value);
@@ -385,7 +371,7 @@ export function AgentEditor() {
         <ToolConfigDialog
           toolId={configDialogTool}
           open={!!configDialogTool}
-          onOpenChange={(open) => {
+          onOpenChange={open => {
             if (!open) setConfigDialogTool(null);
           }}
         />

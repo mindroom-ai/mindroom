@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import {
   Dialog,
@@ -12,7 +12,13 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Settings, AlertCircle } from 'lucide-react';
@@ -49,9 +55,7 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Tool Configuration</DialogTitle>
-            <DialogDescription>
-              This tool does not require configuration.
-            </DialogDescription>
+            <DialogDescription>This tool does not require configuration.</DialogDescription>
           </DialogHeader>
         </DialogContent>
       </Dialog>
@@ -122,7 +126,7 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
     onOpenChange(false);
   };
 
-  const renderField = (field: typeof schema.fields[0]) => {
+  const renderField = (field: (typeof schema.fields)[0]) => {
     const value = values[field.name] ?? '';
     const error = errors[field.name];
 
@@ -136,13 +140,11 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
               id={field.name}
               type={field.type === 'url' ? 'url' : 'text'}
               value={value}
-              onChange={(e) => handleFieldChange(field.name, e.target.value)}
+              onChange={e => handleFieldChange(field.name, e.target.value)}
               placeholder={field.placeholder}
               className={error ? 'border-red-500' : ''}
             />
-            {field.description && (
-              <p className="text-xs text-gray-500">{field.description}</p>
-            )}
+            {field.description && <p className="text-xs text-gray-500">{field.description}</p>}
             {error && (
               <p className="text-xs text-red-500 flex items-center gap-1">
                 <AlertCircle className="h-3 w-3" />
@@ -160,13 +162,11 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
               id={field.name}
               type="password"
               value={value}
-              onChange={(e) => handleFieldChange(field.name, e.target.value)}
+              onChange={e => handleFieldChange(field.name, e.target.value)}
               placeholder={field.placeholder}
               className={error ? 'border-red-500' : ''}
             />
-            {field.description && (
-              <p className="text-xs text-gray-500">{field.description}</p>
-            )}
+            {field.description && <p className="text-xs text-gray-500">{field.description}</p>}
             {error && (
               <p className="text-xs text-red-500 flex items-center gap-1">
                 <AlertCircle className="h-3 w-3" />
@@ -184,14 +184,12 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
               id={field.name}
               type="number"
               value={value}
-              onChange={(e) => handleFieldChange(field.name, parseInt(e.target.value) || 0)}
+              onChange={e => handleFieldChange(field.name, parseInt(e.target.value) || 0)}
               min={field.validation?.min}
               max={field.validation?.max}
               className={error ? 'border-red-500' : ''}
             />
-            {field.description && (
-              <p className="text-xs text-gray-500">{field.description}</p>
-            )}
+            {field.description && <p className="text-xs text-gray-500">{field.description}</p>}
             {error && (
               <p className="text-xs text-red-500 flex items-center gap-1">
                 <AlertCircle className="h-3 w-3" />
@@ -207,7 +205,7 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
             <Checkbox
               id={field.name}
               checked={value || false}
-              onCheckedChange={(checked) => handleFieldChange(field.name, checked)}
+              onCheckedChange={checked => handleFieldChange(field.name, checked)}
             />
             <Label htmlFor={field.name} className="cursor-pointer">
               {field.label}
@@ -221,7 +219,7 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
             <Label htmlFor={field.name}>{field.label}</Label>
             <Select
               value={value || field.default}
-              onValueChange={(val) => handleFieldChange(field.name, val)}
+              onValueChange={val => handleFieldChange(field.name, val)}
             >
               <SelectTrigger id={field.name} className={error ? 'border-red-500' : ''}>
                 <SelectValue />
@@ -234,9 +232,7 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
                 ))}
               </SelectContent>
             </Select>
-            {field.description && (
-              <p className="text-xs text-gray-500">{field.description}</p>
-            )}
+            {field.description && <p className="text-xs text-gray-500">{field.description}</p>}
             {error && (
               <p className="text-xs text-red-500 flex items-center gap-1">
                 <AlertCircle className="h-3 w-3" />
@@ -252,12 +248,15 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
   };
 
   // Group fields by category if there are many
-  const groupedFields = schema.fields.reduce((acc, field) => {
-    const category = field.required ? 'Required' : 'Optional';
-    if (!acc[category]) acc[category] = [];
-    acc[category].push(field);
-    return acc;
-  }, {} as Record<string, typeof schema.fields>);
+  const groupedFields = schema.fields.reduce(
+    (acc, field) => {
+      const category = field.required ? 'Required' : 'Optional';
+      if (!acc[category]) acc[category] = [];
+      acc[category].push(field);
+      return acc;
+    },
+    {} as Record<string, typeof schema.fields>
+  );
 
   const hasMultipleCategories = Object.keys(groupedFields).length > 1;
 
@@ -269,9 +268,7 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
             <Settings className="h-5 w-5" />
             Configure {schema.name}
           </DialogTitle>
-          <DialogDescription>
-            {schema.description}
-          </DialogDescription>
+          <DialogDescription>{schema.description}</DialogDescription>
         </DialogHeader>
 
         <ScrollArea className="max-h-[50vh] pr-4">
@@ -295,9 +292,7 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
               ))}
             </Tabs>
           ) : (
-            <div className="space-y-4">
-              {schema.fields.map(renderField)}
-            </div>
+            <div className="space-y-4">{schema.fields.map(renderField)}</div>
           )}
         </ScrollArea>
 

@@ -1,9 +1,7 @@
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ToolConfigDialog } from './ToolConfigDialog';
 import { useConfigStore } from '@/store/configStore';
-import { TOOL_SCHEMAS } from '@/types/toolConfig';
 
 // Mock the store
 vi.mock('@/store/configStore', () => ({
@@ -32,38 +30,20 @@ describe('ToolConfigDialog', () => {
   });
 
   it('renders dialog with tool schema', () => {
-    render(
-      <ToolConfigDialog
-        toolId="googlesearch"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="googlesearch" open={true} onOpenChange={mockOnOpenChange} />);
 
     expect(screen.getByText('Configure Google Search')).toBeInTheDocument();
     expect(screen.getByText('Search the web using Google')).toBeInTheDocument();
   });
 
   it('shows message for tools without configuration', () => {
-    render(
-      <ToolConfigDialog
-        toolId="nonexistent"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="nonexistent" open={true} onOpenChange={mockOnOpenChange} />);
 
     expect(screen.getByText('This tool does not require configuration.')).toBeInTheDocument();
   });
 
   it('renders all field types correctly', () => {
-    render(
-      <ToolConfigDialog
-        toolId="googlesearch"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="googlesearch" open={true} onOpenChange={mockOnOpenChange} />);
 
     // Check for text/password fields
     expect(screen.getByLabelText('API Key')).toBeInTheDocument();
@@ -71,13 +51,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('handles text field changes', () => {
-    render(
-      <ToolConfigDialog
-        toolId="email"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="email" open={true} onOpenChange={mockOnOpenChange} />);
 
     const smtpInput = screen.getByLabelText('SMTP Host');
     fireEvent.change(smtpInput, { target: { value: 'smtp.gmail.com' } });
@@ -86,13 +60,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('handles number field changes', () => {
-    render(
-      <ToolConfigDialog
-        toolId="shell"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="shell" open={true} onOpenChange={mockOnOpenChange} />);
 
     const timeoutInput = screen.getByLabelText('Command Timeout (seconds)');
     fireEvent.change(timeoutInput, { target: { value: '30' } });
@@ -101,13 +69,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('handles boolean field changes', () => {
-    render(
-      <ToolConfigDialog
-        toolId="duckduckgo"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="duckduckgo" open={true} onOpenChange={mockOnOpenChange} />);
 
     // DuckDuckGo has only optional fields, so no tabs
     const safeSearchCheckbox = screen.getByLabelText('Safe Search');
@@ -124,13 +86,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('handles select field changes', () => {
-    render(
-      <ToolConfigDialog
-        toolId="duckduckgo"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="duckduckgo" open={true} onOpenChange={mockOnOpenChange} />);
 
     // DuckDuckGo has only optional fields, so no tabs
     // Find the select trigger
@@ -149,13 +105,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('validates required fields', async () => {
-    render(
-      <ToolConfigDialog
-        toolId="googlesearch"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="googlesearch" open={true} onOpenChange={mockOnOpenChange} />);
 
     const saveButton = screen.getByText('Save Configuration');
     fireEvent.click(saveButton);
@@ -169,13 +119,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('validates number field min/max', async () => {
-    render(
-      <ToolConfigDialog
-        toolId="shell"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="shell" open={true} onOpenChange={mockOnOpenChange} />);
 
     const timeoutInput = screen.getByLabelText('Command Timeout (seconds)');
     fireEvent.change(timeoutInput, { target: { value: '0' } });
@@ -191,13 +135,7 @@ describe('ToolConfigDialog', () => {
   it('validates URL format', async () => {
     // URL validation requires pattern in schema
     // For now just test required field validation
-    render(
-      <ToolConfigDialog
-        toolId="jina"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="jina" open={true} onOpenChange={mockOnOpenChange} />);
 
     const saveButton = screen.getByText('Save Configuration');
     fireEvent.click(saveButton);
@@ -208,13 +146,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('saves configuration when valid', async () => {
-    render(
-      <ToolConfigDialog
-        toolId="googlesearch"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="googlesearch" open={true} onOpenChange={mockOnOpenChange} />);
 
     const apiKeyInput = screen.getByLabelText('API Key');
     const searchEngineIdInput = screen.getByLabelText('Search Engine ID');
@@ -248,13 +180,7 @@ describe('ToolConfigDialog', () => {
       updateToolConfig: mockUpdateToolConfig,
     });
 
-    render(
-      <ToolConfigDialog
-        toolId="googlesearch"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="googlesearch" open={true} onOpenChange={mockOnOpenChange} />);
 
     const apiKeyInput = screen.getByLabelText('API Key') as HTMLInputElement;
     const searchEngineIdInput = screen.getByLabelText('Search Engine ID') as HTMLInputElement;
@@ -264,13 +190,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('clears errors when field is edited', async () => {
-    render(
-      <ToolConfigDialog
-        toolId="googlesearch"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="googlesearch" open={true} onOpenChange={mockOnOpenChange} />);
 
     // Trigger validation error
     const saveButton = screen.getByText('Save Configuration');
@@ -291,13 +211,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('handles cancel button', () => {
-    render(
-      <ToolConfigDialog
-        toolId="googlesearch"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="googlesearch" open={true} onOpenChange={mockOnOpenChange} />);
 
     const cancelButton = screen.getByText('Cancel');
     fireEvent.click(cancelButton);
@@ -307,13 +221,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('groups fields by required/optional when there are many', () => {
-    render(
-      <ToolConfigDialog
-        toolId="googlesearch"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="googlesearch" open={true} onOpenChange={mockOnOpenChange} />);
 
     // Google search has both required and optional fields
     expect(screen.getByText('Required')).toBeInTheDocument();
@@ -321,13 +229,7 @@ describe('ToolConfigDialog', () => {
   });
 
   it('disables save button for tools without fields', () => {
-    render(
-      <ToolConfigDialog
-        toolId="calculator"
-        open={true}
-        onOpenChange={mockOnOpenChange}
-      />
-    );
+    render(<ToolConfigDialog toolId="calculator" open={true} onOpenChange={mockOnOpenChange} />);
 
     const saveButton = screen.getByText('Save Configuration');
     expect(saveButton).toBeDisabled();

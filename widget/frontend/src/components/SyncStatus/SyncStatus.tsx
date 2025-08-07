@@ -1,4 +1,3 @@
-import React from 'react';
 import { Check, RefreshCw, AlertCircle, WifiOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 

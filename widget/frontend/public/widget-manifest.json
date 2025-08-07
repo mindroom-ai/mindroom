@@ -1,16 +1,16 @@
 {
-  "type": "m.custom",
-  "name": "MindRoom Agent Configuration",
-  "description": "Configure MindRoom agents and API keys through a visual interface",
   "avatar_url": "",
-  "url": "$WIDGET_URL",
   "data": {
-    "title": "Agent Configuration",
-    "requires_client": "element"
+    "requires_client": "element",
+    "title": "Agent Configuration"
   },
+  "description": "Configure MindRoom agents and API keys through a visual interface",
+  "name": "MindRoom Agent Configuration",
   "permissions": [
     "m.room.state",
     "org.matrix.msc2762.receive_state:m.mindroom.api_keys",
     "org.matrix.msc2762.send_state:m.mindroom.api_keys"
-  ]
+  ],
+  "type": "m.custom",
+  "url": "$WIDGET_URL"
 }

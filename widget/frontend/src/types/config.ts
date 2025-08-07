@@ -69,4 +69,4 @@ export const AVAILABLE_TOOLS = [
   'telegram',
 ] as const;
 
-export type ToolType = typeof AVAILABLE_TOOLS[number];
+export type ToolType = (typeof AVAILABLE_TOOLS)[number];

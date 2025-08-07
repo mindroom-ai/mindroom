@@ -54,13 +54,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         agents,
         isLoading: false,
         syncStatus: 'synced',
-        isDirty: false
+        isDirty: false,
       });
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : 'Failed to load config',
         isLoading: false,
-        syncStatus: 'error'
+        syncStatus: 'error',
       });
     }
   },
@@ -73,11 +73,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set({ isLoading: true, error: null, syncStatus: 'syncing' });
     try {
       // Convert agents array back to object format
-      const agentsObject = agents.reduce((acc, agent) => {
-        const { id, ...rest } = agent;
-        acc[id] = rest;
-        return acc;
-      }, {} as Record<string, Omit<Agent, 'id'>>);
+      const agentsObject = agents.reduce(
+        (acc, agent) => {
+          const { id, ...rest } = agent;
+          acc[id] = rest;
+          return acc;
+        },
+        {} as Record<string, Omit<Agent, 'id'>>
+      );
 
       const updatedConfig: Config = {
         ...config,
@@ -88,40 +91,38 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       set({
         isLoading: false,
         syncStatus: 'synced',
-        isDirty: false
+        isDirty: false,
       });
     } catch (error) {
       set({
         error: error instanceof Error ? error.message : 'Failed to save config',
         isLoading: false,
-        syncStatus: 'error'
+        syncStatus: 'error',
       });
     }
   },
 
   // Select an agent for editing
-  selectAgent: (agentId) => {
+  selectAgent: agentId => {
     set({ selectedAgentId: agentId });
   },
 
   // Update an existing agent
   updateAgent: (agentId, updates) => {
-    set((state) => ({
-      agents: state.agents.map((agent) =>
-        agent.id === agentId ? { ...agent, ...updates } : agent
-      ),
+    set(state => ({
+      agents: state.agents.map(agent => (agent.id === agentId ? { ...agent, ...updates } : agent)),
       isDirty: true,
     }));
   },
 
   // Create a new agent
-  createAgent: (agentData) => {
+  createAgent: agentData => {
     const id = agentData.display_name.toLowerCase().replace(/\s+/g, '_');
     const newAgent: Agent = {
       id,
       ...agentData,
     };
-    set((state) => ({
+    set(state => ({
       agents: [...state.agents, newAgent],
       selectedAgentId: id,
       isDirty: true,
@@ -129,9 +130,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   },
 
   // Delete an agent
-  deleteAgent: (agentId) => {
-    set((state) => ({
-      agents: state.agents.filter((agent) => agent.id !== agentId),
+  deleteAgent: agentId => {
+    set(state => ({
+      agents: state.agents.filter(agent => agent.id !== agentId),
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
       isDirty: true,
     }));
@@ -139,7 +140,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Update a model configuration
   updateModel: (modelId, updates) => {
-    set((state) => {
+    set(state => {
       if (!state.config) return state;
       return {
         config: {
@@ -158,8 +159,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   },
 
   // Delete a model configuration
-  deleteModel: (modelId) => {
-    set((state) => {
+  deleteModel: modelId => {
+    set(state => {
       if (!state.config) return state;
       const { [modelId]: _, ...remainingModels } = state.config.models;
       return {
@@ -174,7 +175,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Set an API key
   setAPIKey: (provider, key) => {
-    set((state) => ({
+    set(state => ({
       apiKeys: {
         ...state.apiKeys,
         [provider]: {
@@ -187,7 +188,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   },
 
   // Test a model connection
-  testModel: async (modelId) => {
+  testModel: async modelId => {
     try {
       const result = await configService.testModel(modelId);
       return result;
@@ -199,7 +200,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Update tool configuration
   updateToolConfig: (toolId, config) => {
-    set((state) => {
+    set(state => {
       if (!state.config) return state;
       return {
         config: {

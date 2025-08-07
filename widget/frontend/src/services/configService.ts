@@ -1,4 +1,4 @@
-import { Config, APIKey } from '@/types/config';
+import { Config } from '@/types/config';
 
 const API_BASE = '/api';
 

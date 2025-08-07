@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import { useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useConfigStore } from '@/store/configStore';
 import { AgentList } from '@/components/AgentList/AgentList';
@@ -34,9 +34,7 @@ function AppContent() {
       {/* Header */}
       <header className="bg-gradient-to-r from-blue-600 to-purple-600 shadow-lg">
         <div className="px-6 py-4 flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-white">
-            🧠 MindRoom Configuration
-          </h1>
+          <h1 className="text-2xl font-bold text-white">🧠 MindRoom Configuration</h1>
           <SyncStatus status={syncStatus} />
         </div>
       </header>
@@ -45,10 +43,16 @@ function AppContent() {
       <div className="flex-1 overflow-hidden">
         <Tabs defaultValue="agents" className="h-full">
           <TabsList className="px-6 py-3 bg-white/80 backdrop-blur-sm border-b border-gray-200">
-            <TabsTrigger value="agents" className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600">
+            <TabsTrigger
+              value="agents"
+              className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600"
+            >
               👥 Agents
             </TabsTrigger>
-            <TabsTrigger value="models" className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600">
+            <TabsTrigger
+              value="models"
+              className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600"
+            >
               🔧 Models & API Keys
             </TabsTrigger>
           </TabsList>

@@ -1,4 +1,3 @@
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AgentEditor } from './AgentEditor';
@@ -83,11 +82,11 @@ describe('AgentEditor', () => {
 
   it('does not cause infinite update loops when updateAgent is called', async () => {
     let updateCount = 0;
-    const trackingUpdateAgent = vi.fn((id, updates) => {
+    const trackingUpdateAgent = vi.fn((_id, _updates) => {
       updateCount++;
       // Simulate what the real updateAgent does - updates the agent in the store
       mockStore.agents = mockStore.agents.map(agent =>
-        agent.id === id ? { ...agent, ...updates } : agent
+        agent.id === _id ? { ...agent, ..._updates } : agent
       );
     });
 
@@ -167,8 +166,8 @@ describe('AgentEditor', () => {
 
     // Find add instruction button
     const addButtons = screen.getAllByRole('button', { name: /add/i });
-    const addInstructionButton = addButtons.find(btn =>
-      btn.closest('div')?.querySelector('label')?.textContent === 'Instructions'
+    const addInstructionButton = addButtons.find(
+      btn => btn.closest('div')?.querySelector('label')?.textContent === 'Instructions'
     );
 
     fireEvent.click(addInstructionButton!);
@@ -187,8 +186,8 @@ describe('AgentEditor', () => {
 
     // Find add room button
     const addButtons = screen.getAllByRole('button', { name: /add/i });
-    const addRoomButton = addButtons.find(btn =>
-      btn.closest('div')?.querySelector('label')?.textContent === 'Rooms'
+    const addRoomButton = addButtons.find(
+      btn => btn.closest('div')?.querySelector('label')?.textContent === 'Rooms'
     );
 
     fireEvent.click(addRoomButton!);
@@ -252,7 +251,7 @@ describe('AgentEditor', () => {
 
   it('regression test: form updates should not cause infinite loops', async () => {
     let updateCount = 0;
-    const trackingUpdateAgent = vi.fn((id, updates) => {
+    const trackingUpdateAgent = vi.fn((_id, _updates) => {
       updateCount++;
     });
 

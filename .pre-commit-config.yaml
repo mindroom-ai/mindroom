@@ -32,3 +32,45 @@ repos:
     rev: "v2.6.0"
     hooks:
       - id: pyproject-fmt
+
+  # TypeScript/JavaScript hooks
+  - repo: local
+    hooks:
+      - id: prettier
+        name: Prettier formatter
+        entry: bash -c 'for file in "$@"; do npx prettier --write "$file"; done' --
+        language: system
+        files: ^widget/frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
+        exclude: ^(widget/frontend/package-lock\.json|.*\.min\.(js|css))$
+        pass_filenames: true
+
+      - id: eslint
+        name: ESLint
+        entry: bash -c 'cd widget/frontend && npx eslint@8 --fix "$@"' --
+        language: system
+        files: ^widget/frontend/.*\.(js|jsx|ts|tsx)$
+        pass_filenames: true
+
+      - id: typescript-check
+        name: TypeScript type checking
+        entry: bash -c 'cd widget/frontend && npm run type-check'
+        language: system
+        files: ^widget/frontend/.*\.(ts|tsx)$
+        pass_filenames: false
+
+      - id: check-package-lock
+        name: Check package-lock.json is up to date
+        entry: bash -c 'cd widget/frontend && npm ls >/dev/null 2>&1'
+        language: system
+        files: ^widget/frontend/package\.json$
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-json
+        files: ^widget/frontend/.*\.json$
+      - id: pretty-format-json
+        args: ['--autofix', '--indent=2']
+        files: ^widget/frontend/.*\.json$
+        exclude: ^(widget/frontend/package(-lock)?\.json|widget/frontend/tsconfig.*\.json)$

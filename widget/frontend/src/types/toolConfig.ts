@@ -622,7 +622,10 @@ export function isToolConfigured(toolId: string, config?: ToolConfigValues): boo
 }
 
 // Helper to validate tool configuration
-export function validateToolConfig(toolId: string, config: ToolConfigValues): Record<string, string> {
+export function validateToolConfig(
+  toolId: string,
+  config: ToolConfigValues
+): Record<string, string> {
   const schema = TOOL_SCHEMAS[toolId];
   if (!schema) return {};
 

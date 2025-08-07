@@ -1,4 +1,3 @@
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ModelConfig } from './ModelConfig';
@@ -133,9 +132,9 @@ describe('ModelConfig', () => {
     render(<ModelConfig />);
 
     // Find delete button for anthropic model (not the default)
-    const deleteButtons = screen.getAllByRole('button').filter(btn =>
-      btn.querySelector('.lucide-trash2')
-    );
+    const deleteButtons = screen
+      .getAllByRole('button')
+      .filter(btn => btn.querySelector('.lucide-trash2'));
 
     // Should have delete buttons for non-default models
     expect(deleteButtons.length).toBeGreaterThan(0);
