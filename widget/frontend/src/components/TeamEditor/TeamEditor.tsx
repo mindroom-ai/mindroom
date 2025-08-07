@@ -184,17 +184,18 @@ export function TeamEditor() {
               control={control}
               render={({ field }) => (
                 <Select
-                  value={field.value || ''}
+                  value={field.value || 'default_model'}
                   onValueChange={value => {
-                    field.onChange(value || undefined);
-                    handleFieldChange('model', value || undefined);
+                    const newValue = value === 'default_model' ? undefined : value;
+                    field.onChange(newValue);
+                    handleFieldChange('model', newValue);
                   }}
                 >
                   <SelectTrigger id="model">
                     <SelectValue placeholder="Use default model" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Use default model</SelectItem>
+                    <SelectItem value="default_model">Use default model</SelectItem>
                     {config &&
                       Object.keys(config.models).map(modelId => (
                         <SelectItem key={modelId} value={modelId}>
