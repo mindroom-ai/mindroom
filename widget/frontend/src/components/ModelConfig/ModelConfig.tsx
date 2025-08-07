@@ -151,9 +151,12 @@ export function ModelConfig() {
         <div className="grid gap-4 pb-4">
         {/* Add New Model Button */}
         {!isAddingModel && (
-          <Button onClick={handleAddModel} variant="outline" className="w-full">
+          <Button
+            onClick={handleAddModel}
+            className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-md transition-all hover:shadow-lg"
+          >
             <Plus className="h-4 w-4 mr-2" />
-            Add New Model
+            ✨ Add New Model
           </Button>
         )}
 

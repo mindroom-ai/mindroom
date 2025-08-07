@@ -30,12 +30,12 @@ function AppContent() {
   }
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50">
+    <div className="flex flex-col h-screen bg-gradient-to-br from-gray-50 to-gray-100">
       {/* Header */}
-      <header className="bg-white shadow-sm border-b">
-        <div className="px-4 py-3 flex items-center justify-between">
-          <h1 className="text-xl font-semibold text-gray-900">
-            MindRoom Agent Configuration
+      <header className="bg-gradient-to-r from-blue-600 to-purple-600 shadow-lg">
+        <div className="px-6 py-4 flex items-center justify-between">
+          <h1 className="text-2xl font-bold text-white">
+            🧠 MindRoom Configuration
           </h1>
           <SyncStatus status={syncStatus} />
         </div>
@@ -44,9 +44,13 @@ function AppContent() {
       {/* Main Content */}
       <div className="flex-1 overflow-hidden">
         <Tabs defaultValue="agents" className="h-full">
-          <TabsList className="px-4 py-2 bg-white border-b">
-            <TabsTrigger value="agents">Agents</TabsTrigger>
-            <TabsTrigger value="models">Models & API Keys</TabsTrigger>
+          <TabsList className="px-6 py-3 bg-white/80 backdrop-blur-sm border-b border-gray-200">
+            <TabsTrigger value="agents" className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600">
+              👥 Agents
+            </TabsTrigger>
+            <TabsTrigger value="models" className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600">
+              🔧 Models & API Keys
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="agents" className="h-full p-4">

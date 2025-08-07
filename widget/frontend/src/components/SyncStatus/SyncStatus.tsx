@@ -11,26 +11,26 @@ export function SyncStatus({ status }: SyncStatusProps) {
     synced: {
       icon: Check,
       text: 'Synced',
-      className: 'text-green-600',
-      iconClassName: 'text-green-600',
+      className: 'text-green-300',
+      iconClassName: 'text-green-300',
     },
     syncing: {
       icon: RefreshCw,
       text: 'Syncing...',
-      className: 'text-blue-600',
-      iconClassName: 'text-blue-600 animate-spin',
+      className: 'text-blue-300',
+      iconClassName: 'text-blue-300 animate-spin',
     },
     error: {
       icon: AlertCircle,
       text: 'Sync Error',
-      className: 'text-red-600',
-      iconClassName: 'text-red-600',
+      className: 'text-red-300',
+      iconClassName: 'text-red-300',
     },
     disconnected: {
       icon: WifiOff,
       text: 'Disconnected',
-      className: 'text-gray-500',
-      iconClassName: 'text-gray-500',
+      className: 'text-gray-300',
+      iconClassName: 'text-gray-300',
     },
   };
 

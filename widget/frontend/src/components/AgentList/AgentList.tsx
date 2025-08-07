@@ -26,10 +26,9 @@ export function AgentList() {
         <div className="flex items-center justify-between">
           <CardTitle>Agents</CardTitle>
           <Button
-            variant="outline"
             size="sm"
             onClick={handleCreateAgent}
-            className="h-8"
+            className="h-8 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-sm"
           >
             <Plus className="h-4 w-4 mr-1" />
             Add
@@ -43,12 +42,15 @@ export function AgentList() {
               key={agent.id}
               onClick={() => selectAgent(agent.id)}
               className={cn(
-                'w-full text-left px-3 py-2 rounded-md transition-colors',
-                'hover:bg-gray-100 flex items-center gap-2',
-                selectedAgentId === agent.id && 'bg-blue-50 hover:bg-blue-100'
+                'w-full text-left px-3 py-2 rounded-lg transition-all duration-200',
+                'hover:bg-gray-100 hover:shadow-sm flex items-center gap-2',
+                selectedAgentId === agent.id && 'bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 shadow-sm'
               )}
             >
-              <Bot className="h-4 w-4 text-gray-500" />
+              <Bot className={cn(
+                "h-4 w-4 transition-colors",
+                selectedAgentId === agent.id ? 'text-blue-600' : 'text-gray-500'
+              )} />
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-sm">{agent.display_name}</div>
                 <div className="text-xs text-gray-500 truncate">
