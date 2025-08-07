@@ -9,11 +9,18 @@
             margin: 0;
             padding: 0;
             height: 100%;
-            overflow: hidden;
+            min-height: 600px; /* Ensure minimum height */
+            overflow: auto; /* Allow scrolling if needed */
+        }
+        #container {
+            width: 100%;
+            height: 100%;
+            min-height: 600px; /* Ensure minimum height */
         }
         #app-frame {
             width: 100%;
             height: 100%;
+            min-height: 600px; /* Ensure minimum height */
             border: none;
         }
         .loading {

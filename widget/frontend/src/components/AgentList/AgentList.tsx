@@ -20,7 +20,7 @@ export function AgentList() {
   };
 
   return (
-    <Card className="h-full flex flex-col overflow-hidden">
+    <Card className="flex flex-col" style={{ minHeight: '500px' }}>
       <CardHeader className="pb-3 flex-shrink-0">
         <div className="flex items-center justify-between">
           <CardTitle>Agents</CardTitle>
@@ -34,7 +34,7 @@ export function AgentList() {
           </Button>
         </div>
       </CardHeader>
-      <CardContent className="p-2 flex-1 overflow-y-auto">
+      <CardContent className="p-2 flex-1 overflow-y-auto" style={{ maxHeight: '450px' }}>
         <div className="space-y-1">
           {agents.map(agent => (
             <button

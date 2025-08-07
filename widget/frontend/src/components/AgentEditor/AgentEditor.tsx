@@ -97,7 +97,7 @@ export function AgentEditor() {
 
   if (!selectedAgent) {
     return (
-      <Card className="h-full flex items-center justify-center">
+      <Card className="flex items-center justify-center" style={{ minHeight: '500px' }}>
         <div className="text-gray-500 text-center">
           <FileCode className="h-12 w-12 mx-auto mb-2 text-gray-300" />
           <p>Select an agent to edit</p>
@@ -107,7 +107,7 @@ export function AgentEditor() {
   }
 
   return (
-    <Card className="h-full flex flex-col overflow-hidden">
+    <Card className="flex flex-col" style={{ minHeight: '500px' }}>
       <CardHeader className="pb-3 flex-shrink-0">
         <div className="flex items-center justify-between">
           <CardTitle>Agent Details</CardTitle>
@@ -123,7 +123,7 @@ export function AgentEditor() {
           </div>
         </div>
       </CardHeader>
-      <CardContent className="flex-1 overflow-y-auto">
+      <CardContent className="flex-1 overflow-y-auto" style={{ maxHeight: '450px' }}>
         <div className="space-y-4">
           {/* Display Name */}
           <div>
