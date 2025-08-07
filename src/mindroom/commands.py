@@ -225,7 +225,7 @@ Use `!list_schedules` to see task IDs."""
 Usage: `!widget [url]` - Add the MindRoom configuration widget to this room
 
 Examples:
-- `!widget` - Add widget using default URL (http://localhost:3001)
+- `!widget` - Add widget using default URL (http://localhost:3003)
 - `!widget https://config.mindroom.ai` - Add widget from custom URL
 
 The widget provides a visual interface for configuring MindRoom agents and settings.
@@ -321,7 +321,7 @@ async def handle_widget_command(
         Response text for the user
     """
     # Default URL for local development
-    default_url = "http://localhost:3001/matrix-widget.html"
+    default_url = "http://localhost:3003/matrix-widget.html"
     widget_url = url if url else default_url
 
     # Create the widget state event content

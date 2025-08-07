@@ -80,9 +80,7 @@ DEMO_URL="http://localhost:3005" nix-shell shell.nix --run "cd frontend && npm r
 ## Troubleshooting
 
 ### Port Issues
-- The frontend finds an available port (3000-3006)
 - Always check the output of `run.sh` for the actual port
-- If port 3000 is taken, it will use 3001, 3002, etc.
 
 ### Config File
 The backend needs `config.yaml` at the project root:

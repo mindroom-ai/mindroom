@@ -77,7 +77,7 @@ def capture_widget_state():
         for model_id, model_config in config.get("models", {}).items():
             print(f"  • {model_id}: {model_config.get('provider', 'unknown')} - {model_config.get('id', 'unknown')}")
 
-        print("\n✓ Widget is running and accessible at: http://localhost:3001")
+        print("\n✓ Widget is running and accessible at: http://localhost:3003")
 
     except urllib.error.URLError as e:
         print("✗ Could not connect to backend. Is it running on port 8000?")

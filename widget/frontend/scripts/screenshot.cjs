@@ -32,7 +32,7 @@ async function takeScreenshot() {
     });
 
     // Navigate to the widget
-    const url = process.env.DEMO_URL || "http://localhost:3001";
+    const url = process.env.DEMO_URL || "http://localhost:3003";
     console.log(`Navigating to ${url}...`);
     await page.goto(url, { waitUntil: "networkidle0" });
 

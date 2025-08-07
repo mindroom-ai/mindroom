@@ -6,7 +6,7 @@ Usage:
     python take_screenshot.py <port>
 
 Example:
-    python take_screenshot.py 3000
+    python take_screenshot.py 3003
 
 The servers must be running first. Use ./run.sh to start them.
 """
@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 
-def take_screenshot(port: int = 3000) -> bool:
+def take_screenshot(port: int = 3003) -> bool:
     """Take a screenshot of the widget using Puppeteer."""
     env = {
         "DEMO_URL": f"http://localhost:{port}",
@@ -44,7 +44,7 @@ def main() -> None:
     """Main function to take screenshots."""
     if len(sys.argv) != 2:
         print("Usage: python take_screenshot.py <port>")
-        print("Example: python take_screenshot.py 3000")
+        print("Example: python take_screenshot.py 3003")
         print("\nNote: The servers must be running first. Use ./run.sh to start them.")
         sys.exit(1)
 

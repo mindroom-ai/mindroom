@@ -13,11 +13,11 @@ In any MindRoom room, type:
 #### Option 2: Use Element's /addwidget Command
 In Element Desktop:
 ```
-/addwidget http://localhost:3001/matrix-widget.html
+/addwidget http://localhost:3003/matrix-widget.html
 ```
 
 #### Option 3: Direct Browser Access
-Open http://localhost:3001 in your browser while MindRoom is running.
+Open http://localhost:3003 in your browser while MindRoom is running.
 
 **⚠️ Important:** Element Web (app.element.io) does NOT support custom widgets. You need Element Desktop or self-hosted Element Web.
 
@@ -32,7 +32,7 @@ Open http://localhost:3001 in your browser while MindRoom is running.
 
 This starts:
 - Backend API on port 8001
-- Frontend UI on port 3001
+- Frontend UI on port 3003
 
 ### How It Works
 
@@ -90,7 +90,7 @@ Since Element Web doesn't support widgets, alternatives include:
 
 1. **Element Desktop** - Download from https://element.io/download
 2. **Browser Split Screen** - Run widget in separate tab
-3. **Desktop App Mode** - `google-chrome --app=http://localhost:3001`
+3. **Desktop App Mode** - `google-chrome --app=http://localhost:3003`
 4. **Self-Host Element Web** with widgets enabled
 
 ## Troubleshooting
