@@ -99,41 +99,25 @@ async def create_team_response(
 
     # Build team identity context
     agent_identities = []
-    agent_tools = []
     for agent in agents:
         # Extract a brief role description
         # Agent.role is Optional[str] in the Agno library
-        role_desc = "Team member"
         agent_role = getattr(agent, "role", None)
         if agent_role:
-            # Take the first line or first 100 chars of the role
+            # Take the first substantive line from the role (skip headers and empty lines)
             role_lines = str(agent_role).split("\n")
+            role_desc = "Team member"
             for line in role_lines:
-                if line.strip() and not line.startswith("#"):
-                    role_desc = line.strip()[:100]
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and not stripped.startswith("You are"):
+                    role_desc = stripped[:150]  # Allow slightly longer descriptions
                     break
+        else:
+            role_desc = "Team member"
 
         # Agent.name should always be present but use a fallback just in case
         agent_name = getattr(agent, "name", "Unknown")
         agent_identities.append(f"- **{agent_name}**: {role_desc}")
-
-        # List available tools for each agent
-        # Agent.tools is Optional[List[...]] in the Agno library
-        agent_tools_list = getattr(agent, "tools", None)
-        if agent_tools_list:
-            # Extract tool names, handling different tool object types
-            tool_names = []
-            for tool in agent_tools_list[:5]:  # First 5 tools
-                # Try to get the name attribute, otherwise convert to string
-                tool_name = getattr(tool, "name", str(tool))
-                tool_names.append(tool_name)
-
-            if tool_names:
-                agent_tools.append(f"- **{agent_name}** has access to: {', '.join(tool_names)}")
-
-    tools_section = ""
-    if agent_tools:
-        tools_section = f"\n## Available Tools\n{chr(10).join(agent_tools)}\n"
 
     # Determine team mode instruction
     mode_instruction = ""
@@ -148,11 +132,11 @@ async def create_team_response(
 
 You are working as a team with the following members:
 {chr(10).join(agent_identities)}
-{tools_section}{mode_instruction}
+{mode_instruction}
 
 **Important Instructions:**
 1. Each agent IS one of the team members listed above - you collectively control these agents
-2. Leverage each agent's specific expertise and tools to provide a comprehensive response
+2. Each agent should use their specialized knowledge and capabilities to contribute
 3. Work as a coordinated team to address the user's request
 4. When the user mentions specific agents (like NewsAgent or CodeAgent), recognize that YOU are those agents
 
