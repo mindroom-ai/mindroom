@@ -46,30 +46,35 @@ def get_memory_config(storage_path: Path) -> dict:
             host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
         embedder_config["config"]["ollama_base_url"] = host
 
-    # Get LLM config from main models section
-    default_model = app_config.models.get("default")
-    if default_model:
-        llm_provider = default_model.provider
-        llm_id = default_model.id
-
+    # Build LLM config from memory configuration
+    if app_config.memory.llm:
         llm_config: dict[str, Any] = {
-            "provider": llm_provider,
-            "config": {
-                "model": llm_id,
-            },
+            "provider": app_config.memory.llm.provider,
+            "config": {},
         }
 
-        # Add provider-specific LLM config
-        if llm_provider == "ollama":
-            llm_host = default_model.host or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-            llm_config["config"]["ollama_base_url"] = llm_host
-            llm_config["config"]["temperature"] = 0.1
-            llm_config["config"]["top_p"] = 1
-        elif llm_provider == "openai":
+        # Copy config but handle provider-specific field names
+        for key, value in app_config.memory.llm.config.items():
+            if key == "host" and app_config.memory.llm.provider == "ollama":
+                # mem0 expects ollama_base_url, not host
+                llm_config["config"]["ollama_base_url"] = value or os.environ.get(
+                    "OLLAMA_HOST", "http://localhost:11434"
+                )
+            elif key != "host":  # Skip host for other fields
+                llm_config["config"][key] = value
+
+        # Add API keys for providers that need them
+        if app_config.memory.llm.provider == "openai":
             llm_config["config"]["api_key"] = os.environ.get("OPENAI_API_KEY")
-            llm_config["config"]["temperature"] = 0
+        elif app_config.memory.llm.provider == "anthropic":
+            llm_config["config"]["api_key"] = os.environ.get("ANTHROPIC_API_KEY")
+
+        logger.info(
+            f"Using {app_config.memory.llm.provider} model '{app_config.memory.llm.config.get('model')}' for memory"
+        )
     else:
-        # Fallback to Ollama if no model configured
+        # Fallback if no LLM configured
+        logger.warning("No memory LLM configured, using default ollama/llama3.2")
         llm_config = {
             "provider": "ollama",
             "config": {
