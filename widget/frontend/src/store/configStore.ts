@@ -21,6 +21,7 @@ interface ConfigState {
   createAgent: (agent: Omit<Agent, 'id'>) => void;
   deleteAgent: (agentId: string) => void;
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
+  deleteModel: (modelId: string) => void;
   setAPIKey: (provider: string, key: string) => void;
   testModel: (modelId: string) => Promise<boolean>;
   markDirty: () => void;
@@ -149,6 +150,21 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
               ...updates,
             },
           },
+        },
+        isDirty: true,
+      };
+    });
+  },
+
+  // Delete a model configuration
+  deleteModel: (modelId) => {
+    set((state) => {
+      if (!state.config) return state;
+      const { [modelId]: _, ...remainingModels } = state.config.models;
+      return {
+        config: {
+          ...state.config,
+          models: remainingModels,
         },
         isDirty: true,
       };
