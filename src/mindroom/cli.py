@@ -12,7 +12,14 @@ import nio
 import typer
 from rich.console import Console
 
-from mindroom.matrix import MATRIX_HOMESERVER, MatrixID, MatrixState, invite_to_room, matrix_client
+from mindroom.matrix import (
+    MATRIX_HOMESERVER,
+    MatrixID,
+    MatrixState,
+    extract_server_name_from_homeserver,
+    invite_to_room,
+    matrix_client,
+)
 
 if TYPE_CHECKING:
     from mindroom.agent_config import Config
@@ -20,6 +27,7 @@ app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
 console = Console()
 
 HOMESERVER = MATRIX_HOMESERVER or "http://localhost:8008"
+SERVER_NAME = extract_server_name_from_homeserver(HOMESERVER)
 
 
 async def _ensure_agent_in_room(
@@ -63,7 +71,7 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
 
     if room_id:
         # Save room info
-        add_room(room_key, room_id, f"#{room_key}:localhost", room_name)
+        add_room(room_key, room_id, f"#{room_key}:{SERVER_NAME}", room_name)
 
         invited_count = 0
 
@@ -105,10 +113,10 @@ async def _ensure_user_account() -> MatrixState:
 
     # If we have stored credentials, try to login first
     if user_account:
-        async with matrix_client(HOMESERVER, f"@{user_account.username}:localhost") as client:
+        async with matrix_client(HOMESERVER, f"@{user_account.username}:{SERVER_NAME}") as client:
             response = await client.login(password=user_account.password)
             if isinstance(response, nio.LoginResponse):
-                console.print(f"✅ User account ready: @{user_account.username}:localhost")
+                console.print(f"✅ User account ready: @{user_account.username}:{SERVER_NAME}")
                 return state
             else:
                 console.print("⚠️  Stored credentials invalid, creating new account...")
@@ -130,7 +138,7 @@ async def _ensure_user_account() -> MatrixState:
     except ValueError as e:
         error_msg = str(e)
         if "M_USER_IN_USE" in error_msg:
-            console.print(f"ℹ️  User @{user_username}:localhost already exists")
+            console.print(f"ℹ️  User @{user_username}:{SERVER_NAME} already exists")
         else:
             console.print(f"❌ Failed to register {user_username}: {error_msg}")
 
@@ -138,7 +146,7 @@ async def _ensure_user_account() -> MatrixState:
     state.add_account("user", user_username, user_password)
     state.save()
 
-    console.print(f"✅ User account ready: @{user_username}:localhost")
+    console.print(f"✅ User account ready: @{user_username}:{SERVER_NAME}")
 
     return state
 
@@ -263,7 +271,7 @@ async def _invite_all_agents_to_room(
     # Invite all other agents
     for key, account in state.accounts.items():
         if key.startswith("agent_"):
-            agent_id = f"@{account.username}:localhost"
+            agent_id = f"@{account.username}:{SERVER_NAME}"
             if await _invite_agent_to_room(client, room_id, agent_id):
                 invited_count += 1
 
@@ -294,7 +302,7 @@ async def _create_room_and_invite_all_agents(
 
     if room_id:
         # Save room info
-        add_room(room_key, room_id, f"#{room_key}:localhost", room_name)
+        add_room(room_key, room_id, f"#{room_key}:{SERVER_NAME}", room_name)
 
         # Invite agents based on config
         invited_count = await _invite_agents_from_config(client, room_id, room_key, config)
@@ -356,7 +364,7 @@ async def _run(log_level: str, storage_path: Path) -> None:
             console.print("❌ No user account found")
             sys.exit(1)
 
-        username = f"@{user_account.username}:localhost"
+        username = f"@{user_account.username}:{SERVER_NAME}"
         password = user_account.password
 
         async with matrix_client(HOMESERVER, username) as client:
@@ -392,7 +400,7 @@ def info():
     # User info
     user_account = state.get_account("user")
     if user_account:
-        console.print(f"\n👤 User: @{user_account.username}:localhost")
+        console.print(f"\n👤 User: @{user_account.username}:{SERVER_NAME}")
 
     # Agent info
     agent_accounts = [(key, acc) for key, acc in state.accounts.items() if key.startswith("agent_")]
@@ -400,7 +408,7 @@ def info():
         console.print(f"\n🤖 Agents: {len(agent_accounts)} registered")
         for key, account in agent_accounts:
             agent_name = key.replace("agent_", "")
-            console.print(f"  • {agent_name}: @{account.username}:localhost")
+            console.print(f"  • {agent_name}: @{account.username}:{SERVER_NAME}")
 
     # Room info
     if state.rooms:
@@ -432,7 +440,7 @@ async def _create_room(room_alias: str, room_name: str | None) -> None:
         console.print("❌ No user account found. Run: mindroom run")
         return
 
-    username = f"@{user_account.username}:localhost"
+    username = f"@{user_account.username}:{SERVER_NAME}"
     password = user_account.password
 
     async with matrix_client(HOMESERVER, username) as client:
@@ -457,7 +465,7 @@ async def _invite_agents(room_id: str) -> None:
         console.print("❌ No user account found. Run: mindroom run")
         return
 
-    username = f"@{user_account.username}:localhost"
+    username = f"@{user_account.username}:{SERVER_NAME}"
     password = user_account.password
 
     async with matrix_client(HOMESERVER, username) as client:
