@@ -57,19 +57,19 @@ function AppContent() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="agents" className="flex-1 p-4 overflow-hidden">
+          <TabsContent value="agents" className="flex-1 p-4 overflow-hidden min-h-0">
             <div className="grid grid-cols-12 gap-4 h-full">
-              <div className="col-span-4 h-full">
+              <div className="col-span-4 h-full overflow-hidden">
                 <AgentList />
               </div>
-              <div className="col-span-8 h-full">
+              <div className="col-span-8 h-full overflow-hidden">
                 <AgentEditor />
               </div>
             </div>
           </TabsContent>
 
-          <TabsContent value="models" className="flex-1 p-4 overflow-hidden">
-            <div className="h-full">
+          <TabsContent value="models" className="flex-1 p-4 overflow-hidden min-h-0">
+            <div className="h-full overflow-hidden">
               <ModelConfig />
             </div>
           </TabsContent>

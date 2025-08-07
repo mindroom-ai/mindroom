@@ -107,7 +107,7 @@ export function AgentEditor() {
   }
 
   return (
-    <Card className="h-full flex flex-col">
+    <Card className="h-full flex flex-col overflow-hidden">
       <CardHeader className="pb-3 flex-shrink-0">
         <div className="flex items-center justify-between">
           <CardTitle>Agent Details</CardTitle>
@@ -123,7 +123,7 @@ export function AgentEditor() {
           </div>
         </div>
       </CardHeader>
-      <CardContent className="flex-1 overflow-y-auto">
+      <CardContent className="flex-1 overflow-y-auto min-h-0">
         <div className="space-y-4">
           {/* Display Name */}
           <div>
