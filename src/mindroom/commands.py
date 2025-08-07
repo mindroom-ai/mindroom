@@ -24,6 +24,7 @@ class CommandType(Enum):
     SCHEDULE = "schedule"
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
+    WIDGET = "widget"
 
 
 @dataclass
@@ -50,6 +51,7 @@ class CommandParser:
     SCHEDULE_PATTERN = re.compile(r"^!schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
     LIST_SCHEDULES_PATTERN = re.compile(r"^!list[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
+    WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
 
     def parse(self, message: str) -> Command | None:
         """Parse a message for commands.
@@ -136,6 +138,16 @@ class CommandParser:
                 raw_text=message,
             )
 
+        # !widget command
+        match = self.WIDGET_PATTERN.match(message)
+        if match:
+            url = match.group(1).strip() if match.group(1) else None
+            return Command(
+                type=CommandType.WIDGET,
+                args={"url": url},
+                raw_text=message,
+            )
+
         # Unknown command
         logger.debug(f"Unknown command: {message}")
         return None
@@ -207,6 +219,20 @@ Example:
 
 Use `!list_schedules` to see task IDs."""
 
+    elif topic == "widget":
+        return """**Widget Command**
+
+Usage: `!widget [url]` - Add the MindRoom configuration widget to this room
+
+Examples:
+- `!widget` - Add widget using default URL (http://localhost:3001)
+- `!widget https://config.mindroom.ai` - Add widget from custom URL
+
+The widget provides a visual interface for configuring MindRoom agents and settings.
+Pin it to keep it visible in the room.
+
+Note: Widget support requires Element Desktop or self-hosted Element Web."""
+
     else:
         # General help
         return """**Available Commands**
@@ -217,9 +243,11 @@ Use `!list_schedules` to see task IDs."""
 - `!schedule <time> <message>` - Schedule a reminder
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
+- `!widget [url]` - Add configuration widget to the room
 - `!help [topic]` - Show this help or help for a specific command
 
-Note: All commands only work within threads, not in main room messages.
+Note: All commands only work within threads, not in main room messages
+(except !widget which works in the main room).
 
 For detailed help on a command, use: `!help <command>`"""
 
@@ -275,6 +303,62 @@ async def handle_list_invites_command(
         return f"**Invited agents in this thread:**\n{thread_list}"
 
     return "No agents are currently invited to this thread."
+
+
+async def handle_widget_command(
+    client: nio.AsyncClient,
+    room_id: str,
+    url: str | None = None,
+) -> str:
+    """Handle the widget command to add configuration widget to room.
+
+    Args:
+        client: The Matrix client
+        room_id: The room ID to add widget to
+        url: Optional custom widget URL
+
+    Returns:
+        Response text for the user
+    """
+    # Default URL for local development
+    default_url = "http://localhost:3001/matrix-widget.html"
+    widget_url = url if url else default_url
+
+    # Create the widget state event content
+    widget_content = {
+        "type": "custom",
+        "url": widget_url,
+        "name": "MindRoom Configuration",
+        "data": {"title": "MindRoom Configuration", "curl": widget_url.replace("/matrix-widget.html", "")},
+        "creatorUserId": client.user_id,
+        "id": "mindroom_config",
+    }
+
+    try:
+        # Send the state event to add the widget
+        response = await client.room_put_state(
+            room_id=room_id, event_type="im.vector.modular.widgets", state_key="mindroom_config", content=widget_content
+        )
+
+        if isinstance(response, nio.RoomPutStateError):
+            logger.error(f"Failed to add widget to room {room_id}: {response.message}")
+            return f"❌ Failed to add widget: {response.message}"
+
+        logger.info(f"Successfully added widget to room {room_id}")
+
+        return (
+            "✅ **MindRoom Configuration widget added!**\n\n"
+            "• Pin the widget to keep it visible\n"
+            "• All room members can access the configuration\n"
+            "• Changes sync in real-time with config.yaml\n\n"
+            f"Widget URL: {widget_url}\n\n"
+            "**Note:** Widgets require Element Desktop or self-hosted Element Web.\n"
+            "Alternatively, you can use: `/addwidget {url}` in Element."
+        )
+
+    except Exception as e:
+        logger.error(f"Error adding widget to room {room_id}: {e}")
+        return f"❌ Error adding widget: {str(e)}"
 
 
 # Global parser instance

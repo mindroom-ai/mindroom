@@ -21,6 +21,7 @@ from .commands import (
     get_command_help,
     handle_invite_command,
     handle_list_invites_command,
+    handle_widget_command,
 )
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import (
@@ -569,6 +570,16 @@ class AgentBot:
         self.logger.info("Handling command", command_type=command.type.value)
 
         is_thread, thread_id = extract_thread_info(event.source)
+
+        # Widget command is special - it works in the main room
+        if command.type == CommandType.WIDGET:
+            url = command.args.get("url")
+            response_text = await handle_widget_command(client=self.client, room_id=room.room_id, url=url)
+            # Send response in thread if in thread, otherwise in main room
+            await self._send_response(room, event.event_id, response_text, thread_id)
+            return
+
+        # All other commands require a thread
         if not is_thread or not thread_id:
             response_text = "❌ Commands only work within threads. Please start a thread first."
             # Create a thread even for this error message
