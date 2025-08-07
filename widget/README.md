@@ -194,7 +194,7 @@ Currently manual testing. Run the widget and verify:
 
 ### Common Issues
 
-1. **Port conflicts**: Backend uses 8001, frontend uses 3000
+1. **Port conflicts**: Backend uses 8001, frontend uses 3003 (configurable via environment variables)
 2. **File permissions**: Ensure write access to `config.yaml`
 3. **Missing dependencies**: Run `npm install` and `uv sync`
 

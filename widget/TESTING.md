@@ -13,6 +13,10 @@ The frontend uses Vitest as the test runner with React Testing Library for compo
 **Test Files:**
 - `src/store/configStore.test.ts` - Tests for the Zustand store
 - `src/components/AgentList/AgentList.test.tsx` - Tests for the AgentList component
+- `src/components/AgentEditor/AgentEditor.test.tsx` - Tests for the AgentEditor component
+- `src/components/ModelConfig/ModelConfig.test.tsx` - Tests for the ModelConfig component
+- `src/components/ToolConfig/ToolConfigDialog.test.tsx` - Tests for the ToolConfigDialog component
+- `src/types/toolConfig.test.ts` - Tests for tool configuration types
 
 ### Running Frontend Tests
 
@@ -101,6 +105,12 @@ Use the convenience script to run both frontend and backend tests:
 ```bash
 cd widget
 ./run_tests.sh
+```
+
+Or with Nix for all dependencies:
+```bash
+cd widget
+./run_tests_nix.sh
 ```
 
 ## Test Coverage

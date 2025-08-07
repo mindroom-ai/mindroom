@@ -19,10 +19,10 @@ Note the port number shown in the output (e.g., "Frontend: http://localhost:3005
 ### 2. Take screenshots (in a new terminal)
 ```bash
 cd widget
-nix-shell shell.nix --run "python take_screenshot.py 3005"
+nix-shell shell.nix --run "python take_screenshot.py 3003"
 ```
 
-Replace `3005` with the actual port number from step 1.
+Replace `3003` with the actual port number if you're using a custom port.
 
 ### 3. Find screenshots
 Screenshots are saved in: `widget/frontend/screenshots/`
@@ -33,12 +33,12 @@ Screenshots are saved in: `widget/frontend/screenshots/`
 
 The `run.sh` script starts both backend and frontend:
 - **Backend**: Port 8001 (or set with `BACKEND_PORT` environment variable)
-- **Frontend**: Port 3000-3006 (finds first available)
+- **Frontend**: Port 3003 (or set with `FRONTEND_PORT` environment variable)
 
 The script will show which ports are being used:
 ```
 Widget is running!
-Frontend: http://localhost:3005
+Frontend: http://localhost:3003
 Backend: http://localhost:8001
 ```
 
@@ -52,7 +52,7 @@ python take_screenshot.py <port>
 
 Example:
 ```bash
-python take_screenshot.py 3005
+python take_screenshot.py 3003
 ```
 
 The script captures:
@@ -74,7 +74,7 @@ widget/frontend/screenshots/
 
 ```bash
 cd widget
-DEMO_URL="http://localhost:3005" nix-shell shell.nix --run "cd frontend && npm run screenshot"
+DEMO_URL="http://localhost:3003" nix-shell shell.nix --run "cd frontend && npm run screenshot"
 ```
 
 ## Troubleshooting
