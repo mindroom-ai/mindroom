@@ -211,4 +211,4 @@ class TestAgentDescription:
         """Test describing an unknown agent."""
         description = describe_agent("nonexistent")
 
-        assert description == "nonexistent: Unknown agent"
+        assert description == "nonexistent: Unknown agent or team"
