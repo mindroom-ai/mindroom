@@ -196,15 +196,6 @@ class AgentBot:
 
         # If message is from another agent and we're not mentioned, ignore it
         sender_is_agent = extract_agent_name(event.sender) is not None
-
-        # IMPORTANT: If ANY agent sends a message without mentioning anyone,
-        # other agents should not respond (prevents cascade effects)
-        # This MUST happen before any response decision is made
-        if sender_is_agent and not context.mentioned_agents:
-            self.logger.debug("Ignoring agent message without any mentions", sender=event.sender)
-            return
-
-        # Additional check: if message is from another agent and we're not mentioned
         if sender_is_agent and not context.am_i_mentioned:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
