@@ -197,19 +197,13 @@ class AgentBot:
         # If message is from another agent and we're not mentioned, ignore it
         sender_is_agent = extract_agent_name(event.sender) is not None
 
-        # Special case: If RouterAgent sends a message without mentioning anyone,
-        # other agents should not respond (router is handling it)
-        if sender_is_agent:
-            sender_agent_name = extract_agent_name(event.sender)
-            if sender_agent_name == ROUTER_AGENT_NAME and not context.mentioned_agents:
-                self.logger.debug("Ignoring RouterAgent message without mentions")
-                return
-
-        # Don't respond to error messages from other agents
-        if sender_is_agent and event.body.strip().startswith("❌"):
-            self.logger.debug("Ignoring error message from other agent")
+        # IMPORTANT: If ANY agent sends a message without mentioning anyone,
+        # other agents should not respond (prevents cascade effects)
+        if sender_is_agent and not context.mentioned_agents:
+            self.logger.debug("Ignoring agent message without any mentions", sender=event.sender)
             return
 
+        # Additional check: if message is from another agent and we're not mentioned
         if sender_is_agent and not context.am_i_mentioned:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return

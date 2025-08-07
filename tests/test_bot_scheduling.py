@@ -408,16 +408,13 @@ class TestCommandHandling:
 
         # Verify the agent didn't try to process the error message
         bot._generate_response.assert_not_called()
-        # Check log calls - should be caught by RouterAgent check now
+        # Check log calls - should be caught by the general agent message check
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-        # Either caught by RouterAgent check or error message check
-        assert "Ignoring RouterAgent message without mentions" in debug_calls or any(
-            "Ignoring error message" in call for call in [call[0][0] for call in bot.logger.info.call_args_list]
-        )
+        assert "Ignoring agent message without any mentions" in debug_calls
 
     @pytest.mark.asyncio
-    async def test_agents_ignore_router_messages_without_mentions(self):
-        """Test that agents don't respond to RouterAgent messages that don't mention anyone."""
+    async def test_agents_ignore_any_agent_messages_without_mentions(self):
+        """Test that agents don't respond to ANY agent messages that don't mention anyone."""
         # Create a general agent
         agent_user = AgentMatrixUser(
             agent_name="general",
@@ -470,4 +467,4 @@ class TestCommandHandling:
         bot._generate_response.assert_not_called()
         # Check debug calls for the new log message
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-        assert "Ignoring RouterAgent message without mentions" in debug_calls
+        assert "Ignoring agent message without any mentions" in debug_calls
