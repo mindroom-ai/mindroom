@@ -149,6 +149,14 @@ export function ModelConfig() {
 
       <div className="flex-1 overflow-y-auto">
         <div className="grid gap-4 pb-4">
+        {/* Add New Model Button */}
+        {!isAddingModel && (
+          <Button onClick={handleAddModel} variant="outline" className="w-full">
+            <Plus className="h-4 w-4 mr-2" />
+            Add New Model
+          </Button>
+        )}
+
         {/* New Model Form */}
         {isAddingModel && (
           <Card>
@@ -364,13 +372,6 @@ export function ModelConfig() {
             </CardContent>
           </Card>
         ))}
-
-        {!isAddingModel && (
-          <Button onClick={handleAddModel} variant="outline" className="w-full">
-            <Plus className="h-4 w-4 mr-2" />
-            Add New Model
-          </Button>
-        )}
         </div>
       </div>
     </div>
