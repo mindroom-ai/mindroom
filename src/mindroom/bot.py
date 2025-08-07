@@ -255,7 +255,6 @@ class AgentBot:
             return
 
         # Determine if this agent should respond individually
-        # Pass current sender info to handle RouterAgent error messages properly
         should_respond = should_agent_respond(
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,
@@ -263,8 +262,6 @@ class AgentBot:
             room_id=room.room_id,
             configured_rooms=self.rooms,
             thread_history=context.thread_history,
-            current_sender=event.sender if sender_is_agent else None,
-            current_mentions=context.mentioned_agents if sender_is_agent else None,
         )
 
         if should_respond and not context.am_i_mentioned:

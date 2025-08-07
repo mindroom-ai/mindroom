@@ -39,23 +39,6 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
     return sorted(list(agents))
 
 
-def get_all_agents_in_thread_including_router(thread_history: list[dict[str, Any]]) -> list[str]:
-    """Get list of ALL agents that have sent messages in thread, including RouterAgent.
-
-    This is used to detect when ANY agent (including router) has sent a message,
-    which is important for preventing cascade responses.
-    """
-    agents = set()
-
-    for msg in thread_history:
-        sender = msg.get("sender", "")
-        agent_name = extract_agent_name(sender)
-        if agent_name:  # Include ALL agents, even RouterAgent
-            agents.add(agent_name)
-
-    return sorted(list(agents))
-
-
 def get_mentioned_agents(mentions: dict[str, Any]) -> list[str]:
     """Extract agent names from mentions."""
     user_ids = mentions.get("user_ids", [])
@@ -136,22 +119,10 @@ def should_agent_respond(
     room_id: str,
     configured_rooms: list[str],
     thread_history: list[dict],
-    current_sender: str | None = None,
-    current_mentions: list[str] | None = None,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
 
     Team formation is handled elsewhere - this just determines individual responses.
-
-    Args:
-        agent_name: Name of the agent considering response
-        am_i_mentioned: Whether this agent is mentioned
-        is_thread: Whether this is a thread message
-        room_id: The room ID
-        configured_rooms: Rooms the agent has access to
-        thread_history: Previous messages in thread
-        current_sender: Sender of the current message being processed
-        current_mentions: Agents mentioned in the current message
     """
 
     # For room messages (not in threads)
@@ -162,29 +133,6 @@ def should_agent_respond(
     # Thread logic
     if am_i_mentioned:
         return True
-
-    # Check if the CURRENT message is from RouterAgent without mentions
-    # This handles the case where router sends an error and we're deciding whether to respond
-    if current_sender:
-        sender_agent = extract_agent_name(current_sender)
-        if sender_agent == ROUTER_AGENT_NAME and not current_mentions:
-            # Router sent a message without mentioning anyone - nobody should respond
-            return False
-
-    # Also check if the last message in history is from RouterAgent without mentions
-    # (for cases where we don't have current_sender info)
-    if thread_history:
-        last_msg = thread_history[-1]
-        sender = last_msg.get("sender", "")
-        agent_name_sender = extract_agent_name(sender)
-        if agent_name_sender == ROUTER_AGENT_NAME:
-            # Check if router mentioned anyone
-            content = last_msg.get("content", {})
-            mentions = content.get("m.mentions", {})
-            mentioned_agents = get_mentioned_agents(mentions)
-            if not mentioned_agents:
-                # Router sent a message without mentioning anyone - nobody should respond
-                return False
 
     # For threads, check agent participation
     agents_in_thread = get_agents_in_thread(thread_history)

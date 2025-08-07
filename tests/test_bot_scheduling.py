@@ -441,31 +441,29 @@ class TestCommandHandling:
         ]
 
         # Test that finance agent should NOT respond when receiving router's error
-        # Pass the current message info (router's error)
+        # With RouterAgent fix in bot.py, the finance agent never gets to call should_agent_respond
+        # because bot.py returns early when any agent sends a message without mentions.
+        # So we test the scenario with the full thread history
         should_respond = should_agent_respond(
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
             room_id="!test:localhost",
             configured_rooms=["!test:localhost"],
-            thread_history=thread_history[:-1],  # History without the current message
-            current_sender="@mindroom_router:localhost",  # Current message is from router
-            current_mentions=[],  # Router didn't mention anyone
+            thread_history=thread_history,  # Full history including router's error
         )
 
         assert not should_respond, "Finance agent should not respond to router error without mentions"
 
         # Test that even if finance was the only other agent in thread, it still shouldn't respond
-        # Still testing with current message from router without mentions
+        # The bot.py logic prevents this case from ever reaching should_agent_respond
         should_respond = should_agent_respond(
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
             room_id="!test:localhost",
             configured_rooms=["!test:localhost"],
-            thread_history=thread_history[:-1],  # Don't include router's error in history
-            current_sender="@mindroom_router:localhost",
-            current_mentions=[],
+            thread_history=thread_history,  # Include router's error in history
         )
 
         assert not should_respond, "Finance agent should not respond even if it was previously in thread"
