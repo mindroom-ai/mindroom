@@ -21,8 +21,8 @@ export function AgentList() {
   };
 
   return (
-    <Card className="h-full">
-      <CardHeader className="pb-3">
+    <Card className="h-full flex flex-col overflow-hidden">
+      <CardHeader className="pb-3 flex-shrink-0">
         <div className="flex items-center justify-between">
           <CardTitle>Agents</CardTitle>
           <Button
@@ -35,7 +35,7 @@ export function AgentList() {
           </Button>
         </div>
       </CardHeader>
-      <CardContent className="p-2">
+      <CardContent className="p-2 flex-1 overflow-y-auto">
         <div className="space-y-1">
           {agents.map((agent) => (
             <button

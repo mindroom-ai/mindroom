@@ -53,12 +53,12 @@ function AppContent() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="agents" className="h-full p-4">
-            <div className="grid grid-cols-12 gap-4 h-full">
-              <div className="col-span-4">
+          <TabsContent value="agents" className="h-full p-4 overflow-hidden">
+            <div className="grid grid-cols-12 gap-4 h-full" style={{ height: 'calc(100% - 2rem)' }}>
+              <div className="col-span-4 h-full overflow-hidden">
                 <AgentList />
               </div>
-              <div className="col-span-8">
+              <div className="col-span-8 h-full overflow-hidden">
                 <AgentEditor />
               </div>
             </div>

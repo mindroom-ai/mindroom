@@ -101,8 +101,8 @@ export function AgentEditor() {
   }
 
   return (
-    <Card className="h-full overflow-hidden flex flex-col">
-      <CardHeader className="pb-3">
+    <Card className="h-full flex flex-col overflow-hidden">
+      <CardHeader className="pb-3 flex-shrink-0">
         <div className="flex items-center justify-between">
           <CardTitle>Agent Details</CardTitle>
           <div className="flex gap-2">
