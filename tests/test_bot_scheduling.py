@@ -413,6 +413,166 @@ class TestCommandHandling:
         assert "Ignoring agent message without any mentions" in debug_calls
 
     @pytest.mark.asyncio
+    async def test_router_error_without_mentions_ignored_by_other_agents(self):
+        """Test the exact scenario where RouterAgent sends an error without mentions and other agents ignore it."""
+        # This tests the specific case where:
+        # 1. User sends a schedule command
+        # 2. RouterAgent fails to parse it and sends an error message
+        # 3. FinanceAgent should NOT respond to the error message
+
+        from mindroom.thread_utils import should_agent_respond
+
+        # Create thread history with user command and router error
+        thread_history = [
+            {
+                "event_id": "$user_msg",
+                "sender": "@user:localhost",
+                "content": {"msgtype": "m.text", "body": "!schedule remind me in 1 min", "m.mentions": {}},
+            },
+            {
+                "event_id": "$router_error",
+                "sender": "@mindroom_router:localhost",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
+                    "m.mentions": {},  # No mentions!
+                },
+            },
+        ]
+
+        # Test that finance agent should NOT respond when receiving router's error
+        # Pass the current message info (router's error)
+        should_respond = should_agent_respond(
+            agent_name="finance",
+            am_i_mentioned=False,
+            is_thread=True,
+            room_id="!test:localhost",
+            configured_rooms=["!test:localhost"],
+            thread_history=thread_history[:-1],  # History without the current message
+            current_sender="@mindroom_router:localhost",  # Current message is from router
+            current_mentions=[],  # Router didn't mention anyone
+        )
+
+        assert not should_respond, "Finance agent should not respond to router error without mentions"
+
+        # Test that even if finance was the only other agent in thread, it still shouldn't respond
+        # Still testing with current message from router without mentions
+        should_respond = should_agent_respond(
+            agent_name="finance",
+            am_i_mentioned=False,
+            is_thread=True,
+            room_id="!test:localhost",
+            configured_rooms=["!test:localhost"],
+            thread_history=thread_history[:-1],  # Don't include router's error in history
+            current_sender="@mindroom_router:localhost",
+            current_mentions=[],
+        )
+
+        assert not should_respond, "Finance agent should not respond even if it was previously in thread"
+
+    @pytest.mark.asyncio
+    async def test_full_router_error_flow_integration(self):
+        """Integration test for the full flow of router error handling."""
+        # Create a finance agent
+        agent_user = AgentMatrixUser(
+            agent_name="finance",
+            user_id="@mindroom_finance:localhost",
+            display_name="Finance Agent",
+            password="mock_password",
+            access_token="mock_token",
+        )
+
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        bot.client = AsyncMock()
+        bot.client.user_id = "@mindroom_finance:localhost"
+        bot.logger = MagicMock()
+        bot._generate_response = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+        bot.thread_invite_manager = AsyncMock()
+
+        # Create thread history that mimics the real scenario
+        thread_history = [
+            {
+                "event_id": "$earlier_msg",
+                "sender": "@user:localhost",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "Calculate compound interest on $10,000 at 5% for 10 years",
+                    "m.mentions": {},
+                },
+            },
+            {
+                "event_id": "$router_routing",
+                "sender": "@mindroom_router:localhost",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "@mindroom_finance:localhost could you help with this? ✓",
+                    "m.mentions": {"user_ids": ["@mindroom_finance:localhost"]},
+                },
+            },
+            {
+                "event_id": "$finance_response",
+                "sender": "@mindroom_finance:localhost",
+                "content": {"msgtype": "m.text", "body": "I'll calculate that for you...", "m.mentions": {}},
+            },
+            {
+                "event_id": "$user_schedule",
+                "sender": "@user:localhost",
+                "content": {"msgtype": "m.text", "body": "!schedule remind me in 1 min", "m.mentions": {}},
+            },
+        ]
+
+        # Mock context for the router error message
+        mock_context = MagicMock()
+        mock_context.am_i_mentioned = False
+        mock_context.is_thread = True
+        mock_context.thread_id = "$thread123"
+        mock_context.thread_history = thread_history + [
+            {
+                "event_id": "$router_error",
+                "sender": "@mindroom_router:localhost",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
+                    "m.mentions": {},
+                },
+            }
+        ]
+        mock_context.mentioned_agents = []
+        bot._extract_message_context = AsyncMock(return_value=mock_context)
+
+        # Create room and event for router error
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$router_error",
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
+                },
+            }
+        )
+
+        with (
+            patch("mindroom.bot.interactive") as mock_interactive,
+            patch("mindroom.bot.extract_agent_name") as mock_extract,
+        ):
+            mock_interactive.handle_text_response = AsyncMock()
+            mock_extract.side_effect = lambda x: "router" if "router" in x else ("finance" if "finance" in x else None)
+
+            await bot._on_message(room, event)
+
+        # Verify finance agent did NOT respond to router's error
+        bot._generate_response.assert_not_called()
+
+        # Verify it was logged as being ignored
+        debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
+        assert "Ignoring agent message without any mentions" in debug_calls
+
+    @pytest.mark.asyncio
     async def test_agents_ignore_any_agent_messages_without_mentions(self):
         """Test that agents don't respond to ANY agent messages that don't mention anyone."""
         # Create a general agent

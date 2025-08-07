@@ -136,10 +136,22 @@ def should_agent_respond(
     room_id: str,
     configured_rooms: list[str],
     thread_history: list[dict],
+    current_sender: str | None = None,
+    current_mentions: list[str] | None = None,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
 
     Team formation is handled elsewhere - this just determines individual responses.
+
+    Args:
+        agent_name: Name of the agent considering response
+        am_i_mentioned: Whether this agent is mentioned
+        is_thread: Whether this is a thread message
+        room_id: The room ID
+        configured_rooms: Rooms the agent has access to
+        thread_history: Previous messages in thread
+        current_sender: Sender of the current message being processed
+        current_mentions: Agents mentioned in the current message
     """
 
     # For room messages (not in threads)
@@ -151,8 +163,16 @@ def should_agent_respond(
     if am_i_mentioned:
         return True
 
-    # Check if the last message is from RouterAgent without mentions
-    # If so, nobody should respond (prevents cascade effects from router errors)
+    # Check if the CURRENT message is from RouterAgent without mentions
+    # This handles the case where router sends an error and we're deciding whether to respond
+    if current_sender:
+        sender_agent = extract_agent_name(current_sender)
+        if sender_agent == ROUTER_AGENT_NAME and not current_mentions:
+            # Router sent a message without mentioning anyone - nobody should respond
+            return False
+
+    # Also check if the last message in history is from RouterAgent without mentions
+    # (for cases where we don't have current_sender info)
     if thread_history:
         last_msg = thread_history[-1]
         sender = last_msg.get("sender", "")
