@@ -182,7 +182,7 @@ async def create_room(
     """
     room_config: dict[str, Any] = {"name": name}
     if alias:
-        room_config["room_alias_name"] = alias
+        room_config["alias"] = alias
     if topic:
         room_config["topic"] = topic
 
