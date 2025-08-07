@@ -474,15 +474,27 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        # Always ensure we have a thread_id - use the original message as thread root if needed
-        effective_thread_id = thread_id if thread_id else reply_to_event_id
+        # Special case: When thread_id is explicitly None (e.g., for command errors),
+        # don't create a thread
+        if thread_id is None and self.agent_name == ROUTER_AGENT_NAME:
+            # For router command errors, just send a plain reply without thread
+            content = create_mention_content_from_text(
+                response_text,
+                sender_domain=sender_domain,
+                thread_event_id=None,
+                reply_to_event_id=reply_to_event_id,
+            )
+        else:
+            # Normal case: Always ensure we have a thread_id - use the original message as thread root if needed
+            # This ensures agents always respond in threads, even when mentioned in main room
+            effective_thread_id = thread_id if thread_id else reply_to_event_id
 
-        content = create_mention_content_from_text(
-            response_text,
-            sender_domain=sender_domain,
-            thread_event_id=effective_thread_id,
-            reply_to_event_id=reply_to_event_id,
-        )
+            content = create_mention_content_from_text(
+                response_text,
+                sender_domain=sender_domain,
+                thread_event_id=effective_thread_id,
+                reply_to_event_id=reply_to_event_id,
+            )
 
         response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
         if isinstance(response, nio.RoomSendResponse):
@@ -571,7 +583,7 @@ class AgentBot:
         is_thread, thread_id = extract_thread_info(event.source)
         if not is_thread or not thread_id:
             response_text = "❌ Commands only work within threads. Please start a thread first."
-            # Create a thread even for this error message
+            # Send error as a reply, not in a thread
             await self._send_response(room, event.event_id, response_text, thread_id=None)
             return
 
