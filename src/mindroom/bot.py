@@ -184,14 +184,11 @@ class AgentBot:
         is_command = event.body.strip().startswith("!")
 
         if is_command:
-            if self.agent_name == ROUTER_AGENT_NAME:
-                # Router handles the command
-                command = command_parser.parse(event.body)
-                if command:
-                    await self._handle_command(room, event, command)
-            else:
-                # Non-router agents completely ignore commands
-                pass
+            if self.agent_name != ROUTER_AGENT_NAME:  # Router handles the command
+                return
+            command = command_parser.parse(event.body)
+            if command:
+                await self._handle_command(room, event, command)
             return
 
         # Check if sender is an agent BEFORE extracting context
