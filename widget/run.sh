@@ -5,6 +5,9 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Set backend port from environment variable or use default
+BACKEND_PORT=${BACKEND_PORT:-8001}
+
 echo -e "${BLUE}Starting MindRoom Configuration Widget...${NC}"
 
 # Function to kill background processes on exit
@@ -17,7 +20,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Start backend
-echo -e "${GREEN}Starting backend server...${NC}"
+echo -e "${GREEN}Starting backend server on port $BACKEND_PORT...${NC}"
 cd backend
 
 # Check if uv is available
@@ -32,7 +35,7 @@ echo "Using uv for Python dependencies..."
 if [ ! -d ".venv" ]; then
     uv sync
 fi
-uv run uvicorn src.main:app --reload --port 8001 &
+uv run uvicorn src.main:app --reload --port $BACKEND_PORT &
 BACKEND_PID=$!
 
 cd ..
@@ -48,13 +51,13 @@ if [ ! -d "node_modules" ]; then
     npm install
 fi
 
-npm run dev &
+VITE_BACKEND_PORT=$BACKEND_PORT npm run dev &
 FRONTEND_PID=$!
 cd ..
 
 echo -e "${GREEN}Widget is running!${NC}"
 echo -e "Frontend: http://localhost:3000"
-echo -e "Backend: http://localhost:8001"
+echo -e "Backend: http://localhost:$BACKEND_PORT"
 echo -e "\nPress Ctrl+C to stop both servers"
 
 # Wait for both processes

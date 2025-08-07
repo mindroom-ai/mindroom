@@ -35,6 +35,9 @@ npm run dev
 # Standard systems
 ./widget/run.sh
 
+# With custom backend port
+BACKEND_PORT=8080 ./widget/run.sh
+
 # On Nix systems (ensures all dependencies available)
 ./widget/run-nix.sh
 ```
@@ -53,7 +56,7 @@ npm run dev
 
 ### Backend (FastAPI/Python)
 - **Location**: `widget/backend/`
-- **Port**: 8001
+- **Port**: 8001 (configurable via `BACKEND_PORT` environment variable)
 - **Technologies**: FastAPI, PyYAML, Watchdog, Pydantic
 - **Key Files**:
   - `src/main.py` - API endpoints and file watching
@@ -161,6 +164,15 @@ widget/
 ```
 
 ## Development
+
+### Environment Variables
+
+- `BACKEND_PORT`: Set the backend server port (default: 8001)
+  ```bash
+  # Examples:
+  BACKEND_PORT=8080 ./widget/run.sh
+  export BACKEND_PORT=9000 && ./widget/run.sh
+  ```
 
 ### Adding New Features
 
