@@ -62,10 +62,14 @@ Examples of requests you should handle:
 - "in 30 seconds remind me to check email" (time: "in 30 seconds", message: "check email")
 - "let me know tomorrow" (time: "tomorrow", message: "Reminder")
 - "remind me tomorrow" (time: "tomorrow", message: "Reminder")
+- "a daily update and whether i need to sell" (time: "tomorrow at 9am", message: "Daily update and whether you need to sell")
+- "daily at 9am check stocks" (time: "tomorrow at 9am", message: "check stocks")
 
 For vague times like "later" or "soon", use 30 minutes as a reasonable default.
 Parse time expressions flexibly - "1 min", "1 minute", "one minute" are all valid.
 If no specific message is given, use "Reminder" as the default message.
+For "daily" requests without a specific time, use tomorrow at 9am as the first occurrence.
+Note: We currently only support one-time reminders, not recurring ones. For "daily" requests, schedule the first occurrence only.
 
 If you cannot parse the request, return an error with a helpful suggestion."""
 

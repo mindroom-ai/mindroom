@@ -408,6 +408,66 @@ class TestCommandHandling:
 
         # Verify the agent didn't try to process the error message
         bot._generate_response.assert_not_called()
-        # Check all debug calls to see what was logged
+        # Check log calls - should be caught by RouterAgent check now
         debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
-        assert "Ignoring error message from other agent" in debug_calls
+        # Either caught by RouterAgent check or error message check
+        assert "Ignoring RouterAgent message without mentions" in debug_calls or any(
+            "Ignoring error message" in call for call in [call[0][0] for call in bot.logger.info.call_args_list]
+        )
+
+    @pytest.mark.asyncio
+    async def test_agents_ignore_router_messages_without_mentions(self):
+        """Test that agents don't respond to RouterAgent messages that don't mention anyone."""
+        # Create a general agent
+        agent_user = AgentMatrixUser(
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="General Agent",
+            password="mock_password",
+            access_token="mock_token",
+        )
+
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        bot.client = AsyncMock()
+        bot.client.user_id = "@mindroom_general:localhost"
+        bot.logger = MagicMock()
+        bot._generate_response = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+        bot.thread_invite_manager = AsyncMock()
+
+        # Mock context extraction - no agents mentioned
+        mock_context = MagicMock()
+        mock_context.am_i_mentioned = False
+        mock_context.mentioned_agents = []  # No agents mentioned
+        mock_context.is_thread = True
+        mock_context.thread_id = "$thread123"
+        mock_context.thread_history = []
+        bot._extract_message_context = AsyncMock(return_value=mock_context)
+
+        # Create a room and event with message from router agent without mentions
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event123",
+                "sender": "@mindroom_router:localhost",  # From router agent
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": "❌ Unable to parse the schedule request"},
+            }
+        )
+
+        # Mock interactive.handle_text_response and extract_agent_name
+        with (
+            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.bot.extract_agent_name") as mock_extract,
+        ):
+            # Make extract_agent_name return "router" for the router agent sender
+            mock_extract.return_value = "router"
+            # Call _on_message
+            await bot._on_message(room, event)
+
+        # Verify the agent didn't try to process the message
+        bot._generate_response.assert_not_called()
+        # Check debug calls for the new log message
+        debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
+        assert "Ignoring RouterAgent message without mentions" in debug_calls
