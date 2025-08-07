@@ -5,6 +5,8 @@ import { AgentList } from '@/components/AgentList/AgentList';
 import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
 import { TeamList } from '@/components/TeamList/TeamList';
 import { TeamEditor } from '@/components/TeamEditor/TeamEditor';
+import { RoomList } from '@/components/RoomList/RoomList';
+import { RoomEditor } from '@/components/RoomEditor/RoomEditor';
 import { ModelConfig } from '@/components/ModelConfig/ModelConfig';
 import { RoomModels } from '@/components/RoomModels/RoomModels';
 import { MemoryConfig } from '@/components/MemoryConfig/MemoryConfig';
@@ -60,6 +62,12 @@ function AppContent() {
               👫 Teams
             </TabsTrigger>
             <TabsTrigger
+              value="rooms"
+              className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600"
+            >
+              🏠 Rooms
+            </TabsTrigger>
+            <TabsTrigger
               value="models"
               className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600"
             >
@@ -91,6 +99,17 @@ function AppContent() {
               </div>
               <div className="col-span-8 h-full overflow-hidden">
                 <TeamEditor />
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="rooms" className="flex-1 p-4 overflow-hidden min-h-0">
+            <div className="grid grid-cols-12 gap-4 h-full">
+              <div className="col-span-4 h-full overflow-hidden">
+                <RoomList />
+              </div>
+              <div className="col-span-8 h-full overflow-hidden">
+                <RoomEditor />
               </div>
             </div>
           </TabsContent>

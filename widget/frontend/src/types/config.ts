@@ -35,6 +35,14 @@ export interface Team {
   model?: string; // Optional team-specific model
 }
 
+export interface Room {
+  id: string; // Room identifier
+  display_name: string;
+  description?: string;
+  agents: string[]; // List of agent IDs in this room
+  model?: string; // Room-specific model override
+}
+
 export interface Config {
   memory: MemoryConfig;
   models: Record<string, ModelConfig>;

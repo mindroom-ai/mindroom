@@ -13,17 +13,26 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Save, Trash2, Plus, X, Users } from 'lucide-react';
+import { Save, Trash2, Users } from 'lucide-react';
 import { useForm, Controller } from 'react-hook-form';
 import { Team } from '@/types/config';
 
 export function TeamEditor() {
-  const { teams, agents, selectedTeamId, updateTeam, deleteTeam, saveConfig, config, isDirty } =
-    useConfigStore();
+  const {
+    teams,
+    agents,
+    rooms,
+    selectedTeamId,
+    updateTeam,
+    deleteTeam,
+    saveConfig,
+    config,
+    isDirty,
+  } = useConfigStore();
 
   const selectedTeam = teams.find(t => t.id === selectedTeamId);
 
-  const { control, reset, setValue, getValues } = useForm<Team>({
+  const { control, reset } = useForm<Team>({
     defaultValues: selectedTeam || {
       id: '',
       display_name: '',
@@ -59,20 +68,6 @@ export function TeamEditor() {
 
   const handleSave = async () => {
     await saveConfig();
-  };
-
-  const handleAddRoom = () => {
-    const current = getValues('rooms');
-    const updated = [...current, 'new_room'];
-    setValue('rooms', updated);
-    handleFieldChange('rooms', updated);
-  };
-
-  const handleRemoveRoom = (index: number) => {
-    const current = getValues('rooms');
-    const updated = current.filter((_, i) => i !== index);
-    setValue('rooms', updated);
-    handleFieldChange('rooms', updated);
   };
 
   if (!selectedTeam) {
@@ -246,35 +241,48 @@ export function TeamEditor() {
 
           {/* Rooms */}
           <div>
-            <div className="flex items-center justify-between mb-2">
-              <Label>Rooms</Label>
-              <Button variant="outline" size="sm" onClick={handleAddRoom}>
-                <Plus className="h-3 w-3 mr-1" />
-                Add
-              </Button>
-            </div>
+            <Label>Team Rooms</Label>
+            <p className="text-xs text-muted-foreground mb-2">
+              Select rooms where this team can operate
+            </p>
             <Controller
               name="rooms"
               control={control}
               render={({ field }) => (
-                <div className="space-y-2">
-                  {field.value.map((room, index) => (
-                    <div key={index} className="flex gap-2">
-                      <Input
-                        value={room}
-                        onChange={e => {
-                          const updated = [...field.value];
-                          updated[index] = e.target.value;
-                          field.onChange(updated);
-                          handleFieldChange('rooms', updated);
-                        }}
-                        placeholder="Room name..."
-                      />
-                      <Button variant="ghost" size="icon" onClick={() => handleRemoveRoom(index)}>
-                        <X className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  ))}
+                <div className="space-y-2 mt-2 max-h-48 overflow-y-auto border rounded-lg p-2">
+                  {rooms.length === 0 ? (
+                    <p className="text-sm text-muted-foreground text-center py-2">
+                      No rooms available. Create rooms in the Rooms tab.
+                    </p>
+                  ) : (
+                    rooms.map(room => {
+                      const isChecked = field.value.includes(room.id);
+                      return (
+                        <div
+                          key={room.id}
+                          className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50"
+                        >
+                          <Checkbox
+                            id={`room-${room.id}`}
+                            checked={isChecked}
+                            onCheckedChange={checked => {
+                              const newRooms = checked
+                                ? [...field.value, room.id]
+                                : field.value.filter(r => r !== room.id);
+                              field.onChange(newRooms);
+                              handleFieldChange('rooms', newRooms);
+                            }}
+                          />
+                          <label htmlFor={`room-${room.id}`} className="flex-1 cursor-pointer">
+                            <div className="font-medium text-sm">{room.display_name}</div>
+                            {room.description && (
+                              <div className="text-xs text-gray-500">{room.description}</div>
+                            )}
+                          </label>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               )}
             />
