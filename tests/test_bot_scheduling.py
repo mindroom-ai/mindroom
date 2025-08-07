@@ -138,8 +138,8 @@ class TestBotScheduleCommands:
             mock_cancel.assert_called_once_with(client=mock_agent_bot.client, room_id="!test:server", task_id="task123")
 
     @pytest.mark.asyncio
-    async def test_schedule_command_requires_thread(self, mock_agent_bot):
-        """Test that schedule commands only work in threads."""
+    async def test_schedule_command_auto_creates_thread(self, mock_agent_bot):
+        """Test that schedule commands auto-create threads when used in main room."""
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -152,11 +152,13 @@ class TestBotScheduleCommands:
 
         await mock_agent_bot._handle_command(room, event, command)
 
-        # Should send error message about threads
+        # Should successfully schedule the task (auto-creates thread)
         mock_agent_bot._send_response.assert_called_once()
         call_args = mock_agent_bot._send_response.call_args
-        assert "❌" in call_args[0][2]
-        assert "threads" in call_args[0][2].lower()
+        assert "✅" in call_args[0][2] or "Task ID" in call_args[0][2]
+        # The thread_id should be None (will be handled by _send_response)
+        # and the event should be passed for thread creation
+        assert call_args[1].get("reply_to_event") == event
 
 
 class TestBotTaskRestoration:
