@@ -471,6 +471,107 @@ class TestCommandHandling:
         assert not should_respond, "Finance agent should not respond even if it was previously in thread"
 
     @pytest.mark.asyncio
+    async def test_router_error_prevents_team_formation(self):
+        """Test that RouterAgent error messages don't trigger team formation."""
+        # This tests the scenario where multiple agents were mentioned earlier in thread
+        # but RouterAgent sends an error without mentions - no team should form
+
+        # Create news agent (first alphabetically, would coordinate team)
+        agent_user = AgentMatrixUser(
+            agent_name="news",
+            user_id="@mindroom_news:localhost",
+            display_name="News Agent",
+            password="mock_password",
+            access_token="mock_token",
+        )
+
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        bot.client = AsyncMock()
+        bot.client.user_id = "@mindroom_news:localhost"
+        bot.logger = MagicMock()
+        bot._generate_response = AsyncMock()
+        bot._send_response = AsyncMock()
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+        bot.thread_invite_manager = AsyncMock()
+        bot.orchestrator = MagicMock()
+
+        # Create thread history with multiple agents mentioned
+        thread_history = [
+            {
+                "event_id": "$user_msg",
+                "sender": "@user:localhost",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "@news @research check this out",
+                    "m.mentions": {"user_ids": ["@mindroom_news:localhost", "@mindroom_research:localhost"]},
+                },
+            },
+            {
+                "event_id": "$news_response",
+                "sender": "@mindroom_news:localhost",
+                "content": {"msgtype": "m.text", "body": "I'll look into it", "m.mentions": {}},
+            },
+            {
+                "event_id": "$research_response",
+                "sender": "@mindroom_research:localhost",
+                "content": {"msgtype": "m.text", "body": "Analyzing now", "m.mentions": {}},
+            },
+            {
+                "event_id": "$user_schedule",
+                "sender": "@user:localhost",
+                "content": {"msgtype": "m.text", "body": "!schedule remind me tomorrow", "m.mentions": {}},
+            },
+        ]
+
+        # Mock context for the router error message
+        mock_context = MagicMock()
+        mock_context.am_i_mentioned = False
+        mock_context.is_thread = True
+        mock_context.thread_id = "$thread123"
+        mock_context.thread_history = thread_history  # History before router error
+        mock_context.mentioned_agents = []  # Router doesn't mention anyone
+        bot._extract_message_context = AsyncMock(return_value=mock_context)
+
+        # Create room and event for router error
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$router_error",
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "❌ Unable to parse the schedule request",
+                },
+            }
+        )
+
+        with (
+            patch("mindroom.bot.interactive") as mock_interactive,
+            patch("mindroom.bot.extract_agent_name") as mock_extract,
+            patch("mindroom.bot.create_team_response") as mock_team,
+        ):
+            mock_interactive.handle_text_response = AsyncMock()
+            mock_extract.side_effect = (
+                lambda x: "router"
+                if "router" in x
+                else ("news" if "news" in x else ("research" if "research" in x else None))
+            )
+
+            await bot._on_message(room, event)
+
+        # Verify news agent did NOT form a team or respond
+        bot._generate_response.assert_not_called()
+        bot._send_response.assert_not_called()
+        mock_team.assert_not_called()
+
+        # Verify it was logged as being ignored
+        debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
+        # The general "agent without mentions" check catches this first
+        assert "Ignoring agent message without any mentions" in debug_calls
+
+    @pytest.mark.asyncio
     async def test_full_router_error_flow_integration(self):
         """Integration test for the full flow of router error handling."""
         # Create a finance agent
