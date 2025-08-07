@@ -96,6 +96,7 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - `!invite <agent>` - Invite an agent to a thread (only works in threads)
 - `!uninvite <agent>` - Remove an agent from a thread
 - `!list_invites` - List all invited agents in current thread
+- `!widget [url]` - Add MindRoom configuration widget to the room
 - `!help [topic]` - Get help on available commands
 - `!link [thread-id]` - Link another thread's context (planned)
 - `!agents` - List available agents (planned)
@@ -295,7 +296,7 @@ pre-commit run --all-files
 - Thread-based conversations
 - Cross-room agent invitations with time limits
 - Agent response routing based on context
-- Commands: `!invite`, `!uninvite`, `!list_invites`, `!help`
+- Commands: `!invite`, `!uninvite`, `!list_invites`, `!widget`, `!help`
 - Multiple AI model support (OpenAI, Anthropic, Ollama, etc.)
 - End-to-end encryption via Matrix
 - Team-based agent collaboration (using Agno Teams)

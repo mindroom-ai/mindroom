@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MindRoom Configuration Widget</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+        }
+        #container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }
+        #app-frame {
+            width: 100%;
+            height: 100%;
+            border: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            color: #666;
+        }
+
+        /* When embedded in Matrix, ensure minimum height */
+        @media (max-height: 600px) {
+            body, html {
+                min-height: 600px;
+                overflow: auto;
+            }
+            #container, #app-frame {
+                min-height: 600px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="container" class="loading">
+        <div>Loading MindRoom Configuration...</div>
+    </div>
+
+    <script>
+        // Matrix Widget API compatibility
+        let widgetApi = null;
+
+        // Check if we're running inside a Matrix client
+        if (window.parent !== window) {
+            // Initialize Matrix Widget API if available
+            if (window.mxwidgets) {
+                widgetApi = new window.mxwidgets.WidgetApi();
+                widgetApi.requestCapability('m.always_on_screen');
+                widgetApi.start();
+            }
+        }
+
+        // Get the widget URL from query parameters or use default
+        const params = new URLSearchParams(window.location.search);
+        const appUrl = params.get('url') || 'http://localhost:3003';
+
+        // Create iframe for the actual app
+        const container = document.getElementById('container');
+        container.innerHTML = '';
+        container.className = '';
+
+        const iframe = document.createElement('iframe');
+        iframe.id = 'app-frame';
+        iframe.src = appUrl;
+        iframe.allow = 'clipboard-write';
+
+        // Handle iframe load
+        iframe.onload = function() {
+            // Send configuration to the app if needed
+            if (widgetApi) {
+                iframe.contentWindow.postMessage({
+                    type: 'matrix-widget-init',
+                    isWidget: true
+                }, '*');
+            }
+        };
+
+        container.appendChild(iframe);
+
+        // Handle messages from the iframe
+        window.addEventListener('message', function(event) {
+            // Only accept messages from our iframe
+            if (event.source !== iframe.contentWindow) return;
+
+            // Handle different message types
+            if (event.data.type === 'resize') {
+                if (widgetApi) {
+                    widgetApi.setAlwaysOnScreen(true);
+                }
+            }
+        });
+    </script>
+</body>
+</html>
