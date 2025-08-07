@@ -246,7 +246,7 @@ export function AgentEditor() {
                             </Badge>
                           )}
                         </div>
-                        {isChecked && hasSchema && (
+                        {isChecked && hasSchema && (needsConfig || isConfigured) && (
                           <Button
                             variant="ghost"
                             size="sm"
