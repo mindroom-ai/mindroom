@@ -31,6 +31,12 @@ def start_backend_server() -> subprocess.Popen[bytes]:
     print("Starting backend server...")
     backend_dir = Path(__file__).parent / "backend"
 
+    # Check if config.yaml exists at project root
+    config_path = Path(__file__).parent.parent / "config.yaml"
+    if not config_path.exists():
+        print(f"Warning: config.yaml not found at {config_path}")
+        print("The UI will show an error. Please ensure config.yaml exists.")
+
     # Check if venv exists, if not suggest using uv
     venv_path = backend_dir / ".venv"
     if not venv_path.exists():
@@ -38,8 +44,9 @@ def start_backend_server() -> subprocess.Popen[bytes]:
         print("Please run: cd widget/backend && uv sync")
         sys.exit(1)
 
+    # Use the default port 8001
     process = subprocess.Popen(
-        [str(venv_path / "bin" / "python"), "-m", "uvicorn", "src.main:app"],
+        [str(venv_path / "bin" / "python"), "-m", "uvicorn", "src.main:app", "--port", "8001"],
         cwd=backend_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
