@@ -6,6 +6,8 @@ import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
 import { TeamList } from '@/components/TeamList/TeamList';
 import { TeamEditor } from '@/components/TeamEditor/TeamEditor';
 import { ModelConfig } from '@/components/ModelConfig/ModelConfig';
+import { RoomModels } from '@/components/RoomModels/RoomModels';
+import { MemoryConfig } from '@/components/MemoryConfig/MemoryConfig';
 import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toaster } from '@/components/ui/toaster';
@@ -63,6 +65,12 @@ function AppContent() {
             >
               🔧 Models & API Keys
             </TabsTrigger>
+            <TabsTrigger
+              value="settings"
+              className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600"
+            >
+              ⚙️ Settings
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="agents" className="flex-1 p-4 overflow-hidden min-h-0">
@@ -91,6 +99,23 @@ function AppContent() {
             <div className="h-full overflow-hidden">
               <ModelConfig />
             </div>
+          </TabsContent>
+
+          <TabsContent value="settings" className="flex-1 p-4 overflow-hidden min-h-0">
+            <Tabs defaultValue="room-models" className="h-full flex flex-col">
+              <TabsList className="mb-4">
+                <TabsTrigger value="room-models">Room Models</TabsTrigger>
+                <TabsTrigger value="memory">Memory</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="room-models" className="flex-1 overflow-hidden">
+                <RoomModels />
+              </TabsContent>
+
+              <TabsContent value="memory" className="flex-1 overflow-hidden">
+                <MemoryConfig />
+              </TabsContent>
+            </Tabs>
           </TabsContent>
         </Tabs>
       </div>

@@ -27,6 +27,7 @@ interface ConfigState {
   createTeam: (team: Omit<Team, 'id'>) => void;
   deleteTeam: (teamId: string) => void;
   updateRoomModels: (roomModels: Record<string, string>) => void;
+  updateMemoryConfig: (memoryConfig: { provider: string; model: string; host?: string }) => void;
   updateModel: (modelId: string, updates: Partial<ModelConfig>) => void;
   deleteModel: (modelId: string) => void;
   setAPIKey: (provider: string, key: string) => void;
@@ -209,6 +210,29 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         config: {
           ...state.config,
           room_models: roomModels,
+        },
+        isDirty: true,
+      };
+    });
+  },
+
+  // Update memory configuration
+  updateMemoryConfig: memoryConfig => {
+    set(state => {
+      if (!state.config) return state;
+      return {
+        config: {
+          ...state.config,
+          memory: {
+            ...state.config.memory,
+            embedder: {
+              provider: memoryConfig.provider,
+              config: {
+                model: memoryConfig.model,
+                ...(memoryConfig.host ? { host: memoryConfig.host } : {}),
+              },
+            },
+          },
         },
         isDirty: true,
       };
