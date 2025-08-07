@@ -97,8 +97,59 @@ async def create_team_response(
     if not agents:
         return "Sorry, no agents available for team collaboration."
 
+    # Build team identity context
+    agent_identities = []
+    agent_tools = []
+    for agent in agents:
+        # Extract a brief role description
+        role_desc = "Team member"
+        if hasattr(agent, "role") and agent.role:
+            # Take the first line or first 100 chars of the role
+            role_lines = str(agent.role).split("\n")
+            for line in role_lines:
+                if line.strip() and not line.startswith("#"):
+                    role_desc = line.strip()[:100]
+                    break
+
+        agent_identities.append(f"- **{agent.name}**: {role_desc}")
+
+        # List available tools for each agent
+        if hasattr(agent, "tools") and agent.tools:
+            tools_list = [
+                tool.name if hasattr(tool, "name") else str(tool) for tool in agent.tools[:5]
+            ]  # First 5 tools
+            if tools_list:
+                agent_tools.append(f"- **{agent.name}** has access to: {', '.join(tools_list)}")
+
+    tools_section = ""
+    if agent_tools:
+        tools_section = f"\n## Available Tools\n{chr(10).join(agent_tools)}\n"
+
+    # Determine team mode instruction
+    mode_instruction = ""
+    if mode == TeamMode.COORDINATE:
+        mode_instruction = "\n**Mode: COORDINATE** - Work sequentially, building on each other's contributions. Each agent should add their unique perspective."
+    elif mode == TeamMode.COLLABORATE:
+        mode_instruction = (
+            "\n**Mode: COLLABORATE** - Work together in parallel, combining your expertise into a unified response."
+        )
+
+    team_identity = f"""## Team Collaboration Context
+
+You are working as a team with the following members:
+{chr(10).join(agent_identities)}
+{tools_section}{mode_instruction}
+
+**Important Instructions:**
+1. Each agent IS one of the team members listed above - you collectively control these agents
+2. Leverage each agent's specific expertise and tools to provide a comprehensive response
+3. Work as a coordinated team to address the user's request
+4. When the user mentions specific agents (like NewsAgent or CodeAgent), recognize that YOU are those agents
+
+"""
+
     # Build prompt with context
-    prompt = message
+    prompt = team_identity + message
     if thread_history:
         recent_messages = thread_history[-3:]  # Last 3 messages for context
         context_parts = []
@@ -109,7 +160,7 @@ async def create_team_response(
                 context_parts.append(f"{sender}: {body}")
 
         if context_parts:
-            prompt = f"Context:\n{'\n'.join(context_parts)}\n\nUser: {message}"
+            prompt = f"{team_identity}## Thread Context:\n{'\n'.join(context_parts)}\n\n## User Request:\n{message}"
 
     # Create and run team
     team = Team(
