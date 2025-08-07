@@ -55,6 +55,12 @@ def load_config(config_path: Path | None = None) -> Config:
     with open(path) as f:
         data = yaml.safe_load(f)
 
+    # Handle None values for optional dictionaries
+    if data.get("teams") is None:
+        data["teams"] = {}
+    if data.get("room_models") is None:
+        data["room_models"] = {}
+
     config = Config(**data)
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")
@@ -140,14 +146,14 @@ def create_agent(agent_name: str, storage_path: Path, config_path: Path | None =
 
 
 def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
-    """Generate a description of an agent based on its configuration.
+    """Generate a description of an agent or team based on its configuration.
 
     Args:
-        agent_name: Name of the agent to describe
+        agent_name: Name of the agent or team to describe
         config_path: Optional path to configuration file
 
     Returns:
-        Human-readable description of the agent
+        Human-readable description of the agent or team
     """
     # Handle built-in router agent
     if agent_name == ROUTER_AGENT_NAME:
@@ -159,9 +165,19 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
 
     config = load_config(config_path)
 
+    # Check if it's a team
+    if agent_name in config.teams:
+        team_config = config.teams[agent_name]
+        parts = [f"{agent_name}"]
+        if team_config.role:
+            parts.append(f"- {team_config.role}")
+        parts.append(f"- Team of agents: {', '.join(team_config.agents)}")
+        parts.append(f"- Collaboration mode: {team_config.mode}")
+        return "\n  ".join(parts)
+
     # Check if agent exists
     if agent_name not in config.agents:
-        return f"{agent_name}: Unknown agent"
+        return f"{agent_name}: Unknown agent or team"
 
     agent_config = config.agents[agent_name]
 

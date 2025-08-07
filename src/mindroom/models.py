@@ -64,10 +64,23 @@ class RouterConfig(BaseModel):
     model: str = Field(default="default", description="Model to use for routing decisions")
 
 
+class TeamConfig(BaseModel):
+    """Configuration for a team of agents."""
+
+    display_name: str = Field(description="Human-readable name for the team")
+    role: str = Field(description="Description of the team's purpose")
+    agents: list[str] = Field(description="List of agent names that compose this team")
+    rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
+    model: str | None = Field(default=None, description="Default model for this team (optional)")
+    mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
+    teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
+    room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig, description="Default values")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")

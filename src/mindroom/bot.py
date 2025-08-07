@@ -724,6 +724,65 @@ class AgentBot:
 
 
 @dataclass
+class TeamBot(AgentBot):
+    """A bot that represents a team of agents working together."""
+
+    team_name: str = field(init=False)
+    team_agents: list[str] = field(default_factory=list)
+    team_mode: str = field(default="coordinate")
+    team_model: str | None = field(default=None)
+
+    def __post_init__(self) -> None:
+        """Extract team name from agent user."""
+        self.team_name = self.agent_user.agent_name
+
+    @cached_property
+    def agent(self) -> Agent | None:  # type: ignore[override]
+        """Teams don't have individual agents, return None."""
+        return None
+
+    async def _generate_response(
+        self,
+        room_id: str,
+        prompt: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        thread_history: list[dict],
+        existing_event_id: str | None = None,
+    ) -> None:
+        """Generate a team response instead of individual agent response."""
+        if not prompt.strip():
+            return
+
+        # Get the appropriate model for this team and room
+        from .teams import TeamMode, create_team_response, get_team_model
+
+        model_name = get_team_model(self.team_name, room_id)
+
+        # Convert team_mode string to TeamMode enum
+        mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
+
+        # Create team response
+        response_text = await create_team_response(
+            agent_names=self.team_agents,
+            mode=mode,
+            message=prompt,
+            orchestrator=self.orchestrator,
+            thread_history=thread_history,
+            model_name=model_name,
+        )
+
+        # Send the response (reuse parent's method for consistency)
+        room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
+
+        if existing_event_id:
+            await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+        else:
+            # Send as regular message (not streaming for teams)
+            await self._send_response(room, reply_to_event_id, response_text, thread_id)
+
+
+@dataclass
 class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
@@ -742,27 +801,62 @@ class MultiAgentOrchestrator:
         for agent_name, agent_user in agent_users.items():
             if agent_name == ROUTER_AGENT_NAME:
                 # Router is a built-in agent that has access to all rooms
-                # Get all unique room IDs from all agents
-                all_room_aliases = {room for agent_config in config.agents.values() for room in agent_config.rooms}
+                # Get all unique room IDs from all agents and teams
+                all_room_aliases = set()
+                for agent_config in config.agents.values():
+                    all_room_aliases.update(agent_config.rooms)
+                for team_config in config.teams.values():
+                    all_room_aliases.update(team_config.rooms)
                 rooms_to_resolve = list(all_room_aliases)
+
+                # Create regular AgentBot for router
+                enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+                bot = AgentBot(
+                    agent_user,
+                    self.storage_path,
+                    rooms=[room_aliases.get(room, room) for room in rooms_to_resolve],
+                    enable_streaming=enable_streaming,
+                )
+                bot.orchestrator = self
+                self.agent_bots[agent_name] = bot
+
+            elif agent_name in config.teams:
+                # This is a team - create TeamBot
+                team_config = config.teams[agent_name]
+                rooms_to_resolve = team_config.rooms
+                resolved_rooms = [room_aliases.get(room, room) for room in rooms_to_resolve]
+
+                bot = TeamBot(
+                    agent_user=agent_user,
+                    storage_path=self.storage_path,
+                    rooms=resolved_rooms,
+                    team_agents=team_config.agents,
+                    team_mode=team_config.mode,
+                    team_model=team_config.model,
+                    enable_streaming=False,  # Teams don't stream
+                )
+                bot.orchestrator = self
+                self.agent_bots[agent_name] = bot
+
             else:
                 # Regular agent - use configured rooms
-                agent_config = config.agents.get(agent_name)
-                rooms_to_resolve = agent_config.rooms if agent_config else []
+                if agent_name not in config.agents:
+                    logger.warning(f"No configuration found for agent {agent_name}")
+                    continue
+                agent_config = config.agents[agent_name]
 
-            # Resolve all room aliases to IDs
-            resolved_rooms = [room_aliases.get(room, room) for room in rooms_to_resolve]
+                rooms_to_resolve = agent_config.rooms
+                resolved_rooms = [room_aliases.get(room, room) for room in rooms_to_resolve]
 
-            enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
-
-            bot = AgentBot(
-                agent_user,
-                self.storage_path,
-                rooms=resolved_rooms,
-                enable_streaming=enable_streaming,
-            )
-            bot.orchestrator = self  # Set orchestrator reference
-            self.agent_bots[agent_name] = bot
+                enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+                bot = AgentBot(
+                    agent_user,
+                    self.storage_path,
+                    rooms=resolved_rooms,
+                    enable_streaming=enable_streaming,
+                )
+                bot.orchestrator = self
+                self.agent_bots[agent_name] = bot
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))
 
