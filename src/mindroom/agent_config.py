@@ -9,7 +9,6 @@ from agno.storage.sqlite import SqliteStorage
 
 from . import agent_prompts
 from .logging_config import get_logger
-from .matrix import MATRIX_HOMESERVER, MatrixID, extract_server_name_from_homeserver
 from .models import Config
 from .tools import get_tool_by_name
 
@@ -183,6 +182,8 @@ def get_agent_ids_for_room(room_key: str, config: Config | None = None, homeserv
     """Get all agent Matrix IDs assigned to a specific room."""
     if config is None:
         config = load_config()
+
+    from .matrix import MATRIX_HOMESERVER, MatrixID, extract_server_name_from_homeserver
 
     # Determine server name
     server_url = homeserver or MATRIX_HOMESERVER
