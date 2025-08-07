@@ -3,21 +3,38 @@
 # Users can add custom agents by adding new entries to this file
 # Room assignments use aliases that are resolved from matrix_rooms.yaml
 
-# Memory embedder configuration
+# Memory configuration
 memory:
   embedder:
     provider: "ollama"  # Options: openai, ollama, huggingface, sentence-transformers
     config:
       model: "nomic-embed-text"  # Ollama embedding model
       host: "http://localhost:11434"  # Ollama host URL
+  llm:
+    provider: "ollama"  # Options: ollama, openai, anthropic (mem0 doesn't support openrouter)
+    config:
+      model: "devstral:24b"  # Ollama model for memory operations
+      host: "http://localhost:11434"  # Ollama host URL
+      temperature: 0.1
+      top_p: 1
 
 models:
   default:  # Default model used when agent doesn't specify one
-    provider: "ollama"
-    id: "devstral:24b"
-    #id: "gpt-oss:20b"
+    # provider: "ollama"
+    # id: "devstral:24b"
 
-  anthropic:
+    provider: openrouter
+    id: "openrouter/horizon-beta"
+
+  haiku:
+    provider: "anthropic"
+    id: "claude-3-5-haiku-latest"
+
+  sonnet:
+    provider: "anthropic"
+    id: "claude-3-5-haiku-latest"
+
+  opus:
     provider: "anthropic"
     id: "claude-3-5-haiku-latest"
 
@@ -28,22 +45,21 @@ models:
     # For ollama, you can add:
     # host: "http://localhost:11434"
 
-  openrouter:
+  glm45:
     provider: "openrouter"
     id: "z-ai/glm-4.5-air:free"
+
+  gptoss:
+    provider: "openrouter"
+    id: openai/gpt-oss-120b
 
   deepseek:
     provider: "openrouter"
     id: "deepseek-ai/deepseek-chat:free"
 
-  # Example of other model configurations:
-  # gpt4:
-  #   provider: "openai"
-  #   id: "gpt-4"
-  #
-  # claude:
-  #   provider: "anthropic"
-  #   id: "claude-4-opus-latest"
+  gpt4o:
+    provider: "openai"
+    id: "gpt-4o"
 
 agents:
   # General conversation agent
@@ -253,7 +269,6 @@ agents:
       - analysis  # Analysis tasks
     num_history_runs: 5
 
-
 # Configuration for agent defaults
 defaults:
   num_history_runs: 5
@@ -262,4 +277,4 @@ defaults:
 
 # Router configuration
 router:
-  model: "ollama"  # Which model to use for routing decisions (references models section)
+  model: "glm45"  # Which model to use for routing decisions (references models section)
