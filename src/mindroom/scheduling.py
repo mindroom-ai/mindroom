@@ -236,26 +236,36 @@ async def list_scheduled_tasks(
         return "Unable to retrieve scheduled tasks."
 
     tasks = []
+    tasks_in_other_threads = []
+    
     for event in response.events:
         if event["type"] == SCHEDULED_TASK_EVENT_TYPE:
             content = event["content"]
             if content.get("status") == "pending":
-                # Filter by thread if specified
-                if thread_id and content.get("thread_id") != thread_id:
-                    continue
-
                 try:
                     task_info = {
                         "id": event["state_key"],
                         "time": datetime.fromisoformat(content["execute_at"]),
                         "message": content["message"],
+                        "thread_id": content.get("thread_id"),
                     }
-                    tasks.append(task_info)
+                    
+                    # Separate tasks by thread
+                    task_thread = content.get("thread_id")
+                    # Only filter by thread if we're in a thread context
+                    # Show all tasks if no thread_id (shouldn't happen with current design)
+                    if thread_id and task_thread and task_thread != thread_id:
+                        tasks_in_other_threads.append(task_info)
+                    else:
+                        tasks.append(task_info)
                 except (KeyError, ValueError):
                     continue
 
-    if not tasks:
+    if not tasks and not tasks_in_other_threads:
         return "No scheduled tasks found."
+    
+    if not tasks and tasks_in_other_threads:
+        return f"No scheduled tasks in this thread.\n\n📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use !list_schedules in those threads to see details."
 
     # Sort by execution time
     tasks.sort(key=lambda t: t["time"])
