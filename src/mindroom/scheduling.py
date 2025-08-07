@@ -149,11 +149,29 @@ async def schedule_task(
         "status": "pending",
     }
 
-    await client.room_put_state(
+    # DEBUG: Log what we're storing
+    logger.info(
+        "Storing scheduled task in Matrix state",
+        task_id=task_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        event_type=SCHEDULED_TASK_EVENT_TYPE,
+        state_key=task_id,
+    )
+
+    put_response = await client.room_put_state(
         room_id=room_id,
         event_type=SCHEDULED_TASK_EVENT_TYPE,
         content=task_data,
         state_key=task_id,
+    )
+
+    # DEBUG: Log the response
+    logger.info(
+        "room_put_state response",
+        response_type=type(put_response).__name__,
+        is_success=isinstance(put_response, nio.RoomPutStateResponse),
+        response=str(put_response),
     )
 
     # Start the async task
@@ -231,12 +249,45 @@ async def list_scheduled_tasks(
     thread_id: str | None = None,
 ) -> str:
     """List scheduled tasks in human-readable format."""
+    # DEBUG: Log the request
+    logger.info(
+        "list_scheduled_tasks called",
+        room_id=room_id,
+        thread_id=thread_id,
+    )
+
     response = await client.room_get_state(room_id)
+
+    # DEBUG: Log the response type
+    logger.info(
+        "room_get_state response",
+        response_type=type(response).__name__,
+        is_success=isinstance(response, nio.RoomGetStateResponse),
+    )
+
     if not isinstance(response, nio.RoomGetStateResponse):
+        logger.error(
+            "Failed to get room state",
+            response=str(response),
+            response_type=type(response).__name__,
+        )
         return "Unable to retrieve scheduled tasks."
 
     tasks = []
     tasks_in_other_threads = []
+
+    # DEBUG: Log event types
+    event_types: dict[str, int] = {}
+    for event in response.events:
+        event_type = event.get("type", "unknown")
+        event_types[event_type] = event_types.get(event_type, 0) + 1
+
+    logger.info(
+        "Room state events",
+        total_events=len(response.events),
+        event_types=event_types,
+        scheduled_task_events=event_types.get(SCHEDULED_TASK_EVENT_TYPE, 0),
+    )
 
     for event in response.events:
         if event["type"] == SCHEDULED_TASK_EVENT_TYPE:
