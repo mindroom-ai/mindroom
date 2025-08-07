@@ -46,3 +46,5 @@ Thumbs.db
 # Misc
 *.bak
 *.tmp
+widget/.direnv/
+widget/.envrc

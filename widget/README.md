@@ -210,7 +210,7 @@ The widget can be embedded directly into your Matrix client as a room widget. Th
 3. Enter URL: `http://localhost:3001/matrix-widget.html?url=http://localhost:3001`
 4. Click "Add Widget"
 
-See `MATRIX_INTEGRATION.md` for detailed setup instructions and alternative access methods.
+See `WIDGET_INTEGRATION.md` for detailed setup instructions and production deployment.
 
 ## Future Enhancements
 
@@ -221,11 +221,11 @@ See `MATRIX_INTEGRATION.md` for detailed setup instructions and alternative acce
 - [ ] Batch operations on agents
 - [x] Matrix widget manifest for embedding
 
-## Additional Setup Guides
+## Additional Documentation
 
-- `MATRIX_INTEGRATION.md` - Matrix/Element widget integration guide
-- `SCREENSHOT_SETUP.md` - Detailed screenshot setup and troubleshooting
-- `NIX_SETUP.md` - Nix-specific environment setup
+- `WIDGET_INTEGRATION.md` - Complete integration and deployment guide
+- `TESTING.md` - Comprehensive testing documentation
+- `SCREENSHOT_INSTRUCTIONS.md` - Screenshot setup for documentation
 
 ## Support
 
