@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import path from 'path'
 
 // Get backend port from environment variable or use default
-const backendPort = process.env.VITE_BACKEND_PORT || '8001'
+const backendPort = process.env.BACKEND_PORT || '8001'
 
 // https://vitejs.dev/config/
 export default defineConfig({

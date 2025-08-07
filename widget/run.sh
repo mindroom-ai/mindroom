@@ -51,7 +51,7 @@ if [ ! -d "node_modules" ]; then
     npm install
 fi
 
-VITE_BACKEND_PORT=$BACKEND_PORT npm run dev &
+BACKEND_PORT=$BACKEND_PORT npm run dev &
 FRONTEND_PID=$!
 cd ..
 
