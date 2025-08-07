@@ -197,15 +197,20 @@ Currently manual testing. Run the widget and verify:
 
 ## Matrix/Element Integration
 
-The widget can be embedded directly into your Matrix client (Element, etc.) as a room widget. This allows you to configure MindRoom without leaving your chat interface.
+The widget can be embedded directly into your Matrix client as a room widget. This allows you to configure MindRoom without leaving your chat interface.
 
-**Quick Setup:**
+**⚠️ Important:** Element Web (app.element.io) does NOT support custom widgets. You need:
+- **Element Desktop** (download from https://element.io/download), OR
+- **Self-hosted Element Web** with widgets enabled, OR
+- **Use the widget directly** at http://localhost:3001 in a browser tab
+
+**Quick Setup (Element Desktop only):**
 1. Start the widget: `./widget/run.sh`
-2. In Element, go to room settings → Widgets → Add Custom Widget
+2. In Element Desktop, go to room settings → Widgets → Add Custom Widget
 3. Enter URL: `http://localhost:3001/matrix-widget.html?url=http://localhost:3001`
 4. Click "Add Widget"
 
-See `MATRIX_INTEGRATION.md` for detailed setup instructions and advanced integration options.
+See `MATRIX_INTEGRATION.md` for detailed setup instructions and alternative access methods.
 
 ## Future Enhancements
 

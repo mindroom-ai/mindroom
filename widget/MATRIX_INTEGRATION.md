@@ -1,16 +1,28 @@
 # Matrix/Element Widget Integration
 
-This guide explains how to integrate the MindRoom Configuration widget into your Matrix client (Element, etc.).
+This guide explains how to integrate the MindRoom Configuration widget into your Matrix client.
+
+## Important: Widget Support Limitations
+
+**⚠️ Element Web (app.element.io) does NOT support custom widgets for security reasons.**
+
+Widgets are only available in:
+- **Element Desktop** (downloadable application)
+- **Self-hosted Element Web** instances with widgets enabled
+- **Other Matrix clients** that support widgets (FluffyChat, etc.)
 
 ## Prerequisites
 
 1. MindRoom widget running (see widget/README.md for setup)
-2. Element or another Matrix client that supports widgets
+2. One of:
+   - Element Desktop (download from https://element.io/download)
+   - Self-hosted Element Web with widget support enabled
+   - Another Matrix client with widget support
 3. Admin access to the room where you want to add the widget
 
 ## Quick Setup
 
-### Method 1: Using Element Web/Desktop
+### Method 1: Using Element Desktop
 
 1. **Start the widget server** (if not already running):
    ```bash
@@ -51,6 +63,80 @@ For remote access or hosted deployment:
 ```
 https://your-domain.com/widget/matrix-widget.html?url=https://your-domain.com/widget
 ```
+
+## Alternative Access Methods (For Element Web Users)
+
+Since Element Web (app.element.io) doesn't support custom widgets, here are alternative ways to use the MindRoom configuration tool:
+
+### Option 1: Direct Browser Access
+
+Simply open the widget in a separate browser tab:
+
+1. **Start the widget**:
+   ```bash
+   ./widget/run.sh
+   ```
+
+2. **Open in browser**:
+   ```
+   http://localhost:3001
+   ```
+
+3. **Keep it open alongside Element Web** in a separate tab or window
+
+### Option 2: Use Element Desktop
+
+Download and install Element Desktop which has full widget support:
+
+1. **Download Element Desktop** from https://element.io/download
+2. **Login** with your Matrix account
+3. **Follow the widget setup instructions** above
+
+### Option 3: Browser Split Screen
+
+Use your browser's split-screen or picture-in-picture features:
+
+1. **Open Element Web** in one tab
+2. **Open the widget** (http://localhost:3001) in another tab
+3. **Use browser extensions** like "Tab Resize" or "Split Screen" to view both simultaneously
+
+### Option 4: Desktop Widget Tools
+
+Use desktop widget tools to create a floating window:
+
+**On macOS:**
+- Use "Fluid" or "Nativefier" to create a standalone app from the widget URL
+
+**On Windows:**
+- Use "WebView2" or create a shortcut with `--app=http://localhost:3001`
+
+**On Linux:**
+- Use `google-chrome --app=http://localhost:3001` to create an app window
+- Or use tools like "Nativefier" or "Web Apps" in GNOME
+
+### Option 5: Self-Host Element Web
+
+If you need widget support in a web interface:
+
+1. **Deploy your own Element Web instance**:
+   ```bash
+   git clone https://github.com/vector-im/element-web.git
+   cd element-web
+   yarn install
+   yarn build
+   ```
+
+2. **Configure to enable widgets** in `config.json`:
+   ```json
+   {
+     "integrations_ui_url": "https://scalar.vector.im/",
+     "integrations_rest_url": "https://scalar.vector.im/api",
+     "integrations_widgets_urls": ["https://scalar.vector.im/api"],
+     "enable_widgets": true
+   }
+   ```
+
+3. **Serve the built files** with a web server
 
 ## Widget Features in Matrix
 
