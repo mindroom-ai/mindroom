@@ -54,6 +54,7 @@ from .thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     get_available_agents_in_room,
+    get_safe_thread_root,
     has_user_responded_after_message,
     should_agent_respond,
 )
@@ -491,8 +492,6 @@ class AgentBot:
         if not thread_id:
             # If we have the event object, check if it's safe to use as thread root
             if reply_to_event:
-                from .thread_utils import get_safe_thread_root
-
                 safe_root = get_safe_thread_root(reply_to_event)
                 effective_thread_id = safe_root if safe_root else reply_to_event_id
             else:
