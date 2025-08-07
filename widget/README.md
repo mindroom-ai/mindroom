@@ -195,6 +195,18 @@ Currently manual testing. Run the widget and verify:
 2. **File permissions**: Ensure write access to `config.yaml`
 3. **Missing dependencies**: Run `npm install` and `uv sync`
 
+## Matrix/Element Integration
+
+The widget can be embedded directly into your Matrix client (Element, etc.) as a room widget. This allows you to configure MindRoom without leaving your chat interface.
+
+**Quick Setup:**
+1. Start the widget: `./widget/run.sh`
+2. In Element, go to room settings → Widgets → Add Custom Widget
+3. Enter URL: `http://localhost:3001/matrix-widget.html?url=http://localhost:3001`
+4. Click "Add Widget"
+
+See `MATRIX_INTEGRATION.md` for detailed setup instructions and advanced integration options.
+
 ## Future Enhancements
 
 - [ ] Real API key encryption (currently placeholder)
@@ -202,10 +214,11 @@ Currently manual testing. Run the widget and verify:
 - [ ] Import/export configuration backups
 - [ ] Undo/redo functionality
 - [ ] Batch operations on agents
-- [ ] Matrix widget manifest for embedding
+- [x] Matrix widget manifest for embedding
 
 ## Additional Setup Guides
 
+- `MATRIX_INTEGRATION.md` - Matrix/Element widget integration guide
 - `SCREENSHOT_SETUP.md` - Detailed screenshot setup and troubleshooting
 - `NIX_SETUP.md` - Nix-specific environment setup
 
