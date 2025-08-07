@@ -111,7 +111,10 @@ When working in teams with other agents, you should identify yourself as {agent_
     else:
         logger.info(f"Using YAML config for agent: {agent_name}")
         # Add identity context even for YAML-configured agents
-        identity_instruction = f"You are {agent_config.display_name} (username: @mindroom_{agent_name}). When collaborating with other agents, identify yourself and leverage your expertise: {agent_config.role}"
+        identity_instruction = (
+            f"You are {agent_config.display_name} (username: @mindroom_{agent_name})."
+            " When collaborating with other agents, identify yourself and leverage your expertise: {agent_config.role}"
+        )
         role = agent_config.role
         instructions = [identity_instruction] + agent_config.instructions
 

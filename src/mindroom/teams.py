@@ -102,24 +102,34 @@ async def create_team_response(
     agent_tools = []
     for agent in agents:
         # Extract a brief role description
+        # Agent.role is Optional[str] in the Agno library
         role_desc = "Team member"
-        if hasattr(agent, "role") and agent.role:
+        agent_role = getattr(agent, "role", None)
+        if agent_role:
             # Take the first line or first 100 chars of the role
-            role_lines = str(agent.role).split("\n")
+            role_lines = str(agent_role).split("\n")
             for line in role_lines:
                 if line.strip() and not line.startswith("#"):
                     role_desc = line.strip()[:100]
                     break
 
-        agent_identities.append(f"- **{agent.name}**: {role_desc}")
+        # Agent.name should always be present but use a fallback just in case
+        agent_name = getattr(agent, "name", "Unknown")
+        agent_identities.append(f"- **{agent_name}**: {role_desc}")
 
         # List available tools for each agent
-        if hasattr(agent, "tools") and agent.tools:
-            tools_list = [
-                tool.name if hasattr(tool, "name") else str(tool) for tool in agent.tools[:5]
-            ]  # First 5 tools
-            if tools_list:
-                agent_tools.append(f"- **{agent.name}** has access to: {', '.join(tools_list)}")
+        # Agent.tools is Optional[List[...]] in the Agno library
+        agent_tools_list = getattr(agent, "tools", None)
+        if agent_tools_list:
+            # Extract tool names, handling different tool object types
+            tool_names = []
+            for tool in agent_tools_list[:5]:  # First 5 tools
+                # Try to get the name attribute, otherwise convert to string
+                tool_name = getattr(tool, "name", str(tool))
+                tool_names.append(tool_name)
+
+            if tool_names:
+                agent_tools.append(f"- **{agent_name}** has access to: {', '.join(tool_names)}")
 
     tools_section = ""
     if agent_tools:
