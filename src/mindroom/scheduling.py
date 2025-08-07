@@ -48,30 +48,25 @@ async def parse_schedule(
 Current time (UTC): {current_time.isoformat()}Z
 Request: "{full_text}"
 
-Extract:
-1. When to execute the task (convert to exact UTC datetime)
-2. What message to send at that time
+You MUST extract:
+1. execute_at: The exact UTC datetime when the task should execute
+2. message: The message/reminder text to send at that time
+3. interpretation: A human-readable explanation of the parsed time
 
-Examples of requests you should handle:
-- "in 5 minutes Check the deployment status"
-- "tomorrow at 3pm Send the weekly report"
-- "later Ping me about the meeting"
-- "next week Review the project proposal"
-- "in 2 hours" (if no message specified, use "Reminder" as default)
-- "tell me in 1 min again" (time: "in 1 min", message: "Reminder")
-- "in 30 seconds remind me to check email" (time: "in 30 seconds", message: "check email")
-- "let me know tomorrow" (time: "tomorrow", message: "Reminder")
-- "remind me tomorrow" (time: "tomorrow", message: "Reminder")
-- "a daily update and whether i need to sell" (time: "tomorrow at 9am", message: "Daily update and whether you need to sell")
-- "daily at 9am check stocks" (time: "tomorrow at 9am", message: "check stocks")
+Examples of requests and how to parse them:
+- "in 5 minutes Check the deployment status" -> execute_at: current_time + 5 minutes, message: "Check the deployment status"
+- "tomorrow at 3pm Send the weekly report" -> execute_at: tomorrow at 15:00 UTC, message: "Send the weekly report"
+- "later Ping me about the meeting" -> execute_at: current_time + 30 minutes, message: "Ping me about the meeting"
+- "in 2 hours" -> execute_at: current_time + 2 hours, message: "Reminder"
+- "remind me tomorrow" -> execute_at: tomorrow at 09:00 UTC, message: "Reminder"
 
-For vague times like "later" or "soon", use 30 minutes as a reasonable default.
-Parse time expressions flexibly - "1 min", "1 minute", "one minute" are all valid.
-If no specific message is given, use "Reminder" as the default message.
-For "daily" requests without a specific time, use tomorrow at 9am as the first occurrence.
-Note: We currently only support one-time reminders, not recurring ones. For "daily" requests, schedule the first occurrence only.
+Rules:
+- For vague times like "later" or "soon", use 30 minutes from now
+- If no message is specified, use "Reminder" as the default
+- For "daily" requests, schedule tomorrow at 9am UTC (we don't support recurring yet)
+- Parse time expressions flexibly: "1 min", "1 minute", "one minute" are all valid
 
-If you cannot parse the request, return an error with a helpful suggestion."""
+IMPORTANT: Always provide a valid response. If the request is unclear, make a reasonable interpretation."""
 
     # Use default model for simplicity
     model = get_model_instance("default")
@@ -80,26 +75,36 @@ If you cannot parse the request, return an error with a helpful suggestion."""
         name="ScheduleParser",
         role="Parse natural language schedule requests",
         model=model,
-        response_model=ScheduledTimeResponse | ScheduleParseError,  # type: ignore[arg-type]
+        response_model=ScheduledTimeResponse,  # Only use single model, not union
     )
 
-    response = await agent.arun(prompt, session_id=f"schedule_parse_{uuid.uuid4()}")
-    result = response.content
+    try:
+        response = await agent.arun(prompt, session_id=f"schedule_parse_{uuid.uuid4()}")
+        result = response.content
 
-    if isinstance(result, ScheduledTimeResponse):
-        logger.info(
-            "Successfully parsed schedule",
-            request=full_text,
-            execute_at=result.execute_at,
-            message=result.message,
-            interpretation=result.interpretation,
+        if isinstance(result, ScheduledTimeResponse):
+            logger.info(
+                "Successfully parsed schedule",
+                request=full_text,
+                execute_at=result.execute_at,
+                message=result.message,
+                interpretation=result.interpretation,
+            )
+            return result
+        elif isinstance(result, ScheduleParseError):
+            logger.debug("AI returned parse error", error=result.error)
+            return result
+
+        # Log unexpected response type for debugging
+        logger.error(
+            "Unexpected response type from AI",
+            response_type=type(result).__name__,
+            response_content=str(result),
         )
-        return result
-    elif isinstance(result, ScheduleParseError):
-        logger.debug("AI returned parse error", error=result.error)
-        return result
+    except Exception as e:
+        logger.exception("Error parsing schedule", error=str(e), request=full_text)
 
-    # Fallback if AI returns unexpected type
+    # Fallback if AI returns unexpected type or errors
     return ScheduleParseError(
         error="Unable to parse the schedule request",
         suggestion="Try something like 'in 5 minutes Check the deployment' or 'tomorrow at 3pm Send report'",
