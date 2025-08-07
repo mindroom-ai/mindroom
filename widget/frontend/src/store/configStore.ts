@@ -24,6 +24,7 @@ interface ConfigState {
   deleteModel: (modelId: string) => void;
   setAPIKey: (provider: string, key: string) => void;
   testModel: (modelId: string) => Promise<boolean>;
+  updateToolConfig: (toolId: string, config: any) => void;
   markDirty: () => void;
   clearError: () => void;
 }
@@ -194,6 +195,23 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       console.error('Failed to test model:', error);
       return false;
     }
+  },
+
+  // Update tool configuration
+  updateToolConfig: (toolId, config) => {
+    set((state) => {
+      if (!state.config) return state;
+      return {
+        config: {
+          ...state.config,
+          tools: {
+            ...state.config.tools,
+            [toolId]: config,
+          },
+        },
+        isDirty: true,
+      };
+    });
   },
 
   // Mark configuration as dirty

@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback } from 'react';
+import React, { useEffect, useCallback, useState } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -7,10 +7,13 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Save, Trash2, Plus, X, FileCode } from 'lucide-react';
+import { Save, Trash2, Plus, X, FileCode, Settings } from 'lucide-react';
 import { AVAILABLE_TOOLS } from '@/types/config';
 import { useForm, Controller } from 'react-hook-form';
 import { Agent } from '@/types/config';
+import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
+import { TOOL_SCHEMAS, toolNeedsConfiguration } from '@/types/toolConfig';
+import { Badge } from '@/components/ui/badge';
 
 export function AgentEditor() {
   const {
@@ -23,9 +26,10 @@ export function AgentEditor() {
     isDirty
   } = useConfigStore();
 
+  const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
-  const { control, reset, watch, setValue, getValues } = useForm<Agent>({
+  const { control, reset, setValue, getValues } = useForm<Agent>({
     defaultValues: selectedAgent || {
       id: '',
       display_name: '',
@@ -201,7 +205,7 @@ export function AgentEditor() {
           {/* Tools */}
           <div>
             <Label>Tools</Label>
-            <div className="grid grid-cols-2 gap-2 mt-2">
+            <div className="space-y-2 mt-2">
               {AVAILABLE_TOOLS.map((tool) => (
                 <Controller
                   key={tool}
@@ -209,25 +213,52 @@ export function AgentEditor() {
                   control={control}
                   render={({ field }) => {
                     const isChecked = field.value.includes(tool);
+                    const hasSchema = !!TOOL_SCHEMAS[tool];
+                    const needsConfig = toolNeedsConfiguration(tool);
+                    const isConfigured = config?.tools?.[tool] && Object.keys(config.tools[tool]).length > 0;
+
                     return (
-                      <div className="flex items-center space-x-2">
-                        <Checkbox
-                          id={tool}
-                          checked={isChecked}
-                          onCheckedChange={(checked) => {
-                            const newTools = checked
-                              ? [...field.value, tool]
+                      <div className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 transition-colors">
+                        <div className="flex items-center space-x-2">
+                          <Checkbox
+                            id={tool}
+                            checked={isChecked}
+                            onCheckedChange={(checked) => {
+                              const newTools = checked
+                                ? [...field.value, tool]
                               : field.value.filter(t => t !== tool);
-                            field.onChange(newTools);
-                            handleFieldChange('tools', newTools);
-                          }}
-                        />
-                        <label
-                          htmlFor={tool}
-                          className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-                        >
-                          {tool}
-                        </label>
+                              field.onChange(newTools);
+                              handleFieldChange('tools', newTools);
+                            }}
+                          />
+                          <label
+                            htmlFor={tool}
+                            className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer"
+                          >
+                            {TOOL_SCHEMAS[tool]?.name || tool}
+                          </label>
+                          {isChecked && needsConfig && !isConfigured && (
+                            <Badge variant="destructive" className="text-xs">
+                              Needs Config
+                            </Badge>
+                          )}
+                          {isChecked && isConfigured && (
+                            <Badge variant="default" className="text-xs bg-green-100 text-green-800">
+                              Configured
+                            </Badge>
+                          )}
+                        </div>
+                        {isChecked && hasSchema && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setConfigDialogTool(tool)}
+                            className="h-7 px-2"
+                          >
+                            <Settings className="h-3 w-3 mr-1" />
+                            Configure
+                          </Button>
+                        )}
                       </div>
                     );
                   }}
@@ -348,6 +379,17 @@ export function AgentEditor() {
           </div>
         </div>
       </CardContent>
+
+      {/* Tool Configuration Dialog */}
+      {configDialogTool && (
+        <ToolConfigDialog
+          toolId={configDialogTool}
+          open={!!configDialogTool}
+          onOpenChange={(open) => {
+            if (!open) setConfigDialogTool(null);
+          }}
+        />
+      )}
     </Card>
   );
 }

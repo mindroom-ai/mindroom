@@ -37,6 +37,7 @@ export interface Config {
   router: {
     model: string;
   };
+  tools?: Record<string, any>; // Tool configurations
 }
 
 export interface APIKey {
