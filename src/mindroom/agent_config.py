@@ -97,26 +97,22 @@ def create_agent(agent_name: str, storage_path: Path, config_path: Path | None =
     storage_path.mkdir(parents=True, exist_ok=True)
     storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
 
+    # Add identity context to all agents using the unified template
+    identity_context = agent_prompts.AGENT_IDENTITY_CONTEXT.format(
+        display_name=agent_config.display_name, agent_name=agent_name
+    )
+
     # Use rich prompt if available, otherwise use YAML config
     if agent_name in RICH_PROMPTS:
         logger.info(f"Using rich prompt for agent: {agent_name}")
-        # Add agent identity context to the rich prompt
-        identity_context = f"""## Your Identity
-You are {agent_config.display_name} (username: @mindroom_{agent_name}), a specialized agent in the Mindroom multi-agent system.
-When working in teams with other agents, you should identify yourself as {agent_config.display_name} and leverage your specific expertise.
-
-"""
+        # Prepend identity context to the rich prompt
         role = identity_context + RICH_PROMPTS[agent_name]
         instructions = []  # Instructions are in the rich prompt
     else:
         logger.info(f"Using YAML config for agent: {agent_name}")
-        # Add identity context even for YAML-configured agents
-        identity_instruction = (
-            f"You are {agent_config.display_name} (username: @mindroom_{agent_name})."
-            " When collaborating with other agents, identify yourself and leverage your expertise: {agent_config.role}"
-        )
-        role = agent_config.role
-        instructions = [identity_instruction] + agent_config.instructions
+        # For YAML agents, prepend identity to role and keep original instructions
+        role = identity_context + agent_config.role
+        instructions = agent_config.instructions
 
     # Create agent with defaults applied
     model = get_model_instance(agent_config.model)
