@@ -118,6 +118,10 @@ async def create_team_response(
         mode=mode.value,
         name=f"Team-{'-'.join(agent_names)}",
         model=get_model_instance("default"),
+        # Enable features for better team collaboration visibility
+        show_members_responses=True,  # Show individual member responses
+        enable_agentic_context=True,  # Share context between team members
+        debug_mode=False,  # Set to True for debugging
         # Agno will automatically list members with their names, roles, and tools
         # No need for custom descriptions or instructions
     )
@@ -132,12 +136,41 @@ async def create_team_response(
 
     # Extract response content
     if isinstance(response, TeamRunResponse):
-        # The content field contains the final aggregated response from the team
-        team_response = str(response.content or "")
+        # Build comprehensive team response
+        parts = []
 
-        # Log member responses if available for debugging
+        # Include member responses if available (when show_members_responses=True)
         if hasattr(response, "member_responses") and response.member_responses:
             logger.debug(f"Team had {len(response.member_responses)} member responses")
+
+            # Add individual member contributions
+            for member_resp in response.member_responses:
+                # Extract member name from the response if available
+                member_name = getattr(member_resp, "member_id", "Unknown Agent")
+                member_content = ""
+
+                # Handle both TeamRunResponse and RunResponse types
+                if hasattr(member_resp, "content"):
+                    member_content = str(member_resp.content or "")
+                elif hasattr(member_resp, "messages"):
+                    # Extract assistant messages from the member
+                    messages = getattr(member_resp, "messages", [])
+                    if messages:
+                        for msg in messages:
+                            if hasattr(msg, "role") and msg.role == "assistant" and hasattr(msg, "content"):
+                                member_content += str(msg.content or "")
+
+                if member_content:
+                    parts.append(f"**{member_name}**: {member_content}")
+
+        # Add the final aggregated response
+        if response.content:
+            if parts:  # If we have member responses, add a separator
+                parts.append("\n**Team Consensus**:")
+            parts.append(str(response.content))
+
+        # Combine all parts
+        team_response = "\n\n".join(parts) if parts else "No team response generated."
     else:
         logger.warning(f"Unexpected response type: {type(response)}", response=response)
         team_response = str(response)
