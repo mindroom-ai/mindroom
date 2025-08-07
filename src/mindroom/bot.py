@@ -39,6 +39,12 @@ from .matrix import (
 )
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
+from .scheduling import (
+    cancel_scheduled_task,
+    list_scheduled_tasks,
+    restore_scheduled_tasks,
+    schedule_task,
+)
 from .streaming import IN_PROGRESS_MARKER, StreamingResponse
 from .teams import create_team_response, should_form_team
 from .thread_invites import ThreadInviteManager
@@ -131,6 +137,10 @@ class AgentBot:
         for room_id in self.rooms:
             if await join_room(self.client, room_id):
                 self.logger.info("Joined room", room_id=room_id)
+                # Restore scheduled tasks for this room
+                restored = await restore_scheduled_tasks(self.client, room_id)
+                if restored > 0:
+                    self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
@@ -169,14 +179,18 @@ class AgentBot:
         if sender_id.is_agent and sender_id.agent_name:
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
-        # Handle commands (only router agent handles commands to avoid duplicates)
-        if self.agent_name == ROUTER_AGENT_NAME:
+        is_command = event.body.strip().startswith("!")
+        if is_command:  # ONLY router handles the command
+            if self.agent_name != ROUTER_AGENT_NAME:
+                return
             command = command_parser.parse(event.body)
             if command:
                 await self._handle_command(room, event, command)
-                return
+            else:
+                help_text = "❌ Unknown command. Try !help for available commands."
+                await self._send_response(room, event.event_id, help_text, thread_id=None)
+            return
 
-        # Extract message context
         context = await self._extract_message_context(room, event)
 
         # If message is from another agent and we're not mentioned, ignore it
@@ -592,6 +606,33 @@ class AgentBot:
         elif command.type == CommandType.HELP:
             topic = command.args.get("topic")
             response_text = get_command_help(topic)
+
+        elif command.type == CommandType.SCHEDULE:
+            full_text = command.args["full_text"]
+
+            task_id, response_text = await schedule_task(
+                client=self.client,
+                room_id=room.room_id,
+                thread_id=thread_id,
+                agent_user_id=self.agent_user.user_id,
+                scheduled_by=event.sender,
+                full_text=full_text,
+            )
+
+        elif command.type == CommandType.LIST_SCHEDULES:
+            response_text = await list_scheduled_tasks(
+                client=self.client,
+                room_id=room.room_id,
+                thread_id=thread_id,
+            )
+
+        elif command.type == CommandType.CANCEL_SCHEDULE:
+            task_id = command.args["task_id"]
+            response_text = await cancel_scheduled_task(
+                client=self.client,
+                room_id=room.room_id,
+                task_id=task_id,
+            )
 
         if response_text:
             await self._send_response(room, event.event_id, response_text, thread_id)

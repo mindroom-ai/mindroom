@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import ClassVar
 
-from ..agent_config import load_config
+from ..agent_config import ROUTER_AGENT_NAME, load_config
 
 
 @dataclass(frozen=True)
@@ -59,7 +59,15 @@ class MatrixID:
         # Remove prefix
         name = self.username[len(self.AGENT_PREFIX) :]
 
-        # Validate against config
+        # Special check for the router agent:
+        # The router is a built-in agent that handles command routing and doesn't
+        # appear in config.agents. Without this check, extract_agent_name() would
+        # return None for router messages, causing other agents to incorrectly
+        # respond to router's error messages (e.g., when schedule parsing fails).
+        if name == ROUTER_AGENT_NAME:
+            return name
+
+        # Validate regular agents against config
         config = load_config()
         return name if name in config.agents else None
 

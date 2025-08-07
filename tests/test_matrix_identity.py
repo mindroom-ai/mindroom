@@ -60,6 +60,15 @@ class TestMatrixID:
         mid = MatrixID.parse("@mindroom_unknown:localhost")
         assert mid.agent_name is None
 
+    def test_parse_router(self):
+        """Test parsing a router agent ID."""
+        mid = MatrixID.parse("@mindroom_router:localhost")
+        assert mid.username == "mindroom_router"
+        assert mid.domain == "localhost"
+        assert mid.full_id == "@mindroom_router:localhost"
+        assert mid.is_agent is True
+        assert mid.agent_name == "router"
+
 
 class TestThreadStateKey:
     """Test the ThreadStateKey class."""
