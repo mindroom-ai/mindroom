@@ -191,12 +191,11 @@ class AgentBot:
                 await self._handle_command(room, event, command)
             return
 
-        # Check if sender is an agent BEFORE extracting context
-        sender_agent_name = extract_agent_name(event.sender)
-        sender_is_agent = sender_agent_name is not None
-
         # Extract message context for non-command messages
         context = await self._extract_message_context(room, event)
+
+        # If message is from another agent and we're not mentioned, ignore it
+        sender_is_agent = extract_agent_name(event.sender) is not None
 
         # IMPORTANT: If ANY agent sends a message without mentioning anyone,
         # other agents should not respond (prevents cascade effects)
