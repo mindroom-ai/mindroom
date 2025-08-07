@@ -9,7 +9,7 @@ from agno.agent import Agent
 from agno.run.team import TeamRunResponse
 from agno.team import Team
 
-from .agent_config import ROUTER_AGENT_NAME, load_config
+from .agent_config import ROUTER_AGENT_NAME
 from .ai import get_model_instance
 from .logging_config import get_logger
 
@@ -18,56 +18,6 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
-
-
-def get_agent_description(agent: Agent, agent_name: str | None = None) -> str:
-    """Get a brief description of an agent for team contexts.
-
-    This function provides a clean abstraction for extracting agent descriptions
-    without needing to parse role strings or make assumptions about format.
-
-    Args:
-        agent: The Agno Agent instance
-        agent_name: Optional agent name to look up config
-
-    Returns:
-        A brief description suitable for team contexts
-    """
-    # Try to get description from our config if we have the agent name
-    if agent_name:
-        try:
-            config = load_config()
-            if agent_name in config.agents:
-                agent_config = config.agents[agent_name]
-                return agent_config.get_brief_description()
-        except Exception:
-            # Fall through to other methods if config lookup fails
-            pass
-
-    # Check if agent has a simple role we can use
-    agent_role = getattr(agent, "role", None)
-    if agent_role:
-        # If it's a simple one-liner, use it directly
-        role_str = str(agent_role)
-        if len(role_str) <= 150 and "\n" not in role_str:
-            return role_str
-
-        # For multi-line roles, try to extract something meaningful
-        # Look for the first sentence that's not a header or identity statement
-        for line in role_str.split("\n"):
-            stripped = line.strip()
-            # Skip empty lines, headers, and identity statements
-            if (
-                stripped
-                and not stripped.startswith("#")
-                and not stripped.startswith("You are")
-                and not stripped.startswith("## ")
-            ):
-                # Return the first meaningful line, truncated if needed
-                return stripped[:150] if len(stripped) > 150 else stripped
-
-    # Final fallback
-    return "Team member with specialized expertise"
 
 
 class TeamMode(str, Enum):
@@ -147,52 +97,8 @@ async def create_team_response(
     if not agents:
         return "Sorry, no agents available for team collaboration."
 
-    # Build team identity context
-    agent_identities = []
-
-    # Map agents back to their original names from the orchestrator
-    agent_name_map = {}
-    for name, bot in orchestrator.agent_bots.items():
-        if bot.agent in agents:
-            agent_name_map[bot.agent] = name
-
-    for agent in agents:
-        # Get the agent's display name
-        agent_display_name = getattr(agent, "name", "Unknown")
-
-        # Get the original agent name for config lookup
-        original_name = agent_name_map.get(agent)
-
-        # Get a clean description using our helper function
-        description = get_agent_description(agent, original_name)
-
-        agent_identities.append(f"- **{agent_display_name}**: {description}")
-
-    # Determine team mode instruction
-    mode_instruction = ""
-    if mode == TeamMode.COORDINATE:
-        mode_instruction = "\n**Mode: COORDINATE** - Work sequentially, building on each other's contributions. Each agent should add their unique perspective."
-    elif mode == TeamMode.COLLABORATE:
-        mode_instruction = (
-            "\n**Mode: COLLABORATE** - Work together in parallel, combining your expertise into a unified response."
-        )
-
-    team_identity = f"""## Team Collaboration Context
-
-You are working as a team with the following members:
-{chr(10).join(agent_identities)}
-{mode_instruction}
-
-**Important Instructions:**
-1. Each agent IS one of the team members listed above - you collectively control these agents
-2. Each agent should use their specialized knowledge and capabilities to contribute
-3. Work as a coordinated team to address the user's request
-4. When the user mentions specific agents (like NewsAgent or CodeAgent), recognize that YOU are those agents
-
-"""
-
-    # Build prompt with context
-    prompt = team_identity + message
+    # Build the user message with thread context if available
+    prompt = message
     if thread_history:
         recent_messages = thread_history[-3:]  # Last 3 messages for context
         context_parts = []
@@ -203,14 +109,35 @@ You are working as a team with the following members:
                 context_parts.append(f"{sender}: {body}")
 
         if context_parts:
-            prompt = f"{team_identity}## Thread Context:\n{'\n'.join(context_parts)}\n\n## User Request:\n{message}"
+            context = "\n".join(context_parts)
+            prompt = f"Thread Context:\n{context}\n\nUser: {message}"
 
-    # Create and run team
+    # Get member names for the team description
+    member_names = [getattr(agent, "name", "Unknown") for agent in agents]
+
+    # Create team description based on mode
+    if mode == TeamMode.COORDINATE:
+        team_description = f"A coordinated team of {', '.join(member_names)} working sequentially to build on each other's contributions."
+    elif mode == TeamMode.COLLABORATE:
+        team_description = (
+            f"A collaborative team of {', '.join(member_names)} working together to provide a unified response."
+        )
+    else:
+        team_description = f"A team of {', '.join(member_names)} working together."
+
+    # Use Agno's built-in Team features for identity and instructions
     team = Team(
         members=agents,  # type: ignore[arg-type]
         mode=mode.value,
         name=f"Team-{'-'.join(agent_names)}",
         model=get_model_instance("default"),
+        description=team_description,
+        instructions=[
+            "You are working as a coordinated team with multiple specialized agents.",
+            "Each team member should leverage their unique expertise and capabilities.",
+            f"The team consists of: {', '.join(member_names)}.",
+            "When users mention specific agents, recognize that you collectively ARE those agents.",
+        ],
     )
 
     logger.info(f"Executing team response with {len(agents)} agents")
