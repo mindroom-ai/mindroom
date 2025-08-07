@@ -81,7 +81,7 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
       }
 
       // Type-specific validation
-      if (value && field.validation) {
+      if (value !== undefined && value !== '' && field.validation) {
         if (field.type === 'number') {
           const numValue = Number(value);
           if (field.validation.min !== undefined && numValue < field.validation.min) {

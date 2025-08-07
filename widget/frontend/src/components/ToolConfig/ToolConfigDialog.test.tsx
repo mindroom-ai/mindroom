@@ -103,34 +103,49 @@ describe('ToolConfigDialog', () => {
   it('handles boolean field changes', () => {
     render(
       <ToolConfigDialog
-        toolId="email"
+        toolId="duckduckgo"
         open={true}
         onOpenChange={mockOnOpenChange}
       />
     );
 
-    const tlsCheckbox = screen.getByLabelText('Use TLS');
-    fireEvent.click(tlsCheckbox);
+    // DuckDuckGo has only optional fields, so no tabs
+    const safeSearchCheckbox = screen.getByLabelText('Safe Search');
+    // It starts checked because default is true
+    expect(safeSearchCheckbox).toBeChecked();
 
-    expect(tlsCheckbox).toBeChecked();
+    // Click to uncheck
+    fireEvent.click(safeSearchCheckbox);
+    expect(safeSearchCheckbox).not.toBeChecked();
+
+    // Click again to check
+    fireEvent.click(safeSearchCheckbox);
+    expect(safeSearchCheckbox).toBeChecked();
   });
 
   it('handles select field changes', () => {
     render(
       <ToolConfigDialog
-        toolId="tavily"
+        toolId="duckduckgo"
         open={true}
         onOpenChange={mockOnOpenChange}
       />
     );
 
-    const depthSelect = screen.getByRole('combobox');
-    fireEvent.click(depthSelect);
+    // DuckDuckGo has only optional fields, so no tabs
+    // Find the select trigger
+    const regionLabel = screen.getByText('Region');
+    const regionSelect = regionLabel.parentElement?.querySelector('[role="combobox"]');
 
-    const option = screen.getByText('Advanced');
+    expect(regionSelect).toBeTruthy();
+    expect(regionSelect).toHaveTextContent('No region'); // Default value
+
+    fireEvent.click(regionSelect!);
+
+    const option = screen.getByText('United States');
     fireEvent.click(option);
 
-    expect(depthSelect).toHaveTextContent('Advanced');
+    expect(regionSelect).toHaveTextContent('United States');
   });
 
   it('validates required fields', async () => {
