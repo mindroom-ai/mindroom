@@ -488,14 +488,6 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
         )
 
-        self.logger.debug(
-            "Sending response",
-            thread_id_param=thread_id,
-            effective_thread_id=effective_thread_id,
-            reply_to=reply_to_event_id,
-            has_thread_relation="m.thread" in content.get("m.relates_to", {}).get("rel_type", ""),
-        )
-
         response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
         if isinstance(response, nio.RoomSendResponse):
             self.response_tracker.mark_responded(reply_to_event_id)
@@ -586,12 +578,6 @@ class AgentBot:
             # If the command itself is a reply to another message, we can't create a thread from it
             # Use the message the command is replying to as the thread root instead
             thread_root = self._get_safe_thread_root(event)
-            self.logger.debug(
-                "Command outside thread - sending error",
-                command_event_id=event.event_id,
-                thread_root=thread_root,
-                command_has_relations="m.relates_to" in event.source.get("content", {}),
-            )
             await self._send_response(room, event.event_id, response_text, thread_id=thread_root)
             return
 
