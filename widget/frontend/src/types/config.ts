@@ -25,6 +25,16 @@ export interface Agent {
   model?: string; // Reference to a model in the models section
 }
 
+export interface Team {
+  id: string; // The key in the teams object
+  display_name: string;
+  role: string;
+  agents: string[]; // List of agent IDs
+  rooms: string[];
+  mode: 'coordinate' | 'collaborate';
+  model?: string; // Optional team-specific model
+}
+
 export interface Config {
   memory: MemoryConfig;
   models: Record<string, ModelConfig>;
@@ -37,6 +47,8 @@ export interface Config {
   router: {
     model: string;
   };
+  room_models?: Record<string, string>; // Room-specific model overrides for teams
+  teams?: Record<string, Omit<Team, 'id'>>; // Teams configuration
   tools?: Record<string, any>; // Tool configurations
 }
 
