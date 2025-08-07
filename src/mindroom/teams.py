@@ -100,7 +100,7 @@ async def create_team_response(
     # Build the user message with thread context if available
     prompt = message
     if thread_history:
-        recent_messages = thread_history[-3:]  # Last 3 messages for context
+        recent_messages = thread_history[-30:]  # Last 30 messages for context
         context_parts = []
         for msg in recent_messages:
             sender = msg.get("sender", "Unknown")
@@ -112,32 +112,14 @@ async def create_team_response(
             context = "\n".join(context_parts)
             prompt = f"Thread Context:\n{context}\n\nUser: {message}"
 
-    # Get member names for the team description
-    member_names = [getattr(agent, "name", "Unknown") for agent in agents]
-
-    # Create team description based on mode
-    if mode == TeamMode.COORDINATE:
-        team_description = f"A coordinated team of {', '.join(member_names)} working sequentially to build on each other's contributions."
-    elif mode == TeamMode.COLLABORATE:
-        team_description = (
-            f"A collaborative team of {', '.join(member_names)} working together to provide a unified response."
-        )
-    else:
-        team_description = f"A team of {', '.join(member_names)} working together."
-
-    # Use Agno's built-in Team features for identity and instructions
+    # Let Agno Team handle everything - it already knows how to describe members
     team = Team(
         members=agents,  # type: ignore[arg-type]
         mode=mode.value,
         name=f"Team-{'-'.join(agent_names)}",
         model=get_model_instance("default"),
-        description=team_description,
-        instructions=[
-            "You are working as a coordinated team with multiple specialized agents.",
-            "Each team member should leverage their unique expertise and capabilities.",
-            f"The team consists of: {', '.join(member_names)}.",
-            "When users mention specific agents, recognize that you collectively ARE those agents.",
-        ],
+        # Agno will automatically list members with their names, roles, and tools
+        # No need for custom descriptions or instructions
     )
 
     logger.info(f"Executing team response with {len(agents)} agents")
