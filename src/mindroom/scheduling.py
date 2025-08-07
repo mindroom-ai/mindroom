@@ -237,21 +237,23 @@ async def list_scheduled_tasks(
 
     tasks = []
     tasks_in_other_threads = []
-    
+
     for event in response.events:
         if event["type"] == SCHEDULED_TASK_EVENT_TYPE:
             content = event["content"]
             if content.get("status") == "pending":
                 try:
+                    # Get the thread_id from the task
+                    task_thread = content.get("thread_id")
+
                     task_info = {
                         "id": event["state_key"],
                         "time": datetime.fromisoformat(content["execute_at"]),
                         "message": content["message"],
-                        "thread_id": content.get("thread_id"),
+                        "thread_id": task_thread,
                     }
-                    
+
                     # Separate tasks by thread
-                    task_thread = content.get("thread_id")
                     # Only filter by thread if we're in a thread context
                     # Show all tasks if no thread_id (shouldn't happen with current design)
                     if thread_id and task_thread and task_thread != thread_id:
@@ -263,7 +265,7 @@ async def list_scheduled_tasks(
 
     if not tasks and not tasks_in_other_threads:
         return "No scheduled tasks found."
-    
+
     if not tasks and tasks_in_other_threads:
         return f"No scheduled tasks in this thread.\n\n📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use !list_schedules in those threads to see details."
 
