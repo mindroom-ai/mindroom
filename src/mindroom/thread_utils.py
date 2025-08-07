@@ -3,7 +3,10 @@
 from typing import Any
 
 from .agent_config import ROUTER_AGENT_NAME
+from .logging_config import get_logger
 from .matrix import extract_agent_name
+
+logger = get_logger(__name__)
 
 
 def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str], bool]:

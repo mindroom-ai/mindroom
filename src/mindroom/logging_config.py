@@ -76,10 +76,25 @@ def setup_logging(level: str = "INFO") -> None:
         stream=sys.stderr,
     )
 
-    # Reduce verbosity of nio (Matrix) library
+    # Set mindroom modules to DEBUG level
+    mindroom_level = logging.DEBUG
+
+    # Set all third-party libraries to WARNING
+    logging.getLogger().setLevel(logging.WARNING)
+
+    # But keep mindroom modules at DEBUG
+    logging.getLogger("mindroom").setLevel(mindroom_level)
+    for module in ["bot", "thread_utils", "agent", "orchestrator", "scheduling"]:
+        logging.getLogger(f"mindroom.{module}").setLevel(mindroom_level)
+
+    # Reduce verbosity of specific libraries
     logging.getLogger("nio").setLevel(logging.WARNING)
     logging.getLogger("nio.client").setLevel(logging.WARNING)
     logging.getLogger("nio.responses").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("ollama").setLevel(logging.WARNING)
+    logging.getLogger("chromadb").setLevel(logging.WARNING)
 
 
 def get_logger(name: str = __name__) -> structlog.BoundLogger:

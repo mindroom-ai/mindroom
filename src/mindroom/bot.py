@@ -182,6 +182,11 @@ class AgentBot:
         # IMPORTANT: Only router agent should process commands
         # All other agents must ignore messages that start with !
         is_command = event.body.strip().startswith("!")
+        self.logger.debug("Processing message",
+            event_id=event.event_id,
+            sender=event.sender,
+            is_command=is_command,
+        )
 
         if is_command:
             if self.agent_name == ROUTER_AGENT_NAME:
@@ -195,10 +200,13 @@ class AgentBot:
             return
 
         # Check if sender is an agent BEFORE extracting context
-        sender_is_agent = extract_agent_name(event.sender) is not None
+        sender_agent_name = extract_agent_name(event.sender)
+        sender_is_agent = sender_agent_name is not None
 
         # Extract message context for non-command messages
         context = await self._extract_message_context(room, event)
+
+        self.logger.info("YOLO Message context extracted", context=context, our_event=event)
 
         # IMPORTANT: If ANY agent sends a message without mentioning anyone,
         # other agents should not respond (prevents cascade effects)
@@ -255,6 +263,16 @@ class AgentBot:
 
         # Determine if this agent should respond individually
         # Pass current sender info to handle RouterAgent error messages properly
+        self.logger.debug(
+            "Calling should_agent_respond",
+            agent_name=self.agent_name,
+            sender=event.sender,
+            sender_is_agent=sender_is_agent,
+            sender_agent_name=sender_agent_name,
+            mentioned_agents=context.mentioned_agents,
+            passing_current_sender=event.sender if sender_is_agent else None,
+            passing_current_mentions=context.mentioned_agents if sender_is_agent else None,
+        )
         should_respond = should_agent_respond(
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,

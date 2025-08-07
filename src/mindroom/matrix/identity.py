@@ -59,6 +59,12 @@ class MatrixID:
         # Remove prefix
         name = self.username[len(self.AGENT_PREFIX) :]
 
+        # Special case for router agent
+        from ..agent_config import ROUTER_AGENT_NAME
+
+        if name == ROUTER_AGENT_NAME:
+            return name
+
         # Validate against config
         config = load_config()
         return name if name in config.agents else None
