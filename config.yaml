@@ -276,18 +276,17 @@ room_models:
 teams:
   # Example team configurations (uncomment to enable):
 
-  # dev_team:
-  #   display_name: "DevTeam"
-  #   role: "Full-stack development team for complex programming tasks"
-  #   model: "anthropic"  # Optional: default model for this team
-  #   agents:
-  #     - code
-  #     - shell
-  #     - security
-  #   rooms:
-  #     - lobby
-  #     - dev
-  #   mode: "coordinate"  # coordinate = sequential, collaborate = parallel
+  dev_team:
+    display_name: "DevTeam"
+    role: "Full-stack development team for complex programming tasks"
+    # model: "anthropic"  # Optional: default model for this team
+    agents:
+      - code
+      - shell
+    rooms:
+      - lobby
+      - dev
+    mode: "coordinate"  # coordinate = sequential, collaborate = parallel
 
   # analysis_team:
   #   display_name: "AnalysisTeam"
