@@ -1,0 +1,11 @@
+{
+  "avatar_url": "mxc://example.com/mindroom-icon",
+  "data": {
+    "curl": "$WIDGET_URL",
+    "title": "MindRoom Configuration"
+  },
+  "description": "Configure MindRoom agents and settings",
+  "name": "MindRoom Config",
+  "type": "m.custom",
+  "url": "$WIDGET_URL"
+}

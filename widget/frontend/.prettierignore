@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+
+# Production
+dist/
+build/
+
+# Generated files
+*.min.js
+*.min.css
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Coverage
+coverage/
+.nyc_output/
+
+# IDE
+.vscode/
+.idea/
+
+# Misc
+*.log
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
