@@ -105,9 +105,10 @@ class TestThreadingBehavior:
 
         # Mock interactive.handle_text_response to return None (not an interactive response)
         # Mock _generate_response to capture the call and send a test response
-        with patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)), patch.object(
-            bot, "_generate_response"
-        ) as mock_generate:
+        with (
+            patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
+            patch.object(bot, "_generate_response") as mock_generate,
+        ):
             # Process the message
             await bot._on_message(room, event)
 
@@ -264,15 +265,14 @@ class TestThreadingBehavior:
         call_args = bot.client.room_send.call_args
         content = call_args.kwargs["content"]
 
-        # The error response should be sent without a thread (thread_id=None passed to _send_response)
-        # After the fix, router command errors don't create threads
+        # The error response should create a thread from the message the command is replying to
+        # Since the command is a reply to $some_other_msg:localhost, that becomes the thread root
         assert "m.relates_to" in content
-        # Should only have a reply relation, not a thread
-        assert "m.in_reply_to" in content["m.relates_to"]
+        assert content["m.relates_to"]["rel_type"] == "m.thread"
+        # Thread root should be the message the command was replying to
+        assert content["m.relates_to"]["event_id"] == "$some_other_msg:localhost"
+        # Should reply to the command message
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_reply:localhost"
-        # Should NOT have a thread relation when it's a router command error
-        if "rel_type" in content["m.relates_to"]:
-            assert content["m.relates_to"]["rel_type"] != "m.thread"
 
     @pytest.mark.asyncio
     async def test_command_in_thread_works_correctly(self, tmp_path):
@@ -409,9 +409,10 @@ class TestThreadingBehavior:
         bot.thread_invite_manager.update_agent_activity = AsyncMock()
 
         # Mock interactive.handle_text_response and generate_response
-        with patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)), patch.object(
-            bot, "_generate_response"
-        ) as mock_generate:
+        with (
+            patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
+            patch.object(bot, "_generate_response") as mock_generate,
+        ):
             # Process the message
             await bot._on_message(room, event)
 
