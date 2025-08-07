@@ -46,20 +46,22 @@ async def _ensure_agent_in_room(
 
 async def _create_room_and_invite_agents(room_key: str, room_name: str, user_client: nio.AsyncClient) -> str | None:
     """Create a room and invite all configured agents."""
-    from mindroom.matrix import add_room, invite_to_room
+    from mindroom.agent_config import get_agent_ids_for_room, load_config
+    from mindroom.matrix import add_room, create_room, invite_to_room
 
-    # Create room
-    response = await user_client.room_create(
+    config = load_config()
+    power_users = get_agent_ids_for_room(room_key, config, user_client.homeserver)
+
+    # Create room with power levels
+    room_id = await create_room(
+        client=user_client,
         name=room_name,
         alias=room_key,
         topic=f"Mindroom {room_name}",
-        preset=nio.RoomPreset.public_chat,
+        power_users=power_users,
     )
 
-    if isinstance(response, nio.RoomCreateResponse):
-        room_id: str = response.room_id
-        console.print(f"✅ Created room: {room_name} ({room_id})")
-
+    if room_id:
         # Save room info
         add_room(room_key, room_id, f"#{room_key}:localhost", room_name)
 
@@ -91,7 +93,7 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
             console.print(f"   Invited {invited_count} agents to the room")
 
         return room_id
-    console.print(f"❌ Failed to create room {room_name}: {response}")
+    console.print(f"❌ Failed to create room {room_name}")
     return None
 
 
@@ -275,20 +277,22 @@ async def _create_room_and_invite_all_agents(
     config: Config,
 ) -> str | None:
     """Create a room and invite router + all configured agents in one go."""
-    from mindroom.matrix import add_room
+    from mindroom.agent_config import get_agent_ids_for_room
+    from mindroom.matrix import add_room, create_room
 
-    # Create room
-    response = await client.room_create(
+    # Get all agents for this room to grant power levels
+    power_users = get_agent_ids_for_room(room_key, config, client.homeserver)
+
+    # Create room with power levels
+    room_id = await create_room(
+        client=client,
         name=room_name,
         alias=room_key,
         topic=f"Mindroom {room_name}",
-        preset=nio.RoomPreset.public_chat,
+        power_users=power_users,
     )
 
-    if isinstance(response, nio.RoomCreateResponse):
-        room_id: str = response.room_id
-        console.print(f"✅ Created room: {room_name} ({room_id})")
-
+    if room_id:
         # Save room info
         add_room(room_key, room_id, f"#{room_key}:localhost", room_name)
 
@@ -299,8 +303,7 @@ async def _create_room_and_invite_all_agents(
             console.print(f"   Invited {invited_count} agents to the room")
 
         return room_id
-
-    console.print(f"❌ Failed to create room {room_name}: {response}")
+    console.print(f"❌ Failed to create room {room_name}")
     return None
 
 

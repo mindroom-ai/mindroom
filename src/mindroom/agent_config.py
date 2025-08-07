@@ -176,3 +176,25 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
             parts.append(f"- {first_instruction}")
 
     return "\n  ".join(parts)
+
+
+def get_agent_ids_for_room(room_key: str, config: Config | None = None, homeserver: str | None = None) -> list[str]:
+    """Get all agent Matrix IDs assigned to a specific room."""
+    if config is None:
+        config = load_config()
+
+    from .matrix import MATRIX_HOMESERVER, MatrixID, extract_server_name_from_homeserver
+
+    # Determine server name
+    server_url = homeserver or MATRIX_HOMESERVER
+    server_name = extract_server_name_from_homeserver(server_url)
+
+    # Always include the router agent
+    agent_ids = [MatrixID.from_agent(ROUTER_AGENT_NAME, server_name).full_id]
+
+    # Add agents from config
+    for agent_name, agent_cfg in config.agents.items():
+        if room_key in agent_cfg.rooms:
+            agent_ids.append(MatrixID.from_agent(agent_name, server_name).full_id)
+
+    return agent_ids

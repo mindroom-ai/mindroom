@@ -6,6 +6,70 @@ mindroom uses a YAML-based configuration system that makes it easy to customize 
 
 The default agent configuration file is `config.yaml` in the project root. You can also specify a custom configuration file when starting the bot.
 
+## Configuration Structure
+
+The configuration file has several main sections:
+
+1. **memory** - Configuration for the embedding system used for agent memory
+2. **models** - Define available AI models and their providers
+3. **agents** - Configure individual agents and their capabilities
+4. **defaults** - Default settings for all agents
+5. **router** - Configuration for the agent routing system
+
+## Model Configuration
+
+Before configuring agents, you need to define which AI models are available. mindroom supports multiple model providers:
+
+```yaml
+models:
+  default:  # Default model used when agent doesn't specify one
+    provider: "ollama"
+    id: "devstral:24b"
+
+  anthropic:
+    provider: "anthropic"
+    id: "claude-3-5-haiku-latest"
+
+  ollama:
+    provider: "ollama"
+    id: "devstral:24b"
+    # For ollama, you can add:
+    # host: "http://localhost:11434"
+
+  openrouter:
+    provider: "openrouter"
+    id: "z-ai/glm-4.5-air:free"
+```
+
+### Supported Providers
+
+- **ollama** - Local models via Ollama (requires Ollama installed)
+- **anthropic** - Claude models (requires API key)
+- **openai** - GPT models (requires API key)
+- **openrouter** - Access multiple models through OpenRouter (requires API key)
+
+## Memory Configuration
+
+The memory system uses embeddings to help agents remember and retrieve relevant information:
+
+```yaml
+memory:
+  embedder:
+    provider: "ollama"  # Options: openai, ollama, huggingface, sentence-transformers
+    config:
+      model: "nomic-embed-text"  # Embedding model to use
+      host: "http://localhost:11434"  # Ollama host URL
+```
+
+## Router Configuration
+
+The router determines which agent should handle a user's request:
+
+```yaml
+router:
+  model: "ollama"  # Which model to use for routing decisions (references models section)
+```
+
 ## Available Agents
 
 mindroom comes with several pre-configured agents, each specialized for different tasks:
@@ -73,7 +137,11 @@ agents:
     instructions:
       - "Specific behavior instruction 1"
       - "Specific behavior instruction 2"
+    rooms:
+      - lobby
+      - dev
     num_history_runs: 5  # How many previous messages to remember
+    model: "anthropic"  # Optional: specific model for this agent (overrides default)
 ```
 
 ### Configuration Fields
@@ -85,6 +153,7 @@ agents:
 - **instructions**: Specific guidelines for the agent's behavior
 - **rooms**: List of room aliases where this agent should be active
 - **num_history_runs**: Number of previous conversation turns to include for context (default: 5)
+- **model**: (Optional) Specific model to use for this agent, overrides the default model
 
 ## Room Configuration
 
@@ -300,8 +369,54 @@ Good instructions are specific and actionable:
 You can create multiple configuration files for different purposes:
 
 1. Create a new YAML file (e.g., `my_config.yaml`)
-2. Define your agents using the structure above
+2. Define your models, memory, router, and agents using the structure above
 3. Use the custom file when starting mindroom
+
+### Complete Configuration Example
+
+```yaml
+# Memory configuration
+memory:
+  embedder:
+    provider: "ollama"
+    config:
+      model: "nomic-embed-text"
+      host: "http://localhost:11434"
+
+# Model definitions
+models:
+  default:
+    provider: "ollama"
+    id: "devstral:24b"
+
+  smart:
+    provider: "anthropic"
+    id: "claude-3-5-sonnet-latest"
+
+# Agent configurations
+agents:
+  assistant:
+    display_name: "SmartAssistant"
+    role: "Advanced reasoning and analysis"
+    model: "smart"  # Use the Claude model for this agent
+    tools: []
+    instructions:
+      - "Provide thoughtful, detailed responses"
+      - "Use advanced reasoning capabilities"
+    rooms:
+      - lobby
+    num_history_runs: 10
+
+# Defaults
+defaults:
+  num_history_runs: 5
+  markdown: true
+  add_history_to_messages: true
+
+# Router
+router:
+  model: "default"
+```
 
 ## Troubleshooting
 
