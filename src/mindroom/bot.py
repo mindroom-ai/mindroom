@@ -727,14 +727,9 @@ class AgentBot:
 class TeamBot(AgentBot):
     """A bot that represents a team of agents working together."""
 
-    team_name: str = field(init=False)
     team_agents: list[str] = field(default_factory=list)
     team_mode: str = field(default="coordinate")
     team_model: str | None = field(default=None)
-
-    def __post_init__(self) -> None:
-        """Extract team name from agent user."""
-        self.team_name = self.agent_user.agent_name
 
     @cached_property
     def agent(self) -> Agent | None:  # type: ignore[override]
@@ -757,7 +752,7 @@ class TeamBot(AgentBot):
         # Get the appropriate model for this team and room
         from .teams import TeamMode, create_team_response, get_team_model
 
-        model_name = get_team_model(self.team_name, room_id)
+        model_name = get_team_model(self.agent_name, room_id)
 
         # Convert team_mode string to TeamMode enum
         mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
@@ -799,64 +794,47 @@ class MultiAgentOrchestrator:
         room_aliases = get_room_aliases()
 
         for agent_name, agent_user in agent_users.items():
+            bot = None
+
             if agent_name == ROUTER_AGENT_NAME:
                 # Router is a built-in agent that has access to all rooms
-                # Get all unique room IDs from all agents and teams
                 all_room_aliases = set()
                 for agent_config in config.agents.values():
                     all_room_aliases.update(agent_config.rooms)
                 for team_config in config.teams.values():
                     all_room_aliases.update(team_config.rooms)
-                rooms_to_resolve = list(all_room_aliases)
-
-                # Create regular AgentBot for router
+                rooms = [room_aliases.get(r, r) for r in all_room_aliases]
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
-                bot = AgentBot(
-                    agent_user,
-                    self.storage_path,
-                    rooms=[room_aliases.get(room, room) for room in rooms_to_resolve],
-                    enable_streaming=enable_streaming,
-                )
-                bot.orchestrator = self
-                self.agent_bots[agent_name] = bot
+                bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
 
             elif agent_name in config.teams:
                 # This is a team - create TeamBot
                 team_config = config.teams[agent_name]
-                rooms_to_resolve = team_config.rooms
-                resolved_rooms = [room_aliases.get(room, room) for room in rooms_to_resolve]
+                rooms = [room_aliases.get(r, r) for r in team_config.rooms]
 
                 bot = TeamBot(
                     agent_user=agent_user,
                     storage_path=self.storage_path,
-                    rooms=resolved_rooms,
+                    rooms=rooms,
                     team_agents=team_config.agents,
                     team_mode=team_config.mode,
                     team_model=team_config.model,
-                    enable_streaming=False,  # Teams don't stream
+                    enable_streaming=False,  # Teams don't support streaming
                 )
-                bot.orchestrator = self
-                self.agent_bots[agent_name] = bot
 
-            else:
+            elif agent_name in config.agents:
                 # Regular agent - use configured rooms
-                if agent_name not in config.agents:
-                    logger.warning(f"No configuration found for agent {agent_name}")
-                    continue
                 agent_config = config.agents[agent_name]
-
-                rooms_to_resolve = agent_config.rooms
-                resolved_rooms = [room_aliases.get(room, room) for room in rooms_to_resolve]
-
+                rooms = [room_aliases.get(r, r) for r in agent_config.rooms]
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
-                bot = AgentBot(
-                    agent_user,
-                    self.storage_path,
-                    rooms=resolved_rooms,
-                    enable_streaming=enable_streaming,
-                )
-                bot.orchestrator = self
-                self.agent_bots[agent_name] = bot
+                bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
+            else:
+                logger.warning(f"No configuration found for agent {agent_name}")
+                continue
+
+            # Common setup for all bot types
+            bot.orchestrator = self
+            self.agent_bots[agent_name] = bot
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))
 
