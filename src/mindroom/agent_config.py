@@ -97,14 +97,21 @@ def create_agent(agent_name: str, storage_path: Path, config_path: Path | None =
     storage_path.mkdir(parents=True, exist_ok=True)
     storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
 
+    # Add identity context to all agents using the unified template
+    identity_context = agent_prompts.AGENT_IDENTITY_CONTEXT.format(
+        display_name=agent_config.display_name, agent_name=agent_name
+    )
+
     # Use rich prompt if available, otherwise use YAML config
     if agent_name in RICH_PROMPTS:
         logger.info(f"Using rich prompt for agent: {agent_name}")
-        role = RICH_PROMPTS[agent_name]
+        # Prepend identity context to the rich prompt
+        role = identity_context + RICH_PROMPTS[agent_name]
         instructions = []  # Instructions are in the rich prompt
     else:
         logger.info(f"Using YAML config for agent: {agent_name}")
-        role = agent_config.role
+        # For YAML agents, prepend identity to role and keep original instructions
+        role = identity_context + agent_config.role
         instructions = agent_config.instructions
 
     # Create agent with defaults applied

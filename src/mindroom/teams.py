@@ -97,10 +97,10 @@ async def create_team_response(
     if not agents:
         return "Sorry, no agents available for team collaboration."
 
-    # Build prompt with context
+    # Build the user message with thread context if available
     prompt = message
     if thread_history:
-        recent_messages = thread_history[-3:]  # Last 3 messages for context
+        recent_messages = thread_history[-30:]  # Last 30 messages for context
         context_parts = []
         for msg in recent_messages:
             sender = msg.get("sender", "Unknown")
@@ -109,14 +109,17 @@ async def create_team_response(
                 context_parts.append(f"{sender}: {body}")
 
         if context_parts:
-            prompt = f"Context:\n{'\n'.join(context_parts)}\n\nUser: {message}"
+            context = "\n".join(context_parts)
+            prompt = f"Thread Context:\n{context}\n\nUser: {message}"
 
-    # Create and run team
+    # Let Agno Team handle everything - it already knows how to describe members
     team = Team(
         members=agents,  # type: ignore[arg-type]
         mode=mode.value,
         name=f"Team-{'-'.join(agent_names)}",
         model=get_model_instance("default"),
+        # Agno will automatically list members with their names, roles, and tools
+        # No need for custom descriptions or instructions
     )
 
     logger.info(f"Executing team response with {len(agents)} agents")
