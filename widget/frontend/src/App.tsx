@@ -30,7 +30,7 @@ function AppContent() {
   }
 
   return (
-    <div className="flex flex-col min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+    <div className="flex flex-col h-screen bg-gradient-to-br from-gray-50 to-gray-100">
       {/* Header */}
       <header className="bg-gradient-to-r from-blue-600 to-purple-600 shadow-lg">
         <div className="px-6 py-4 flex items-center justify-between">
@@ -40,9 +40,9 @@ function AppContent() {
       </header>
 
       {/* Main Content */}
-      <div className="flex-1 overflow-auto">
-        <Tabs defaultValue="agents" className="h-full">
-          <TabsList className="px-6 py-3 bg-white/80 backdrop-blur-sm border-b border-gray-200">
+      <div className="flex-1 overflow-hidden">
+        <Tabs defaultValue="agents" className="h-full flex flex-col">
+          <TabsList className="px-6 py-3 bg-white/80 backdrop-blur-sm border-b border-gray-200 flex-shrink-0">
             <TabsTrigger
               value="agents"
               className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600"
@@ -57,19 +57,21 @@ function AppContent() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="agents" className="h-full p-4 overflow-auto">
-            <div className="grid grid-cols-12 gap-4" style={{ minHeight: '600px' }}>
-              <div className="col-span-4">
+          <TabsContent value="agents" className="flex-1 p-4 overflow-hidden">
+            <div className="grid grid-cols-12 gap-4 h-full">
+              <div className="col-span-4 h-full">
                 <AgentList />
               </div>
-              <div className="col-span-8">
+              <div className="col-span-8 h-full">
                 <AgentEditor />
               </div>
             </div>
           </TabsContent>
 
-          <TabsContent value="models" className="p-4" style={{ minHeight: '600px' }}>
-            <ModelConfig />
+          <TabsContent value="models" className="flex-1 p-4 overflow-hidden">
+            <div className="h-full">
+              <ModelConfig />
+            </div>
           </TabsContent>
         </Tabs>
       </div>

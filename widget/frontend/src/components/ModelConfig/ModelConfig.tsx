@@ -145,7 +145,7 @@ export function ModelConfig() {
   };
 
   return (
-    <div className="flex flex-col">
+    <div className="h-full flex flex-col">
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-2xl font-semibold">Model Configuration</h2>
         <Button onClick={() => saveConfig()} variant="default">
@@ -154,7 +154,7 @@ export function ModelConfig() {
         </Button>
       </div>
 
-      <div className="flex-1 overflow-y-auto" style={{ maxHeight: '500px' }}>
+      <div className="flex-1 overflow-y-auto">
         <div className="grid gap-4 pb-4">
           {/* Add New Model Button */}
           {!isAddingModel && (
