@@ -18,15 +18,15 @@ nix-shell widget/shell.nix --run "python take_screenshot.py"
 ```bash
 # Terminal 1: Start backend
 cd widget/backend
-uv sync                    # or: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
-uv run uvicorn src.main:app --reload
+uv sync
+uv run uvicorn src.main:app --reload --port 8001
 
 # Terminal 2: Start frontend
 cd widget/frontend
 npm install
 npm run dev
 
-# Access at http://localhost:3001
+# Access at http://localhost:3003 (default)
 ```
 
 ### Using the Convenience Script
@@ -35,8 +35,8 @@ npm run dev
 # Standard systems
 ./widget/run.sh
 
-# With custom backend port
-BACKEND_PORT=8080 ./widget/run.sh
+# With custom ports
+FRONTEND_PORT=3005 BACKEND_PORT=8080 ./widget/run.sh
 
 # On Nix systems (ensures all dependencies available)
 ./widget/run-nix.sh
@@ -46,7 +46,7 @@ BACKEND_PORT=8080 ./widget/run.sh
 
 ### Frontend (React/TypeScript)
 - **Location**: `widget/frontend/`
-- **Port**: 3001 (or 3000 if available)
+- **Port**: 3003 (default, configurable via `FRONTEND_PORT` environment variable)
 - **Technologies**: React 18, TypeScript, Tailwind CSS, Zustand, Vite
 - **Key Files**:
   - `src/App.tsx` - Main application component
@@ -167,11 +167,14 @@ widget/
 
 ### Environment Variables
 
-- `BACKEND_PORT`: Set the backend server port (default: 8001)
+- `FRONTEND_PORT`: Set the frontend development server port (default: 3003)
+- `BACKEND_PORT`: Set the backend API server port (default: 8001)
+
   ```bash
   # Examples:
+  FRONTEND_PORT=3005 ./widget/run.sh
   BACKEND_PORT=8080 ./widget/run.sh
-  export BACKEND_PORT=9000 && ./widget/run.sh
+  FRONTEND_PORT=3005 BACKEND_PORT=8080 ./widget/run.sh
   ```
 
 ### Adding New Features
@@ -202,12 +205,12 @@ The widget can be embedded directly into your Matrix client as a room widget. Th
 **⚠️ Important:** Element Web (app.element.io) does NOT support custom widgets. You need:
 - **Element Desktop** (download from https://element.io/download), OR
 - **Self-hosted Element Web** with widgets enabled, OR
-- **Use the widget directly** at http://localhost:3001 in a browser tab
+- **Use the widget directly** at http://localhost:3003 in a browser tab
 
 **Quick Setup (Element Desktop only):**
 1. Start the widget: `./widget/run.sh`
 2. In Element Desktop, go to room settings → Widgets → Add Custom Widget
-3. Enter URL: `http://localhost:3001/matrix-widget.html?url=http://localhost:3001`
+3. Enter URL: `http://localhost:3003/matrix-widget.html?url=http://localhost:3003`
 4. Click "Add Widget"
 
 See `WIDGET_INTEGRATION.md` for detailed setup instructions and production deployment.

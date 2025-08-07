@@ -5,8 +5,9 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Set backend port from environment variable or use default
+# Set ports from environment variables or use defaults
 BACKEND_PORT=${BACKEND_PORT:-8001}
+FRONTEND_PORT=${FRONTEND_PORT:-3003}
 
 echo -e "${BLUE}Starting MindRoom Configuration Widget...${NC}"
 
@@ -51,12 +52,12 @@ if [ ! -d "node_modules" ]; then
     npm install
 fi
 
-BACKEND_PORT=$BACKEND_PORT npm run dev &
+BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT npm run dev &
 FRONTEND_PID=$!
 cd ..
 
 echo -e "${GREEN}Widget is running!${NC}"
-echo -e "Frontend: http://localhost:3000"
+echo -e "Frontend: http://localhost:$FRONTEND_PORT"
 echo -e "Backend: http://localhost:$BACKEND_PORT"
 echo -e "\nPress Ctrl+C to stop both servers"
 
