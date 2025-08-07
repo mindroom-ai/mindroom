@@ -138,7 +138,7 @@ export function ModelConfig() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="h-full flex flex-col">
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-2xl font-semibold">Model Configuration</h2>
         <Button onClick={() => saveConfig()} variant="default">
@@ -147,7 +147,8 @@ export function ModelConfig() {
         </Button>
       </div>
 
-      <div className="grid gap-4">
+      <div className="flex-1 overflow-y-auto">
+        <div className="grid gap-4 pb-4">
         {/* New Model Form */}
         {isAddingModel && (
           <Card>
@@ -363,14 +364,15 @@ export function ModelConfig() {
             </CardContent>
           </Card>
         ))}
-      </div>
 
-      {!isAddingModel && (
-        <Button onClick={handleAddModel} variant="outline" className="w-full">
-          <Plus className="h-4 w-4 mr-2" />
-          Add New Model
-        </Button>
-      )}
+        {!isAddingModel && (
+          <Button onClick={handleAddModel} variant="outline" className="w-full">
+            <Plus className="h-4 w-4 mr-2" />
+            Add New Model
+          </Button>
+        )}
+        </div>
+      </div>
     </div>
   );
 }
