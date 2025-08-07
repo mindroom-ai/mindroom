@@ -414,6 +414,145 @@ describe('configStore', () => {
     });
   });
 
+  describe('rooms', () => {
+    beforeEach(() => {
+      const mockRooms = [
+        {
+          id: 'lobby',
+          display_name: 'Lobby',
+          description: 'Main room',
+          agents: ['agent1'],
+          model: 'default',
+        },
+        {
+          id: 'dev',
+          display_name: 'Dev Room',
+          description: 'Development room',
+          agents: ['agent2'],
+        },
+      ];
+
+      const mockAgents = [
+        {
+          id: 'agent1',
+          display_name: 'Agent 1',
+          role: 'Test agent',
+          tools: [],
+          instructions: [],
+          rooms: ['lobby'],
+          num_history_runs: 5,
+        },
+        {
+          id: 'agent2',
+          display_name: 'Agent 2',
+          role: 'Test agent 2',
+          tools: [],
+          instructions: [],
+          rooms: ['dev'],
+          num_history_runs: 5,
+        },
+      ];
+
+      useConfigStore.setState({
+        rooms: mockRooms,
+        agents: mockAgents,
+        selectedRoomId: 'lobby',
+      });
+    });
+
+    it('should select room', () => {
+      const { selectRoom } = useConfigStore.getState();
+      selectRoom('dev');
+
+      const state = useConfigStore.getState();
+      expect(state.selectedRoomId).toBe('dev');
+    });
+
+    it('should update room', () => {
+      const { updateRoom } = useConfigStore.getState();
+      updateRoom('lobby', { display_name: 'Updated Lobby' });
+
+      const state = useConfigStore.getState();
+      const updatedRoom = state.rooms.find(r => r.id === 'lobby');
+      expect(updatedRoom?.display_name).toBe('Updated Lobby');
+      expect(state.isDirty).toBe(true);
+    });
+
+    it('should update agents when room agents change', () => {
+      const { updateRoom } = useConfigStore.getState();
+      updateRoom('lobby', { agents: ['agent1', 'agent2'] });
+
+      const state = useConfigStore.getState();
+      const agent2 = state.agents.find(a => a.id === 'agent2');
+      expect(agent2?.rooms).toContain('lobby');
+      expect(state.isDirty).toBe(true);
+    });
+
+    it('should create new room', () => {
+      const { createRoom } = useConfigStore.getState();
+      const newRoomData = {
+        display_name: 'New Room',
+        description: 'Test room',
+        agents: ['agent1'],
+      };
+
+      createRoom(newRoomData);
+
+      const state = useConfigStore.getState();
+      expect(state.rooms).toHaveLength(3);
+      const newRoom = state.rooms[2];
+      expect(newRoom.display_name).toBe('New Room');
+      expect(newRoom.id).toBe('new_room');
+      expect(state.selectedRoomId).toBe('new_room');
+
+      // Check that agent1 now has new_room in its rooms
+      const agent1 = state.agents.find(a => a.id === 'agent1');
+      expect(agent1?.rooms).toContain('new_room');
+      expect(state.isDirty).toBe(true);
+    });
+
+    it('should delete room and update agents', () => {
+      const { deleteRoom } = useConfigStore.getState();
+      deleteRoom('lobby');
+
+      const state = useConfigStore.getState();
+      expect(state.rooms).toHaveLength(1);
+      expect(state.rooms[0].id).toBe('dev');
+
+      // Check that agent1 no longer has lobby in its rooms
+      const agent1 = state.agents.find(a => a.id === 'agent1');
+      expect(agent1?.rooms).not.toContain('lobby');
+      expect(state.selectedRoomId).toBe(null);
+      expect(state.isDirty).toBe(true);
+    });
+
+    it('should add agent to room', () => {
+      const { addAgentToRoom } = useConfigStore.getState();
+      addAgentToRoom('dev', 'agent1');
+
+      const state = useConfigStore.getState();
+      const devRoom = state.rooms.find(r => r.id === 'dev');
+      expect(devRoom?.agents).toContain('agent1');
+
+      const agent1 = state.agents.find(a => a.id === 'agent1');
+      expect(agent1?.rooms).toContain('dev');
+      expect(state.isDirty).toBe(true);
+    });
+
+    it('should remove agent from room', () => {
+      const { removeAgentFromRoom } = useConfigStore.getState();
+      removeAgentFromRoom('lobby', 'agent1');
+
+      const state = useConfigStore.getState();
+      const lobbyRoom = state.rooms.find(r => r.id === 'lobby');
+      expect(lobbyRoom?.agents).not.toContain('agent1');
+
+      const agent1 = state.agents.find(a => a.id === 'agent1');
+      expect(agent1?.rooms).not.toContain('lobby');
+      expect(state.isDirty).toBe(true);
+    });
+  });
+
   describe('saveConfig with teams', () => {
     it('should save configuration with teams and room models', async () => {
       const mockConfig: Config = {

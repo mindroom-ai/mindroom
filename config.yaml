@@ -1,315 +1,216 @@
-# Configuration File
-# This file defines all available agents and their configurations
-# Users can add custom agents by adding new entries to this file
-# Room assignments use aliases that are resolved from matrix_rooms.yaml
-
-# Memory embedder configuration
 memory:
   embedder:
-    provider: "ollama"  # Options: openai, ollama, huggingface, sentence-transformers
+    provider: ollama
     config:
-      model: "nomic-embed-text"  # Ollama embedding model
-      host: "http://localhost:11434"  # Ollama host URL
-
+      model: nomic-embed-text
+      host: http://localhost:11434
 models:
-  default:  # Default model used when agent doesn't specify one
-    provider: "ollama"
-    id: "devstral:24b"
-    #id: "gpt-oss:20b"
-
+  default:
+    provider: ollama
+    id: devstral:24b
   anthropic:
-    provider: "anthropic"
-    id: "claude-3-5-haiku-latest"
-
+    provider: anthropic
+    id: claude-3-5-haiku-latest
   ollama:
-    provider: "ollama"
-    id: "devstral:24b"
-    # Add any provider-specific config here
-    # For ollama, you can add:
-    # host: "http://localhost:11434"
-
+    provider: ollama
+    id: devstral:24b
   openrouter:
-    provider: "openrouter"
-    id: "z-ai/glm-4.5-air:free"
-
+    provider: openrouter
+    id: z-ai/glm-4.5-air:free
   deepseek:
-    provider: "openrouter"
-    id: "deepseek-ai/deepseek-chat:free"
-
-  # Example of other model configurations:
-  # gpt4:
-  #   provider: "openai"
-  #   id: "gpt-4"
-  #
-  # claude:
-  #   provider: "anthropic"
-  #   id: "claude-4-opus-latest"
-
+    provider: openrouter
+    id: deepseek-ai/deepseek-chat:free
 agents:
-  # General conversation agent
   general:
-    display_name: "GeneralAgent"
-    role: "A general-purpose assistant that provides helpful, conversational responses to users."
+    display_name: GeneralAgent
+    role: A general-purpose assistant that provides helpful, conversational responses
+      to users.
     tools: []
     instructions:
-      - "Always provide a clear, helpful response to the user after any reasoning."
-      - "Remember context from the conversation."
-      - "Be conversational and friendly."
-      - "Ask clarifying questions when needed."
+    - Always provide a clear, helpful response to the user after any reasoning.
+    - Remember context from the conversation.
+    - Be conversational and friendly.
+    - Ask clarifying questions when needed.
     rooms:
-      - lobby    # Main coordination room for all agents
-      - help     # General help and assistance
+    - lobby
+    - help
     num_history_runs: 5
-
-  # Calculator agent for mathematical operations
   calculator:
-    display_name: "CalculatorAgent"
-    role: "Solve mathematical problems."
+    display_name: CalculatorAgent
+    role: Solve mathematical problems.
     tools:
-      - calculator
+    - calculator
     instructions:
-      - "Use the calculator tools to solve mathematical problems accurately."
-      - "Show your work step by step."
-      - "Explain the mathematical concepts when helpful."
-      - "Double-check calculations for accuracy."
+    - Use the calculator tools to solve mathematical problems accurately.
+    - Show your work step by step.
+    - Explain the mathematical concepts when helpful.
+    - Double-check calculations for accuracy.
     rooms:
-      - lobby      # Main coordination room
-      - science    # Science and math collaboration
-      - analysis   # Data analysis tasks
+    - lobby
+    - science
+    - analysis
     num_history_runs: 5
-
-  # Code agent for programming tasks
   code:
-    display_name: "CodeAgent"
-    role: "Generate code, manage files, and execute shell commands."
+    display_name: CodeAgent
+    role: Generate code, manage files, and execute shell commands.
     tools:
-      - file
-      - shell
+    - file
+    - shell
     instructions:
-      - "Write clean, well-documented code following best practices"
-      - "Use appropriate error handling"
-      - "Consider security implications"
-      - "Test code before finalizing"
-      - "Be careful with shell commands - explain what they do"
-      - "Always read files before modifying them"
-      - "Follow the project's existing style and conventions"
+    - Write clean, well-documented code following best practices
+    - Use appropriate error handling
+    - Consider security implications
+    - Test code before finalizing
+    - Be careful with shell commands - explain what they do
+    - Always read files before modifying them
+    - Follow the project's existing style and conventions
     rooms:
-      - lobby       # Main coordination room
-      - dev         # Development and programming
-      - automation  # Automation and scripting
+    - lobby
+    - dev
+    - automation
     num_history_runs: 5
-
-  # Shell command execution agent
   shell:
-    display_name: "ShellAgent"
-    role: "Execute shell commands and manage system operations."
+    display_name: ShellAgent
+    role: Execute shell commands and manage system operations.
     tools:
-      - shell
+    - shell
     instructions:
-      - "Execute shell commands to help users with system tasks."
-      - "Always explain what a command does before running it."
-      - "Be cautious with potentially destructive commands."
-      - "Provide clear output and error messages."
-      - "Suggest safer alternatives when appropriate."
-      - "Remember the user's working directory context."
+    - Execute shell commands to help users with system tasks.
+    - Always explain what a command does before running it.
+    - Be cautious with potentially destructive commands.
+    - Provide clear output and error messages.
+    - Suggest safer alternatives when appropriate.
+    - Remember the user's working directory context.
     rooms:
-      - lobby       # Main coordination room
-      - dev         # Development tasks
-      - automation  # System automation
-      - ops         # Operations and maintenance
+    - lobby
+    - dev
+    - automation
+    - ops
     num_history_runs: 5
-
-  # Text summarization agent
   summary:
-    display_name: "SummaryAgent"
-    role: "Summarize long texts and extract key information."
+    display_name: SummaryAgent
+    role: Summarize long texts and extract key information.
     tools: []
     instructions:
-      - "Provide clear, concise summaries of long texts."
-      - "Extract and highlight key points and main ideas."
-      - "Maintain the original meaning and context."
-      - "Use bullet points for clarity when appropriate."
-      - "Indicate the level of detail in your summary."
-      - "Preserve important quotes or specific data points."
+    - Provide clear, concise summaries of long texts.
+    - Extract and highlight key points and main ideas.
+    - Maintain the original meaning and context.
+    - Use bullet points for clarity when appropriate.
+    - Indicate the level of detail in your summary.
+    - Preserve important quotes or specific data points.
     rooms:
-      - lobby     # Main coordination room
-      - research  # Research collaboration
-      - docs      # Documentation and writing
+    - lobby
+    - research
+    - docs
+    - science
     num_history_runs: 5
-
-  # Research agent for information gathering
   research:
-    display_name: "ResearchAgent"
-    role: "Conduct research using web sources, Wikipedia, and academic papers."
+    display_name: ResearchAgent
+    role: Conduct research using web sources, Wikipedia, and academic papers.
     tools:
-      - duckduckgo
-      - wikipedia
-      - arxiv
+    - duckduckgo
+    - wikipedia
+    - arxiv
     instructions:
-      - "Search for accurate, up-to-date information from reliable sources."
-      - "Cross-reference multiple sources when possible."
-      - "Clearly cite your sources."
-      - "Distinguish between facts and opinions."
-      - "Provide balanced viewpoints on controversial topics."
-      - "Summarize findings in a clear, organized manner."
+    - Search for accurate, up-to-date information from reliable sources.
+    - Cross-reference multiple sources when possible.
+    - Clearly cite your sources.
+    - Distinguish between facts and opinions.
+    - Provide balanced viewpoints on controversial topics.
+    - Summarize findings in a clear, organized manner.
     rooms:
-      - lobby     # Main coordination room
-      - research  # Research collaboration
-      - science   # Scientific research
-      - news      # Current events research
+    - lobby
+    - research
+    - science
+    - news
     num_history_runs: 5
-
-  # Financial data analysis agent
   finance:
-    display_name: "FinanceAgent"
-    role: "Analyze financial data, stock information, and perform calculations."
+    display_name: FinanceAgent
+    role: Analyze financial data, stock information, and perform calculations.
     tools:
-      - yfinance
-      - calculator
+    - yfinance
+    - calculator
     instructions:
-      - "Provide accurate financial data and analysis."
-      - "Use yfinance for real-time stock and market data."
-      - "Perform financial calculations accurately."
-      - "Explain financial concepts clearly."
-      - "Include relevant disclaimers about investment advice."
-      - "Present data in a clear, organized format."
+    - Provide accurate financial data and analysis.
+    - Use yfinance for real-time stock and market data.
+    - Perform financial calculations accurately.
+    - Explain financial concepts clearly.
+    - Include relevant disclaimers about investment advice.
+    - Present data in a clear, organized format.
     rooms:
-      - lobby     # Main coordination room
-      - finance   # Financial analysis
-      - analysis  # Data analysis collaboration
-      - business  # Business discussions
+    - lobby
+    - finance
+    - analysis
+    - business
     num_history_runs: 5
-
-  # News and current events agent
   news:
-    display_name: "NewsAgent"
-    role: "Gather and summarize news and current events."
+    display_name: NewsAgent
+    role: Gather and summarize news and current events.
     tools:
-      - duckduckgo
-      - newspaper
+    - duckduckgo
+    - newspaper
     instructions:
-      - "Search for recent news and current events."
-      - "Provide balanced coverage from multiple sources."
-      - "Summarize articles clearly and objectively."
-      - "Include publication dates and sources."
-      - "Distinguish between news and opinion pieces."
-      - "Highlight key developments and their significance."
+    - Search for recent news and current events.
+    - Provide balanced coverage from multiple sources.
+    - Summarize articles clearly and objectively.
+    - Include publication dates and sources.
+    - Distinguish between news and opinion pieces.
+    - Highlight key developments and their significance.
     rooms:
-      - lobby     # Main coordination room
-      - news      # News and current events
-      - research  # Research collaboration
-      - business  # Business news
+    - lobby
+    - news
+    - research
+    - business
     num_history_runs: 5
-
-  # Data analysis agent
   data_analyst:
-    display_name: "DataAnalystAgent"
-    role: "Analyze data, create visualizations, and provide insights."
+    display_name: DataAnalystAgent
+    role: Analyze data, create visualizations, and provide insights.
     tools:
-      - csv
-      - calculator
+    - csv
+    - calculator
     instructions:
-      - "Analyze data thoroughly and accurately."
-      - "Create clear visualizations when helpful."
-      - "Explain your analysis methodology."
-      - "Identify patterns and trends in data."
-      - "Provide actionable insights and recommendations."
-      - "Handle missing or inconsistent data appropriately."
+    - Analyze data thoroughly and accurately.
+    - Create clear visualizations when helpful.
+    - Explain your analysis methodology.
+    - Identify patterns and trends in data.
+    - Provide actionable insights and recommendations.
+    - Handle missing or inconsistent data appropriately.
     rooms:
-      - lobby     # Main coordination room
-      - analysis  # Data analysis hub
-      - science   # Scientific data analysis
-      - finance   # Financial data analysis
-      - business  # Business analytics
+    - lobby
+    - analysis
+    - science
+    - finance
+    - business
     num_history_runs: 5
-
-  # Security analysis agent (for testing)
   security:
-    display_name: "SecurityAgent"
-    role: "Analyze security aspects and provide recommendations."
+    display_name: SecurityAgent
+    role: Analyze security aspects and provide recommendations.
     tools: []
     instructions:
-      - "Analyze security implications thoroughly."
-      - "Provide security best practices."
-      - "Identify potential vulnerabilities."
-      - "Suggest mitigation strategies."
+    - Analyze security implications thoroughly.
+    - Provide security best practices.
+    - Identify potential vulnerabilities.
+    - Suggest mitigation strategies.
     rooms:
-      - lobby     # Main coordination room
-      - dev       # Development security
+    - lobby
+    - dev
     num_history_runs: 5
-
-  # Analyst agent (for testing)
   analyst:
-    display_name: "AnalystAgent"
-    role: "Provide analytical insights and recommendations."
+    display_name: AnalystAgent
+    role: Provide analytical insights and recommendations.
     tools: []
     instructions:
-      - "Analyze information comprehensively."
-      - "Provide structured insights."
-      - "Consider multiple perspectives."
-      - "Make evidence-based recommendations."
+    - Analyze information comprehensively.
+    - Provide structured insights.
+    - Consider multiple perspectives.
+    - Make evidence-based recommendations.
     rooms:
-      - lobby     # Main coordination room
-      - analysis  # Analysis tasks
+    - lobby
+    - analysis
     num_history_runs: 5
-
-
-# Configuration for agent defaults
 defaults:
   num_history_runs: 5
   markdown: true
   add_history_to_messages: true
-
-# Router configuration
 router:
-  model: "ollama"  # Which model to use for routing decisions (references models section)
-
-# Room-specific model overrides for teams
-# When a team operates in these rooms, it will use the specified model
-room_models:
-  # Example: Use faster models in casual rooms, powerful models in technical rooms
-  # lobby: "default"
-  # dev: "anthropic"
-  # finance: "deepseek"
-
-# Pre-configured teams that act as single agents
-teams:
-  # Example team configurations (uncomment to enable):
-
-  dev_team:
-    display_name: "DevTeam"
-    role: "Full-stack development team for complex programming tasks"
-    # model: "anthropic"  # Optional: default model for this team
-    agents:
-      - code
-      - shell
-    rooms:
-      - lobby
-      - dev
-    mode: "coordinate"  # coordinate = sequential, collaborate = parallel
-
-  # analysis_team:
-  #   display_name: "AnalysisTeam"
-  #   role: "Comprehensive data and financial analysis team"
-  #   agents:
-  #     - data_analyst
-  #     - finance
-  #     - research
-  #   rooms:
-  #     - lobby
-  #     - finance
-  #     - analysis
-  #   mode: "collaborate"
-
-  # research_team:
-  #   display_name: "ResearchTeam"
-  #   role: "In-depth research and fact-checking team"
-  #   agents:
-  #     - research
-  #     - news
-  #     - summary
-  #   rooms:
-  #     - lobby
-  #     - research
-  #     - news
-  #   mode: "coordinate"
+  model: ollama
