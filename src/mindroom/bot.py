@@ -229,10 +229,6 @@ class AgentBot:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        # Skip if we're shutting down
-        if not self.running:
-            return
-
         if event.sender == self.agent_user.user_id:
             return
 
