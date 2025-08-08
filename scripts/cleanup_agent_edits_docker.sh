@@ -4,7 +4,9 @@
 set -e
 
 # Run the cleanup script with docker postgres connection
-docker exec -i mindroom-postgres psql -U synapse -d synapse << 'EOF'
+# Use synapse-postgres as default, but allow override via environment variable
+POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-synapse-postgres}"
+docker exec -i "$POSTGRES_CONTAINER" psql -U synapse -d synapse << 'EOF'
 -- Cleanup script for excessive edit history from agent messages
 
 -- Set variables
