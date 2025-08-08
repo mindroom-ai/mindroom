@@ -261,6 +261,23 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
         return set()
 
 
+async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
+    """Get all rooms the client has joined.
+
+    Args:
+        client: Authenticated Matrix client
+
+    Returns:
+        List of room IDs the client has joined, or None if the request failed
+    """
+    response = await client.joined_rooms()
+    if isinstance(response, nio.JoinedRoomsResponse):
+        return list(response.rooms)
+    else:
+        logger.error(f"Failed to get joined rooms: {response}")
+        return None
+
+
 def _extract_message_data(event: nio.RoomMessageText) -> dict[str, Any]:
     """Extract message data from a RoomMessageText event."""
     return {

@@ -105,6 +105,8 @@ async def cleanup_all_orphaned_bots(client: nio.AsyncClient) -> dict[str, list[s
     Returns:
         Dictionary mapping room IDs to lists of kicked bot usernames
     """
+    from .matrix import get_joined_rooms
+
     # Get current configuration
     config = load_config()
 
@@ -112,14 +114,13 @@ async def cleanup_all_orphaned_bots(client: nio.AsyncClient) -> dict[str, list[s
     kicked_bots: dict[str, list[str]] = {}
 
     # Get all rooms the client is in
-    joined_rooms_response = await client.joined_rooms()
-    if not isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
-        logger.error(f"Failed to get joined rooms: {joined_rooms_response}")
+    joined_rooms = await get_joined_rooms(client)
+    if joined_rooms is None:
         return kicked_bots
 
-    logger.info(f"Checking {len(joined_rooms_response.rooms)} rooms for orphaned bots")
+    logger.info(f"Checking {len(joined_rooms)} rooms for orphaned bots")
 
-    for room_id in joined_rooms_response.rooms:
+    for room_id in joined_rooms:
         room_kicked = await _cleanup_orphaned_bots_in_room(client, room_id, config)
         if room_kicked:
             kicked_bots[room_id] = room_kicked

@@ -192,13 +192,14 @@ class AgentBot:
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
+        from .matrix import get_joined_rooms
+
         # Get all rooms we're currently in
-        joined_rooms_response = await self.client.joined_rooms()
-        if not isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
-            self.logger.error(f"Failed to get joined rooms: {joined_rooms_response}")
+        joined_rooms = await get_joined_rooms(self.client)
+        if joined_rooms is None:
             return
 
-        current_rooms = set(joined_rooms_response.rooms)
+        current_rooms = set(joined_rooms)
         configured_rooms = set(self.rooms)
 
         # Leave rooms we're no longer configured for
@@ -279,12 +280,14 @@ class AgentBot:
 
         This method ensures clean shutdown when an agent is removed from config.
         """
+        from .matrix import get_joined_rooms
+
         if hasattr(self, "client") and self.client:
             # Leave all rooms
             try:
-                joined_rooms_response = await self.client.joined_rooms()
-                if isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
-                    for room_id in joined_rooms_response.rooms:
+                joined_rooms = await get_joined_rooms(self.client)
+                if joined_rooms:
+                    for room_id in joined_rooms:
                         leave_response = await self.client.room_leave(room_id)
                         if isinstance(leave_response, nio.RoomLeaveResponse):
                             self.logger.info(f"Left room {room_id} during cleanup")
@@ -836,14 +839,15 @@ class AgentBot:
                 # Wait for 1 hour between cleanups
                 await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
+                from .matrix import get_joined_rooms
+
                 # Get all rooms the bot is in
-                joined_rooms_response = await self.client.joined_rooms()
-                if not isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
-                    self.logger.error("Failed to get joined rooms for cleanup")
+                joined_rooms = await get_joined_rooms(self.client)
+                if joined_rooms is None:
                     continue
 
                 total_removed = 0
-                for room_id in joined_rooms_response.rooms:
+                for room_id in joined_rooms:
                     try:
                         removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
                             room_id, timeout_hours=self.invitation_timeout_hours
