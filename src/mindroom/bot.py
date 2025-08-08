@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nio
 from watchfiles import awatch
@@ -915,7 +915,6 @@ class MultiAgentOrchestrator:
         Returns:
             True if any agents were updated, False otherwise.
         """
-        # load_config now automatically uses the latest file based on modification time
         new_config = load_config()
 
         if not self.current_config:
@@ -923,75 +922,17 @@ class MultiAgentOrchestrator:
             return False
 
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
-
-        agents_to_restart = set()
-        teams_to_restart = set()
-
-        # Check for agent changes
-        for agent_name in set(self.current_config.agents.keys()) | set(new_config.agents.keys()):
-            old_agent = self.current_config.agents.get(agent_name)
-            new_agent = new_config.agents.get(agent_name)
-
-            if old_agent != new_agent and (agent_name in self.agent_bots or new_agent is not None):
-                agents_to_restart.add(agent_name)
-
-        # Check for team changes
-        for team_name in set(self.current_config.teams.keys()) | set(new_config.teams.keys()):
-            old_team = self.current_config.teams.get(team_name)
-            new_team = new_config.teams.get(team_name)
-
-            if old_team != new_team and (team_name in self.agent_bots or new_team is not None):
-                teams_to_restart.add(team_name)
-
-        # Check if router needs restart (only if room assignments changed)
-        router_needs_restart = False
-        if ROUTER_AGENT_NAME in agent_users:
-            old_rooms = self.current_config.get_all_configured_rooms()
-            new_rooms = new_config.get_all_configured_rooms()
-            router_needs_restart = old_rooms != new_rooms
-
-        # Collect all entities to restart
-        entities_to_restart = agents_to_restart | teams_to_restart
-        if router_needs_restart:
-            entities_to_restart.add(ROUTER_AGENT_NAME)
+        entities_to_restart = await _identify_entities_to_restart(
+            self.current_config, new_config, agent_users, self.agent_bots
+        )
 
         if not entities_to_restart:
             self.current_config = new_config
             return False
 
-        # Stop affected bots
-        stop_tasks = []
-        for entity_name in entities_to_restart:
-            if entity_name in self.agent_bots:
-                bot = self.agent_bots[entity_name]
-                stop_tasks.append(bot.stop())
-
-        if stop_tasks:
-            await asyncio.gather(*stop_tasks)
-
-        # Remove stopped bots
-        for entity_name in entities_to_restart:
-            self.agent_bots.pop(entity_name, None)
-
-        # Update stored config
+        await _stop_entities(entities_to_restart, self.agent_bots)
         self.current_config = new_config
-
-        # Recreate bots
-        for entity_name in entities_to_restart:
-            if entity_name not in agent_users:
-                continue
-
-            agent_user = agent_users[entity_name]
-            bot = create_bot_for_entity(entity_name, agent_user, new_config, self.storage_path)  # type: ignore[assignment]
-
-            if bot is None:
-                continue  # Entity was removed from config
-
-            bot.orchestrator = self
-            self.agent_bots[entity_name] = bot
-
-            await bot.start()
-            asyncio.create_task(bot.sync_forever())
+        await _recreate_entities(entities_to_restart, agent_users, new_config, self.storage_path, self)
 
         logger.info(f"Configuration update complete: {len(entities_to_restart)} bots affected")
         return True
@@ -1022,6 +963,104 @@ class MultiAgentOrchestrator:
                 logger.info("Invited agent", agent=agent_name, room_id=room_id)
             else:
                 logger.error("Failed to invite agent", agent=agent_name, error=str(result))
+
+
+async def _identify_entities_to_restart(
+    current_config: Config | None,
+    new_config: Config,
+    agent_users: dict[str, AgentMatrixUser],
+    agent_bots: dict[str, Any],
+) -> set[str]:
+    agents_to_restart = _get_changed_agents(current_config, new_config, agent_bots)
+    teams_to_restart = _get_changed_teams(current_config, new_config, agent_bots)
+
+    entities_to_restart = agents_to_restart | teams_to_restart
+
+    if _router_needs_restart(current_config, new_config, agent_users):
+        entities_to_restart.add(ROUTER_AGENT_NAME)
+
+    return entities_to_restart
+
+
+def _get_changed_agents(current_config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:
+    if not current_config:
+        return set()
+
+    changed = set()
+    all_agents = set(current_config.agents.keys()) | set(new_config.agents.keys())
+
+    for agent_name in all_agents:
+        old_agent = current_config.agents.get(agent_name)
+        new_agent = new_config.agents.get(agent_name)
+        if old_agent != new_agent and (agent_name in agent_bots or new_agent is not None):
+            changed.add(agent_name)
+
+    return changed
+
+
+def _get_changed_teams(current_config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:
+    if not current_config:
+        return set()
+
+    changed = set()
+    all_teams = set(current_config.teams.keys()) | set(new_config.teams.keys())
+
+    for team_name in all_teams:
+        old_team = current_config.teams.get(team_name)
+        new_team = new_config.teams.get(team_name)
+        if old_team != new_team and (team_name in agent_bots or new_team is not None):
+            changed.add(team_name)
+
+    return changed
+
+
+def _router_needs_restart(
+    current_config: Config | None, new_config: Config, agent_users: dict[str, AgentMatrixUser]
+) -> bool:
+    if ROUTER_AGENT_NAME not in agent_users or not current_config:
+        return False
+
+    old_rooms = current_config.get_all_configured_rooms()
+    new_rooms = new_config.get_all_configured_rooms()
+    return old_rooms != new_rooms
+
+
+async def _stop_entities(entities_to_restart: set[str], agent_bots: dict[str, Any]) -> None:
+    stop_tasks = []
+    for entity_name in entities_to_restart:
+        if entity_name in agent_bots:
+            bot = agent_bots[entity_name]
+            stop_tasks.append(bot.stop())
+
+    if stop_tasks:
+        await asyncio.gather(*stop_tasks)
+
+    for entity_name in entities_to_restart:
+        agent_bots.pop(entity_name, None)
+
+
+async def _recreate_entities(
+    entities_to_restart: set[str],
+    agent_users: dict[str, AgentMatrixUser],
+    new_config: Config,
+    storage_path: Path,
+    orchestrator: MultiAgentOrchestrator,
+) -> None:
+    for entity_name in entities_to_restart:
+        if entity_name not in agent_users:
+            continue
+
+        agent_user = agent_users[entity_name]
+        bot = create_bot_for_entity(entity_name, agent_user, new_config, storage_path)
+
+        if bot is None:
+            continue  # Entity was removed from config
+
+        bot.orchestrator = orchestrator
+        orchestrator.agent_bots[entity_name] = bot
+
+        await bot.start()
+        asyncio.create_task(bot.sync_forever())
 
 
 async def main(log_level: str, storage_path: Path) -> None:
