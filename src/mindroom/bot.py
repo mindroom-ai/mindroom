@@ -791,7 +791,6 @@ class MultiAgentOrchestrator:
     storage_path: Path
     agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
-    # Track current configs - using dicts for easier comparison
     current_config: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
 
     async def initialize(self) -> None:
@@ -800,13 +799,10 @@ class MultiAgentOrchestrator:
 
         config = load_config()
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
-
-        # Store config for each agent for comparison later
         self.current_config = {}
 
         for agent_name, agent_user in agent_users.items():
             if agent_name == ROUTER_AGENT_NAME:
-                # Router is a built-in agent that has access to all rooms
                 all_room_aliases = set()
                 for agent_config in config.agents.values():
                     all_room_aliases.update(agent_config.rooms)
@@ -815,17 +811,14 @@ class MultiAgentOrchestrator:
                 rooms = resolve_room_aliases(list(all_room_aliases))
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
-                # Store router config
                 self.current_config[agent_name] = {
                     "type": "router",
                     "rooms": sorted(list(all_room_aliases)),
                 }
 
             elif agent_name in config.teams:
-                # This is a team - create TeamBot
                 team_config = config.teams[agent_name]
                 rooms = resolve_room_aliases(team_config.rooms)
-
                 bot = TeamBot(
                     agent_user=agent_user,
                     storage_path=self.storage_path,
@@ -833,9 +826,8 @@ class MultiAgentOrchestrator:
                     team_agents=team_config.agents,
                     team_mode=team_config.mode,
                     team_model=team_config.model,
-                    enable_streaming=False,  # Teams don't support streaming
+                    enable_streaming=False,
                 )
-                # Store team config
                 self.current_config[agent_name] = {
                     "type": "team",
                     "rooms": sorted(team_config.rooms),
@@ -845,12 +837,10 @@ class MultiAgentOrchestrator:
                 }
 
             elif agent_name in config.agents:
-                # Regular agent - use configured rooms
                 agent_config = config.agents[agent_name]
                 rooms = resolve_room_aliases(agent_config.rooms)
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
-                # Store agent config
                 self.current_config[agent_name] = {
                     "type": "agent",
                     "rooms": sorted(agent_config.rooms),
@@ -888,26 +878,21 @@ class MultiAgentOrchestrator:
         # Run all sync tasks
         await asyncio.gather(*sync_tasks)
 
-    async def update_config_selective(self) -> bool:
+    async def update_config(self) -> bool:
         """Update configuration and restart only changed agents.
 
         Returns:
             True if any agents were updated, False otherwise.
         """
-        # Clear the config cache to force reload
         load_config.cache_clear()
-
-        # Load new configuration
         new_config = load_config()
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
 
         agents_to_restart = set()
         new_agents = set()
 
-        # Build new config dict for comparison
         new_config_dict: dict[str, dict[str, Any]] = {}
 
-        # Process router
         if ROUTER_AGENT_NAME in agent_users:
             all_room_aliases = set()
             for agent_config in new_config.agents.values():
@@ -1096,9 +1081,8 @@ async def main(log_level: str, storage_path: Path) -> None:
                     logger.info("Configuration file changed, checking for updates...")
                     last_mtime = current_mtime
 
-                    # Only update affected agents - don't restart everything
                     if orchestrator.running:
-                        updated = await orchestrator.update_config_selective()
+                        updated = await orchestrator.update_config()
                         if updated:
                             logger.info("Configuration update applied to affected agents")
                         else:
