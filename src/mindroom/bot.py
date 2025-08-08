@@ -185,12 +185,21 @@ class AgentBot:
         self.running = True
         self.logger.info("Started bot", user_id=self.agent_user.user_id)
 
-        # Router bot cleans up orphaned bots from all rooms on startup
+        # Router bot manages room memberships on startup
         if self.agent_name == ROUTER_AGENT_NAME:
+            # First clean up orphaned bots
             try:
                 await cleanup_all_orphaned_bots(self.client)
             except Exception as e:
                 self.logger.error(f"Failed to cleanup orphaned bots: {e}")
+
+            # Then invite missing bots
+            try:
+                from .room_cleanup import invite_all_missing_bots
+
+                await invite_all_missing_bots(self.client)
+            except Exception as e:
+                self.logger.error(f"Failed to invite missing bots: {e}")
 
         # Join configured rooms
         for room_id in self.rooms:

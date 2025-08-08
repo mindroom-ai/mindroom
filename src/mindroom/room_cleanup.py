@@ -1,4 +1,4 @@
-"""Room cleanup utilities for removing orphaned bots from Matrix rooms."""
+"""Room management utilities for managing bot membership in Matrix rooms."""
 
 import nio
 
@@ -119,3 +119,102 @@ async def cleanup_all_orphaned_bots(client: nio.AsyncClient) -> dict[str, list[s
         logger.info("No orphaned bots found in any room")
 
     return kicked_bots
+
+
+async def _invite_missing_bots_to_room(
+    client: nio.AsyncClient,
+    room_id: str,
+    config: Config,
+) -> list[str]:
+    """Invite configured bots that are missing from a room.
+
+    Args:
+        client: An authenticated Matrix client with invite permissions
+        room_id: The room to check
+        config: Current configuration
+
+    Returns:
+        List of bot usernames that were invited
+    """
+    # Get room members
+    members_response = await client.joined_members(room_id)
+    if not isinstance(members_response, nio.JoinedMembersResponse):
+        logger.warning(f"Failed to get members for room {room_id}")
+        return []
+
+    # Get current members
+    current_members = {MatrixID.parse(user_id).username for user_id in members_response.members}
+
+    # Get configured bots for this room
+    configured_bots = config.get_configured_bots_for_room(room_id)
+
+    # Find bots that should be in the room but aren't
+    missing_bots = configured_bots - current_members
+
+    invited_bots = []
+
+    for bot_username in missing_bots:
+        # Extract the actual name (remove mindroom_ prefix)
+        entity_name = bot_username[9:] if bot_username.startswith("mindroom_") else bot_username
+
+        # Construct the full Matrix ID
+        # Get server name from the first bot we see (they all have the same domain)
+        from .matrix import extract_server_name_from_homeserver
+
+        server_name = extract_server_name_from_homeserver(client.homeserver)
+        matrix_id = MatrixID.from_agent(entity_name, server_name)
+        full_user_id = matrix_id.full_id
+
+        logger.info(f"Inviting missing bot {bot_username} to room {room_id}")
+
+        # Invite the bot
+        invite_response = await client.room_invite(room_id, full_user_id)
+
+        if isinstance(invite_response, nio.RoomInviteResponse):
+            logger.info(f"Invited {bot_username} to {room_id}")
+            invited_bots.append(bot_username)
+        else:
+            logger.error(f"Failed to invite {bot_username} to {room_id}: {invite_response}")
+
+    return invited_bots
+
+
+async def invite_all_missing_bots(client: nio.AsyncClient) -> dict[str, list[str]]:
+    """Invite all missing bots to all rooms they should be in.
+
+    This should be called by a user or bot with admin/moderator permissions
+    in the rooms that need bots invited.
+
+    Args:
+        client: An authenticated Matrix client
+
+    Returns:
+        Dictionary mapping room IDs to lists of invited bot usernames
+    """
+    # Get current configuration
+    config = load_config()
+
+    # Track what we're doing
+    invited_bots: dict[str, list[str]] = {}
+
+    # Get all rooms the client is in
+    joined_rooms_response = await client.joined_rooms()
+    if not isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
+        logger.error(f"Failed to get joined rooms: {joined_rooms_response}")
+        return invited_bots
+
+    logger.info(f"Checking {len(joined_rooms_response.rooms)} rooms for missing bots")
+
+    for room_id in joined_rooms_response.rooms:
+        room_invited = await _invite_missing_bots_to_room(client, room_id, config)
+        if room_invited:
+            invited_bots[room_id] = room_invited
+
+    # Summary
+    total_invited = sum(len(bots) for bots in invited_bots.values())
+    if total_invited > 0:
+        logger.info(f"Invited {total_invited} missing bots to {len(invited_bots)} rooms")
+    else:
+        logger.info("No missing bots found in any room")
+
+    return invited_bots
