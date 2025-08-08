@@ -528,13 +528,14 @@ class TestMultiAgentOrchestrator:
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()  # Need to initialize first
 
-        # Mock ensure_setup for all bots to avoid actual login/setup
-        ensure_setup_mocks = []
+        # Mock start for all bots to avoid actual login/setup
+        start_mocks = []
         for bot in orchestrator.agent_bots.values():
-            mock_ensure_setup = AsyncMock()
-            bot.ensure_setup = mock_ensure_setup
-            ensure_setup_mocks.append(mock_ensure_setup)
-            # Don't set the client yet - let start() decide whether to call ensure_setup
+            # Create a mock that tracks the call
+            mock_start = AsyncMock()
+            # Replace start with our mock
+            bot.start = mock_start
+            start_mocks.append(mock_start)
             bot.running = False
 
         # Start the orchestrator but don't wait for sync_forever
@@ -546,9 +547,9 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True  # Manually set since we're not calling orchestrator.start()
 
         assert orchestrator.running
-        # Verify ensure_setup was called for each bot
-        for mock_ensure_setup in ensure_setup_mocks:
-            mock_ensure_setup.assert_called_once()
+        # Verify start was called for each bot
+        for mock_start in start_mocks:
+            mock_start.assert_called_once()
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.load_config")

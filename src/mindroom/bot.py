@@ -235,12 +235,8 @@ class AgentBot:
         await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
 
-    async def ensure_setup(self) -> None:
-        """Ensure the agent is fully set up with user account and rooms.
-
-        This is the main entry point for agent self-management.
-        Call this after creating an agent bot to ensure it's ready.
-        """
+    async def start(self) -> None:
+        """Start the agent bot with user account and rooms setup."""
         # Ensure user account exists
         await self.ensure_user_account()
 
@@ -299,20 +295,6 @@ class AgentBot:
 
         # Stop the bot
         await self.stop()
-
-    async def start(self) -> None:
-        """Start the agent bot (backward compatibility).
-
-        This method now delegates to ensure_setup() for the actual setup.
-        Kept for backward compatibility with existing code.
-        """
-        # If client is not already initialized, do full setup
-        if not hasattr(self, "client") or not self.client:
-            await self.ensure_setup()
-        else:
-            # Just ensure rooms are correct if already set up
-            await self.ensure_rooms()
-            self.logger.info("Started bot", user_id=self.agent_user.user_id)
 
     async def stop(self) -> None:
         """Stop the agent bot."""
@@ -1086,7 +1068,7 @@ class MultiAgentOrchestrator:
                     bot.orchestrator = self
                     self.agent_bots[entity_name] = bot
                     # Agent handles its own setup
-                    await bot.ensure_setup()
+                    await bot.start()
                     # Start sync loop
                     asyncio.create_task(bot.sync_forever())
             else:
@@ -1101,7 +1083,7 @@ class MultiAgentOrchestrator:
             if bot:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot
-                await bot.ensure_setup()
+                await bot.start()
                 asyncio.create_task(bot.sync_forever())
 
         # Handle removed entities (cleanup)
