@@ -42,7 +42,7 @@ LAYOUT_FILE="$REPO_ROOT/scripts/zellij-mindroom.kdl"
 show_usage() {
     echo "❌ Use 'Ctrl-Q' to quit Zellij"
     echo "🔌 Use 'Ctrl-O d' to detach from the session"
-    echo "🔗 Use 'scripts/attach' to reattach"
+    echo "🔗 Use 'scripts/start' to reattach"
 }
 
 # Function to start a new Zellij session
@@ -56,7 +56,7 @@ start_new_session() {
         )
         sleep 2  # Give it time to start
         echo "✅ Session '$SESSION_NAME' started in background."
-        echo "Run: scripts/attach   to attach"
+        echo "Run: scripts/start   to attach"
         echo "Run: scripts/stop     to stop the session"
     else
         show_usage
@@ -83,7 +83,7 @@ if echo "$sessions" | grep "$SESSION_NAME" | grep -q "EXITED"; then
 elif echo "$sessions" | awk '{print $1}' | grep -qx "$SESSION_NAME"; then
     if [ "${MINDROOM_NO_ATTACH:-false}" = "true" ]; then
         echo "✅ Session '$SESSION_NAME' is already running. Not attaching as requested."
-        echo "Run: scripts/attach   to attach"
+        echo "Run: scripts/start   to attach"
         echo "Run: scripts/stop     to stop the session"
     else
         echo "🔗 Session '$SESSION_NAME' already exists and is running. Attaching..."
