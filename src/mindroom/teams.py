@@ -223,7 +223,7 @@ async def create_team_response(
     )
 
     # Create agent list for logging
-    agent_list = ", ".join(a.name for a in agents if a.name)
+    agent_list = ", ".join(str(a.name) for a in agents if a.name)
 
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")  # Log first 500 chars of prompt
