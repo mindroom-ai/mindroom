@@ -278,6 +278,49 @@ async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
         return None
 
 
+async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
+    """Leave a Matrix room.
+
+    Args:
+        client: Authenticated Matrix client
+        room_id: The room ID to leave
+
+    Returns:
+        True if successfully left the room, False otherwise
+    """
+    response = await client.room_leave(room_id)
+    if isinstance(response, nio.RoomLeaveResponse):
+        logger.info(f"Left room {room_id}")
+        return True
+    else:
+        logger.error(f"Failed to leave room {room_id}: {response}")
+        return False
+
+
+async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
+    """Send a message to a Matrix room.
+
+    Args:
+        client: Authenticated Matrix client
+        room_id: The room ID to send the message to
+        content: The message content dictionary
+
+    Returns:
+        The event ID of the sent message, or None if sending failed
+    """
+    response = await client.room_send(
+        room_id=room_id,
+        message_type="m.room.message",
+        content=content,
+    )
+    if isinstance(response, nio.RoomSendResponse):
+        logger.debug(f"Sent message to {room_id}: {response.event_id}")
+        return str(response.event_id)
+    else:
+        logger.error(f"Failed to send message to {room_id}: {response}")
+        return None
+
+
 def _extract_message_data(event: nio.RoomMessageText) -> dict[str, Any]:
     """Extract message data from a RoomMessageText event."""
     return {
@@ -379,7 +422,7 @@ async def edit_message(
     event_id: str,
     new_content: dict[str, Any],
     new_text: str,
-) -> nio.RoomSendResponse | nio.ErrorResponse:
+) -> str | None:
     """Edit an existing Matrix message.
 
     Args:
@@ -390,7 +433,7 @@ async def edit_message(
         new_text: The new text (plain text version)
 
     Returns:
-        The response from the room_send call
+        The event ID of the edit message, or None if editing failed
     """
     edit_content = {
         "msgtype": "m.text",
@@ -401,8 +444,4 @@ async def edit_message(
         "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
     }
 
-    return await client.room_send(
-        room_id=room_id,
-        message_type="m.room.message",
-        content=edit_content,
-    )
+    return await send_message(client, room_id, edit_content)

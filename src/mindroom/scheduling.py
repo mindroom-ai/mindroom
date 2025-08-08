@@ -218,11 +218,9 @@ async def _execute_scheduled_task(
                 "event_id": thread_id,
             }
 
-        await client.room_send(
-            room_id=room_id,
-            message_type="m.room.message",
-            content=content,
-        )
+        from mindroom.matrix import send_message
+
+        await send_message(client, room_id, content)
 
         # Update task status to completed
         await client.room_put_state(

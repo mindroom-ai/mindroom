@@ -48,11 +48,12 @@ async def _cleanup_orphaned_bots_in_room(
     Returns:
         List of bot usernames that were kicked
     """
+    from .matrix import get_room_members
 
     # Get room members
-    members_response = await client.joined_members(room_id)
-    if not isinstance(members_response, nio.JoinedMembersResponse):
-        logger.warning(f"Failed to get members for room {room_id}")
+    member_ids = await get_room_members(client, room_id)
+    if not member_ids:
+        logger.warning(f"No members found or failed to get members for room {room_id}")
         return []
 
     # Get configured bots for this room
@@ -61,17 +62,7 @@ async def _cleanup_orphaned_bots_in_room(
 
     kicked_bots = []
 
-    # Check each member - ensure members is a dict
-    if not hasattr(members_response, "members"):
-        logger.warning(f"JoinedMembersResponse has no members attribute for room {room_id}")
-        return []
-
-    members = members_response.members
-    if not isinstance(members, dict):
-        logger.warning(f"members is not a dict (got {type(members)}) for room {room_id}")
-        return []
-
-    for user_id, _member_info in members.items():
+    for user_id in member_ids:
         matrix_id = MatrixID.parse(user_id)
 
         # Check if this is a mindroom bot and shouldn't be in this room

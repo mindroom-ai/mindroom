@@ -13,9 +13,11 @@ from .client import (
     get_room_members,
     invite_to_room,
     join_room,
+    leave_room,
     login,
     matrix_client,
     register_user,
+    send_message,
 )
 from .identity import (
     MatrixID,
@@ -65,9 +67,11 @@ __all__ = [
     "get_room_members",
     "invite_to_room",
     "join_room",
+    "leave_room",
     "login",
     "matrix_client",
     "register_user",
+    "send_message",
     # Identity classes and functions
     "MatrixID",
     "ThreadStateKey",

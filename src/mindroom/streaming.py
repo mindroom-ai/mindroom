@@ -68,19 +68,17 @@ class StreamingResponse:
         if self.event_id is None:
             # First message - send new
             logger.debug("Sending initial streaming message")
-            response = await client.room_send(
-                room_id=self.room_id,
-                message_type="m.room.message",
-                content=content,
-            )
-            if isinstance(response, nio.RoomSendResponse):
-                self.event_id = response.event_id
+            from mindroom.matrix import send_message
+
+            response_event_id = await send_message(client, self.room_id, content)
+            if response_event_id:
+                self.event_id = response_event_id
                 logger.debug("Initial streaming message sent", event_id=self.event_id)
             else:
-                logger.error("Failed to send initial streaming message", error=str(response))
+                logger.error("Failed to send initial streaming message")
         else:
             # Subsequent updates - edit existing message
             logger.debug("Editing streaming message", event_id=self.event_id)
-            response = await edit_message(client, self.room_id, self.event_id, content, display_text)
-            if not isinstance(response, nio.RoomSendResponse):
-                logger.error("Failed to edit streaming message", error=str(response))
+            response_event_id = await edit_message(client, self.room_id, self.event_id, content, display_text)
+            if not response_event_id:
+                logger.error("Failed to edit streaming message")

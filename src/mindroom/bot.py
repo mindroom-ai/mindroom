@@ -192,7 +192,7 @@ class AgentBot:
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
-        from .matrix import get_joined_rooms
+        from .matrix import get_joined_rooms, leave_room
 
         # Get all rooms we're currently in
         joined_rooms = await get_joined_rooms(self.client)
@@ -204,11 +204,11 @@ class AgentBot:
 
         # Leave rooms we're no longer configured for
         for room_id in current_rooms - configured_rooms:
-            leave_response = await self.client.room_leave(room_id)
-            if isinstance(leave_response, nio.RoomLeaveResponse):
+            success = await leave_room(self.client, room_id)
+            if success:
                 self.logger.info(f"Left unconfigured room {room_id}")
             else:
-                self.logger.error(f"Failed to leave room {room_id}: {leave_response}")
+                self.logger.error(f"Failed to leave unconfigured room {room_id}")
 
     async def ensure_user_account(self) -> None:
         """Ensure this agent has a Matrix user account.
@@ -280,7 +280,7 @@ class AgentBot:
 
         This method ensures clean shutdown when an agent is removed from config.
         """
-        from .matrix import get_joined_rooms
+        from .matrix import get_joined_rooms, leave_room
 
         if hasattr(self, "client") and self.client:
             # Leave all rooms
@@ -288,11 +288,11 @@ class AgentBot:
                 joined_rooms = await get_joined_rooms(self.client)
                 if joined_rooms:
                     for room_id in joined_rooms:
-                        leave_response = await self.client.room_leave(room_id)
-                        if isinstance(leave_response, nio.RoomLeaveResponse):
+                        success = await leave_room(self.client, room_id)
+                        if success:
                             self.logger.info(f"Left room {room_id} during cleanup")
                         else:
-                            self.logger.error(f"Failed to leave room {room_id} during cleanup: {leave_response}")
+                            self.logger.error(f"Failed to leave room {room_id} during cleanup")
             except Exception as e:
                 self.logger.error(f"Error leaving rooms during cleanup: {e}")
 
@@ -671,12 +671,14 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
         )
 
-        response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
-        if isinstance(response, nio.RoomSendResponse):
-            self.logger.info("Sent response", event_id=response.event_id, room_name=room.name)
-            return response.event_id  # type: ignore[no-any-return]
+        from .matrix import send_message
+
+        event_id = await send_message(self.client, room.room_id, content)
+        if event_id:
+            self.logger.info("Sent response", event_id=event_id, room_name=room.name)
+            return event_id
         else:
-            self.logger.error("Failed to send response", error=str(response))
+            self.logger.error("Failed to send response to room", room_id=room.room_id)
             return None
 
     async def _edit_message(self, room_id: str, event_id: str, new_text: str, thread_id: str | None) -> bool:
@@ -745,11 +747,13 @@ class AgentBot:
             reply_to_event_id=event.event_id,
         )
 
-        response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
-        if isinstance(response, nio.RoomSendResponse):
+        from .matrix import send_message
+
+        event_id = await send_message(self.client, room.room_id, content)
+        if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
         else:
-            self.logger.error("Failed to route to agent", agent=suggested_agent, error=str(response))
+            self.logger.error("Failed to route to agent", agent=suggested_agent)
 
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
         self.logger.info("Handling command", command_type=command.type.value)
@@ -1121,12 +1125,14 @@ class MultiAgentOrchestrator:
             room_id: The room to invite agents to
             inviter_client: An authenticated client with invite permissions
         """
+        from .matrix import invite_to_room
+
         for agent_name, bot in self.agent_bots.items():
-            result = await inviter_client.room_invite(room_id, bot.agent_user.user_id)
-            if isinstance(result, nio.RoomInviteResponse):
+            success = await invite_to_room(inviter_client, room_id, bot.agent_user.user_id)
+            if success:
                 logger.info("Invited agent", agent=agent_name, room_id=room_id)
             else:
-                logger.error("Failed to invite agent", agent=agent_name, error=str(result))
+                logger.error("Failed to invite agent", agent=agent_name, user_id=bot.agent_user.user_id)
 
 
 async def _identify_entities_to_restart_simplified(
