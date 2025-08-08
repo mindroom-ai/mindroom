@@ -65,6 +65,21 @@ describe('TeamEditor', () => {
     (useConfigStore as any).mockReturnValue({
       teams: [mockTeam],
       agents: mockAgents,
+      rooms: [
+        {
+          id: 'dev',
+          display_name: 'Dev',
+          description: 'Development room',
+          agents: ['code', 'shell'],
+        },
+        { id: 'lobby', display_name: 'Lobby', description: 'Main lobby', agents: [] },
+        {
+          id: 'research',
+          display_name: 'Research',
+          description: 'Research room',
+          agents: ['research'],
+        },
+      ],
       selectedTeamId: 'dev_team',
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
@@ -86,6 +101,7 @@ describe('TeamEditor', () => {
     (useConfigStore as any).mockReturnValue({
       teams: [],
       agents: mockAgents,
+      rooms: [],
       selectedTeamId: null,
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
@@ -182,31 +198,24 @@ describe('TeamEditor', () => {
     });
   });
 
-  it('adds new room to team', async () => {
+  it('adds room to team when checkbox is checked', async () => {
     render(<TeamEditor />);
 
-    const addButton = screen.getByRole('button', { name: /Add/i });
-    fireEvent.click(addButton);
-
-    // Change the default "new_room" value
-    const newRoomInput = screen.getAllByPlaceholderText('Room name...')[2]; // After dev and lobby
-    fireEvent.change(newRoomInput, { target: { value: 'testing' } });
+    const researchCheckbox = screen.getByRole('checkbox', { name: /Research/ });
+    fireEvent.click(researchCheckbox);
 
     await waitFor(() => {
       expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
-        rooms: ['dev', 'lobby', 'testing'],
+        rooms: ['dev', 'lobby', 'research'],
       });
     });
   });
 
-  it('removes room from team', async () => {
+  it('removes room from team when checkbox is unchecked', async () => {
     render(<TeamEditor />);
 
-    // Find the remove button for the first room
-    const removeButtons = screen
-      .getAllByRole('button')
-      .filter(btn => btn.querySelector('svg')?.classList.contains('h-4'));
-    fireEvent.click(removeButtons[0]); // Remove first room
+    const devCheckbox = screen.getByRole('checkbox', { name: /Dev/ });
+    fireEvent.click(devCheckbox);
 
     await waitFor(() => {
       expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
@@ -286,6 +295,15 @@ describe('TeamEditor', () => {
     (useConfigStore as any).mockReturnValue({
       teams: [mockTeam],
       agents: mockAgents,
+      rooms: [
+        {
+          id: 'dev',
+          display_name: 'Dev',
+          description: 'Development room',
+          agents: ['code', 'shell'],
+        },
+        { id: 'lobby', display_name: 'Lobby', description: 'Main lobby', agents: [] },
+      ],
       selectedTeamId: 'dev_team',
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,

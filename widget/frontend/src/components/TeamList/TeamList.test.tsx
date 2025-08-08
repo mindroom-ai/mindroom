@@ -53,7 +53,9 @@ describe('TeamList', () => {
   it('displays agent count and mode for each team', () => {
     render(<TeamList />);
 
-    expect(screen.getByText('2 agents')).toBeInTheDocument();
+    // Both teams have 2 agents, so there should be 2 elements with "2 agents"
+    const agentCounts = screen.getAllByText('2 agents');
+    expect(agentCounts).toHaveLength(2);
     expect(screen.getAllByText('coordinate')[0]).toBeInTheDocument();
     expect(screen.getAllByText('collaborate')[0]).toBeInTheDocument();
   });
@@ -104,8 +106,10 @@ describe('TeamList', () => {
   it('shows create team form when plus button is clicked', () => {
     render(<TeamList />);
 
-    const plusButton = screen.getByRole('button', { name: /plus/i });
-    fireEvent.click(plusButton);
+    // Find the button with the Plus icon (it's a small button in the header)
+    const buttons = screen.getAllByRole('button');
+    const plusButton = buttons.find(btn => btn.className.includes('h-8 w-8'));
+    fireEvent.click(plusButton!);
 
     expect(screen.getByPlaceholderText('Team name...')).toBeInTheDocument();
     expect(screen.getByText('Create')).toBeInTheDocument();
@@ -115,8 +119,9 @@ describe('TeamList', () => {
   it('creates new team with correct data', async () => {
     render(<TeamList />);
 
-    const plusButton = screen.getByRole('button', { name: /plus/i });
-    fireEvent.click(plusButton);
+    const buttons = screen.getAllByRole('button');
+    const plusButton = buttons.find(btn => btn.className.includes('h-8 w-8'));
+    fireEvent.click(plusButton!);
 
     const input = screen.getByPlaceholderText('Team name...');
     fireEvent.change(input, { target: { value: 'Test Team' } });
@@ -138,8 +143,9 @@ describe('TeamList', () => {
   it('cancels team creation when cancel button is clicked', () => {
     render(<TeamList />);
 
-    const plusButton = screen.getByRole('button', { name: /plus/i });
-    fireEvent.click(plusButton);
+    const buttons = screen.getAllByRole('button');
+    const plusButton = buttons.find(btn => btn.className.includes('h-8 w-8'));
+    fireEvent.click(plusButton!);
 
     expect(screen.getByPlaceholderText('Team name...')).toBeInTheDocument();
 
@@ -152,8 +158,9 @@ describe('TeamList', () => {
   it('cancels team creation when Escape key is pressed', () => {
     render(<TeamList />);
 
-    const plusButton = screen.getByRole('button', { name: /plus/i });
-    fireEvent.click(plusButton);
+    const buttons = screen.getAllByRole('button');
+    const plusButton = buttons.find(btn => btn.className.includes('h-8 w-8'));
+    fireEvent.click(plusButton!);
 
     const input = screen.getByPlaceholderText('Team name...');
     fireEvent.keyDown(input, { key: 'Escape' });
@@ -164,8 +171,9 @@ describe('TeamList', () => {
   it('creates team when Enter key is pressed', async () => {
     render(<TeamList />);
 
-    const plusButton = screen.getByRole('button', { name: /plus/i });
-    fireEvent.click(plusButton);
+    const buttons = screen.getAllByRole('button');
+    const plusButton = buttons.find(btn => btn.className.includes('h-8 w-8'));
+    fireEvent.click(plusButton!);
 
     const input = screen.getByPlaceholderText('Team name...');
     fireEvent.change(input, { target: { value: 'Enter Test Team' } });

@@ -31,6 +31,15 @@ describe('AgentEditor', () => {
 
   const mockStore = {
     agents: [mockAgent],
+    rooms: [
+      {
+        id: 'test_room',
+        display_name: 'Test Room',
+        description: 'Test room',
+        agents: ['test_agent'],
+      },
+      { id: 'other_room', display_name: 'Other Room', description: 'Another room', agents: [] },
+    ],
     selectedAgentId: 'test_agent',
     updateAgent: vi.fn(),
     deleteAgent: vi.fn(),
@@ -62,6 +71,7 @@ describe('AgentEditor', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       selectedAgentId: null,
+      rooms: mockStore.rooms,
     });
 
     render(<AgentEditor />);
@@ -93,6 +103,7 @@ describe('AgentEditor', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       updateAgent: trackingUpdateAgent,
+      rooms: mockStore.rooms,
     });
 
     render(<AgentEditor />);
@@ -113,6 +124,7 @@ describe('AgentEditor', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       isDirty: true,
+      rooms: mockStore.rooms,
     });
 
     render(<AgentEditor />);
@@ -258,6 +270,7 @@ describe('AgentEditor', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       updateAgent: trackingUpdateAgent,
+      rooms: mockStore.rooms,
     });
 
     render(<AgentEditor />);
