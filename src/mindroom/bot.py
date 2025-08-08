@@ -883,12 +883,6 @@ class MultiAgentOrchestrator:
         """Initialize all agent bots."""
         logger.info("Initializing multi-agent system...")
 
-        # First, audit and clean up any orphaned bot room memberships
-        logger.info("Auditing room memberships for orphaned bots...")
-        from .room_manager import audit_and_fix_room_memberships
-
-        await audit_and_fix_room_memberships(MATRIX_HOMESERVER)
-
         config = load_config()
         self.current_config = config
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
