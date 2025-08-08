@@ -193,6 +193,18 @@ class AgentBot:
         self.running = True
         self.logger.info("Started bot", user_id=self.agent_user.user_id)
 
+        # Router bot cleans up orphaned bots from all rooms on startup
+        if self.agent_name == ROUTER_AGENT_NAME:
+            from .room_cleanup import cleanup_all_orphaned_bots
+
+            self.logger.info("Router bot checking for orphaned bots in all rooms...")
+            try:
+                kicked = await cleanup_all_orphaned_bots(self.client)
+                if kicked:
+                    self.logger.info(f"Cleaned up orphaned bots from {len(kicked)} rooms")
+            except Exception as e:
+                self.logger.error(f"Failed to cleanup orphaned bots: {e}")
+
         # Get currently joined rooms
         joined_rooms_response = await self.client.joined_rooms()
         if isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
