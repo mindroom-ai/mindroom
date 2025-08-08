@@ -9,6 +9,8 @@ from pydantic import BaseModel
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from mindroom.models import Config
+
 app = FastAPI(title="MindRoom Widget Backend")
 
 # Configure CORS for widget
@@ -26,16 +28,6 @@ CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config.yaml"
 # Global variable to store current config
 current_config: dict[str, Any] = {}
 config_lock = threading.Lock()
-
-
-class Config(BaseModel):
-    memory: dict[str, Any]
-    models: dict[str, dict[str, Any]]
-    agents: dict[str, dict[str, Any]]
-    teams: dict[str, dict[str, Any]] | None = None
-    room_models: dict[str, str] | None = None
-    defaults: dict[str, Any]
-    router: dict[str, Any]
 
 
 class TestModelRequest(BaseModel):

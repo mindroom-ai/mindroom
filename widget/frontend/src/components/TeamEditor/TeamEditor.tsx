@@ -103,6 +103,7 @@ export function TeamEditor() {
           {/* Display Name */}
           <div>
             <Label htmlFor="display_name">Display Name</Label>
+            <p className="text-xs text-muted-foreground mb-1">Human-readable name for the team</p>
             <Controller
               name="display_name"
               control={control}
@@ -123,6 +124,9 @@ export function TeamEditor() {
           {/* Role */}
           <div>
             <Label htmlFor="role">Team Purpose</Label>
+            <p className="text-xs text-muted-foreground mb-1">
+              Description of the team's purpose and what it does
+            </p>
             <Controller
               name="role"
               control={control}
@@ -144,6 +148,9 @@ export function TeamEditor() {
           {/* Collaboration Mode */}
           <div>
             <Label htmlFor="mode">Collaboration Mode</Label>
+            <p className="text-xs text-muted-foreground mb-1">
+              How agents work together: sequential (coordinate) or parallel (collaborate)
+            </p>
             <Controller
               name="mode"
               control={control}
@@ -174,6 +181,9 @@ export function TeamEditor() {
           {/* Model Selection */}
           <div>
             <Label htmlFor="model">Team Model (Optional)</Label>
+            <p className="text-xs text-muted-foreground mb-1">
+              Override model for all agents in this team
+            </p>
             <Controller
               name="model"
               control={control}
@@ -206,6 +216,9 @@ export function TeamEditor() {
           {/* Team Members (Agents) */}
           <div>
             <Label>Team Members</Label>
+            <p className="text-xs text-muted-foreground mb-1">
+              Select agents that compose this team
+            </p>
             <div className="space-y-2 mt-2">
               {agents.map(agent => (
                 <Controller
