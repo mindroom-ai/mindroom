@@ -239,7 +239,8 @@ teams:
     - research
     mode: collaborate
     model: sonnet
-room_models: null
+room_models:
+  research: haiku
 defaults:
   num_history_runs: 5
   markdown: true
