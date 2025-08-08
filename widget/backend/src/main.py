@@ -1,10 +1,6 @@
-import sys
 import threading
 from pathlib import Path
 from typing import Any
-
-# Add parent directory to path to import mindroom
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import yaml
 from fastapi import FastAPI, HTTPException
@@ -13,8 +9,7 @@ from pydantic import BaseModel
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-# Import the actual Config from mindroom
-from src.mindroom.models import Config
+from mindroom.models import Config
 
 app = FastAPI(title="MindRoom Widget Backend")
 
