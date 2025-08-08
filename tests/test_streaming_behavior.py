@@ -264,8 +264,9 @@ class TestStreamingBehavior:
         # Should NOT send edit because not enough time has passed
         assert mock_client.room_send.call_count == 1
 
-        # Simulate time passing
-        await asyncio.sleep(1.1)  # Wait more than update_interval (1.0 seconds)
+        # Simulate time passing (lower interval to speed up test)
+        streaming.update_interval = 0.05
+        await asyncio.sleep(0.06)
 
         # Add more content after delay
         await streaming.update_content("!", mock_client)

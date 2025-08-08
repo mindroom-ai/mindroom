@@ -222,6 +222,9 @@ class AgentBot:
         This method makes the agent responsible for its own user account creation,
         moving this responsibility from the orchestrator to the agent itself.
         """
+        # If we already have a user_id (e.g., provided by tests or config), assume account exists
+        if getattr(self.agent_user, "user_id", ""):
+            return
         # Create or retrieve the Matrix user account
         self.agent_user = await create_agent_user(
             MATRIX_HOMESERVER,
