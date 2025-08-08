@@ -34,7 +34,6 @@ from .matrix import (
     create_mention_content_from_text,
     edit_message,
     extract_agent_name,
-    extract_server_name_from_homeserver,
     extract_thread_info,
     fetch_thread_history,
     join_room,
@@ -173,47 +172,11 @@ class AgentBot:
 
         This should only be called by the router agent or during initial setup.
         """
-        from .agent_config import get_agent_ids_for_room, load_config
-        from .matrix import add_room, create_room, load_rooms
+        from .agent_config import load_config
+        from .matrix import ensure_all_rooms_exist
 
         config = load_config()
-        existing_rooms = load_rooms()
-
-        for room_id in self.rooms:
-            # Skip if this is a room ID (starts with !)
-            if room_id.startswith("!"):
-                # This is a room ID, not a room key/alias - skip it
-                continue
-
-            # This is a room key - check if it exists in our state
-            room_key = room_id
-
-            if room_key not in existing_rooms:
-                # Room doesn't exist, create it
-                room_name = room_key.replace("_", " ").title()
-                self.logger.info(f"Creating room {room_key}")
-
-                # Get power users for this room
-                power_users = get_agent_ids_for_room(room_key, config, self.client.homeserver)
-
-                # Create the room
-                created_room_id = await create_room(
-                    client=self.client,
-                    name=room_name,
-                    alias=room_key,
-                    topic=f"Mindroom {room_name}",
-                    power_users=power_users,
-                )
-
-                if created_room_id:
-                    # Save room info
-                    server_name = extract_server_name_from_homeserver(self.client.homeserver)
-                    add_room(room_key, created_room_id, f"#{room_key}:{server_name}", room_name)
-                    self.logger.info(f"Created room {room_key} with ID {created_room_id}")
-                else:
-                    self.logger.error(f"Failed to create room {room_key}")
-            else:
-                self.logger.debug(f"Room {room_key} already exists")
+        await ensure_all_rooms_exist(self.client, config)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""

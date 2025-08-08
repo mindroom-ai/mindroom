@@ -1,6 +1,15 @@
 """Matrix room management functions."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import nio
+
 from .state import MatrixRoom, MatrixState
+
+if TYPE_CHECKING:
+    from ..models import Config
 
 
 def load_rooms() -> dict[str, MatrixRoom]:
@@ -66,3 +75,100 @@ def get_room_alias_from_id(room_id: str) -> str | None:
         if rid == room_id:
             return alias
     return None
+
+
+async def ensure_room_exists(
+    client: nio.AsyncClient,
+    room_key: str,
+    room_name: str | None = None,
+    power_users: list[str] | None = None,
+) -> str | None:
+    """Ensure a room exists, creating it if necessary.
+
+    Args:
+        client: Matrix client to use for room creation
+        room_key: The room key/alias (without domain)
+        room_name: Display name for the room (defaults to room_key with underscores replaced)
+        power_users: List of user IDs to grant power levels to
+
+    Returns:
+        Room ID if room exists or was created, None on failure
+    """
+    from ..logging_config import get_logger
+    from .client import create_room
+    from .identity import extract_server_name_from_homeserver
+
+    logger = get_logger(__name__)
+    existing_rooms = load_rooms()
+
+    # Check if room already exists in our state
+    if room_key in existing_rooms:
+        logger.debug(f"Room {room_key} already exists")
+        return existing_rooms[room_key].room_id
+
+    # Room doesn't exist, create it
+    if room_name is None:
+        room_name = room_key.replace("_", " ").title()
+
+    logger.info(f"Creating room {room_key}")
+
+    # Create the room
+    created_room_id = await create_room(
+        client=client,
+        name=room_name,
+        alias=room_key,
+        topic=f"Mindroom {room_name}",
+        power_users=power_users or [],
+    )
+
+    if created_room_id:
+        # Save room info
+        server_name = extract_server_name_from_homeserver(client.homeserver)
+        add_room(room_key, created_room_id, f"#{room_key}:{server_name}", room_name)
+        logger.info(f"Created room {room_key} with ID {created_room_id}")
+        return created_room_id
+    else:
+        logger.error(f"Failed to create room {room_key}")
+        return None
+
+
+async def ensure_all_rooms_exist(
+    client: nio.AsyncClient,
+    config: Config,
+) -> dict[str, str]:
+    """Ensure all configured rooms exist.
+
+    Args:
+        client: Matrix client to use for room creation
+        config: Configuration with room settings
+
+    Returns:
+        Dict mapping room keys to room IDs
+    """
+    from ..agent_config import get_agent_ids_for_room
+
+    room_ids = {}
+
+    # Get all configured rooms
+    all_rooms = config.get_all_configured_rooms()
+
+    for room_key in all_rooms:
+        # Skip if this is a room ID (starts with !)
+        if room_key.startswith("!"):
+            # This is a room ID, not a room key/alias - skip it
+            continue
+
+        # Get power users for this room
+        power_users = get_agent_ids_for_room(room_key, config, client.homeserver)
+
+        # Ensure room exists
+        room_id = await ensure_room_exists(
+            client=client,
+            room_key=room_key,
+            power_users=power_users,
+        )
+
+        if room_id:
+            room_ids[room_key] = room_id
+
+    return room_ids
