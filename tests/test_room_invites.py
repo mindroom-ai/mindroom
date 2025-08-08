@@ -1,12 +1,18 @@
-"""Tests for automatic room invite functionality."""
+"""Tests for agent self-managed room membership.
 
+With the new self-managing agent pattern, agents handle their own room
+memberships. This test module verifies that behavior.
+"""
+
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 
+from mindroom.bot import AgentBot
+from mindroom.matrix import AgentMatrixUser
 from mindroom.models import AgentConfig, Config, TeamConfig
-from mindroom.room_cleanup import invite_all_missing_bots
 
 
 @pytest.fixture
@@ -38,131 +44,160 @@ def mock_config():
 
 
 @pytest.mark.asyncio
-async def test_invite_missing_bots(mock_config, monkeypatch):
-    """Test that missing bots are invited to their configured rooms."""
-    # Mock the config loading
-    monkeypatch.setattr("mindroom.room_cleanup.load_config", lambda: mock_config)
+async def test_agent_joins_configured_rooms(monkeypatch):
+    """Test that agents join their configured rooms on startup."""
+    # Create a mock agent user
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password="test_password",
+    )
 
-    # Mock resolve_room_aliases to map room aliases to room IDs
-    def mock_resolve_room_aliases(room_aliases):
-        mapping = {
-            "room1": "!room1:localhost",
-            "room2": "!room2:localhost",
-        }
-        return [mapping.get(alias) for alias in room_aliases]
+    # Create the agent bot with configured rooms
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=Path("/tmp/test"),
+        rooms=["!room1:localhost", "!room2:localhost"],
+    )
 
-    monkeypatch.setattr("mindroom.matrix.resolve_room_aliases", mock_resolve_room_aliases)
-
-    # Mock extract_server_name_from_homeserver
-    monkeypatch.setattr("mindroom.matrix.extract_server_name_from_homeserver", lambda x: "localhost")
-
-    # Create mock client
+    # Mock the client
     mock_client = AsyncMock()
-    mock_client.homeserver = "http://localhost:8008"
+    bot.client = mock_client
 
-    # Mock joined rooms response
+    # Track which rooms were joined
+    joined_rooms = []
+
+    async def mock_join_room(client, room_id):
+        joined_rooms.append(room_id)
+        return True
+
+    monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
+
+    # Mock restore_scheduled_tasks
+    async def mock_restore_scheduled_tasks(client, room_id):
+        return 0
+
+    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
+
+    # Test that the bot joins its configured rooms
+    await bot.join_configured_rooms()
+
+    # Verify the bot joined both configured rooms
+    assert len(joined_rooms) == 2
+    assert "!room1:localhost" in joined_rooms
+    assert "!room2:localhost" in joined_rooms
+
+
+@pytest.mark.asyncio
+async def test_agent_leaves_unconfigured_rooms(monkeypatch):
+    """Test that agents leave rooms they're no longer configured for."""
+    # Create a mock agent user
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password="test_password",
+    )
+
+    # Create the agent bot with only room1 configured
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=Path("/tmp/test"),
+        rooms=["!room1:localhost"],  # Only configured for room1
+    )
+
+    # Mock the client
+    mock_client = AsyncMock()
+    bot.client = mock_client
+
+    # Mock joined_rooms to return both room1 and room2 (agent is in both)
     joined_rooms_response = MagicMock()
     joined_rooms_response.__class__ = nio.JoinedRoomsResponse
     joined_rooms_response.rooms = ["!room1:localhost", "!room2:localhost"]
     mock_client.joined_rooms.return_value = joined_rooms_response
 
-    # Mock room members responses
-    # Room 1: has agent1, missing agent2 and router
-    room1_members = MagicMock()
-    room1_members.__class__ = nio.JoinedMembersResponse
-    room1_members.members = {
-        "@mindroom_agent1:localhost": {},
-    }
+    # Track which rooms were left
+    left_rooms = []
 
-    # Room 2: has nothing, missing agent1, team1, and router
-    room2_members = MagicMock()
-    room2_members.__class__ = nio.JoinedMembersResponse
-    room2_members.members = {}
+    async def mock_room_leave(room_id):
+        left_rooms.append(room_id)
+        response = MagicMock()
+        response.__class__ = nio.RoomLeaveResponse
+        return response
 
-    # Set up joined_members to return different responses based on room_id
-    async def mock_joined_members(room_id):
-        if room_id == "!room1:localhost":
-            return room1_members
-        elif room_id == "!room2:localhost":
-            return room2_members
-        return MagicMock()
+    mock_client.room_leave = mock_room_leave
 
-    mock_client.joined_members = mock_joined_members
+    # Test that the bot leaves unconfigured rooms
+    await bot.leave_unconfigured_rooms()
 
-    # Mock successful invite responses
-    invite_response = MagicMock()
-    invite_response.__class__ = nio.RoomInviteResponse
-    mock_client.room_invite.return_value = invite_response
-
-    # Call the function
-    await invite_all_missing_bots(mock_client)
-
-    # Check that invites were sent
-    assert (
-        mock_client.room_invite.call_count == 5
-    )  # router to room1, agent2 to room1, router to room2, agent1 to room2, team1 to room2
-
-    # Check the specific invites
-    invite_calls = mock_client.room_invite.call_args_list
-    invited_pairs = [(call[0][0], call[0][1]) for call in invite_calls]
-
-    # Should have invited the following:
-    # Room 1: router, agent2
-    # Room 2: router, agent1, team1
-    expected_invites = [
-        ("!room1:localhost", "@mindroom_router:localhost"),
-        ("!room1:localhost", "@mindroom_agent2:localhost"),
-        ("!room2:localhost", "@mindroom_router:localhost"),
-        ("!room2:localhost", "@mindroom_agent1:localhost"),
-        ("!room2:localhost", "@mindroom_team1:localhost"),
-    ]
-
-    for expected in expected_invites:
-        assert expected in invited_pairs, f"Expected invite {expected} not found"
+    # Verify the bot left room2 (unconfigured) but not room1 (configured)
+    assert len(left_rooms) == 1
+    assert "!room2:localhost" in left_rooms
 
 
 @pytest.mark.asyncio
-async def test_no_missing_bots(mock_config, monkeypatch):
-    """Test that no invites are sent when all bots are already in their rooms."""
-    # Mock the config loading
-    monkeypatch.setattr("mindroom.room_cleanup.load_config", lambda: mock_config)
+async def test_agent_manages_rooms_on_config_update(monkeypatch):
+    """Test that agents update their room memberships when configuration changes."""
+    # Create a mock agent user
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password="test_password",
+    )
 
-    # Mock resolve_room_aliases to map room aliases to room IDs
-    def mock_resolve_room_aliases(room_aliases):
-        mapping = {
-            "room1": "!room1:localhost",
-            "room2": "!room2:localhost",
-        }
-        return [mapping.get(alias) for alias in room_aliases]
+    # Start with agent configured for room1 only
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=Path("/tmp/test"),
+        rooms=["!room1:localhost"],
+    )
 
-    monkeypatch.setattr("mindroom.matrix.resolve_room_aliases", mock_resolve_room_aliases)
-
-    # Mock extract_server_name_from_homeserver
-    monkeypatch.setattr("mindroom.matrix.extract_server_name_from_homeserver", lambda x: "localhost")
-
-    # Create mock client
+    # Mock the client
     mock_client = AsyncMock()
-    mock_client.homeserver = "http://localhost:8008"
+    bot.client = mock_client
 
-    # Mock joined rooms response
+    # Track room operations
+    joined_rooms = []
+    left_rooms = []
+
+    async def mock_join_room(client, room_id):
+        joined_rooms.append(room_id)
+        return True
+
+    async def mock_room_leave(room_id):
+        left_rooms.append(room_id)
+        response = MagicMock()
+        response.__class__ = nio.RoomLeaveResponse
+        return response
+
+    monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
+    mock_client.room_leave = mock_room_leave
+
+    # Mock restore_scheduled_tasks
+    async def mock_restore_scheduled_tasks(client, room_id):
+        return 0
+
+    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
+
+    # Mock joined_rooms to return room1 and room3 (agent is in both)
     joined_rooms_response = MagicMock()
     joined_rooms_response.__class__ = nio.JoinedRoomsResponse
-    joined_rooms_response.rooms = ["!room1:localhost"]
+    joined_rooms_response.rooms = ["!room1:localhost", "!room3:localhost"]
     mock_client.joined_rooms.return_value = joined_rooms_response
 
-    # Mock room members response - all configured bots are present
-    room_members = MagicMock()
-    room_members.__class__ = nio.JoinedMembersResponse
-    room_members.members = {
-        "@mindroom_router:localhost": {},
-        "@mindroom_agent1:localhost": {},
-        "@mindroom_agent2:localhost": {},
-    }
-    mock_client.joined_members.return_value = room_members
+    # Update configuration: now configured for room1 and room2 (not room3)
+    bot.rooms = ["!room1:localhost", "!room2:localhost"]
 
-    # Call the function
-    result = await invite_all_missing_bots(mock_client)
+    # Apply room updates
+    await bot.join_configured_rooms()
+    await bot.leave_unconfigured_rooms()
 
-    # Check that no invites were sent
-    assert mock_client.room_invite.call_count == 0
-    assert result == {}
+    # Verify:
+    # - Joined room2 (newly configured)
+    # - Left room3 (no longer configured)
+    # - Stayed in room1 (still configured)
+    assert "!room2:localhost" in joined_rooms
+    assert "!room3:localhost" in left_rooms
+    assert "!room1:localhost" not in left_rooms  # Should stay in room1

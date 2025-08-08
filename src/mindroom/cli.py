@@ -14,10 +14,8 @@ from rich.console import Console
 
 from mindroom.matrix import (
     MATRIX_HOMESERVER,
-    MatrixID,
     MatrixState,
     extract_server_name_from_homeserver,
-    invite_to_room,
     matrix_client,
 )
 
@@ -28,81 +26,6 @@ console = Console()
 
 HOMESERVER = MATRIX_HOMESERVER or "http://localhost:8008"
 SERVER_NAME = extract_server_name_from_homeserver(HOMESERVER)
-
-
-async def _ensure_agent_in_room(
-    client: nio.AsyncClient,
-    room_id: str,
-    room_key: str,
-    agent_id: str,
-    room_members: set[str],
-    agent_name: str | None = None,
-) -> tuple[int, int, int]:  # Returns (successful_invites, already_in_room, failed_invites)
-    """Ensure an agent is in a room, returning invitation statistics."""
-    display_name = agent_name or agent_id
-
-    if agent_id not in room_members:
-        success = await invite_to_room(client, room_id, agent_id)
-        if success:
-            return (1, 0, 0)  # successful_invites=1
-        else:
-            return (0, 0, 1)  # failed_invites=1
-    else:
-        console.print(f"✓ {display_name} already in {room_key}")
-        return (0, 1, 0)  # already_in_room=1
-
-
-async def _create_room_and_invite_agents(room_key: str, room_name: str, user_client: nio.AsyncClient) -> str | None:
-    """Create a room and invite all configured agents."""
-    from mindroom.agent_config import get_agent_ids_for_room, load_config
-    from mindroom.matrix import add_room, create_room, invite_to_room
-
-    config = load_config()
-    power_users = get_agent_ids_for_room(room_key, config, user_client.homeserver)
-
-    # Create room with power levels
-    room_id = await create_room(
-        client=user_client,
-        name=room_name,
-        alias=room_key,
-        topic=f"Mindroom {room_name}",
-        power_users=power_users,
-    )
-
-    if room_id:
-        # Save room info
-        add_room(room_key, room_id, f"#{room_key}:{SERVER_NAME}", room_name)
-
-        invited_count = 0
-
-        # Always invite the router first
-        router_id = MatrixID.from_agent("router", SERVER_NAME).full_id
-        success = await invite_to_room(user_client, room_id, router_id)
-        if success:
-            invited_count += 1
-            console.print(f"  ✅ Invited router to {room_name}")
-        else:
-            console.print("  ❌ Failed to invite router")
-
-        # Invite agents based on config.yaml
-        from mindroom.agent_config import load_config
-
-        config = load_config()
-
-        for agent_name, agent_config in config.agents.items():
-            if room_key in agent_config.rooms:
-                agent_id = MatrixID.from_agent(agent_name, SERVER_NAME).full_id
-                invite_response = await user_client.room_invite(room_id, agent_id)
-                if isinstance(invite_response, nio.RoomInviteResponse):
-                    invited_count += 1
-                # Ignore failures - agent might not exist yet
-
-        if invited_count > 0:
-            console.print(f"   Invited {invited_count} agents to the room")
-
-        return room_id
-    console.print(f"❌ Failed to create room {room_name}")
-    return None
 
 
 async def _ensure_user_account() -> MatrixState:
@@ -151,158 +74,53 @@ async def _ensure_user_account() -> MatrixState:
     return state
 
 
-async def _ensure_rooms_and_agents(client: nio.AsyncClient, required_rooms: set[str]) -> None:
-    """Ensure all required rooms exist and all agents (including router) are invited."""
-    from mindroom.agent_config import load_config
-    from mindroom.matrix import get_room_members, load_rooms
+async def _ensure_rooms_exist(client: nio.AsyncClient, required_rooms: set[str]) -> None:
+    """Ensure all required rooms exist.
 
-    console.print("\n🔄 Setting up rooms and agent access...")
+    With the new self-managing agent pattern, agents handle their own room
+    memberships. This function only ensures the rooms exist.
+    """
+    from mindroom.agent_config import load_config
+    from mindroom.matrix import load_rooms
+
+    console.print("\n🔄 Ensuring required rooms exist...")
 
     config = load_config()
     existing_rooms = load_rooms()
 
     # Track statistics
     rooms_created = 0
-    successful_invites = 0
-    failed_invites = 0
-    already_in_room = 0
+    rooms_existed = 0
 
     for room_key in required_rooms:
         room_name = room_key.replace("_", " ").title()
 
         # Create room if it doesn't exist
         if room_key not in existing_rooms:
-            room_id = await _create_room_and_invite_all_agents(room_key, room_name, client, config)
+            room_id = await _create_room_simple(room_key, room_name, client, config)
             if room_id:
                 rooms_created += 1
                 # Reload rooms to include the newly created one
                 existing_rooms = load_rooms()
             else:
-                console.print(f"❌ Failed to create room {room_key}, skipping agent invites")
-                continue
+                console.print(f"❌ Failed to create room {room_key}")
+        else:
+            rooms_existed += 1
 
-        # Ensure all agents are in the room (for existing rooms)
-        if room_key in existing_rooms:
-            room = existing_rooms[room_key]
-            room_members = await get_room_members(client, room.room_id)
-
-            # Always invite router to ALL rooms first
-            router_id = MatrixID.from_agent("router", SERVER_NAME).full_id
-            s, a, f = await _ensure_agent_in_room(client, room.room_id, room_key, router_id, room_members, "Router")
-            successful_invites += s
-            already_in_room += a
-            failed_invites += f
-
-            # Invite configured agents to their assigned rooms
-            for agent_name, agent_config in config.agents.items():
-                if room_key not in agent_config.rooms:
-                    continue
-
-                agent_id = MatrixID.from_agent(agent_name, SERVER_NAME).full_id
-                s, a, f = await _ensure_agent_in_room(client, room.room_id, room_key, agent_id, room_members, agent_id)
-                successful_invites += s
-                already_in_room += a
-                failed_invites += f
-
-            # Invite configured teams to their assigned rooms
-            for team_name, team_config in config.teams.items():
-                if room_key not in team_config.rooms:
-                    continue
-
-                team_id = MatrixID.from_agent(team_name, SERVER_NAME).full_id
-                s, a, f = await _ensure_agent_in_room(client, room.room_id, room_key, team_id, room_members, team_id)
-                successful_invites += s
-                already_in_room += a
-                failed_invites += f
-
-    console.print(
-        f"\n📊 Setup summary: {rooms_created} rooms created, {successful_invites} invited, "
-        f"{already_in_room} already present, {failed_invites} failed"
-    )
+    console.print(f"\n📊 Room setup: {rooms_created} created, {rooms_existed} already existed")
 
 
-async def _invite_agent_to_room(
-    client: nio.AsyncClient, room_id: str, agent_id: str, agent_name: str | None = None
-) -> bool:
-    """Invite a single agent to a room.
-
-    Returns True if invitation was successful, False otherwise.
-    """
-    response = await client.room_invite(room_id, agent_id)
-
-    display_name = agent_name or agent_id
-    if isinstance(response, nio.RoomInviteResponse):
-        console.print(f"  ✅ Invited {display_name}")
-        return True
-    else:
-        console.print(f"  ❌ Failed to invite {display_name}: {response}")
-        return False
-
-
-async def _invite_agents_from_config(
-    client: nio.AsyncClient, room_id: str, room_key: str, config: Config, include_router: bool = True
-) -> int:
-    """Invite agents and teams to a room based on config.yaml room assignments.
-
-    Returns the number of agents/teams successfully invited.
-    """
-    invited_count = 0
-
-    # Always invite the router first if requested
-    if include_router:
-        router_id = MatrixID.from_agent("router", SERVER_NAME).full_id
-        if await _invite_agent_to_room(client, room_id, router_id, "router"):
-            invited_count += 1
-
-    # Invite configured agents
-    for agent_name, agent_cfg in config.agents.items():
-        if room_key in agent_cfg.rooms:
-            agent_id = MatrixID.from_agent(agent_name, SERVER_NAME).full_id
-            if await _invite_agent_to_room(client, room_id, agent_id, agent_name):
-                invited_count += 1
-
-    # Invite configured teams
-    for team_name, team_cfg in config.teams.items():
-        if room_key in team_cfg.rooms:
-            team_id = MatrixID.from_agent(team_name, SERVER_NAME).full_id
-            if await _invite_agent_to_room(client, room_id, team_id, team_name):
-                invited_count += 1
-
-    return invited_count
-
-
-async def _invite_all_agents_to_room(
-    client: nio.AsyncClient, room_id: str, state: MatrixState, include_router: bool = True
-) -> int:
-    """Invite all available agents to a room.
-
-    Returns the number of agents successfully invited.
-    """
-    invited_count = 0
-
-    # Always invite the router first if requested
-    if include_router:
-        router_id = MatrixID.from_agent("router", SERVER_NAME).full_id
-        if await _invite_agent_to_room(client, room_id, router_id, "router"):
-            invited_count += 1
-
-    # Invite all other agents
-    for key, account in state.accounts.items():
-        if key.startswith("agent_"):
-            agent_id = f"@{account.username}:{SERVER_NAME}"
-            if await _invite_agent_to_room(client, room_id, agent_id):
-                invited_count += 1
-
-    return invited_count
-
-
-async def _create_room_and_invite_all_agents(
+async def _create_room_simple(
     room_key: str,
     room_name: str,
     client: nio.AsyncClient,
     config: Config,
 ) -> str | None:
-    """Create a room and invite router + all configured agents in one go."""
+    """Create a room.
+
+    With the new self-managing agent pattern, agents will join rooms themselves.
+    This function only creates the room with appropriate power levels.
+    """
     from mindroom.agent_config import get_agent_ids_for_room
     from mindroom.matrix import add_room, create_room
 
@@ -321,14 +139,10 @@ async def _create_room_and_invite_all_agents(
     if room_id:
         # Save room info
         add_room(room_key, room_id, f"#{room_key}:{SERVER_NAME}", room_name)
-
-        # Invite agents based on config
-        invited_count = await _invite_agents_from_config(client, room_id, room_key, config)
-
-        if invited_count > 0:
-            console.print(f"   Invited {invited_count} agents to the room")
-
+        console.print(f"   ✅ Created room {room_name}")
+        console.print("   ℹ️  Agents will join automatically when they start")
         return room_id
+
     console.print(f"❌ Failed to create room {room_name}")
     return None
 
@@ -389,7 +203,7 @@ async def _run(log_level: str, storage_path: Path) -> None:
             response = await client.login(password=password)
             if isinstance(response, nio.LoginResponse):
                 # Create missing rooms and ensure all agents are invited
-                await _ensure_rooms_and_agents(client, required_rooms)
+                await _ensure_rooms_exist(client, required_rooms)
             else:
                 console.print(f"❌ Failed to login: {response}")
                 sys.exit(1)
@@ -442,7 +256,7 @@ def create_room(
     room_alias: str = typer.Argument(..., help="Room alias (e.g., 'testing', 'dev2')"),
     room_name: str = typer.Option(None, help="Display name for the room"),
 ) -> None:
-    """Create a new room and invite relevant agents."""
+    """Create a new room. Agents will join automatically when they start."""
     asyncio.run(_create_room(room_alias, room_name))
 
 
@@ -464,19 +278,29 @@ async def _create_room(room_alias: str, room_name: str | None) -> None:
     async with matrix_client(HOMESERVER, username) as client:
         response = await client.login(password=password)
         if isinstance(response, nio.LoginResponse):
-            await _create_room_and_invite_agents(room_alias, room_name, client)
+            from mindroom.agent_config import load_config
+
+            config = load_config()
+            room_id = await _create_room_simple(room_alias, room_name, client, config)
+            if room_id:
+                console.print(f"\n✅ Room created successfully: {room_id}")
+                console.print("ℹ️  Agents will join automatically when they start")
         else:
             console.print(f"❌ Failed to login: {response}")
 
 
 @app.command()
-def invite_agents(room_id: str = typer.Argument(..., help="Room ID to invite agents to")) -> None:
-    """Invite agents to an existing room."""
-    asyncio.run(_invite_agents(room_id))
+def room_info(room_id: str = typer.Argument(..., help="Room ID or alias to get info about")) -> None:
+    """Get information about a room (replaces invite_agents command).
+
+    With the new self-managing agent pattern, agents handle their own room
+    memberships. Use this command to check room status.
+    """
+    asyncio.run(_room_info(room_id))
 
 
-async def _invite_agents(room_id: str) -> None:
-    """Invite agents to a room."""
+async def _room_info(room_id: str) -> None:
+    """Get room information."""
     state = MatrixState.load()
     user_account = state.get_account("user")
     if not user_account:
@@ -489,28 +313,33 @@ async def _invite_agents(room_id: str) -> None:
     async with matrix_client(HOMESERVER, username) as client:
         response = await client.login(password=password)
         if isinstance(response, nio.LoginResponse):
-            # Get room name/alias for agent selection
-            from mindroom.matrix import load_rooms
+            # Get room members
+            members_response = await client.joined_members(room_id)
+            if isinstance(members_response, nio.JoinedMembersResponse):
+                console.print(f"\n🏠 Room: {room_id}")
+                console.print(f"👥 Members: {len(members_response.members)}")
 
-            rooms = load_rooms()
-            room_key = None
-            for key, room in rooms.items():
-                if room.room_id == room_id:
-                    room_key = key
-                    break
+                agents = []
+                users = []
+                for user_id in members_response.members:
+                    if user_id.startswith("@mindroom_"):
+                        agents.append(user_id)
+                    else:
+                        users.append(user_id)
 
-            if room_key:
-                # Invite agents based on configuration
-                from mindroom.agent_config import load_config
+                if agents:
+                    console.print("\n🤖 Agents:")
+                    for agent_id in sorted(agents):
+                        console.print(f"  • {agent_id}")
 
-                agent_config = load_config()
+                if users:
+                    console.print("\n👤 Users:")
+                    for user_id in sorted(users):
+                        console.print(f"  • {user_id}")
 
-                invited_count = await _invite_agents_from_config(client, room_id, room_key, agent_config)
-                console.print(f"\n✨ Invited {invited_count} agents to room")
+                console.print("\nℹ️  Agents manage their own room memberships automatically")
             else:
-                # Invite all agents if room not in config
-                invited_count = await _invite_all_agents_to_room(client, room_id, state)
-                console.print(f"\n✨ Invited {invited_count} agents to room")
+                console.print(f"❌ Failed to get room info: {members_response}")
         else:
             console.print(f"❌ Failed to login: {response}")
 

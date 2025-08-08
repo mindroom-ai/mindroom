@@ -43,7 +43,7 @@ from .matrix import (
 )
 from .models import Config
 from .response_tracker import ResponseTracker
-from .room_cleanup import cleanup_all_orphaned_bots, invite_all_missing_bots
+from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
 from .scheduling import (
     cancel_scheduled_task,
@@ -168,6 +168,52 @@ class AgentBot:
         """Get the Agno Agent instance for this bot."""
         return create_agent(agent_name=self.agent_name, storage_path=self.storage_path / "agents")
 
+    async def ensure_rooms_exist(self) -> None:
+        """Ensure all configured rooms exist (create if necessary).
+
+        This should only be called by the router agent or during initial setup.
+        """
+        for room_id in self.rooms:
+            # Check if room exists by trying to get its state
+            state_response = await self.client.room_get_state(room_id)
+            if isinstance(state_response, nio.RoomGetStateError):
+                # Room doesn't exist or we're not in it - try to create it
+                if state_response.status_code == "M_FORBIDDEN":
+                    self.logger.info(f"Room {room_id} exists but we're not a member")
+                else:
+                    self.logger.warning(f"Cannot access room {room_id}: {state_response.message}")
+
+    async def join_configured_rooms(self) -> None:
+        """Join all rooms this agent is configured for."""
+        for room_id in self.rooms:
+            if await join_room(self.client, room_id):
+                self.logger.info("Joined room", room_id=room_id)
+                # Restore scheduled tasks for this room
+                restored = await restore_scheduled_tasks(self.client, room_id)
+                if restored > 0:
+                    self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
+            else:
+                self.logger.warning("Failed to join room", room_id=room_id)
+
+    async def leave_unconfigured_rooms(self) -> None:
+        """Leave any rooms this agent is no longer configured for."""
+        # Get all rooms we're currently in
+        joined_rooms_response = await self.client.joined_rooms()
+        if not isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
+            self.logger.error(f"Failed to get joined rooms: {joined_rooms_response}")
+            return
+
+        current_rooms = set(joined_rooms_response.rooms)
+        configured_rooms = set(self.rooms)
+
+        # Leave rooms we're no longer configured for
+        for room_id in current_rooms - configured_rooms:
+            leave_response = await self.client.room_leave(room_id)
+            if isinstance(leave_response, nio.RoomLeaveResponse):
+                self.logger.info(f"Left unconfigured room {room_id}")
+            else:
+                self.logger.error(f"Failed to leave room {room_id}: {leave_response}")
+
     async def start(self) -> None:
         """Start the agent bot."""
         self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
@@ -185,30 +231,17 @@ class AgentBot:
         self.running = True
         self.logger.info("Started bot", user_id=self.agent_user.user_id)
 
-        # Router bot manages room memberships on startup
+        # Agents manage their own room memberships
+        await self.join_configured_rooms()
+        await self.leave_unconfigured_rooms()
+
+        # Router bot has additional cleanup responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
-            # First clean up orphaned bots
+            # Clean up any orphaned bots (bots in rooms they shouldn't be in)
             try:
                 await cleanup_all_orphaned_bots(self.client)
             except Exception as e:
                 self.logger.error(f"Failed to cleanup orphaned bots: {e}")
-
-            # Then invite missing bots
-            try:
-                await invite_all_missing_bots(self.client)
-            except Exception as e:
-                self.logger.error(f"Failed to invite missing bots: {e}")
-
-        # Join configured rooms
-        for room_id in self.rooms:
-            if await join_room(self.client, room_id):
-                self.logger.info("Joined room", room_id=room_id)
-                # Restore scheduled tasks for this room
-                restored = await restore_scheduled_tasks(self.client, room_id)
-                if restored > 0:
-                    self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
-            else:
-                self.logger.warning("Failed to join room", room_id=room_id)
 
         # Start periodic cleanup task for the general agent only
         if self.agent_name == "general":
@@ -1061,6 +1094,10 @@ async def _recreate_entities(
 
         await bot.start()
         asyncio.create_task(bot.sync_forever())
+
+        # Update rooms if bot configuration changed
+        await bot.join_configured_rooms()
+        await bot.leave_unconfigured_rooms()
 
 
 async def main(log_level: str, storage_path: Path) -> None:
