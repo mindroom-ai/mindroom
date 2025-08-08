@@ -71,8 +71,8 @@ SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
 
 
-def get_all_room_aliases(config: Config) -> set[str]:
-    """Extract all room aliases from agents and teams in config."""
+def get_all_configured_rooms(config: Config) -> set[str]:
+    """Extract all room aliases configured for agents and teams."""
     all_room_aliases = set()
     for agent_config in config.agents.values():
         all_room_aliases.update(agent_config.rooms)
@@ -101,7 +101,7 @@ def create_bot_for_entity(
     enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
 
     if entity_name == ROUTER_AGENT_NAME:
-        all_room_aliases = get_all_room_aliases(config)
+        all_room_aliases = get_all_configured_rooms(config)
         rooms = resolve_room_aliases(list(all_room_aliases))
         return AgentBot(agent_user, storage_path, rooms, enable_streaming=enable_streaming)
 
@@ -937,8 +937,8 @@ class MultiAgentOrchestrator:
         # Check if router needs restart (if any room assignments changed)
         router_needs_restart = False
         if ROUTER_AGENT_NAME in agent_users:
-            old_rooms = get_all_room_aliases(self.current_config)
-            new_rooms = get_all_room_aliases(new_config)
+            old_rooms = get_all_configured_rooms(self.current_config)
+            new_rooms = get_all_configured_rooms(new_config)
 
             if old_rooms != new_rooms:
                 router_needs_restart = True
