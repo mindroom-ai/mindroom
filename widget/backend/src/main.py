@@ -25,6 +25,13 @@ app.add_middleware(
 # Path to the config.yaml file (go up to mindroom root)
 CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config.yaml"
 
+
+def save_config_to_file(config: dict[str, Any]) -> None:
+    """Save config to YAML file with deterministic ordering."""
+    with open(CONFIG_PATH, "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=True)
+
+
 # Global variable to store current config
 current_config: dict[str, Any] = {}
 config_lock = threading.Lock()
@@ -99,8 +106,7 @@ async def save_config(config: Config):
         config_dict = config.model_dump()
 
         # Write to YAML file
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+        save_config_to_file(config_dict)
 
         # Update current config
         with config_lock:
@@ -139,8 +145,7 @@ async def update_agent(agent_id: str, agent_data: dict[str, Any]):
 
     # Save to file
     try:
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        save_config_to_file(current_config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save agent: {str(e)}") from e
@@ -171,8 +176,7 @@ async def create_agent(agent_data: dict[str, Any]):
 
     # Save to file
     try:
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        save_config_to_file(current_config)
         return {"id": agent_id, "success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}") from e
@@ -189,8 +193,7 @@ async def delete_agent(agent_id: str):
 
     # Save to file
     try:
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        save_config_to_file(current_config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}") from e
@@ -224,8 +227,7 @@ async def update_team(team_id: str, team_data: dict[str, Any]):
 
     # Save to file
     try:
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        save_config_to_file(current_config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save team: {str(e)}") from e
@@ -256,8 +258,7 @@ async def create_team(team_data: dict[str, Any]):
 
     # Save to file
     try:
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        save_config_to_file(current_config)
         return {"id": team_id, "success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create team: {str(e)}") from e
@@ -274,8 +275,7 @@ async def delete_team(team_id: str):
 
     # Save to file
     try:
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        save_config_to_file(current_config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete team: {str(e)}") from e
@@ -299,8 +299,7 @@ async def update_model(model_id: str, model_data: dict[str, Any]):
 
     # Save to file
     try:
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        save_config_to_file(current_config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save model: {str(e)}") from e
@@ -321,8 +320,7 @@ async def update_room_models(room_models: dict[str, str]):
 
     # Save to file
     try:
-        with open(CONFIG_PATH, "w") as f:
-            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        save_config_to_file(current_config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save room models: {str(e)}") from e
