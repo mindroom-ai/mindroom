@@ -23,7 +23,7 @@ uv run uvicorn src.main:app --reload --port 8001
 
 # Terminal 2: Start frontend
 cd widget/frontend
-pnpm install
+pnpm install  # Note: You'll see a warning about build scripts - this is safe to ignore
 pnpm run dev
 
 # Access at http://localhost:3003 (default)
