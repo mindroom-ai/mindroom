@@ -43,7 +43,7 @@ from .matrix import (
 )
 from .models import Config
 from .response_tracker import ResponseTracker
-from .room_cleanup import cleanup_all_orphaned_bots
+from .room_cleanup import cleanup_all_orphaned_bots, invite_all_missing_bots
 from .routing import suggest_agent_for_message
 from .scheduling import (
     cancel_scheduled_task,
@@ -195,8 +195,6 @@ class AgentBot:
 
             # Then invite missing bots
             try:
-                from .room_cleanup import invite_all_missing_bots
-
                 await invite_all_missing_bots(self.client)
             except Exception as e:
                 self.logger.error(f"Failed to invite missing bots: {e}")

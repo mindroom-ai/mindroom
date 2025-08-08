@@ -4,7 +4,7 @@ import nio
 
 from .agent_config import load_config
 from .logging_config import get_logger
-from .matrix import MatrixID
+from .matrix import MatrixID, extract_server_name_from_homeserver
 from .matrix.state import MatrixState
 from .models import Config
 
@@ -158,9 +158,6 @@ async def _invite_missing_bots_to_room(
         entity_name = bot_username[9:] if bot_username.startswith("mindroom_") else bot_username
 
         # Construct the full Matrix ID
-        # Get server name from the first bot we see (they all have the same domain)
-        from .matrix import extract_server_name_from_homeserver
-
         server_name = extract_server_name_from_homeserver(client.homeserver)
         matrix_id = MatrixID.from_agent(entity_name, server_name)
         full_user_id = matrix_id.full_id
