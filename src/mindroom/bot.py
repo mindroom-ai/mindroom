@@ -205,21 +205,6 @@ class AgentBot:
             except Exception as e:
                 self.logger.error(f"Failed to cleanup orphaned bots: {e}")
 
-        # Get currently joined rooms
-        joined_rooms_response = await self.client.joined_rooms()
-        if isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
-            current_rooms = set(joined_rooms_response.rooms)
-            configured_rooms = set(self.rooms)
-
-            # Leave rooms that are no longer in configuration
-            rooms_to_leave = current_rooms - configured_rooms
-            for room_id in rooms_to_leave:
-                leave_response = await self.client.room_leave(room_id)
-                if isinstance(leave_response, nio.RoomLeaveResponse):
-                    self.logger.info("Left room (no longer configured)", room_id=room_id)
-                else:
-                    self.logger.warning("Failed to leave room", room_id=room_id, error=str(leave_response))
-
         # Join configured rooms
         for room_id in self.rooms:
             if await join_room(self.client, room_id):
@@ -235,12 +220,8 @@ class AgentBot:
         if self.agent_name == "general":
             asyncio.create_task(self._periodic_cleanup())
 
-    async def stop(self, leave_rooms: bool = False) -> None:
-        """Stop the agent bot.
-
-        Args:
-            leave_rooms: If True, leave all rooms before stopping (used when agent is removed from config)
-        """
+    async def stop(self) -> None:
+        """Stop the agent bot."""
         self.running = False
 
         # Wait for any pending background tasks (like memory saves) to complete
@@ -251,20 +232,6 @@ class AgentBot:
             self.logger.warning(f"Some background tasks did not complete: {e}")
 
         if hasattr(self, "client") and self.client:
-            # Leave all rooms if requested (when agent is being removed from config)
-            if leave_rooms:
-                joined_rooms_response = await self.client.joined_rooms()
-                if isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
-                    for room_id in joined_rooms_response.rooms:
-                        try:
-                            leave_response = await self.client.room_leave(room_id)
-                            if isinstance(leave_response, nio.RoomLeaveResponse):
-                                self.logger.info("Left room before removal", room_id=room_id)
-                            else:
-                                self.logger.warning("Failed to leave room", room_id=room_id, error=str(leave_response))
-                        except Exception as e:
-                            self.logger.error("Error leaving room", room_id=room_id, error=str(e))
-
             await self.client.close()
         self.logger.info("Stopped agent bot")
 
@@ -1037,12 +1004,7 @@ class MultiAgentOrchestrator:
         for entity_name in entities_to_restart:
             if entity_name in self.agent_bots:
                 bot = self.agent_bots[entity_name]
-                # Check if this entity is being removed from config
-                is_removed = (entity_name in self.current_config.agents and entity_name not in new_config.agents) or (
-                    entity_name in self.current_config.teams and entity_name not in new_config.teams
-                )
-                # If being removed, leave all rooms before stopping
-                stop_tasks.append(bot.stop(leave_rooms=is_removed))
+                stop_tasks.append(bot.stop())
 
         if stop_tasks:
             logger.info(f"Stopping {len(stop_tasks)} bots...")
