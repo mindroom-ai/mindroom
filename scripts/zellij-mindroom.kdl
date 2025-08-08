@@ -10,7 +10,8 @@ layout {
             }
             pane {
                 name "widget"
-                command "./widget/run.sh"
+                cwd "widget"
+                command "./run.sh"
             }
         }
     }
