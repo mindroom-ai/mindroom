@@ -280,6 +280,8 @@ class AgentBot:
             thread_id=context.thread_id,
             thread_history=context.thread_history,
         )
+        # Mark as responded after successful response generation
+        self.response_tracker.mark_responded(event.event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
@@ -328,6 +330,8 @@ class AgentBot:
                 thread_history=thread_history,
                 existing_event_id=ack_event_id,  # Edit the acknowledgment
             )
+            # Mark the original interactive question as responded
+            self.response_tracker.mark_responded(event.reacts_to)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -380,24 +384,16 @@ class AgentBot:
 
         if existing_event_id:
             # Edit the existing message
-            success = await self._edit_message(room.room_id, existing_event_id, response_text, thread_id)
-            # Mark as responded after successful final edit
-            if success and reply_to_event_id:
-                self.response_tracker.mark_responded(reply_to_event_id)
+            await self._edit_message(room.room_id, existing_event_id, response_text, thread_id)
             return
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(room, reply_to_event_id, response.formatted_text, thread_id)
-        if event_id:
-            # Mark as responded only after successful send of final message
-            # (only when not editing an existing message)
-            if reply_to_event_id and not existing_event_id:
-                self.response_tracker.mark_responded(reply_to_event_id)
-            if response.option_map and response.options_list:
-                interactive.register_interactive_question(
-                    event_id, room.room_id, thread_id, response.option_map, self.agent_name
-                )
-                await interactive.add_reaction_buttons(self.client, room.room_id, event_id, response.options_list)
+        if event_id and response.option_map and response.options_list:
+            interactive.register_interactive_question(
+                event_id, room.room_id, thread_id, response.option_map, self.agent_name
+            )
+            await interactive.add_reaction_buttons(self.client, room.room_id, event_id, response.options_list)
 
     async def _process_and_respond_streaming(
         self,
@@ -440,10 +436,7 @@ class AgentBot:
 
             await streaming.finalize(self.client)
 
-            # Mark as responded after successful completion
-            # This handles both new messages and edits (when existing_event_id is set)
-            if streaming.event_id and reply_to_event_id:
-                self.response_tracker.mark_responded(reply_to_event_id)
+            if streaming.event_id:
                 self.logger.info("Sent streaming response", event_id=streaming.event_id)
 
         except Exception as e:
