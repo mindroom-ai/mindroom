@@ -29,8 +29,6 @@ CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config.yaml"
 current_config: dict[str, Any] = {}
 config_lock = threading.Lock()
 
-# Config is now imported from mindroom.models
-
 
 class TestModelRequest(BaseModel):
     modelId: str
