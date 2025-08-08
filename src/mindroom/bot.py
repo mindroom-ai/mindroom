@@ -154,10 +154,6 @@ class AgentBot:
         """Stop the agent bot."""
         self.running = False
 
-        # Give a brief moment for any in-progress messages to complete
-        # This helps avoid cutting off streaming responses mid-sentence
-        await asyncio.sleep(0.5)
-
         if hasattr(self, "client") and self.client:
             await self.client.close()
         self.logger.info("Stopped agent bot")
@@ -795,7 +791,8 @@ class MultiAgentOrchestrator:
     storage_path: Path
     agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
-    current_config: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)  # Track current agent configs
+    # Track current configs - using dicts for easier comparison
+    current_config: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
 
     async def initialize(self) -> None:
         """Initialize all agent bots."""
@@ -891,7 +888,7 @@ class MultiAgentOrchestrator:
         # Run all sync tasks
         await asyncio.gather(*sync_tasks)
 
-    async def update_config(self) -> bool:
+    async def update_config_selective(self) -> bool:
         """Update configuration and restart only changed agents.
 
         Returns:
@@ -1101,7 +1098,7 @@ async def main(log_level: str, storage_path: Path) -> None:
 
                     # Only update affected agents - don't restart everything
                     if orchestrator.running:
-                        updated = await orchestrator.update_config()
+                        updated = await orchestrator.update_config_selective()
                         if updated:
                             logger.info("Configuration update applied to affected agents")
                         else:
