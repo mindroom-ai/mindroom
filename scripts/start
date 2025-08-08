@@ -15,27 +15,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
 
 echo "Using repo root: $REPO_ROOT"
 
-require_cmd() {
-  if ! command -v "$1" &>/dev/null; then
-    echo "Error: '$1' is not installed or not on PATH."
-    case "$1" in
-      uv)
-        echo "Install uv: https://github.com/astral-sh/uv"
-        ;;
-      npm)
-        echo "Install Node.js/npm (e.g. via nvm or your package manager)."
-        ;;
-      zellij)
-        echo "Install zellij: https://zellij.dev/"
-        ;;
-    esac
-    exit 1
-  fi
-}
-
-require_cmd uv
-require_cmd npm
-require_cmd zellij
 
 echo "Syncing Python dependencies in repo root with uv..."
 (cd "$REPO_ROOT" && uv sync)
@@ -48,11 +27,11 @@ fi
 
 # Frontend deps (widget/frontend)
 if [ -d "$REPO_ROOT/widget/frontend" ]; then
-  echo "Installing frontend dependencies for widget/frontend..."
-  if [ -f "$REPO_ROOT/widget/frontend/package-lock.json" ]; then
-    (cd "$REPO_ROOT/widget/frontend" && npm ci)
+  echo "Installing frontend dependencies with pnpm..."
+  if [ -f "$REPO_ROOT/widget/frontend/pnpm-lock.yaml" ]; then
+    (cd "$REPO_ROOT/widget/frontend" && pnpm install --frozen-lockfile)
   else
-    (cd "$REPO_ROOT/widget/frontend" && npm install)
+    (cd "$REPO_ROOT/widget/frontend" && pnpm install)
   fi
 fi
 
