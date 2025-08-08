@@ -83,10 +83,14 @@ def _extract_contributions_recursive(
                         parts.append(f"{indent_str}**{agent_name}**: {content}")
 
         # Add team consensus if requested
-        if include_consensus and response.content:
-            if parts:  # Separator only if we have member contributions
-                parts.append(f"\n{indent_str}**Team Consensus**:")
-            parts.append(f"{indent_str}{response.content}")
+        if include_consensus:
+            if response.content:
+                if parts:  # Separator only if we have member contributions
+                    parts.append(f"\n{indent_str}**Team Consensus**:")
+                parts.append(f"{indent_str}{response.content}")
+            elif parts:
+                # If no consensus but we have member responses, note that
+                parts.append(f"\n{indent_str}*No team consensus - showing individual responses only*")
 
     elif isinstance(response, RunResponse):
         # Single agent response
@@ -112,13 +116,18 @@ def _extract_content(response: TeamRunResponse | RunResponse) -> str:
         return str(response.content)
 
     # Fall back to extracting from messages
+    # Note: This concatenates ALL assistant messages, which might include
+    # multiple turns in a conversation. Consider if you want just the
+    # last message or all of them.
     if response.messages:
-        content = ""
+        content_parts = []
         messages_list: list[Any] = response.messages
         for msg in messages_list:
             if isinstance(msg, Message) and msg.role == "assistant" and msg.content:
-                content += str(msg.content)
-        return content
+                content_parts.append(str(msg.content))
+
+        # Join with newlines to preserve message boundaries
+        return "\n\n".join(content_parts) if content_parts else ""
 
     return ""
 
@@ -235,6 +244,9 @@ async def create_team_response(
         # Log member responses for debugging
         if response.member_responses:
             logger.debug(f"Team had {len(response.member_responses)} member responses")
+
+        # Log the team consensus content for debugging
+        logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
 
         # Extract all contributions (including nested teams if any)
         parts = extract_team_member_contributions(response)
