@@ -180,11 +180,13 @@ class AgentBot:
 
         This should only be called by the router agent or during initial setup.
         """
+        assert self.client is not None
         config = self.config if self.config else load_config()
         await ensure_all_rooms_exist(self.client, config)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
+        assert self.client is not None
         for room_id in self.rooms:
             if await join_room(self.client, room_id):
                 self.logger.info("Joined room", room_id=room_id)
@@ -197,6 +199,7 @@ class AgentBot:
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
+        assert self.client is not None
         # Get all rooms we're currently in
         joined_rooms = await get_joined_rooms(self.client)
         if joined_rooms is None:
@@ -281,19 +284,19 @@ class AgentBot:
 
         This method ensures clean shutdown when an agent is removed from config.
         """
-        if hasattr(self, "client") and self.client:
-            # Leave all rooms
-            try:
-                joined_rooms = await get_joined_rooms(self.client)
-                if joined_rooms:
-                    for room_id in joined_rooms:
-                        success = await leave_room(self.client, room_id)
-                        if success:
-                            self.logger.info(f"Left room {room_id} during cleanup")
-                        else:
-                            self.logger.error(f"Failed to leave room {room_id} during cleanup")
-            except Exception as e:
-                self.logger.error(f"Error leaving rooms during cleanup: {e}")
+        assert self.client is not None
+        # Leave all rooms
+        try:
+            joined_rooms = await get_joined_rooms(self.client)
+            if joined_rooms:
+                for room_id in joined_rooms:
+                    success = await leave_room(self.client, room_id)
+                    if success:
+                        self.logger.info(f"Left room {room_id} during cleanup")
+                    else:
+                        self.logger.error(f"Failed to leave room {room_id} during cleanup")
+        except Exception as e:
+            self.logger.error(f"Error leaving rooms during cleanup: {e}")
 
         # Stop the bot
         await self.stop()
@@ -309,18 +312,17 @@ class AgentBot:
         except Exception as e:
             self.logger.warning(f"Some background tasks did not complete: {e}")
 
-        if hasattr(self, "client") and self.client:
-            await self.client.close()
+        assert self.client is not None
+        await self.client.close()
         self.logger.info("Stopped agent bot")
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
-        if not hasattr(self, "client") or not self.client:
-            self.logger.error("Cannot sync - client not initialized")
-            return
+        assert self.client is not None
         await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
+        assert self.client is not None
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
         if await join_room(self.client, room.room_id):
             self.logger.info("Joined room", room_id=room.room_id)
@@ -328,6 +330,7 @@ class AgentBot:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+        assert self.client is not None
         if event.sender == self.agent_user.user_id:
             return
 
@@ -339,6 +342,7 @@ class AgentBot:
         sender_id = MatrixID.parse(event.sender)
 
         if sender_id.is_agent and sender_id.agent_name:
+            assert self.thread_invite_manager is not None
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
 
         is_command = event.body.strip().startswith("!")
@@ -434,6 +438,7 @@ class AgentBot:
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
+        assert self.client is not None
         result = await interactive.handle_reaction(self.client, room, event, self.agent_name)
 
         if result:
@@ -482,6 +487,8 @@ class AgentBot:
             self.response_tracker.mark_responded(event.reacts_to)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
+        assert self.client is not None
+        assert self.thread_invite_manager is not None
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
 
         if am_i_mentioned:
@@ -553,6 +560,7 @@ class AgentBot:
         existing_event_id: str | None = None,
     ) -> None:
         """Process a message and send a response (streaming)."""
+        assert self.client is not None
         if not prompt.strip():
             return
 
@@ -624,6 +632,7 @@ class AgentBot:
         if not prompt.strip():
             return
 
+        assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
         # Dispatch to appropriate method
@@ -670,6 +679,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
         )
 
+        assert self.client is not None
         event_id = await send_message(self.client, room.room_id, content)
         if event_id:
             self.logger.info("Sent response", event_id=event_id, room_name=room.name)
@@ -693,6 +703,7 @@ class AgentBot:
             thread_event_id=thread_id,
         )
 
+        assert self.client is not None
         response = await edit_message(self.client, room_id, event_id, content, new_text)
 
         if isinstance(response, nio.RoomSendResponse):
@@ -744,6 +755,7 @@ class AgentBot:
             reply_to_event_id=event.event_id,
         )
 
+        assert self.client is not None
         event_id = await send_message(self.client, room.room_id, content)
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
@@ -757,6 +769,7 @@ class AgentBot:
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
+            assert self.client is not None
             url = command.args.get("url")
             response_text = await handle_widget_command(client=self.client, room_id=room.room_id, url=url)
             # Send response in thread if in thread, otherwise in main room
@@ -774,6 +787,8 @@ class AgentBot:
             agent_name = command.args["agent_name"]
             agent_domain = self.matrix_id.domain
 
+            assert self.client is not None
+            assert self.thread_invite_manager is not None
             response_text = await handle_invite_command(
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
@@ -786,6 +801,7 @@ class AgentBot:
 
         elif command.type == CommandType.UNINVITE:
             agent_name = command.args["agent_name"]
+            assert self.thread_invite_manager is not None
             removed = await self.thread_invite_manager.remove_invite(effective_thread_id, room.room_id, agent_name)
             if removed:
                 response_text = f"✅ Removed @{agent_name} from this thread."
@@ -793,6 +809,7 @@ class AgentBot:
                 response_text = f"❌ @{agent_name} was not invited to this thread."
 
         elif command.type == CommandType.LIST_INVITES:
+            assert self.thread_invite_manager is not None
             response_text = await handle_list_invites_command(
                 room.room_id, effective_thread_id, self.thread_invite_manager
             )
@@ -804,6 +821,7 @@ class AgentBot:
         elif command.type == CommandType.SCHEDULE:
             full_text = command.args["full_text"]
 
+            assert self.client is not None
             task_id, response_text = await schedule_task(
                 client=self.client,
                 room_id=room.room_id,
@@ -814,6 +832,7 @@ class AgentBot:
             )
 
         elif command.type == CommandType.LIST_SCHEDULES:
+            assert self.client is not None
             response_text = await list_scheduled_tasks(
                 client=self.client,
                 room_id=room.room_id,
@@ -822,6 +841,7 @@ class AgentBot:
 
         elif command.type == CommandType.CANCEL_SCHEDULE:
             task_id = command.args["task_id"]
+            assert self.client is not None
             response_text = await cancel_scheduled_task(
                 client=self.client,
                 room_id=room.room_id,
@@ -841,6 +861,7 @@ class AgentBot:
                 from .matrix import get_joined_rooms
 
                 # Get all rooms the bot is in
+                assert self.client is not None
                 joined_rooms = await get_joined_rooms(self.client)
                 if joined_rooms is None:
                     continue
@@ -848,6 +869,7 @@ class AgentBot:
                 total_removed = 0
                 for room_id in joined_rooms:
                     try:
+                        assert self.thread_invite_manager is not None
                         removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
                             room_id, timeout_hours=self.invitation_timeout_hours
                         )
