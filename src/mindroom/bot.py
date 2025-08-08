@@ -102,7 +102,7 @@ def create_bot_for_entity(
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
         rooms = resolve_room_aliases(list(all_room_aliases))
-        return AgentBot(agent_user, storage_path, rooms, enable_streaming=enable_streaming)
+        return AgentBot(agent_user, storage_path, config, rooms, enable_streaming=enable_streaming)
 
     elif entity_name in config.teams:
         team_config = config.teams[entity_name]
@@ -110,6 +110,7 @@ def create_bot_for_entity(
         return TeamBot(
             agent_user=agent_user,
             storage_path=storage_path,
+            config=config,
             rooms=rooms,
             team_agents=team_config.agents,
             team_mode=team_config.mode,
@@ -120,7 +121,7 @@ def create_bot_for_entity(
     elif entity_name in config.agents:
         agent_config = config.agents[entity_name]
         rooms = resolve_room_aliases(agent_config.rooms)
-        return AgentBot(agent_user, storage_path, rooms, enable_streaming=enable_streaming)
+        return AgentBot(agent_user, storage_path, config, rooms, enable_streaming=enable_streaming)
 
     return None
 
@@ -143,6 +144,7 @@ class AgentBot:
 
     agent_user: AgentMatrixUser
     storage_path: Path
+    config: Config | None = None  # Optional for backward compatibility
     rooms: list[str] = field(default_factory=list)
 
     client: nio.AsyncClient = field(init=False)
@@ -178,7 +180,7 @@ class AgentBot:
 
         This should only be called by the router agent or during initial setup.
         """
-        config = load_config()
+        config = self.config if self.config else load_config()
         await ensure_all_rooms_exist(self.client, config)
 
     async def join_configured_rooms(self) -> None:
