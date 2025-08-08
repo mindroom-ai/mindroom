@@ -795,8 +795,6 @@ class MultiAgentOrchestrator:
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
 
         for agent_name, agent_user in agent_users.items():
-            bot = None
-
             if agent_name == ROUTER_AGENT_NAME:
                 # Router is a built-in agent that has access to all rooms
                 all_room_aliases = set()
@@ -830,8 +828,7 @@ class MultiAgentOrchestrator:
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
             else:
-                logger.warning(f"No configuration found for agent {agent_name}")
-                continue
+                raise ValueError(f"Unknown agent configuration for {agent_name}")
 
             # Common setup for all bot types
             bot.orchestrator = self
