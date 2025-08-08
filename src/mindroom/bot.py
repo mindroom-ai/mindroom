@@ -71,6 +71,61 @@ SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
 
 
+def get_all_room_aliases(config: Config) -> set[str]:
+    """Extract all room aliases from agents and teams in config."""
+    all_room_aliases = set()
+    for agent_config in config.agents.values():
+        all_room_aliases.update(agent_config.rooms)
+    for team_config in config.teams.values():
+        all_room_aliases.update(team_config.rooms)
+    return all_room_aliases
+
+
+def create_bot_for_entity(
+    entity_name: str,
+    agent_user: AgentMatrixUser,
+    config: Config,
+    storage_path: Path,
+) -> AgentBot | TeamBot | None:
+    """Create appropriate bot instance for an entity (agent, team, or router).
+
+    Args:
+        entity_name: Name of the entity to create a bot for
+        agent_user: Matrix user for the bot
+        config: Configuration object
+        storage_path: Path for storing agent data
+
+    Returns:
+        Bot instance or None if entity not found in config
+    """
+    enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+
+    if entity_name == ROUTER_AGENT_NAME:
+        all_room_aliases = get_all_room_aliases(config)
+        rooms = resolve_room_aliases(list(all_room_aliases))
+        return AgentBot(agent_user, storage_path, rooms, enable_streaming=enable_streaming)
+
+    elif entity_name in config.teams:
+        team_config = config.teams[entity_name]
+        rooms = resolve_room_aliases(team_config.rooms)
+        return TeamBot(
+            agent_user=agent_user,
+            storage_path=storage_path,
+            rooms=rooms,
+            team_agents=team_config.agents,
+            team_mode=team_config.mode,
+            team_model=team_config.model,
+            enable_streaming=False,
+        )
+
+    elif entity_name in config.agents:
+        agent_config = config.agents[entity_name]
+        rooms = resolve_room_aliases(agent_config.rooms)
+        return AgentBot(agent_user, storage_path, rooms, enable_streaming=enable_streaming)
+
+    return None
+
+
 @dataclass
 class MessageContext:
     """Context extracted from a Matrix message event."""
@@ -790,7 +845,7 @@ class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
     storage_path: Path
-    agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
+    agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
     current_config: Config | None = field(default=None, init=False)
 
@@ -803,38 +858,10 @@ class MultiAgentOrchestrator:
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
 
         for agent_name, agent_user in agent_users.items():
-            if agent_name == ROUTER_AGENT_NAME:
-                all_room_aliases = set()
-                for agent_config in config.agents.values():
-                    all_room_aliases.update(agent_config.rooms)
-                for team_config in config.teams.values():
-                    all_room_aliases.update(team_config.rooms)
-                rooms = resolve_room_aliases(list(all_room_aliases))
-                enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
-                bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
-
-            elif agent_name in config.teams:
-                team_config = config.teams[agent_name]
-                rooms = resolve_room_aliases(team_config.rooms)
-                bot = TeamBot(
-                    agent_user=agent_user,
-                    storage_path=self.storage_path,
-                    rooms=rooms,
-                    team_agents=team_config.agents,
-                    team_mode=team_config.mode,
-                    team_model=team_config.model,
-                    enable_streaming=False,
-                )
-
-            elif agent_name in config.agents:
-                agent_config = config.agents[agent_name]
-                rooms = resolve_room_aliases(agent_config.rooms)
-                enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
-                bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
-            else:
+            bot = create_bot_for_entity(agent_name, agent_user, config, self.storage_path)
+            if bot is None:
                 raise ValueError(f"Unknown agent configuration for {agent_name}")
 
-            # Common setup for all bot types
             bot.orchestrator = self
             self.agent_bots[agent_name] = bot
 
@@ -910,17 +937,8 @@ class MultiAgentOrchestrator:
         # Check if router needs restart (if any room assignments changed)
         router_needs_restart = False
         if ROUTER_AGENT_NAME in agent_users:
-            old_rooms = set()
-            for agent in self.current_config.agents.values():
-                old_rooms.update(agent.rooms)
-            for team in self.current_config.teams.values():
-                old_rooms.update(team.rooms)
-
-            new_rooms = set()
-            for agent in new_config.agents.values():
-                new_rooms.update(agent.rooms)
-            for team in new_config.teams.values():
-                new_rooms.update(team.rooms)
+            old_rooms = get_all_room_aliases(self.current_config)
+            new_rooms = get_all_room_aliases(new_config)
 
             if old_rooms != new_rooms:
                 router_needs_restart = True
@@ -961,37 +979,9 @@ class MultiAgentOrchestrator:
                 continue
 
             agent_user = agent_users[entity_name]
+            bot = create_bot_for_entity(entity_name, agent_user, new_config, self.storage_path)  # type: ignore[assignment]
 
-            if entity_name == ROUTER_AGENT_NAME:
-                all_room_aliases = set()
-                for agent in new_config.agents.values():
-                    all_room_aliases.update(agent.rooms)
-                for team in new_config.teams.values():
-                    all_room_aliases.update(team.rooms)
-                rooms = resolve_room_aliases(list(all_room_aliases))
-                enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
-                bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
-
-            elif entity_name in new_config.teams:
-                team_config = new_config.teams[entity_name]
-                rooms = resolve_room_aliases(team_config.rooms)
-                bot = TeamBot(
-                    agent_user=agent_user,
-                    storage_path=self.storage_path,
-                    rooms=rooms,
-                    team_agents=team_config.agents,
-                    team_mode=team_config.mode,
-                    team_model=team_config.model,
-                    enable_streaming=False,
-                )
-
-            elif entity_name in new_config.agents:
-                agent_config = new_config.agents[entity_name]
-                rooms = resolve_room_aliases(agent_config.rooms)
-                enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
-                bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
-
-            else:
+            if bot is None:
                 continue
 
             bot.orchestrator = self
