@@ -908,7 +908,7 @@ class MultiAgentOrchestrator:
         Returns:
             True if any agents were updated, False otherwise.
         """
-        load_config.cache_clear()
+        # load_config now automatically uses the latest file based on modification time
         new_config = load_config()
 
         if not self.current_config:

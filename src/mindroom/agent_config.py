@@ -1,6 +1,5 @@
 """Agent loader that reads agent configurations from YAML file."""
 
-import functools
 from pathlib import Path
 
 import yaml
@@ -34,9 +33,14 @@ RICH_PROMPTS = {
 }
 
 
-@functools.cache
+# Cache for configuration based on file modification time
+_config_cache: dict[tuple[Path, float], Config] = {}
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """Load agent configuration from YAML file.
+
+    Uses modification time-based caching to automatically reload when file changes.
 
     Args:
         config_path: Path to agents configuration file. If None, uses default.
@@ -52,6 +56,20 @@ def load_config(config_path: Path | None = None) -> Config:
     if not path.exists():
         raise FileNotFoundError(f"Agent configuration file not found: {path}")
 
+    # Get file modification time
+    mtime = path.stat().st_mtime
+    cache_key = (path, mtime)
+
+    # Check cache
+    if cache_key in _config_cache:
+        return _config_cache[cache_key]
+
+    # Clear old entries for this path from cache
+    # (keeps cache from growing indefinitely)
+    keys_to_remove = [key for key in _config_cache if key[0] == path and key != cache_key]
+    for key in keys_to_remove:
+        del _config_cache[key]
+
     with open(path) as f:
         data = yaml.safe_load(f)
 
@@ -65,6 +83,8 @@ def load_config(config_path: Path | None = None) -> Config:
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")
 
+    # Cache the result
+    _config_cache[cache_key] = config
     return config
 
 
