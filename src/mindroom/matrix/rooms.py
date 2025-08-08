@@ -37,3 +37,32 @@ def remove_room(room_key: str) -> bool:
         state.save()
         return True
     return False
+
+
+def resolve_room_aliases(room_list: list[str]) -> list[str]:
+    """Resolve room aliases to room IDs.
+
+    Args:
+        room_list: List of room aliases or IDs
+
+    Returns:
+        List of room IDs (aliases resolved to IDs, IDs passed through)
+    """
+    room_aliases = get_room_aliases()
+    return [room_aliases.get(room, room) for room in room_list]
+
+
+def get_room_alias_from_id(room_id: str) -> str | None:
+    """Get room alias from room ID (reverse lookup).
+
+    Args:
+        room_id: Matrix room ID
+
+    Returns:
+        Room alias if found, None otherwise
+    """
+    room_aliases = get_room_aliases()
+    for alias, rid in room_aliases.items():
+        if rid == room_id:
+            return alias
+    return None

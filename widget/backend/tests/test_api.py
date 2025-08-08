@@ -194,3 +194,214 @@ def test_cors_headers(test_client: TestClient):
     # TestClient doesn't simulate CORS middleware properly
     # In a real browser environment, these headers would be present
     assert response.status_code == 200
+
+
+def test_get_teams_empty(test_client: TestClient):
+    """Test getting teams when none exist."""
+    test_client.post("/api/config/load")
+
+    response = test_client.get("/api/config/teams")
+    assert response.status_code == 200
+    teams = response.json()
+    assert isinstance(teams, list)
+    assert len(teams) == 0
+
+
+def test_create_team(test_client: TestClient, temp_config_file):
+    """Test creating a new team."""
+    test_client.post("/api/config/load")
+
+    team_data = {
+        "display_name": "Test Team",
+        "role": "Testing team functionality",
+        "agents": ["test_agent"],
+        "rooms": ["test-room"],
+        "model": "default",
+        "mode": "coordinate",
+    }
+
+    response = test_client.post("/api/config/teams", json=team_data)
+    assert response.status_code == 200
+
+    result = response.json()
+    assert "id" in result
+    assert result["id"] == "test_team"
+    assert result["success"] is True
+
+    # Verify file was updated
+    with open(temp_config_file) as f:
+        saved_config = yaml.safe_load(f)
+
+    assert "teams" in saved_config
+    assert "test_team" in saved_config["teams"]
+    assert saved_config["teams"]["test_team"]["display_name"] == "Test Team"
+    assert saved_config["teams"]["test_team"]["agents"] == ["test_agent"]
+
+
+def test_get_teams_with_data(test_client: TestClient):
+    """Test getting teams after creating one."""
+    test_client.post("/api/config/load")
+
+    # Create a team first
+    team_data = {
+        "display_name": "Test Team",
+        "role": "Testing team functionality",
+        "agents": ["test_agent"],
+        "rooms": ["test-room"],
+        "model": "default",
+        "mode": "coordinate",
+    }
+    test_client.post("/api/config/teams", json=team_data)
+
+    # Now get teams
+    response = test_client.get("/api/config/teams")
+    assert response.status_code == 200
+
+    teams = response.json()
+    assert isinstance(teams, list)
+    assert len(teams) == 1
+
+    team = teams[0]
+    assert team["id"] == "test_team"
+    assert team["display_name"] == "Test Team"
+    assert team["agents"] == ["test_agent"]
+    assert team["mode"] == "coordinate"
+
+
+def test_update_team(test_client: TestClient, temp_config_file):
+    """Test updating an existing team."""
+    test_client.post("/api/config/load")
+
+    # Create a team first
+    team_data = {
+        "display_name": "Test Team",
+        "role": "Testing team functionality",
+        "agents": ["test_agent"],
+        "rooms": ["test-room"],
+        "model": "default",
+        "mode": "coordinate",
+    }
+    test_client.post("/api/config/teams", json=team_data)
+
+    # Update the team
+    updated_data = {
+        "display_name": "Updated Team",
+        "role": "Updated role",
+        "agents": ["test_agent", "new_agent"],
+        "rooms": ["test-room", "new-room"],
+        "model": "gpt-4",
+        "mode": "collaborate",
+    }
+
+    response = test_client.put("/api/config/teams/test_team", json=updated_data)
+    assert response.status_code == 200
+
+    # Verify file was updated
+    with open(temp_config_file) as f:
+        saved_config = yaml.safe_load(f)
+
+    assert saved_config["teams"]["test_team"]["display_name"] == "Updated Team"
+    assert saved_config["teams"]["test_team"]["agents"] == ["test_agent", "new_agent"]
+    assert saved_config["teams"]["test_team"]["mode"] == "collaborate"
+
+
+def test_delete_team(test_client: TestClient, temp_config_file):
+    """Test deleting a team."""
+    test_client.post("/api/config/load")
+
+    # Create a team first
+    team_data = {
+        "display_name": "Test Team",
+        "role": "Testing team functionality",
+        "agents": ["test_agent"],
+        "rooms": ["test-room"],
+    }
+    test_client.post("/api/config/teams", json=team_data)
+
+    # Delete the team
+    response = test_client.delete("/api/config/teams/test_team")
+    assert response.status_code == 200
+
+    # Verify it's deleted from file
+    with open(temp_config_file) as f:
+        saved_config = yaml.safe_load(f)
+
+    assert "teams" not in saved_config or "test_team" not in saved_config.get("teams", {})
+
+    # Verify it's not returned in list
+    response = test_client.get("/api/config/teams")
+    teams = response.json()
+    assert len(teams) == 0
+
+
+def test_delete_nonexistent_team(test_client: TestClient):
+    """Test deleting a team that doesn't exist."""
+    test_client.post("/api/config/load")
+
+    response = test_client.delete("/api/config/teams/nonexistent_team")
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_create_team_unique_id(test_client: TestClient):
+    """Test that creating teams with same display name generates unique IDs."""
+    test_client.post("/api/config/load")
+
+    team_data = {
+        "display_name": "Test Team",
+        "role": "First team",
+        "agents": ["test_agent"],
+        "rooms": ["test-room"],
+    }
+
+    # Create first team
+    response1 = test_client.post("/api/config/teams", json=team_data)
+    assert response1.status_code == 200
+    assert response1.json()["id"] == "test_team"
+
+    # Create second team with same display name
+    team_data["role"] = "Second team"
+    response2 = test_client.post("/api/config/teams", json=team_data)
+    assert response2.status_code == 200
+    assert response2.json()["id"] == "test_team_1"
+
+    # Create third team with same display name
+    team_data["role"] = "Third team"
+    response3 = test_client.post("/api/config/teams", json=team_data)
+    assert response3.status_code == 200
+    assert response3.json()["id"] == "test_team_2"
+
+
+def test_get_room_models(test_client: TestClient):
+    """Test getting room-specific model overrides."""
+    test_client.post("/api/config/load")
+
+    response = test_client.get("/api/config/room-models")
+    assert response.status_code == 200
+    room_models = response.json()
+    assert isinstance(room_models, dict)
+
+
+def test_update_room_models(test_client: TestClient, temp_config_file):
+    """Test updating room-specific model overrides."""
+    test_client.post("/api/config/load")
+
+    room_models = {"lobby": "gpt-4", "tech-room": "claude-3", "general": "default"}
+
+    response = test_client.put("/api/config/room-models", json=room_models)
+    assert response.status_code == 200
+
+    # Verify file was updated
+    with open(temp_config_file) as f:
+        saved_config = yaml.safe_load(f)
+
+    assert "room_models" in saved_config
+    assert saved_config["room_models"]["lobby"] == "gpt-4"
+    assert saved_config["room_models"]["tech-room"] == "claude-3"
+
+    # Verify we can retrieve the updated room models
+    response = test_client.get("/api/config/room-models")
+    assert response.status_code == 200
+    retrieved_models = response.json()
+    assert retrieved_models["lobby"] == "gpt-4"
+    assert retrieved_models["tech-room"] == "claude-3"

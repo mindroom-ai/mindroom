@@ -144,15 +144,15 @@ async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.
 
 
 async def ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
-    """Ensure all configured agents have Matrix user accounts.
+    """Ensure all configured agents and teams have Matrix user accounts.
 
-    This includes both user-configured agents and the built-in router agent.
+    This includes user-configured agents, teams, and the built-in router agent.
 
     Args:
         homeserver: The Matrix homeserver URL
 
     Returns:
-        Dictionary mapping agent names to AgentMatrixUser objects
+        Dictionary mapping agent/team names to AgentMatrixUser objects
     """
     agent_users = {}
 
@@ -168,8 +168,9 @@ async def ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
     except Exception as e:
         logger.error(f"Failed to create Matrix user for built-in router agent: {e}")
 
-    # Then, create user-configured agents
     config = load_config()
+
+    # Create user-configured agents
     for agent_name, agent_config in config.agents.items():
         try:
             agent_user = await create_agent_user(
@@ -182,5 +183,19 @@ async def ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
         except Exception as e:
             # Continue with other agents even if one fails
             logger.error(f"Failed to create Matrix user for agent {agent_name}: {e}")
+
+    # Create team users
+    for team_name, team_config in config.teams.items():
+        try:
+            team_user = await create_agent_user(
+                homeserver,
+                team_name,
+                team_config.display_name,
+            )
+            agent_users[team_name] = team_user
+            logger.info(f"Ensured Matrix user for team: {team_name} -> {team_user.user_id}")
+        except Exception as e:
+            # Continue with other teams even if one fails
+            logger.error(f"Failed to create Matrix user for team {team_name}: {e}")
 
     return agent_users

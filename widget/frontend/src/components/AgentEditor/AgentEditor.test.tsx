@@ -31,6 +31,15 @@ describe('AgentEditor', () => {
 
   const mockStore = {
     agents: [mockAgent],
+    rooms: [
+      {
+        id: 'test_room',
+        display_name: 'Test Room',
+        description: 'Test room',
+        agents: ['test_agent'],
+      },
+      { id: 'other_room', display_name: 'Other Room', description: 'Another room', agents: [] },
+    ],
     selectedAgentId: 'test_agent',
     updateAgent: vi.fn(),
     deleteAgent: vi.fn(),
@@ -55,13 +64,16 @@ describe('AgentEditor', () => {
     expect(screen.getByDisplayValue('Test Agent')).toBeTruthy();
     expect(screen.getByDisplayValue('Test role')).toBeTruthy();
     expect(screen.getByDisplayValue('Test instruction')).toBeTruthy();
-    expect(screen.getByDisplayValue('test_room')).toBeTruthy();
+    // Rooms are now displayed as checkboxes, not input fields
+    const testRoomCheckbox = screen.getByRole('checkbox', { name: /Test Room/i });
+    expect(testRoomCheckbox).toBeChecked();
   });
 
   it('shows empty state when no agent is selected', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       selectedAgentId: null,
+      rooms: mockStore.rooms,
     });
 
     render(<AgentEditor />);
@@ -93,6 +105,7 @@ describe('AgentEditor', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       updateAgent: trackingUpdateAgent,
+      rooms: mockStore.rooms,
     });
 
     render(<AgentEditor />);
@@ -113,6 +126,7 @@ describe('AgentEditor', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       isDirty: true,
+      rooms: mockStore.rooms,
     });
 
     render(<AgentEditor />);
@@ -184,19 +198,26 @@ describe('AgentEditor', () => {
   it('adds and removes rooms', () => {
     render(<AgentEditor />);
 
-    // Find add room button
-    const addButtons = screen.getAllByRole('button', { name: /add/i });
-    const addRoomButton = addButtons.find(
-      btn => btn.closest('div')?.querySelector('label')?.textContent === 'Rooms'
-    );
+    // Test Room checkbox should be checked initially
+    const testRoomCheckbox = screen.getByRole('checkbox', { name: /Test Room/i });
+    expect(testRoomCheckbox).toBeChecked();
 
-    fireEvent.click(addRoomButton!);
-
-    // Should have called updateAgent with new room
+    // Uncheck Test Room
+    fireEvent.click(testRoomCheckbox);
     expect(mockStore.updateAgent).toHaveBeenCalledWith(
       'test_agent',
       expect.objectContaining({
-        rooms: ['test_room', 'new_room'],
+        rooms: [],
+      })
+    );
+
+    // Check Other Room
+    const otherRoomCheckbox = screen.getByRole('checkbox', { name: /Other Room/i });
+    fireEvent.click(otherRoomCheckbox);
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        rooms: ['other_room'],
       })
     );
   });
@@ -258,6 +279,7 @@ describe('AgentEditor', () => {
     (useConfigStore as any).mockReturnValue({
       ...mockStore,
       updateAgent: trackingUpdateAgent,
+      rooms: mockStore.rooms,
     });
 
     render(<AgentEditor />);

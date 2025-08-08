@@ -3,7 +3,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useConfigStore } from '@/store/configStore';
 import { AgentList } from '@/components/AgentList/AgentList';
 import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
+import { TeamList } from '@/components/TeamList/TeamList';
+import { TeamEditor } from '@/components/TeamEditor/TeamEditor';
+import { RoomList } from '@/components/RoomList/RoomList';
+import { RoomEditor } from '@/components/RoomEditor/RoomEditor';
 import { ModelConfig } from '@/components/ModelConfig/ModelConfig';
+import { MemoryConfig } from '@/components/MemoryConfig/MemoryConfig';
 import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toaster } from '@/components/ui/toaster';
@@ -50,10 +55,28 @@ function AppContent() {
               👥 Agents
             </TabsTrigger>
             <TabsTrigger
+              value="teams"
+              className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600"
+            >
+              👫 Teams
+            </TabsTrigger>
+            <TabsTrigger
+              value="rooms"
+              className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600"
+            >
+              🏠 Rooms
+            </TabsTrigger>
+            <TabsTrigger
               value="models"
               className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600"
             >
               🔧 Models & API Keys
+            </TabsTrigger>
+            <TabsTrigger
+              value="memory"
+              className="data-[state=active]:bg-blue-50 data-[state=active]:text-blue-600"
+            >
+              🧠 Memory
             </TabsTrigger>
           </TabsList>
 
@@ -68,9 +91,37 @@ function AppContent() {
             </div>
           </TabsContent>
 
+          <TabsContent value="teams" className="flex-1 p-4 overflow-hidden min-h-0">
+            <div className="grid grid-cols-12 gap-4 h-full">
+              <div className="col-span-4 h-full overflow-hidden">
+                <TeamList />
+              </div>
+              <div className="col-span-8 h-full overflow-hidden">
+                <TeamEditor />
+              </div>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="rooms" className="flex-1 p-4 overflow-hidden min-h-0">
+            <div className="grid grid-cols-12 gap-4 h-full">
+              <div className="col-span-4 h-full overflow-hidden">
+                <RoomList />
+              </div>
+              <div className="col-span-8 h-full overflow-hidden">
+                <RoomEditor />
+              </div>
+            </div>
+          </TabsContent>
+
           <TabsContent value="models" className="flex-1 p-4 overflow-hidden min-h-0">
             <div className="h-full overflow-hidden">
               <ModelConfig />
+            </div>
+          </TabsContent>
+
+          <TabsContent value="memory" className="flex-1 p-4 overflow-hidden min-h-0">
+            <div className="h-full overflow-hidden">
+              <MemoryConfig />
             </div>
           </TabsContent>
         </Tabs>

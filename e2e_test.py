@@ -128,10 +128,10 @@ async def run_test_sequence(storage_path):
                 "description": "Cross-agent memory recall",
             },
             {
-                "agent": "general",
-                "message": "can you ask @calculator to multiply the last result by 2?",
-                "wait": 5,
-                "description": "Agent mentioning another agent",
+                "agent": "dev_team",
+                "message": "write a simple hello world Python script",
+                "wait": 8,
+                "description": "Testing team coordination (DevTeam)",
             },
         ]
 

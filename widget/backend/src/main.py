@@ -32,6 +32,8 @@ class Config(BaseModel):
     memory: dict[str, Any]
     models: dict[str, dict[str, Any]]
     agents: dict[str, dict[str, Any]]
+    teams: dict[str, dict[str, Any]] | None = None
+    room_models: dict[str, str] | None = None
     defaults: dict[str, Any]
     router: dict[str, Any]
 
@@ -202,6 +204,91 @@ async def delete_agent(agent_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}") from e
 
 
+@app.get("/api/config/teams")
+async def get_teams():
+    """Get all teams"""
+    with config_lock:
+        teams = current_config.get("teams", {})
+        # Convert to list format with IDs
+        team_list = []
+        for team_id, team_data in teams.items():
+            team = {"id": team_id, **team_data}
+            team_list.append(team)
+        return team_list
+
+
+@app.put("/api/config/teams/{team_id}")
+async def update_team(team_id: str, team_data: dict[str, Any]):
+    """Update a specific team"""
+    with config_lock:
+        if "teams" not in current_config:
+            current_config["teams"] = {}
+
+        # Remove ID from team_data if present
+        team_data_copy = team_data.copy()
+        team_data_copy.pop("id", None)
+
+        current_config["teams"][team_id] = team_data_copy
+
+    # Save to file
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save team: {str(e)}") from e
+
+
+@app.post("/api/config/teams")
+async def create_team(team_data: dict[str, Any]):
+    """Create a new team"""
+    team_id = team_data.get("display_name", "new_team").lower().replace(" ", "_")
+
+    with config_lock:
+        if "teams" not in current_config:
+            current_config["teams"] = {}
+
+        # Check if team already exists
+        if team_id in current_config["teams"]:
+            # Generate unique ID
+            counter = 1
+            while f"{team_id}_{counter}" in current_config["teams"]:
+                counter += 1
+            team_id = f"{team_id}_{counter}"
+
+        # Remove ID from team_data if present
+        team_data_copy = team_data.copy()
+        team_data_copy.pop("id", None)
+
+        current_config["teams"][team_id] = team_data_copy
+
+    # Save to file
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        return {"id": team_id, "success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create team: {str(e)}") from e
+
+
+@app.delete("/api/config/teams/{team_id}")
+async def delete_team(team_id: str):
+    """Delete a team"""
+    with config_lock:
+        if "teams" not in current_config or team_id not in current_config["teams"]:
+            raise HTTPException(status_code=404, detail="Team not found")
+
+        del current_config["teams"][team_id]
+
+    # Save to file
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete team: {str(e)}") from e
+
+
 @app.get("/api/config/models")
 async def get_models():
     """Get all model configurations"""
@@ -225,6 +312,28 @@ async def update_model(model_id: str, model_data: dict[str, Any]):
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save model: {str(e)}") from e
+
+
+@app.get("/api/config/room-models")
+async def get_room_models():
+    """Get room-specific model overrides"""
+    with config_lock:
+        return current_config.get("room_models", {})
+
+
+@app.put("/api/config/room-models")
+async def update_room_models(room_models: dict[str, str]):
+    """Update room-specific model overrides"""
+    with config_lock:
+        current_config["room_models"] = room_models
+
+    # Save to file
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            yaml.dump(current_config, f, default_flow_style=False, sort_keys=False)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save room models: {str(e)}") from e
 
 
 @app.post("/api/test/model")

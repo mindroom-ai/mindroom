@@ -28,10 +28,12 @@ from .identity import (
 from .mentions import create_mention_content, create_mention_content_from_text
 from .rooms import (
     add_room,
+    get_room_alias_from_id,
     get_room_aliases,
     get_room_id,
     load_rooms,
     remove_room,
+    resolve_room_aliases,
 )
 from .state import MatrixAccount, MatrixRoom, MatrixState
 from .users import (
@@ -76,10 +78,12 @@ __all__ = [
     "MatrixRoom",
     # Room functions
     "add_room",
+    "get_room_alias_from_id",
     "get_room_aliases",
     "get_room_id",
     "load_rooms",
     "remove_room",
+    "resolve_room_aliases",
     # Mention functions
     "create_mention_content",
     "create_mention_content_from_text",

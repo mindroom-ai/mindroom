@@ -183,3 +183,6 @@ logs/
 
 # Matrix state files (contain sensitive data)
 matrix_state.yaml
+
+# Vite cache
+widget/frontend/.vite/

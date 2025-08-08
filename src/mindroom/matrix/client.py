@@ -62,7 +62,6 @@ async def matrix_client(
             response = await client.login(password="secret")
     """
     ssl_context = _maybe_ssl_context(homeserver)
-
     if access_token:
         client = nio.AsyncClient(homeserver, user_id, store_path=".nio_store", ssl=ssl_context)
         client.access_token = access_token
@@ -90,7 +89,6 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
         ValueError: If login fails
     """
     ssl_context = _maybe_ssl_context(homeserver)
-
     client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
 
     response = await client.login(password)
