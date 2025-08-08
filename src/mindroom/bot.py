@@ -892,10 +892,63 @@ async def main(log_level: str, storage_path: Path) -> None:
     # Create storage directory if it doesn't exist
     storage_path.mkdir(parents=True, exist_ok=True)
 
-    orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
-    try:
-        await orchestrator.start()
-    except KeyboardInterrupt:
-        logger.info("Multi-agent bot system stopped by user")
-    finally:
+    # Get config file path
+    config_path = Path("config.yaml")
+
+    # Track the last modification time
+    last_mtime = config_path.stat().st_mtime if config_path.exists() else 0
+
+    orchestrator = None
+    restart_flag = False
+
+    while True:
+        try:
+            # Clean up previous orchestrator if restarting
+            if orchestrator is not None:
+                logger.info("Stopping orchestrator for restart...")
+                await orchestrator.stop()
+                orchestrator = None
+                # Brief pause to ensure cleanup
+                await asyncio.sleep(1)
+
+            # Create and start new orchestrator
+            logger.info("Starting orchestrator...")
+            orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
+
+            # Create task to run the orchestrator
+            orchestrator_task = asyncio.create_task(orchestrator.start())
+
+            # Monitor config file for changes
+            while not orchestrator_task.done():
+                await asyncio.sleep(2)  # Check every 2 seconds
+
+                # Check if config file has been modified
+                if config_path.exists():
+                    current_mtime = config_path.stat().st_mtime
+                    if current_mtime > last_mtime:
+                        logger.info("Configuration file changed, restarting agents...")
+                        last_mtime = current_mtime
+                        restart_flag = True
+                        orchestrator_task.cancel()
+                        break
+
+            # If task completed normally (not due to restart), exit
+            if not restart_flag:
+                await orchestrator_task
+                break
+
+            restart_flag = False
+
+        except KeyboardInterrupt:
+            logger.info("Multi-agent bot system stopped by user")
+            break
+        except asyncio.CancelledError:
+            # Task was cancelled for restart
+            pass
+        except Exception as e:
+            logger.error(f"Error in orchestrator: {e}")
+            await asyncio.sleep(5)  # Wait before retry
+
+    # Final cleanup
+    if orchestrator is not None:
         await orchestrator.stop()
