@@ -193,6 +193,21 @@ class AgentBot:
         self.running = True
         self.logger.info("Started bot", user_id=self.agent_user.user_id)
 
+        # Get currently joined rooms
+        joined_rooms_response = await self.client.joined_rooms()
+        if isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
+            current_rooms = set(joined_rooms_response.rooms)
+            configured_rooms = set(self.rooms)
+
+            # Leave rooms that are no longer in configuration
+            rooms_to_leave = current_rooms - configured_rooms
+            for room_id in rooms_to_leave:
+                leave_response = await self.client.room_leave(room_id)
+                if isinstance(leave_response, nio.RoomLeaveResponse):
+                    self.logger.info("Left room (no longer configured)", room_id=room_id)
+                else:
+                    self.logger.warning("Failed to leave room", room_id=room_id, error=str(leave_response))
+
         # Join configured rooms
         for room_id in self.rooms:
             if await join_room(self.client, room_id):
@@ -867,6 +882,12 @@ class MultiAgentOrchestrator:
     async def initialize(self) -> None:
         """Initialize all agent bots."""
         logger.info("Initializing multi-agent system...")
+
+        # First, audit and clean up any orphaned bot room memberships
+        logger.info("Auditing room memberships for orphaned bots...")
+        from .room_manager import audit_and_fix_room_memberships
+
+        await audit_and_fix_room_memberships(MATRIX_HOMESERVER)
 
         config = load_config()
         self.current_config = config
