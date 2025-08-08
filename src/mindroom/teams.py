@@ -29,65 +29,76 @@ class TeamMode(str, Enum):
     COLLABORATE = "collaborate"  # Parallel, synthesized
 
 
-def extract_team_member_contributions(
-    response: TeamRunResponse | RunResponse,
-    include_consensus: bool = True,
-    indent_level: int = 0,
-) -> list[str]:
-    """Extract member contributions from a team response, handling nested teams recursively.
+def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -> list[str]:
+    """Extract and format member contributions from a team response.
+
+    Handles nested teams recursively with proper indentation.
 
     Args:
         response: The team or agent response to extract contributions from
-        include_consensus: Whether to include the final team consensus
-        indent_level: Current indentation level for nested teams
+
+    Returns:
+        List of formatted contribution strings
+    """
+    return _extract_contributions_recursive(response, indent=0, include_consensus=True)
+
+
+def _extract_contributions_recursive(
+    response: TeamRunResponse | RunResponse,
+    indent: int,
+    include_consensus: bool,
+) -> list[str]:
+    """Internal recursive function for extracting contributions.
+
+    Args:
+        response: The response to extract from
+        indent: Current indentation level
+        include_consensus: Whether to include team consensus
 
     Returns:
         List of formatted contribution strings
     """
     parts = []
-    indent = "  " * indent_level  # Indentation for nested teams
+    indent_str = "  " * indent
 
-    # Handle TeamRunResponse
     if isinstance(response, TeamRunResponse):
-        # Process member responses if available
+        # Extract member contributions
         if response.member_responses:
             for member_resp in response.member_responses:
-                # Recursively handle nested teams
                 if isinstance(member_resp, TeamRunResponse):
-                    # This is a nested team
-                    team_name = getattr(member_resp, "team_name", "Nested Team")
-                    parts.append(f"{indent}**{team_name}** (Team):")
-                    # Recursively extract from nested team
-                    nested_parts = extract_team_member_contributions(
+                    # Nested team
+                    team_name = member_resp.team_name or "Nested Team"
+                    parts.append(f"{indent_str}**{team_name}** (Team):")
+                    nested_parts = _extract_contributions_recursive(
                         member_resp,
-                        include_consensus=False,  # Don't include consensus for nested teams
-                        indent_level=indent_level + 1,
+                        indent=indent + 1,
+                        include_consensus=False,  # No consensus for nested teams
                     )
                     parts.extend(nested_parts)
                 elif isinstance(member_resp, RunResponse):
-                    # Regular agent response
-                    agent_name = member_resp.agent_name if member_resp.agent_name else "Team Member"
-                    content = extract_content_from_response(member_resp)
+                    # Regular agent
+                    agent_name = member_resp.agent_name or "Team Member"
+                    content = _extract_content(member_resp)
                     if content:
-                        parts.append(f"{indent}**{agent_name}**: {content}")
+                        parts.append(f"{indent_str}**{agent_name}**: {content}")
 
-        # Add the final consensus if requested
+        # Add team consensus if requested
         if include_consensus and response.content:
-            if parts:  # Only add separator if we have member contributions
-                parts.append(f"\n{indent}**Team Consensus**:")
-            parts.append(f"{indent}{response.content}")
+            if parts:  # Separator only if we have member contributions
+                parts.append(f"\n{indent_str}**Team Consensus**:")
+            parts.append(f"{indent_str}{response.content}")
 
-    # Handle RunResponse (single agent)
     elif isinstance(response, RunResponse):
-        agent_name = response.agent_name if response.agent_name else "Agent"
-        content = extract_content_from_response(response)
+        # Single agent response
+        agent_name = response.agent_name or "Agent"
+        content = _extract_content(response)
         if content:
-            parts.append(f"{indent}**{agent_name}**: {content}")
+            parts.append(f"{indent_str}**{agent_name}**: {content}")
 
     return parts
 
 
-def extract_content_from_response(response: TeamRunResponse | RunResponse) -> str:
+def _extract_content(response: TeamRunResponse | RunResponse) -> str:
     """Extract content from a response object.
 
     Args:
@@ -96,19 +107,20 @@ def extract_content_from_response(response: TeamRunResponse | RunResponse) -> st
     Returns:
         The extracted content as a string
     """
-    content = ""
-
-    # Try to get content directly
+    # Direct content takes priority
     if response.content:
-        content = str(response.content)
+        return str(response.content)
+
     # Fall back to extracting from messages
-    elif response.messages:
+    if response.messages:
+        content = ""
         messages_list: list[Any] = response.messages
         for msg in messages_list:
             if isinstance(msg, Message) and msg.role == "assistant" and msg.content:
                 content += str(msg.content)
+        return content
 
-    return content
+    return ""
 
 
 class ShouldFormTeamResult(NamedTuple):
@@ -225,7 +237,7 @@ async def create_team_response(
             logger.debug(f"Team had {len(response.member_responses)} member responses")
 
         # Extract all contributions (including nested teams if any)
-        parts = extract_team_member_contributions(response, include_consensus=True)
+        parts = extract_team_member_contributions(response)
 
         # Combine all parts
         team_response = "\n\n".join(parts) if parts else "No team response generated."
