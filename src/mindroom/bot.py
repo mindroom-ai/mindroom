@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -1053,6 +1054,8 @@ async def main(log_level: str, storage_path: Path) -> None:
         log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
         storage_path: The base directory for storing agent data
     """
+    from watchfiles import awatch
+
     # Set up logging with the specified level
     setup_logging(level=log_level)
 
@@ -1062,9 +1065,6 @@ async def main(log_level: str, storage_path: Path) -> None:
     # Get config file path
     config_path = Path("config.yaml")
 
-    # Track the last modification time
-    last_mtime = config_path.stat().st_mtime if config_path.exists() else 0
-
     # Create and start orchestrator
     logger.info("Starting orchestrator...")
     orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
@@ -1073,26 +1073,36 @@ async def main(log_level: str, storage_path: Path) -> None:
         # Create task to run the orchestrator
         orchestrator_task = asyncio.create_task(orchestrator.start())
 
-        # Monitor config file for changes
-        while not orchestrator_task.done():
-            await asyncio.sleep(2)  # Check every 2 seconds
+        # Create task to watch config file for changes
+        async def watch_config():
+            """Watch config file for changes and reload when modified."""
+            async for _changes in awatch(config_path):
+                # The changes set contains tuples of (change_type, path)
+                # We only care that the file changed, not the specific type
+                logger.info("Configuration file changed, checking for updates...")
 
-            # Check if config file has been modified
-            if config_path.exists():
-                current_mtime = config_path.stat().st_mtime
-                if current_mtime > last_mtime:
-                    logger.info("Configuration file changed, checking for updates...")
-                    last_mtime = current_mtime
+                if orchestrator.running:
+                    updated = await orchestrator.update_config()
+                    if updated:
+                        logger.info("Configuration update applied to affected agents")
+                    else:
+                        logger.info("No agent changes detected in configuration update")
 
-                    if orchestrator.running:
-                        updated = await orchestrator.update_config()
-                        if updated:
-                            logger.info("Configuration update applied to affected agents")
-                        else:
-                            logger.info("No agent changes detected in configuration update")
+                # Break if orchestrator is no longer running
+                if not orchestrator.running:
+                    break
 
-        # Wait for orchestrator task to complete
-        await orchestrator_task
+        # Run config watcher in parallel with orchestrator
+        watcher_task = asyncio.create_task(watch_config())
+
+        # Wait for either orchestrator or watcher to complete
+        done, pending = await asyncio.wait({orchestrator_task, watcher_task}, return_when=asyncio.FIRST_COMPLETED)
+
+        # Cancel any pending tasks
+        for task in pending:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     except KeyboardInterrupt:
         logger.info("Multi-agent bot system stopped by user")
