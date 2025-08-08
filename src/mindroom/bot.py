@@ -955,7 +955,6 @@ class MultiAgentOrchestrator:
         for entity_name in entities_to_restart:
             if entity_name in self.agent_bots:
                 bot = self.agent_bots[entity_name]
-                bot.running = False
                 stop_tasks.append(bot.stop())
 
         if stop_tasks:
@@ -997,11 +996,11 @@ class MultiAgentOrchestrator:
         """Stop all agent bots."""
         self.running = False
 
-        # First signal all bots to stop accepting new messages
+        # Signal all bots to stop their sync loops
         for bot in self.agent_bots.values():
             bot.running = False
 
-        # Give time for in-progress messages to complete (up to 3 seconds)
+        # Give time for in-progress messages to complete
         logger.info("Waiting for in-progress messages to complete...")
         await asyncio.sleep(3)
 
