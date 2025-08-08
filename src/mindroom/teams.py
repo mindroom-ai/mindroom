@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from agno.agent import Agent
+from agno.models.message import Message
 from agno.run.team import TeamRunResponse
 from agno.team import Team
 
@@ -140,28 +141,32 @@ async def create_team_response(
         parts = []
 
         # Include member responses if available (when show_members_responses=True)
-        if hasattr(response, "member_responses") and response.member_responses:
+        if response.member_responses:
             logger.debug(f"Team had {len(response.member_responses)} member responses")
 
             # Add individual member contributions
-            for member_resp in response.member_responses:
-                # Extract member name from the response if available
-                member_name = getattr(member_resp, "member_id", "Unknown Agent")
+            for i, member_resp in enumerate(response.member_responses):
                 member_content = ""
-
-                # Handle both TeamRunResponse and RunResponse types
-                if hasattr(member_resp, "content"):
-                    member_content = str(member_resp.content or "")
-                elif hasattr(member_resp, "messages"):
+                # Extract content from the response
+                if member_resp.content:
+                    member_content = str(member_resp.content)
+                elif member_resp.messages:
                     # Extract assistant messages from the member
-                    messages = getattr(member_resp, "messages", [])
-                    if messages:
-                        for msg in messages:
-                            if hasattr(msg, "role") and msg.role == "assistant" and hasattr(msg, "content"):
-                                member_content += str(msg.content or "")
+                    messages_list: list[Any] = member_resp.messages
+                    for msg in messages_list:
+                        if isinstance(msg, Message) and msg.role == "assistant" and msg.content:
+                            member_content += str(msg.content)
 
                 if member_content:
-                    parts.append(f"**{member_name}**: {member_content}")
+                    # Use agent name from our list if available
+                    agent_index = i if i < len(agent_names) else -1
+                    if agent_index >= 0 and agent_index < len(agent_names):
+                        member_name = agent_names[agent_index]
+                        # Skip router agent
+                        if member_name != ROUTER_AGENT_NAME:
+                            parts.append(f"**{member_name}**: {member_content}")
+                    else:
+                        parts.append(f"**Agent {i + 1}**: {member_content}")
 
         # Add the final aggregated response
         if response.content:
