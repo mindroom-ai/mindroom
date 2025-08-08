@@ -859,8 +859,6 @@ class AgentBot:
                 # Wait for 1 hour between cleanups
                 await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
-                from .matrix import get_joined_rooms
-
                 # Get all rooms the bot is in
                 assert self.client is not None
                 joined_rooms = await get_joined_rooms(self.client)
