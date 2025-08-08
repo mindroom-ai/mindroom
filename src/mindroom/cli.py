@@ -204,6 +204,17 @@ async def _ensure_rooms_and_agents(client: nio.AsyncClient, required_rooms: set[
                 already_in_room += a
                 failed_invites += f
 
+            # Invite configured teams to their assigned rooms
+            for team_name, team_config in config.teams.items():
+                if room_key not in team_config.rooms:
+                    continue
+
+                team_id = MatrixID.from_agent(team_name, SERVER_NAME).full_id
+                s, a, f = await _ensure_agent_in_room(client, room.room_id, room_key, team_id, room_members, team_id)
+                successful_invites += s
+                already_in_room += a
+                failed_invites += f
+
     console.print(
         f"\n📊 Setup summary: {rooms_created} rooms created, {successful_invites} invited, "
         f"{already_in_room} already present, {failed_invites} failed"
@@ -231,9 +242,9 @@ async def _invite_agent_to_room(
 async def _invite_agents_from_config(
     client: nio.AsyncClient, room_id: str, room_key: str, config: Config, include_router: bool = True
 ) -> int:
-    """Invite agents to a room based on config.yaml room assignments.
+    """Invite agents and teams to a room based on config.yaml room assignments.
 
-    Returns the number of agents successfully invited.
+    Returns the number of agents/teams successfully invited.
     """
     invited_count = 0
 
@@ -248,6 +259,13 @@ async def _invite_agents_from_config(
         if room_key in agent_cfg.rooms:
             agent_id = MatrixID.from_agent(agent_name, SERVER_NAME).full_id
             if await _invite_agent_to_room(client, room_id, agent_id, agent_name):
+                invited_count += 1
+
+    # Invite configured teams
+    for team_name, team_cfg in config.teams.items():
+        if room_key in team_cfg.rooms:
+            team_id = MatrixID.from_agent(team_name, SERVER_NAME).full_id
+            if await _invite_agent_to_room(client, room_id, team_id, team_name):
                 invited_count += 1
 
     return invited_count
