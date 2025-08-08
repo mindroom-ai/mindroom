@@ -71,8 +71,8 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
     Raises:
         ValueError: If login fails
     """
-    ssl_context = get_ssl_context()
-    client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
+    ssl = homeserver.startswith("https://")
+    client = nio.AsyncClient(homeserver, user_id, ssl=ssl)
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):
