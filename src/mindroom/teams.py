@@ -29,6 +29,88 @@ class TeamMode(str, Enum):
     COLLABORATE = "collaborate"  # Parallel, synthesized
 
 
+def extract_team_member_contributions(
+    response: TeamRunResponse | RunResponse,
+    include_consensus: bool = True,
+    indent_level: int = 0,
+) -> list[str]:
+    """Extract member contributions from a team response, handling nested teams recursively.
+
+    Args:
+        response: The team or agent response to extract contributions from
+        include_consensus: Whether to include the final team consensus
+        indent_level: Current indentation level for nested teams
+
+    Returns:
+        List of formatted contribution strings
+    """
+    parts = []
+    indent = "  " * indent_level  # Indentation for nested teams
+
+    # Handle TeamRunResponse
+    if isinstance(response, TeamRunResponse):
+        # Process member responses if available
+        if response.member_responses:
+            for member_resp in response.member_responses:
+                # Recursively handle nested teams
+                if isinstance(member_resp, TeamRunResponse):
+                    # This is a nested team
+                    team_name = getattr(member_resp, "team_name", "Nested Team")
+                    parts.append(f"{indent}**{team_name}** (Team):")
+                    # Recursively extract from nested team
+                    nested_parts = extract_team_member_contributions(
+                        member_resp,
+                        include_consensus=False,  # Don't include consensus for nested teams
+                        indent_level=indent_level + 1,
+                    )
+                    parts.extend(nested_parts)
+                elif isinstance(member_resp, RunResponse):
+                    # Regular agent response
+                    agent_name = member_resp.agent_name if member_resp.agent_name else "Team Member"
+                    content = extract_content_from_response(member_resp)
+                    if content:
+                        parts.append(f"{indent}**{agent_name}**: {content}")
+
+        # Add the final consensus if requested
+        if include_consensus and response.content:
+            if parts:  # Only add separator if we have member contributions
+                parts.append(f"\n{indent}**Team Consensus**:")
+            parts.append(f"{indent}{response.content}")
+
+    # Handle RunResponse (single agent)
+    elif isinstance(response, RunResponse):
+        agent_name = response.agent_name if response.agent_name else "Agent"
+        content = extract_content_from_response(response)
+        if content:
+            parts.append(f"{indent}**{agent_name}**: {content}")
+
+    return parts
+
+
+def extract_content_from_response(response: TeamRunResponse | RunResponse) -> str:
+    """Extract content from a response object.
+
+    Args:
+        response: The response to extract content from
+
+    Returns:
+        The extracted content as a string
+    """
+    content = ""
+
+    # Try to get content directly
+    if response.content:
+        content = str(response.content)
+    # Fall back to extracting from messages
+    elif response.messages:
+        messages_list: list[Any] = response.messages
+        for msg in messages_list:
+            if isinstance(msg, Message) and msg.role == "assistant" and msg.content:
+                content += str(msg.content)
+
+    return content
+
+
 class ShouldFormTeamResult(NamedTuple):
     """Result of should_form_team."""
 
@@ -136,47 +218,14 @@ async def create_team_response(
 
     response = await team.arun(prompt)
 
-    # Extract response content
+    # Extract response content using our universal extraction function
     if isinstance(response, TeamRunResponse):
-        # Build comprehensive team response
-        parts = []
-
-        # Include member responses if available (when show_members_responses=True)
+        # Log member responses for debugging
         if response.member_responses:
             logger.debug(f"Team had {len(response.member_responses)} member responses")
 
-            # Add individual member contributions
-            for member_resp in response.member_responses:
-                member_content = ""
-                member_name = None
-
-                # RunResponse has agent_name attribute, TeamRunResponse might not
-                if isinstance(member_resp, RunResponse) and member_resp.agent_name:
-                    member_name = member_resp.agent_name
-
-                # Extract content from the response
-                if member_resp.content:
-                    member_content = str(member_resp.content)
-                elif member_resp.messages:
-                    # Extract assistant messages from the member
-                    messages_list: list[Any] = member_resp.messages
-                    for msg in messages_list:
-                        if isinstance(msg, Message) and msg.role == "assistant" and msg.content:
-                            member_content += str(msg.content)
-
-                if member_content:
-                    # Use the agent name from the response if available
-                    if member_name:
-                        parts.append(f"**{member_name}**: {member_content}")
-                    else:
-                        # Fallback to generic label if no name available
-                        parts.append(f"**Team Member**: {member_content}")
-
-        # Add the final aggregated response
-        if response.content:
-            if parts:  # If we have member responses, add a separator
-                parts.append("\n**Team Consensus**:")
-            parts.append(str(response.content))
+        # Extract all contributions (including nested teams if any)
+        parts = extract_team_member_contributions(response, include_consensus=True)
 
         # Combine all parts
         team_response = "\n\n".join(parts) if parts else "No team response generated."
