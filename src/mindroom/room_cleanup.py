@@ -61,8 +61,17 @@ async def _cleanup_orphaned_bots_in_room(
 
     kicked_bots = []
 
-    # Check each member
-    for user_id, _member_info in members_response.members.items():
+    # Check each member - ensure members is a dict
+    if not hasattr(members_response, "members"):
+        logger.warning(f"JoinedMembersResponse has no members attribute for room {room_id}")
+        return []
+
+    members = members_response.members
+    if not isinstance(members, dict):
+        logger.warning(f"members is not a dict (got {type(members)}) for room {room_id}")
+        return []
+
+    for user_id, _member_info in members.items():
         matrix_id = MatrixID.parse(user_id)
 
         # Check if this is a mindroom bot and shouldn't be in this room

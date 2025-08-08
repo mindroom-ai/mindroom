@@ -266,11 +266,11 @@ class AgentBot:
             # Ensure all configured rooms exist
             await self.ensure_rooms_exist()
 
-            # Clean up any orphaned bots
+            # Clean up any orphaned bots (best effort - don't fail initialization)
             try:
                 await cleanup_all_orphaned_bots(self.client)
             except Exception as e:
-                self.logger.error(f"Failed to cleanup orphaned bots: {e}")
+                self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
 
         # Start periodic cleanup task for the general agent only
         if self.agent_name == "general":
