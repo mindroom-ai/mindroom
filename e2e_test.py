@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from mindroom.cli import _run
 from mindroom.matrix import MATRIX_HOMESERVER
+from mindroom.matrix.client import markdown_to_html
 
 
 class MindRoomE2ETest:
@@ -65,8 +66,6 @@ class MindRoomE2ETest:
         processed_text, all_mentioned_ids, markdown_text = parse_mentions_in_text(full_message, user_domain)
 
         # Convert markdown to HTML
-        from mindroom.matrix.client import markdown_to_html
-
         formatted_html = markdown_to_html(markdown_text)
 
         # Create content with all mentions properly set
