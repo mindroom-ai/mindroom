@@ -42,6 +42,7 @@ from .matrix import (
 )
 from .models import Config
 from .response_tracker import ResponseTracker
+from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
 from .scheduling import (
     cancel_scheduled_task,
@@ -195,8 +196,6 @@ class AgentBot:
 
         # Router bot cleans up orphaned bots from all rooms on startup
         if self.agent_name == ROUTER_AGENT_NAME:
-            from .room_cleanup import cleanup_all_orphaned_bots
-
             self.logger.info("Router bot checking for orphaned bots in all rooms...")
             try:
                 kicked = await cleanup_all_orphaned_bots(self.client)
