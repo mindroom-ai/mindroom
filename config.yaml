@@ -11,8 +11,6 @@ memory:
       host: http://localhost:11434
       temperature: 0.1
       top_p: 1
-router:
-  model: ollama
 models:
   default:
     provider: ollama
@@ -228,8 +226,23 @@ agents:
     - lobby
     - analysis
     num_history_runs: 5
+teams:
+  super_team:
+    display_name: Super Team
+    role: A team with all the great agents.
+    agents:
+    - code
+    - shell
+    - research
+    - finance
+    rooms:
+    - research
+    mode: collaborate
+    model: sonnet
+room_models: null
 defaults:
   num_history_runs: 5
   markdown: true
   add_history_to_messages: true
-teams: {}
+router:
+  model: ollama

@@ -114,7 +114,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Save configuration to backend
   saveConfig: async () => {
-    const { config, agents, teams } = get();
+    const { config, agents, teams, rooms } = get();
     if (!config) return;
 
     set({ isLoading: true, error: null, syncStatus: 'syncing' });
@@ -139,10 +139,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         {} as Record<string, Omit<Team, 'id'>>
       );
 
+      // Extract room_models from rooms that have a model set
+      const roomModels: Record<string, string> = {};
+      rooms.forEach(room => {
+        if (room.model) {
+          roomModels[room.id] = room.model;
+        }
+      });
+
       const updatedConfig: Config = {
         ...config,
         agents: agentsObject,
         teams: teamsObject,
+        room_models: Object.keys(roomModels).length > 0 ? roomModels : undefined,
       };
 
       await configService.saveConfig(updatedConfig);
@@ -244,6 +253,27 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         room.id === roomId ? { ...room, ...updates } : room
       );
 
+      let updatedConfig = state.config;
+
+      // If model changed, update room_models in config
+      if (updates.model !== undefined && state.config) {
+        const currentRoomModels = state.config.room_models || {};
+        const newRoomModels = { ...currentRoomModels };
+
+        if (updates.model) {
+          // Set the room model
+          newRoomModels[roomId] = updates.model;
+        } else {
+          // Remove the room model if it's being unset
+          delete newRoomModels[roomId];
+        }
+
+        updatedConfig = {
+          ...state.config,
+          room_models: Object.keys(newRoomModels).length > 0 ? newRoomModels : undefined,
+        };
+      }
+
       // If agents changed, update the agents' rooms arrays
       if (updates.agents) {
         const oldRoom = state.rooms.find(r => r.id === roomId);
@@ -266,6 +296,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         });
 
         return {
+          config: updatedConfig,
           rooms: updatedRooms,
           agents: updatedAgents,
           isDirty: true,
@@ -273,6 +304,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
 
       return {
+        config: updatedConfig,
         rooms: updatedRooms,
         isDirty: true,
       };
