@@ -147,6 +147,9 @@ async def create_team_response(
             logger.debug(f"Team had {len(response.member_responses)} member responses")
 
             # Add individual member contributions
+            # Note: We assume member_responses are in the same order as we provided agents,
+            # but this is not guaranteed by the Agno Team API. The responses don't include
+            # agent identifiers, so we can only guess based on order.
             for i, member_resp in enumerate(response.member_responses):
                 member_content = ""
                 # Extract content from the response
@@ -160,11 +163,12 @@ async def create_team_response(
                             member_content += str(msg.content)
 
                 if member_content:
-                    # Use agent name from our list if available
+                    # Best effort: assume response order matches agent order
                     if i < len(team_agent_names):
                         parts.append(f"**{team_agent_names[i]}**: {member_content}")
                     else:
-                        parts.append(f"**Agent {i + 1}**: {member_content}")
+                        # Fallback if we have more responses than expected
+                        parts.append(f"**Member {i + 1}**: {member_content}")
 
         # Add the final aggregated response
         if response.content:
