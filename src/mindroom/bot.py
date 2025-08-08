@@ -153,6 +153,16 @@ class AgentBot:
     async def stop(self) -> None:
         """Stop the agent bot."""
         self.running = False
+
+        # Wait for any pending background tasks (like memory saves) to complete
+        from .background_tasks import wait_for_background_tasks
+
+        try:
+            await wait_for_background_tasks(timeout=5.0)  # 5 second timeout
+            self.logger.info("Background tasks completed")
+        except Exception as e:
+            self.logger.warning(f"Some background tasks did not complete: {e}")
+
         if hasattr(self, "client") and self.client:
             await self.client.close()
         self.logger.info("Stopped agent bot")

@@ -16,6 +16,7 @@ from agno.run.response import RunResponse, RunResponseContentEvent
 from dotenv import load_dotenv
 
 from .agent_config import load_config
+from .background_tasks import create_background_task
 from .logging_config import get_logger
 from .memory import (
     build_memory_enhanced_prompt,
@@ -167,7 +168,12 @@ async def ai_response(
 
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
         response_text = response.content or ""
-        await store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id)
+
+        # Save memory in background to avoid blocking
+        create_background_task(
+            store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id),
+            name=f"memory_save_{agent_name}_{session_id}",
+        )
 
         return response_text
     except Exception as e:
@@ -217,7 +223,11 @@ async def ai_response_streaming(
             logger.info("Cache hit", agent=agent_name)
             response_text = cached_result.content or ""
             yield response_text
-            await store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id)
+            # Save memory in background to avoid blocking
+            create_background_task(
+                store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id),
+                name=f"memory_save_{agent_name}_{session_id}_cached",
+            )
             return
 
     full_response = ""
@@ -242,4 +252,8 @@ async def ai_response_streaming(
         logger.info("Response cached", agent=agent_name)
 
     if full_response:
-        await store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id)
+        # Save memory in background to avoid blocking streaming finalization
+        create_background_task(
+            store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id),
+            name=f"memory_save_{agent_name}_{session_id}_stream",
+        )
