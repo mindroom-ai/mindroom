@@ -53,11 +53,16 @@ class MindRoomE2ETest:
         """Send a message with proper Matrix mention."""
         from mindroom.matrix.mentions import parse_mentions_in_text
 
+        # Extract domain from the logged-in user's ID
+        user_domain = "localhost"  # default
+        if self.client.user_id and ":" in self.client.user_id:
+            user_domain = self.client.user_id.split(":", 1)[1]
+
         # Start with the primary agent mention
         full_message = f"@{agent_name} {message}"
 
         # Parse ALL mentions in the text (including ones in the message body)
-        processed_text, all_mentioned_ids = parse_mentions_in_text(full_message, "localhost")
+        processed_text, all_mentioned_ids = parse_mentions_in_text(full_message, user_domain)
 
         # Create content with all mentions properly set
         content = {

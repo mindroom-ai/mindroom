@@ -315,6 +315,28 @@ class AgentBot:
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
 
+        # Debug logging for mention detection
+        mentions = event.source.get("content", {}).get("m.mentions", {})
+        body = event.source.get("content", {}).get("body", "")
+
+        # Log if body contains potential mentions but m.mentions is empty/missing
+        if "@" in body and self.agent_name in body.lower() and not mentions:
+            self.logger.warning(
+                "Potential mention in body but no m.mentions field",
+                agent_name=self.agent_name,
+                body=body[:100],  # First 100 chars
+                sender=event.sender,
+            )
+
+        if mentions:
+            self.logger.debug(
+                "Checking mentions",
+                agent_name=self.agent_name,
+                m_mentions=mentions,
+                mentioned_agents=mentioned_agents,
+                am_i_mentioned=am_i_mentioned,
+            )
+
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
