@@ -24,14 +24,6 @@ trap cleanup EXIT INT TERM
 echo -e "${GREEN}Starting backend server on port $BACKEND_PORT...${NC}"
 cd backend
 
-# Check if uv is available
-if ! command -v uv &> /dev/null; then
-    echo -e "${BLUE}Error: 'uv' is not installed.${NC}"
-    echo "Please install uv: https://github.com/astral-sh/uv"
-    echo "Or use run-nix.sh which provides all dependencies."
-    exit 1
-fi
-
 echo "Using uv for Python dependencies..."
 if [ ! -d ".venv" ]; then
     uv sync
@@ -48,11 +40,11 @@ sleep 2
 echo -e "${GREEN}Starting frontend development server...${NC}"
 cd frontend
 if [ ! -d "node_modules" ]; then
-    echo "Installing frontend dependencies..."
-    npm install
+    echo "Installing frontend dependencies with pnpm..."
+    pnpm install
 fi
 
-BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT npm run dev &
+BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev &
 FRONTEND_PID=$!
 cd ..
 

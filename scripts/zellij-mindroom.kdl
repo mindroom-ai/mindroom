@@ -1,0 +1,18 @@
+session_name "mindroom"
+
+layout {
+    tab name="MindRoom" {
+        pane split_direction="vertical" {
+            pane {
+                name "mindroom"
+                command "uv"
+                args "run" "mindroom" "run"
+            }
+            pane {
+                name "widget"
+                cwd "widget"
+                command "./run.sh"
+            }
+        }
+    }
+}

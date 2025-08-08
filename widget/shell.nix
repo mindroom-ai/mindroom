@@ -26,15 +26,20 @@ pkgs.mkShell {
     at-spi2-atk
     at-spi2-core
 
-    # Node.js for running the widget
+    # Node.js and pnpm for running the widget
     nodejs_20
+    pnpm
 
     # Python for backend
     python311
+
+    # uv for Python package management
+    uv
   ];
 
   shellHook = ''
     echo "MindRoom Widget Development Shell"
+    echo "Tools available: uv, pnpm, nodejs, python3, chromium"
     echo "Chromium available for screenshots"
     export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
     export PUPPETEER_EXECUTABLE_PATH=${pkgs.chromium}/bin/chromium

@@ -110,12 +110,24 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 
 ### Installation
 
+#### Prerequisites
+- Python 3.11+
+- [uv](https://github.com/astral-sh/uv) for Python package management
+- [pnpm](https://pnpm.io/) for Node.js package management (if using the widget)
+- [Zellij](https://zellij.dev/) terminal multiplexer (optional, for helper scripts)
+- Node.js 20+ (if using the widget)
+
+#### Install MindRoom
 ```bash
 git clone https://github.com/yourusername/mindroom
 cd mindroom
 uv sync --all-extras
 source .venv/bin/activate
-```
+
+# If using the widget, also install frontend dependencies
+cd widget/frontend
+pnpm install
+cd ../..
 
 ### Configuration
 
@@ -135,18 +147,32 @@ OLLAMA_HOST=http://localhost:11434  # for local models
 
 ### Running Mindroom
 
-Just one command:
-
+#### Option 1: Simple Command
 ```bash
 mindroom run
 ```
 
-This automatically:
+#### Option 2: With Widget Interface (Recommended)
+```bash
+# Start both MindRoom and the configuration widget in a single terminal session
+scripts/start
+
+# To stop everything
+scripts/stop
+```
+
+The helper script (`scripts/start`) runs both MindRoom and the widget in a [Zellij](https://zellij.dev/) terminal multiplexer session, giving you:
+- MindRoom agents running in one pane
+- Configuration widget (backend + frontend) in another pane
+- Easy session management with attach/detach capabilities
+
+Both methods automatically do:
 - ✅ Creates your Matrix user account
 - ✅ Creates accounts for all agents in `config.yaml`
 - ✅ Creates all rooms defined in `config.yaml`
 - ✅ Invites agents to their configured rooms
 - ✅ Starts the multi-agent system
+- ✅ Provides visual configuration interface at http://localhost:3003
 
 ### Basic Usage
 

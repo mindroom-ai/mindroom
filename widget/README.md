@@ -6,30 +6,21 @@ This widget provides a visual interface for managing MindRoom agent configuratio
 
 ## Quick Start
 
-### Using Nix (Recommended for Screenshots)
+### Recommended: Using Helper Scripts
 
 ```bash
-# From project root - starts everything automatically
-nix-shell widget/shell.nix --run "python take_screenshot.py"
+# From project root - starts both MindRoom and widget in Zellij
+scripts/start
+
+# To stop everything
+scripts/stop
 ```
 
-### Manual Start
+This runs both MindRoom and the widget in a single terminal session using [Zellij](https://zellij.dev/).
 
-```bash
-# Terminal 1: Start backend
-cd widget/backend
-uv sync
-uv run uvicorn src.main:app --reload --port 8001
+### Alternative Methods
 
-# Terminal 2: Start frontend
-cd widget/frontend
-npm install
-npm run dev
-
-# Access at http://localhost:3003 (default)
-```
-
-### Using the Convenience Script
+#### Using the Widget-Only Script
 
 ```bash
 # Standard systems
@@ -40,6 +31,29 @@ FRONTEND_PORT=3005 BACKEND_PORT=8080 ./widget/run.sh
 
 # On Nix systems (ensures all dependencies available)
 ./widget/run-nix.sh
+```
+
+#### Manual Start
+
+```bash
+# Terminal 1: Start backend
+cd widget/backend
+uv sync
+uv run uvicorn src.main:app --reload --port 8001
+
+# Terminal 2: Start frontend
+cd widget/frontend
+pnpm install  # Note: You'll see a warning about build scripts - this is safe to ignore
+pnpm run dev
+
+# Access at http://localhost:3003 (default)
+```
+
+#### Using Nix (For Screenshots)
+
+```bash
+# From project root - starts everything automatically
+nix-shell widget/shell.nix --run "python widget/take_screenshot.py"
 ```
 
 ## Architecture
@@ -58,9 +72,10 @@ FRONTEND_PORT=3005 BACKEND_PORT=8080 ./widget/run.sh
 - **Location**: `widget/backend/`
 - **Port**: 8001 (configurable via `BACKEND_PORT` environment variable)
 - **Technologies**: FastAPI, PyYAML, Watchdog, Pydantic
+- **Dependencies**: Uses `mindroom` as an editable package dependency
 - **Key Files**:
   - `src/main.py` - API endpoints and file watching
-  - `pyproject.toml` - Python dependencies
+  - `pyproject.toml` - Python dependencies (includes mindroom)
 
 ## Features
 
@@ -113,7 +128,7 @@ The widget includes Puppeteer-based screenshot functionality. You need Chrome/Ch
 
 ```bash
 # From project root
-nix-shell widget/shell.nix --run "python take_screenshot.py"
+nix-shell widget/shell.nix --run "python widget/take_screenshot.py"
 ```
 
 This automatically:
@@ -127,7 +142,7 @@ This automatically:
 
 Install Chrome/Chromium, then:
 ```bash
-python take_screenshot.py
+python widget/take_screenshot.py
 ```
 
 ### Alternative (No Chrome)
@@ -196,7 +211,7 @@ Currently manual testing. Run the widget and verify:
 
 1. **Port conflicts**: Backend uses 8001, frontend uses 3003 (configurable via environment variables)
 2. **File permissions**: Ensure write access to `config.yaml`
-3. **Missing dependencies**: Run `npm install` and `uv sync`
+3. **Missing dependencies**: Run `pnpm install` and `uv sync`
 
 ## Matrix/Element Integration
 
