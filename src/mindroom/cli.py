@@ -76,7 +76,7 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
         invited_count = 0
 
         # Always invite the router first
-        router_id = MatrixID.from_agent("router", "localhost").full_id
+        router_id = MatrixID.from_agent("router", SERVER_NAME).full_id
         success = await invite_to_room(user_client, room_id, router_id)
         if success:
             invited_count += 1
@@ -91,7 +91,7 @@ async def _create_room_and_invite_agents(room_key: str, room_name: str, user_cli
 
         for agent_name, agent_config in config.agents.items():
             if room_key in agent_config.rooms:
-                agent_id = MatrixID.from_agent(agent_name, "localhost").full_id
+                agent_id = MatrixID.from_agent(agent_name, SERVER_NAME).full_id
                 invite_response = await user_client.room_invite(room_id, agent_id)
                 if isinstance(invite_response, nio.RoomInviteResponse):
                     invited_count += 1
@@ -141,6 +141,7 @@ async def _ensure_user_account() -> MatrixState:
             console.print(f"ℹ️  User @{user_username}:{SERVER_NAME} already exists")
         else:
             console.print(f"❌ Failed to register {user_username}: {error_msg}")
+            sys.exit(1)
 
     # Save credentials
     state.add_account("user", user_username, user_password)
@@ -187,7 +188,7 @@ async def _ensure_rooms_and_agents(client: nio.AsyncClient, required_rooms: set[
             room_members = await get_room_members(client, room.room_id)
 
             # Always invite router to ALL rooms first
-            router_id = MatrixID.from_agent("router", "localhost").full_id
+            router_id = MatrixID.from_agent("router", SERVER_NAME).full_id
             s, a, f = await _ensure_agent_in_room(client, room.room_id, room_key, router_id, room_members, "Router")
             successful_invites += s
             already_in_room += a
@@ -198,7 +199,7 @@ async def _ensure_rooms_and_agents(client: nio.AsyncClient, required_rooms: set[
                 if room_key not in agent_config.rooms:
                     continue
 
-                agent_id = MatrixID.from_agent(agent_name, "localhost").full_id
+                agent_id = MatrixID.from_agent(agent_name, SERVER_NAME).full_id
                 s, a, f = await _ensure_agent_in_room(client, room.room_id, room_key, agent_id, room_members, agent_id)
                 successful_invites += s
                 already_in_room += a
@@ -239,14 +240,14 @@ async def _invite_agents_from_config(
 
     # Always invite the router first if requested
     if include_router:
-        router_id = MatrixID.from_agent("router", "localhost").full_id
+        router_id = MatrixID.from_agent("router", SERVER_NAME).full_id
         if await _invite_agent_to_room(client, room_id, router_id, "router"):
             invited_count += 1
 
     # Invite configured agents
     for agent_name, agent_cfg in config.agents.items():
         if room_key in agent_cfg.rooms:
-            agent_id = MatrixID.from_agent(agent_name, "localhost").full_id
+            agent_id = MatrixID.from_agent(agent_name, SERVER_NAME).full_id
             if await _invite_agent_to_room(client, room_id, agent_id, agent_name):
                 invited_count += 1
 
@@ -264,7 +265,7 @@ async def _invite_all_agents_to_room(
 
     # Always invite the router first if requested
     if include_router:
-        router_id = MatrixID.from_agent("router", "localhost").full_id
+        router_id = MatrixID.from_agent("router", SERVER_NAME).full_id
         if await _invite_agent_to_room(client, room_id, router_id, "router"):
             invited_count += 1
 

@@ -134,7 +134,7 @@ async def register_user(
             and response.status_code == "M_USER_IN_USE"
         ):
             logger.info(f"User {user_id} already exists")
-            return user_id
+            raise ValueError(f"M_USER_IN_USE: User {username} already exists")
         else:
             raise ValueError(f"Failed to register user {username}: {response}")
 
