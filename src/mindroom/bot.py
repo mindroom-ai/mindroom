@@ -253,6 +253,8 @@ class AgentBot:
                 thread_history=context.thread_history,
             )
             await self._send_response(room, event.event_id, team_response, context.thread_id)
+            # Mark as responded after team response
+            self.response_tracker.mark_responded(event.event_id)
             return
 
         # Determine if this agent should respond individually
