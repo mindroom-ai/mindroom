@@ -8,7 +8,6 @@ import markdown
 import nio
 
 from ..logging_config import get_logger
-from .ssl_helper import get_ssl_context
 from .users import extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
@@ -23,6 +22,23 @@ def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
     is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
     thread_id = relates_to.get("event_id") if is_thread else None
     return is_thread, thread_id
+
+
+def _maybe_ssl_context(homeserver: str) -> Any:
+    if homeserver.startswith("https://"):
+        import os
+        import ssl as ssl_module
+
+        if os.getenv("MATRIX_SSL_VERIFY", "true").lower() == "false":
+            # Create context that disables verification for dev/self-signed certs
+            ssl_context = ssl_module.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl_module.CERT_NONE
+        else:
+            # Use default context with proper verification
+            ssl_context = ssl_module.create_default_context()
+        return ssl_context
+    return None
 
 
 @asynccontextmanager
@@ -45,7 +61,8 @@ async def matrix_client(
         async with matrix_client("http://localhost:8008") as client:
             response = await client.login(password="secret")
     """
-    ssl_context = get_ssl_context()
+    ssl_context = _maybe_ssl_context(homeserver)
+
     if access_token:
         client = nio.AsyncClient(homeserver, user_id, store_path=".nio_store", ssl=ssl_context)
         client.access_token = access_token
@@ -72,7 +89,9 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
     Raises:
         ValueError: If login fails
     """
-    client = nio.AsyncClient(homeserver, user_id)
+    ssl_context = _maybe_ssl_context(homeserver)
+
+    client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):
@@ -134,7 +153,7 @@ async def register_user(
             and response.status_code == "M_USER_IN_USE"
         ):
             logger.info(f"User {user_id} already exists")
-            raise ValueError(f"M_USER_IN_USE: User {username} already exists")
+            return user_id
         else:
             raise ValueError(f"Failed to register user {username}: {response}")
 

@@ -141,7 +141,6 @@ async def _ensure_user_account() -> MatrixState:
             console.print(f"ℹ️  User @{user_username}:{SERVER_NAME} already exists")
         else:
             console.print(f"❌ Failed to register {user_username}: {error_msg}")
-            sys.exit(1)
 
     # Save credentials
     state.add_account("user", user_username, user_password)
