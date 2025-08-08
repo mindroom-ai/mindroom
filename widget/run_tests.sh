@@ -8,15 +8,14 @@ echo ""
 echo "Running Frontend Tests (TypeScript/React)..."
 echo "-------------------------------------------"
 cd frontend
-npm test -- --run
+pnpm test -- --run
 
 # Backend tests
 echo ""
 echo "Running Backend Tests (Python/FastAPI)..."
 echo "----------------------------------------"
 cd ../backend
-source .venv/bin/activate
-python -m pytest tests/ -v -o addopts=""
+uv run pytest tests/ -v -o addopts=""
 
 echo ""
 echo "Test run complete!"

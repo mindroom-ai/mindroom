@@ -23,8 +23,8 @@ uv run uvicorn src.main:app --reload --port 8001
 
 # Terminal 2: Start frontend
 cd widget/frontend
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 
 # Access at http://localhost:3003 (default)
 ```
