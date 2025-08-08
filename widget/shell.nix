@@ -28,7 +28,7 @@ pkgs.mkShell {
 
     # Node.js and pnpm for running the widget
     nodejs_20
-    nodePackages.pnpm
+    pnpm
 
     # Python for backend
     python311
