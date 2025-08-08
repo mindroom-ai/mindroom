@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Simple zellij-based starter that:
+# - Ensures Python deps (uv sync) in repo and widget/backend
+# - Ensures frontend deps (npm ci/install) in widget/frontend
+# - Starts a zellij session with two panes:
+#   1) uv run mindroom run   (repo root)
+#   2) ./widget/run.sh       (starts widget backend+frontend)
+#
+# Does NOT attach. Use scripts/attach to connect, scripts/stop to kill.
+
+SESSION_NAME="${SESSION_NAME:-mindroom}"
+
+# Resolve repo root regardless of where this script is called from
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
+
+echo "Using repo root: $REPO_ROOT"
+
+require_cmd() {
+  if ! command -v "$1" &>/dev/null; then
+    echo "Error: '$1' is not installed or not on PATH."
+    case "$1" in
+      uv)
+        echo "Install uv: https://github.com/astral-sh/uv"
+        ;;
+      npm)
+        echo "Install Node.js/npm (e.g. via nvm or your package manager)."
+        ;;
+      zellij)
+        echo "Install zellij: https://zellij.dev/"
+        ;;
+    esac
+    exit 1
+  fi
+}
+
+require_cmd uv
+require_cmd npm
+require_cmd zellij
+
+echo "Syncing Python dependencies in repo root with uv..."
+(cd "$REPO_ROOT" && uv sync)
+
+# Backend deps (widget/backend)
+if [ -d "$REPO_ROOT/widget/backend" ]; then
+  echo "Syncing Python dependencies for widget/backend with uv..."
+  (cd "$REPO_ROOT/widget/backend" && uv sync)
+fi
+
+# Frontend deps (widget/frontend)
+if [ -d "$REPO_ROOT/widget/frontend" ]; then
+  echo "Installing frontend dependencies for widget/frontend..."
+  if [ -f "$REPO_ROOT/widget/frontend/package-lock.json" ]; then
+    (cd "$REPO_ROOT/widget/frontend" && npm ci)
+  else
+    (cd "$REPO_ROOT/widget/frontend" && npm install)
+  fi
+fi
+
+# Check if session already exists (strip ANSI color codes)
+sessions="$(zellij list-sessions 2>/dev/null || zellij ls 2>/dev/null || true)"
+sessions_clean="$(echo "$sessions" | sed 's/\x1b\[[0-9;]*m//g')"
+if echo "$sessions_clean" | awk '{print $1}' | grep -qx "$SESSION_NAME"; then
+  echo "zellij session '$SESSION_NAME' already exists."
+  echo "Use scripts/attach to connect, or scripts/stop then scripts/start to restart."
+  exit 0
+fi
+
+echo "Starting zellij session '$SESSION_NAME' with two panes..."
+
+# Create a detached session first (compat across zellij versions)
+if ! zellij action new-session -s "$SESSION_NAME" 2>/dev/null; then
+  if command -v setsid &>/dev/null; then
+    # Start a detached session without taking over the current TTY
+    setsid -f zellij --session "$SESSION_NAME" >/dev/null 2>&1 || true
+  else
+    # Fallback: background it; may still momentarily attach, but returns
+    (zellij --session "$SESSION_NAME" </dev/null >/dev/null 2>&1 &)
+  fi
+fi
+
+# Wait for the session to become available
+for _ in $(seq 1 50); do
+  sessions_now="$(zellij list-sessions 2>/dev/null || zellij ls 2>/dev/null || true)"
+  sessions_now_clean="$(echo "$sessions_now" | sed 's/\x1b\[[0-9;]*m//g')"
+  if echo "$sessions_now_clean" | awk '{print $1}' | grep -qx "$SESSION_NAME"; then
+    break
+  fi
+  sleep 0.1
+done
+
+# Verify session exists
+sessions_now="$(zellij list-sessions 2>/dev/null || zellij ls 2>/dev/null || true)"
+sessions_now_clean="$(echo "$sessions_now" | sed 's/\x1b\[[0-9;]*m//g')"
+if ! echo "$sessions_now_clean" | awk '{print $1}' | grep -qx "$SESSION_NAME"; then
+  echo "Failed to create zellij session '$SESSION_NAME'."
+  exit 1
+fi
+
+# Pane 1: mindroom run (from repo root)
+zellij --session "$SESSION_NAME" run -- bash -lc "cd \"$REPO_ROOT\" && uv run mindroom run"
+
+# Pane 2: widget/run.sh (starts widget backend + frontend)
+zellij --session "$SESSION_NAME" run -- bash -lc "cd \"$REPO_ROOT/widget\" && ./run.sh"
+
+echo "zellij session '$SESSION_NAME' started."
+echo "Run: scripts/attach   to attach"
+echo "Run: scripts/stop     to stop the session"
