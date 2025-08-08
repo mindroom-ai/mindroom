@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from agno.agent import Agent
+from agno.models.message import Message
+from agno.run.response import RunResponse
 from agno.run.team import TeamRunResponse
 from agno.team import Team
 
@@ -26,6 +28,109 @@ class TeamMode(str, Enum):
 
     COORDINATE = "coordinate"  # Sequential, building on each other
     COLLABORATE = "collaborate"  # Parallel, synthesized
+
+
+def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -> list[str]:
+    """Extract and format member contributions from a team response.
+
+    Handles nested teams recursively with proper indentation.
+
+    Args:
+        response: The team or agent response to extract contributions from
+
+    Returns:
+        List of formatted contribution strings
+    """
+    return _extract_contributions_recursive(response, indent=0, include_consensus=True)
+
+
+def _extract_contributions_recursive(
+    response: TeamRunResponse | RunResponse,
+    indent: int,
+    include_consensus: bool,
+) -> list[str]:
+    """Internal recursive function for extracting contributions.
+
+    Args:
+        response: The response to extract from
+        indent: Current indentation level
+        include_consensus: Whether to include team consensus
+
+    Returns:
+        List of formatted contribution strings
+    """
+    parts = []
+    indent_str = "  " * indent
+
+    if isinstance(response, TeamRunResponse):
+        # Extract member contributions
+        if response.member_responses:
+            for member_resp in response.member_responses:
+                if isinstance(member_resp, TeamRunResponse):
+                    # Nested team
+                    team_name = member_resp.team_name or "Nested Team"
+                    parts.append(f"{indent_str}**{team_name}** (Team):")
+                    nested_parts = _extract_contributions_recursive(
+                        member_resp,
+                        indent=indent + 1,
+                        include_consensus=False,  # No consensus for nested teams
+                    )
+                    parts.extend(nested_parts)
+                elif isinstance(member_resp, RunResponse):
+                    # Regular agent
+                    agent_name = member_resp.agent_name or "Team Member"
+                    content = _extract_content(member_resp)
+                    if content:
+                        parts.append(f"{indent_str}**{agent_name}**: {content}")
+
+        # Add team consensus if requested
+        if include_consensus:
+            if response.content:
+                if parts:  # Separator only if we have member contributions
+                    parts.append(f"\n{indent_str}**Team Consensus**:")
+                parts.append(f"{indent_str}{response.content}")
+            elif parts:
+                # If no consensus but we have member responses, note that
+                parts.append(f"\n{indent_str}*No team consensus - showing individual responses only*")
+
+    elif isinstance(response, RunResponse):
+        # Single agent response
+        agent_name = response.agent_name or "Agent"
+        content = _extract_content(response)
+        if content:
+            parts.append(f"{indent_str}**{agent_name}**: {content}")
+
+    return parts
+
+
+def _extract_content(response: TeamRunResponse | RunResponse) -> str:
+    """Extract content from a response object.
+
+    Args:
+        response: The response to extract content from
+
+    Returns:
+        The extracted content as a string
+    """
+    # Direct content takes priority
+    if response.content:
+        return str(response.content)
+
+    # Fall back to extracting from messages
+    # Note: This concatenates ALL assistant messages, which might include
+    # multiple turns in a conversation. Consider if you want just the
+    # last message or all of them.
+    if response.messages:
+        content_parts = []
+        messages_list: list[Any] = response.messages
+        for msg in messages_list:
+            if isinstance(msg, Message) and msg.role == "assistant" and msg.content:
+                content_parts.append(str(msg.content))
+
+        # Join with newlines to preserve message boundaries
+        return "\n\n".join(content_parts) if content_parts else ""
+
+    return ""
 
 
 class ShouldFormTeamResult(NamedTuple):
@@ -166,23 +271,47 @@ async def create_team_response(
         mode=mode.value,
         name=f"Team-{'-'.join(agent_names)}",
         model=model,
+        # Enable features for better team collaboration visibility
+        show_members_responses=True,  # Show individual member responses
+        enable_agentic_context=True,  # Share context between team members
+        debug_mode=False,  # Set to True for debugging
         # Agno will automatically list members with their names, roles, and tools
         # No need for custom descriptions or instructions
     )
 
-    logger.info(f"Executing team response with {len(agents)} agents")
+    # Create agent list for logging
+    agent_list = ", ".join(str(a.name) for a in agents if a.name)
+
+    logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
+    logger.info(f"TEAM PROMPT: {prompt[:500]}")  # Log first 500 chars of prompt
+
     response = await team.arun(prompt)
 
-    # Extract response content
+    # Extract response content using our universal extraction function
     if isinstance(response, TeamRunResponse):
-        team_response = str(response.content)
+        # Log member responses for debugging
+        if response.member_responses:
+            logger.debug(f"Team had {len(response.member_responses)} member responses")
+
+        # Log the team consensus content for debugging
+        logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
+
+        # Extract all contributions (including nested teams if any)
+        parts = extract_team_member_contributions(response)
+
+        # Combine all parts
+        team_response = "\n\n".join(parts) if parts else "No team response generated."
     else:
         logger.warning(f"Unexpected response type: {type(response)}", response=response)
         team_response = str(response)
 
+    # Log the team response
+    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:500]}")
+    if len(team_response) > 500:
+        logger.debug(f"TEAM RESPONSE (full): {team_response}")
+
     # Prepend team information to the response
     # Don't use @ mentions as that would trigger the agents again
-    agent_list = ", ".join([name for name in agent_names if name != ROUTER_AGENT_NAME])
     team_header = f"🤝 **Team Response** ({agent_list}):\n\n"
 
     return team_header + team_response
