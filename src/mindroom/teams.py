@@ -162,9 +162,7 @@ async def create_team_response(
                     agent_index = i if i < len(agent_names) else -1
                     if agent_index >= 0 and agent_index < len(agent_names):
                         member_name = agent_names[agent_index]
-                        # Skip router agent
-                        if member_name != ROUTER_AGENT_NAME:
-                            parts.append(f"**{member_name}**: {member_content}")
+                        parts.append(f"**{member_name}**: {member_content}")
                     else:
                         parts.append(f"**Agent {i + 1}**: {member_content}")
 
