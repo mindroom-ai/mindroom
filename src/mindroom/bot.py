@@ -948,15 +948,27 @@ class MultiAgentOrchestrator:
                 else:
                     logger.info(f"Team {team_name} removed")
 
-        # Check if router needs restart (if any room assignments changed)
+        # Check if router needs restart
+        # Router only needs to restart if:
+        # 1. Room assignments changed (needs to join/leave rooms)
+        # 2. Model configuration changed (affects routing decisions)
         router_needs_restart = False
         if ROUTER_AGENT_NAME in agent_users:
             old_rooms = get_all_configured_rooms(self.current_config)
             new_rooms = get_all_configured_rooms(new_config)
 
+            # Check room changes
             if old_rooms != new_rooms:
                 router_needs_restart = True
                 logger.info("Router room assignments changed")
+
+            # Check model configuration changes (router model or room-specific models)
+            if (
+                self.current_config.router.model != new_config.router.model
+                or self.current_config.room_models != new_config.room_models
+            ):
+                router_needs_restart = True
+                logger.info("Router needs restart due to model configuration changes")
 
         # Collect all entities to restart
         entities_to_restart = agents_to_restart | teams_to_restart
