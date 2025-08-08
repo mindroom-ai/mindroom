@@ -112,3 +112,64 @@ class Config(BaseModel):
             available = ", ".join(sorted(self.agents.keys()))
             raise ValueError(f"Unknown agent: {agent_name}. Available agents: {available}")
         return self.agents[agent_name]
+
+    def get_all_configured_rooms(self) -> set[str]:
+        """Extract all room aliases configured for agents and teams.
+
+        Returns:
+            Set of all unique room aliases from agent and team configurations
+        """
+        all_room_aliases = set()
+        for agent_config in self.agents.values():
+            all_room_aliases.update(agent_config.rooms)
+        for team_config in self.teams.values():
+            all_room_aliases.update(team_config.rooms)
+        return all_room_aliases
+
+    def get_configured_bots_for_room(
+        self, room_id: str, resolved_rooms_cache: dict[str, set[str]] | None = None
+    ) -> set[str]:
+        """Get the set of bot usernames that should be in a specific room.
+
+        Args:
+            room_id: The Matrix room ID
+            resolved_rooms_cache: Optional cache of resolved room aliases to avoid repeated resolution
+
+        Returns:
+            Set of bot usernames (without domain) that should be in this room
+        """
+        from .agent_config import ROUTER_AGENT_NAME
+        from .matrix import resolve_room_aliases
+
+        configured_bots = set()
+
+        # Check which agents should be in this room
+        for agent_name, agent_config in self.agents.items():
+            if resolved_rooms_cache and agent_name in resolved_rooms_cache:
+                resolved_rooms = resolved_rooms_cache[agent_name]
+            else:
+                resolved_rooms = set(resolve_room_aliases(agent_config.rooms))
+                if resolved_rooms_cache is not None:
+                    resolved_rooms_cache[agent_name] = resolved_rooms
+
+            if room_id in resolved_rooms:
+                configured_bots.add(f"mindroom_{agent_name}")
+
+        # Check which teams should be in this room
+        for team_name, team_config in self.teams.items():
+            cache_key = f"team_{team_name}"
+            if resolved_rooms_cache and cache_key in resolved_rooms_cache:
+                resolved_rooms = resolved_rooms_cache[cache_key]
+            else:
+                resolved_rooms = set(resolve_room_aliases(team_config.rooms))
+                if resolved_rooms_cache is not None:
+                    resolved_rooms_cache[cache_key] = resolved_rooms
+
+            if room_id in resolved_rooms:
+                configured_bots.add(f"mindroom_{team_name}")
+
+        # Router should be in any room that has any configured agents/teams
+        if configured_bots:  # If any bots are configured for this room
+            configured_bots.add(f"mindroom_{ROUTER_AGENT_NAME}")
+
+        return configured_bots

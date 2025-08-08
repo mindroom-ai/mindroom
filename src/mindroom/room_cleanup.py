@@ -2,50 +2,13 @@
 
 import nio
 
-from .agent_config import ROUTER_AGENT_NAME, load_config
+from .agent_config import load_config
 from .logging_config import get_logger
-from .matrix import MatrixID, resolve_room_aliases
+from .matrix import MatrixID
 from .matrix.state import MatrixState
 from .models import Config
 
 logger = get_logger(__name__)
-
-
-def _get_configured_bots_for_room(config: Config, room_id: str) -> set[str]:
-    """Get the set of bot usernames that should be in a specific room.
-
-    Args:
-        config: The current configuration
-        room_id: The Matrix room ID
-
-    Returns:
-        Set of bot usernames (without domain) that should be in this room
-    """
-    configured_bots = set()
-
-    # Check which agents should be in this room
-    for agent_name, agent_config in config.agents.items():
-        resolved_rooms = resolve_room_aliases(agent_config.rooms)
-        if room_id in resolved_rooms:
-            configured_bots.add(f"mindroom_{agent_name}")
-
-    # Check which teams should be in this room
-    for team_name, team_config in config.teams.items():
-        resolved_rooms = resolve_room_aliases(team_config.rooms)
-        if room_id in resolved_rooms:
-            configured_bots.add(f"mindroom_{team_name}")
-
-    # Router should be in any room that has any configured agents/teams
-    all_configured_rooms = set()
-    for agent_config in config.agents.values():
-        all_configured_rooms.update(resolve_room_aliases(agent_config.rooms))
-    for team_config in config.teams.values():
-        all_configured_rooms.update(resolve_room_aliases(team_config.rooms))
-
-    if room_id in all_configured_rooms:
-        configured_bots.add(f"mindroom_{ROUTER_AGENT_NAME}")
-
-    return configured_bots
 
 
 def _get_all_known_bot_usernames() -> set[str]:
@@ -89,7 +52,7 @@ async def _cleanup_orphaned_bots_in_room(
         return []
 
     # Get configured bots for this room
-    configured_bots = _get_configured_bots_for_room(config, room_id)
+    configured_bots = config.get_configured_bots_for_room(room_id)
     known_bot_usernames = _get_all_known_bot_usernames()
 
     kicked_bots = []

@@ -75,16 +75,6 @@ SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
 
 
-def get_all_configured_rooms(config: Config) -> set[str]:
-    """Extract all room aliases configured for agents and teams."""
-    all_room_aliases = set()
-    for agent_config in config.agents.values():
-        all_room_aliases.update(agent_config.rooms)
-    for team_config in config.teams.values():
-        all_room_aliases.update(team_config.rooms)
-    return all_room_aliases
-
-
 def create_bot_for_entity(
     entity_name: str,
     agent_user: AgentMatrixUser,
@@ -105,7 +95,7 @@ def create_bot_for_entity(
     enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
 
     if entity_name == ROUTER_AGENT_NAME:
-        all_room_aliases = get_all_configured_rooms(config)
+        all_room_aliases = config.get_all_configured_rooms()
         rooms = resolve_room_aliases(list(all_room_aliases))
         return AgentBot(agent_user, storage_path, rooms, enable_streaming=enable_streaming)
 
@@ -949,8 +939,8 @@ class MultiAgentOrchestrator:
         # Check if router needs restart (only if room assignments changed)
         router_needs_restart = False
         if ROUTER_AGENT_NAME in agent_users:
-            old_rooms = get_all_configured_rooms(self.current_config)
-            new_rooms = get_all_configured_rooms(new_config)
+            old_rooms = self.current_config.get_all_configured_rooms()
+            new_rooms = new_config.get_all_configured_rooms()
             router_needs_restart = old_rooms != new_rooms
 
         # Collect all entities to restart
@@ -1006,10 +996,6 @@ class MultiAgentOrchestrator:
         # Signal all bots to stop their sync loops
         for bot in self.agent_bots.values():
             bot.running = False
-
-        # Give time for in-progress messages to complete
-        logger.info("Waiting for in-progress messages to complete...")
-        await asyncio.sleep(3)
 
         # Now stop all bots
         stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
