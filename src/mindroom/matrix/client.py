@@ -8,7 +8,6 @@ import markdown
 import nio
 
 from ..logging_config import get_logger
-from .ssl_helper import get_ssl_context
 from .users import extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
@@ -45,12 +44,11 @@ async def matrix_client(
         async with matrix_client("http://localhost:8008") as client:
             response = await client.login(password="secret")
     """
-    ssl_context = get_ssl_context()
     if access_token:
-        client = nio.AsyncClient(homeserver, user_id, store_path=".nio_store", ssl=ssl_context)
+        client = nio.AsyncClient(homeserver, user_id, store_path=".nio_store")
         client.access_token = access_token
     else:
-        client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
+        client = nio.AsyncClient(homeserver, user_id)
 
     try:
         yield client
@@ -72,8 +70,7 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
     Raises:
         ValueError: If login fails
     """
-    ssl_context = get_ssl_context()
-    client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
+    client = nio.AsyncClient(homeserver, user_id)
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):
