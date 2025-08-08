@@ -926,10 +926,17 @@ class MultiAgentOrchestrator:
             old_agent = self.current_config.agents.get(agent_name)
             new_agent = new_config.agents.get(agent_name)
 
-            if old_agent != new_agent and agent_name in self.agent_bots:
+            if old_agent != new_agent and (agent_name in self.agent_bots or new_agent is not None):
+                # Only restart if the agent bot exists OR if it's a new agent
                 agents_to_restart.add(agent_name)
                 if old_agent and new_agent:
-                    logger.info(f"Configuration changed for {agent_name}")
+                    # Log specific changes for debugging
+                    if old_agent.rooms != new_agent.rooms:
+                        logger.info(
+                            f"Room assignments changed for agent {agent_name}: {old_agent.rooms} -> {new_agent.rooms}"
+                        )
+                    else:
+                        logger.info(f"Configuration changed for agent {agent_name}")
                 elif not old_agent:
                     logger.info(f"New agent {agent_name} added")
                 else:
@@ -940,10 +947,17 @@ class MultiAgentOrchestrator:
             old_team = self.current_config.teams.get(team_name)
             new_team = new_config.teams.get(team_name)
 
-            if old_team != new_team and team_name in self.agent_bots:
+            if old_team != new_team and (team_name in self.agent_bots or new_team is not None):
+                # Only restart if the team bot exists OR if it's a new team
                 teams_to_restart.add(team_name)
                 if old_team and new_team:
-                    logger.info(f"Configuration changed for team {team_name}")
+                    # Log specific changes for debugging
+                    if old_team.rooms != new_team.rooms:
+                        logger.info(
+                            f"Room assignments changed for team {team_name}: {old_team.rooms} -> {new_team.rooms}"
+                        )
+                    else:
+                        logger.info(f"Configuration changed for team {team_name}")
                 elif not old_team:
                     logger.info(f"New team {team_name} added")
                 else:

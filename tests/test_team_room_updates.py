@@ -1,0 +1,192 @@
+"""Tests for team room update functionality."""
+
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from mindroom.bot import MultiAgentOrchestrator
+from mindroom.models import Config
+
+
+class TestTeamRoomUpdates:
+    """Test team room configuration updates."""
+
+    @pytest.mark.asyncio
+    async def test_team_room_change_triggers_restart(self):
+        """Test that changing a team's room configuration triggers a restart."""
+        # Create initial config
+        initial_config_data = {
+            "agents": {
+                "agent1": {
+                    "display_name": "Agent1",
+                    "role": "Test",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["room1"],
+                    "model": "default",
+                }
+            },
+            "teams": {
+                "team1": {
+                    "display_name": "Team1",
+                    "role": "Test team",
+                    "agents": ["agent1"],
+                    "rooms": ["room1", "room2"],
+                    "model": "default",
+                    "mode": "coordinate",
+                }
+            },
+            "defaults": {"num_history_runs": 5, "markdown": True, "add_history_to_messages": True},
+            "models": {"default": {"provider": "ollama", "id": "test-model", "host": None, "api_key": None}},
+            "router": {"model": "default"},
+        }
+
+        with patch("mindroom.bot.load_config") as mock_load_config:
+            config1 = Config(**initial_config_data)
+            mock_load_config.return_value = config1
+
+            with patch("mindroom.bot.ensure_all_agent_users") as mock_ensure_users:
+                mock_team_user = MagicMock(user_id="@team1:localhost", agent_name="team1")
+                mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
+                mock_ensure_users.return_value = {"team1": mock_team_user, "router": mock_router_user}
+
+                orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
+
+                with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+                    mock_bot = AsyncMock()
+                    mock_bot.start = AsyncMock()
+                    mock_bot.stop = AsyncMock()
+                    mock_bot.sync_forever = AsyncMock()
+                    mock_create_bot.return_value = mock_bot
+
+                    await orchestrator.initialize()
+                    orchestrator.running = True
+
+                    # Update config with different rooms for the team
+                    updated_config_data = initial_config_data.copy()
+                    updated_config_data["teams"]["team1"]["rooms"] = ["room2", "room3", "room4"]
+                    config2 = Config(**updated_config_data)
+                    mock_load_config.return_value = config2
+
+                    # Update config
+                    updated = await orchestrator.update_config()
+
+                    # Verify the team was restarted
+                    assert updated is True
+                    assert mock_bot.stop.called
+                    # Should create bot twice: once on init, once on update
+                    assert mock_create_bot.call_count == 4  # team1 + router on init, team1 + router on update
+
+    @pytest.mark.asyncio
+    async def test_new_team_gets_created(self):
+        """Test that a new team in config gets created."""
+        # Start with no teams
+        initial_config_data = {
+            "agents": {},
+            "teams": {},
+            "defaults": {"num_history_runs": 5, "markdown": True, "add_history_to_messages": True},
+            "models": {"default": {"provider": "ollama", "id": "test-model", "host": None, "api_key": None}},
+            "router": {"model": "default"},
+        }
+
+        with patch("mindroom.bot.load_config") as mock_load_config:
+            config1 = Config(**initial_config_data)
+            mock_load_config.return_value = config1
+
+            with patch("mindroom.bot.ensure_all_agent_users") as mock_ensure_users:
+                mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
+                mock_ensure_users.return_value = {"router": mock_router_user}
+
+                orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
+
+                with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+                    mock_bot = AsyncMock()
+                    mock_bot.start = AsyncMock()
+                    mock_bot.stop = AsyncMock()
+                    mock_bot.sync_forever = AsyncMock()
+                    mock_create_bot.return_value = mock_bot
+
+                    await orchestrator.initialize()
+                    orchestrator.running = True
+
+                    # Add a new team
+                    updated_config_data = initial_config_data.copy()
+                    updated_config_data["teams"]["new_team"] = {
+                        "display_name": "NewTeam",
+                        "role": "New test team",
+                        "agents": [],
+                        "rooms": ["room1"],
+                        "model": "default",
+                        "mode": "coordinate",
+                    }
+                    config2 = Config(**updated_config_data)
+                    mock_load_config.return_value = config2
+
+                    # Mock ensure_users to include the new team
+                    mock_team_user = MagicMock(user_id="@new_team:localhost", agent_name="new_team")
+                    mock_ensure_users.return_value = {
+                        "router": mock_router_user,
+                        "new_team": mock_team_user,
+                    }
+
+                    # Update config
+                    updated = await orchestrator.update_config()
+
+                    # Verify the new team was created
+                    assert updated is True
+                    # The new team should be in the bots now
+                    assert "new_team" in orchestrator.agent_bots
+
+    @pytest.mark.asyncio
+    async def test_no_change_no_restart(self):
+        """Test that no changes in team config doesn't trigger restart."""
+        config_data = {
+            "agents": {},
+            "teams": {
+                "team1": {
+                    "display_name": "Team1",
+                    "role": "Test team",
+                    "agents": [],
+                    "rooms": ["room1"],
+                    "model": "default",
+                    "mode": "coordinate",
+                }
+            },
+            "defaults": {"num_history_runs": 5, "markdown": True, "add_history_to_messages": True},
+            "models": {"default": {"provider": "ollama", "id": "test-model", "host": None, "api_key": None}},
+            "router": {"model": "default"},
+        }
+
+        with patch("mindroom.bot.load_config") as mock_load_config:
+            config = Config(**config_data)
+            mock_load_config.return_value = config
+
+            with patch("mindroom.bot.ensure_all_agent_users") as mock_ensure_users:
+                mock_team_user = MagicMock(user_id="@team1:localhost", agent_name="team1")
+                mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
+                mock_ensure_users.return_value = {"team1": mock_team_user, "router": mock_router_user}
+
+                orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
+
+                with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+                    mock_bot = AsyncMock()
+                    mock_bot.start = AsyncMock()
+                    mock_bot.stop = AsyncMock()
+                    mock_bot.sync_forever = AsyncMock()
+                    mock_create_bot.return_value = mock_bot
+
+                    await orchestrator.initialize()
+                    orchestrator.running = True
+
+                    # Reset mocks
+                    mock_bot.stop.reset_mock()
+                    mock_create_bot.reset_mock()
+
+                    # Update with same config
+                    updated = await orchestrator.update_config()
+
+                    # Verify nothing was restarted
+                    assert updated is False
+                    assert not mock_bot.stop.called
+                    assert mock_create_bot.call_count == 0
