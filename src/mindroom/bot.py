@@ -35,6 +35,7 @@ from .matrix import (
     edit_message,
     ensure_all_agent_users,
     extract_agent_name,
+    extract_server_name_from_homeserver,
     extract_thread_info,
     fetch_thread_history,
     join_room,
@@ -173,15 +174,47 @@ class AgentBot:
 
         This should only be called by the router agent or during initial setup.
         """
+        from .agent_config import get_agent_ids_for_room, load_config
+        from .matrix import add_room, create_room, load_rooms
+
+        config = load_config()
+        existing_rooms = load_rooms()
+
         for room_id in self.rooms:
-            # Check if room exists by trying to get its state
-            state_response = await self.client.room_get_state(room_id)
-            if isinstance(state_response, nio.RoomGetStateError):
-                # Room doesn't exist or we're not in it - try to create it
-                if state_response.status_code == "M_FORBIDDEN":
-                    self.logger.info(f"Room {room_id} exists but we're not a member")
+            # Skip if this is a room ID (starts with !)
+            if room_id.startswith("!"):
+                # This is a room ID, not a room key/alias - skip it
+                continue
+
+            # This is a room key - check if it exists in our state
+            room_key = room_id
+
+            if room_key not in existing_rooms:
+                # Room doesn't exist, create it
+                room_name = room_key.replace("_", " ").title()
+                self.logger.info(f"Creating room {room_key}")
+
+                # Get power users for this room
+                power_users = get_agent_ids_for_room(room_key, config, self.client.homeserver)
+
+                # Create the room
+                created_room_id = await create_room(
+                    client=self.client,
+                    name=room_name,
+                    alias=room_key,
+                    topic=f"Mindroom {room_name}",
+                    power_users=power_users,
+                )
+
+                if created_room_id:
+                    # Save room info
+                    server_name = extract_server_name_from_homeserver(self.client.homeserver)
+                    add_room(room_key, created_room_id, f"#{room_key}:{server_name}", room_name)
+                    self.logger.info(f"Created room {room_key} with ID {created_room_id}")
                 else:
-                    self.logger.warning(f"Cannot access room {room_id}: {state_response.message}")
+                    self.logger.error(f"Failed to create room {room_key}")
+            else:
+                self.logger.debug(f"Room {room_key} already exists")
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -235,8 +268,11 @@ class AgentBot:
         await self.join_configured_rooms()
         await self.leave_unconfigured_rooms()
 
-        # Router bot has additional cleanup responsibilities
+        # Router bot has additional responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
+            # Ensure all configured rooms exist
+            await self.ensure_rooms_exist()
+
             # Clean up any orphaned bots (bots in rooms they shouldn't be in)
             try:
                 await cleanup_all_orphaned_bots(self.client)

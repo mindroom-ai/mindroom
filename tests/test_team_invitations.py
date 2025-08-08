@@ -1,11 +1,17 @@
-"""Tests for team invitation functionality."""
+"""Tests for team room membership functionality.
 
+With the new self-managing agent pattern, teams handle their own room
+memberships just like agents do.
+"""
+
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 
-from mindroom.cli import _invite_agents_from_config
+from mindroom.bot import TeamBot
+from mindroom.matrix import AgentMatrixUser
 from mindroom.models import AgentConfig, Config, TeamConfig
 
 
@@ -32,81 +38,103 @@ def mock_config_with_teams():
     return config
 
 
-class TestTeamInvitations:
-    """Test team invitation functionality."""
+class TestTeamRoomMembership:
+    """Test team room membership functionality."""
 
     @pytest.mark.asyncio
-    async def test_invite_agents_from_config_includes_teams(self, mock_config_with_teams) -> None:
-        """Test that _invite_agents_from_config invites both agents and teams."""
-        mock_client = AsyncMock()
-
-        # Mock successful room invite responses
-        mock_invite_response = MagicMock()
-        mock_invite_response.__class__ = nio.RoomInviteResponse
-        mock_client.room_invite.return_value = mock_invite_response
-
-        # Call the function
-        invited_count = await _invite_agents_from_config(
-            client=mock_client,
-            room_id="!test_room:localhost",
-            room_key="test_room",
-            config=mock_config_with_teams,
-            include_router=True,
+    async def test_team_joins_configured_rooms(self, monkeypatch) -> None:
+        """Test that teams join their configured rooms on startup."""
+        # Create a mock team user
+        team_user = AgentMatrixUser(
+            agent_name="team1",
+            user_id="@mindroom_team1:localhost",
+            display_name="Team 1",
+            password="test_password",
         )
 
-        # Should have invited router (1) + agent1 (1) + team1 (1) = 3
-        assert invited_count == 3
+        # Create the team bot with configured rooms
+        bot = TeamBot(
+            agent_user=team_user,
+            storage_path=Path("/tmp/test"),
+            rooms=["!test_room:localhost"],
+            team_agents=["agent1"],
+            team_mode="round_robin",
+            team_model=None,
+            enable_streaming=False,
+        )
 
-        # Check that room_invite was called for all three
-        assert mock_client.room_invite.call_count == 3
+        # Mock the client
+        mock_client = AsyncMock()
+        bot.client = mock_client
 
-        # Check the specific calls
-        calls = mock_client.room_invite.call_args_list
-        invited_ids = [call[0][1] for call in calls]  # Get the user_id argument from each call
+        # Track which rooms were joined
+        joined_rooms = []
 
-        assert "@mindroom_router:localhost" in invited_ids
-        assert "@mindroom_agent1:localhost" in invited_ids
-        assert "@mindroom_team1:localhost" in invited_ids
+        async def mock_join_room(client, room_id):
+            joined_rooms.append(room_id)
+            return True
+
+        monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
+
+        # Mock restore_scheduled_tasks
+        async def mock_restore_scheduled_tasks(client, room_id):
+            return 0
+
+        monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
+
+        # Test that the team joins its configured room
+        await bot.join_configured_rooms()
+
+        # Verify the team joined the configured room
+        assert len(joined_rooms) == 1
+        assert "!test_room:localhost" in joined_rooms
 
     @pytest.mark.asyncio
-    async def test_invite_agents_from_config_only_invites_assigned_teams(self, mock_config_with_teams) -> None:
-        """Test that teams are only invited to their assigned rooms."""
-        # Add another team not assigned to test_room
-        mock_config_with_teams.teams["team2"] = TeamConfig(
-            display_name="Team 2",
-            role="Another test team",
-            agents=["agent1"],
-            rooms=["other_room"],  # Different room
+    async def test_team_leaves_unconfigured_rooms(self, monkeypatch) -> None:
+        """Test that teams leave rooms they're no longer configured for."""
+        # Create a mock team user
+        team_user = AgentMatrixUser(
+            agent_name="team1",
+            user_id="@mindroom_team1:localhost",
+            display_name="Team 1",
+            password="test_password",
         )
 
+        # Create the team bot with no configured rooms
+        bot = TeamBot(
+            agent_user=team_user,
+            storage_path=Path("/tmp/test"),
+            rooms=[],  # No configured rooms
+            team_agents=["agent1"],
+            team_mode="round_robin",
+            team_model=None,
+            enable_streaming=False,
+        )
+
+        # Mock the client
         mock_client = AsyncMock()
+        bot.client = mock_client
 
-        # Mock successful room invite responses
-        mock_invite_response = MagicMock()
-        mock_invite_response.__class__ = nio.RoomInviteResponse
-        mock_client.room_invite.return_value = mock_invite_response
+        # Mock joined_rooms to return a room the team is in
+        joined_rooms_response = MagicMock()
+        joined_rooms_response.__class__ = nio.JoinedRoomsResponse
+        joined_rooms_response.rooms = ["!old_room:localhost"]
+        mock_client.joined_rooms.return_value = joined_rooms_response
 
-        # Call the function for test_room
-        invited_count = await _invite_agents_from_config(
-            client=mock_client,
-            room_id="!test_room:localhost",
-            room_key="test_room",
-            config=mock_config_with_teams,
-            include_router=True,
-        )
+        # Track which rooms were left
+        left_rooms = []
 
-        # Should have invited router (1) + agent1 (1) + team1 (1) = 3
-        # team2 should NOT be invited as it's not assigned to test_room
-        assert invited_count == 3
+        async def mock_room_leave(room_id):
+            left_rooms.append(room_id)
+            response = MagicMock()
+            response.__class__ = nio.RoomLeaveResponse
+            return response
 
-        # Check that room_invite was called for all three
-        assert mock_client.room_invite.call_count == 3
+        mock_client.room_leave = mock_room_leave
 
-        # Check the specific calls
-        calls = mock_client.room_invite.call_args_list
-        invited_ids = [call[0][1] for call in calls]  # Get the user_id argument from each call
+        # Test that the team leaves unconfigured rooms
+        await bot.leave_unconfigured_rooms()
 
-        assert "@mindroom_router:localhost" in invited_ids
-        assert "@mindroom_agent1:localhost" in invited_ids
-        assert "@mindroom_team1:localhost" in invited_ids
-        assert "@mindroom_team2:localhost" not in invited_ids  # Should NOT be invited
+        # Verify the team left the old room
+        assert len(left_rooms) == 1
+        assert "!old_room:localhost" in left_rooms
