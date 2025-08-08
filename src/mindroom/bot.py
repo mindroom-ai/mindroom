@@ -982,6 +982,8 @@ class MultiAgentOrchestrator:
             bot = create_bot_for_entity(entity_name, agent_user, new_config, self.storage_path)  # type: ignore[assignment]
 
             if bot is None:
+                # Entity was removed from config
+                logger.info(f"Skipping {entity_name} - no longer in configuration")
                 continue
 
             bot.orchestrator = self
