@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from mindroom.cli import _run
 from mindroom.matrix import MATRIX_HOMESERVER
+from mindroom.matrix.client import markdown_to_html
 
 
 class MindRoomE2ETest:
@@ -53,16 +54,26 @@ class MindRoomE2ETest:
         """Send a message with proper Matrix mention."""
         from mindroom.matrix.mentions import parse_mentions_in_text
 
+        # Extract domain from the logged-in user's ID
+        user_domain = "localhost"  # default
+        if self.client.user_id and ":" in self.client.user_id:
+            user_domain = self.client.user_id.split(":", 1)[1]
+
         # Start with the primary agent mention
         full_message = f"@{agent_name} {message}"
 
         # Parse ALL mentions in the text (including ones in the message body)
-        processed_text, all_mentioned_ids = parse_mentions_in_text(full_message, "localhost")
+        processed_text, all_mentioned_ids, markdown_text = parse_mentions_in_text(full_message, user_domain)
+
+        # Convert markdown to HTML
+        formatted_html = markdown_to_html(markdown_text)
 
         # Create content with all mentions properly set
         content = {
             "msgtype": "m.text",
             "body": processed_text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": formatted_html,
             "m.mentions": {"user_ids": all_mentioned_ids} if all_mentioned_ids else {},
         }
 
