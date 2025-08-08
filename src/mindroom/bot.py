@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import nio
+from watchfiles import awatch
 
 from . import interactive
 from .agent_config import ROUTER_AGENT_NAME, create_agent, load_config
@@ -196,11 +197,8 @@ class AgentBot:
 
         # Router bot cleans up orphaned bots from all rooms on startup
         if self.agent_name == ROUTER_AGENT_NAME:
-            self.logger.info("Router bot checking for orphaned bots in all rooms...")
             try:
-                kicked = await cleanup_all_orphaned_bots(self.client)
-                if kicked:
-                    self.logger.info(f"Cleaned up orphaned bots from {len(kicked)} rooms")
+                await cleanup_all_orphaned_bots(self.client)
             except Exception as e:
                 self.logger.error(f"Failed to cleanup orphaned bots: {e}")
 
@@ -932,61 +930,28 @@ class MultiAgentOrchestrator:
         agents_to_restart = set()
         teams_to_restart = set()
 
-        # Check for agent changes - compare each agent individually
+        # Check for agent changes
         for agent_name in set(self.current_config.agents.keys()) | set(new_config.agents.keys()):
             old_agent = self.current_config.agents.get(agent_name)
             new_agent = new_config.agents.get(agent_name)
 
             if old_agent != new_agent and (agent_name in self.agent_bots or new_agent is not None):
-                # Only restart if the agent bot exists OR if it's a new agent
                 agents_to_restart.add(agent_name)
-                if old_agent and new_agent:
-                    # Log specific changes for debugging
-                    if old_agent.rooms != new_agent.rooms:
-                        logger.info(
-                            f"Room assignments changed for agent {agent_name}: {old_agent.rooms} -> {new_agent.rooms}"
-                        )
-                    else:
-                        logger.info(f"Configuration changed for agent {agent_name}")
-                elif not old_agent:
-                    logger.info(f"New agent {agent_name} added")
-                else:
-                    logger.info(f"Agent {agent_name} removed")
 
-        # Check for team changes - compare each team individually
+        # Check for team changes
         for team_name in set(self.current_config.teams.keys()) | set(new_config.teams.keys()):
             old_team = self.current_config.teams.get(team_name)
             new_team = new_config.teams.get(team_name)
 
             if old_team != new_team and (team_name in self.agent_bots or new_team is not None):
-                # Only restart if the team bot exists OR if it's a new team
                 teams_to_restart.add(team_name)
-                if old_team and new_team:
-                    # Log specific changes for debugging
-                    if old_team.rooms != new_team.rooms:
-                        logger.info(
-                            f"Room assignments changed for team {team_name}: {old_team.rooms} -> {new_team.rooms}"
-                        )
-                    else:
-                        logger.info(f"Configuration changed for team {team_name}")
-                elif not old_team:
-                    logger.info(f"New team {team_name} added")
-                else:
-                    logger.info(f"Team {team_name} removed")
 
-        # Check if router needs restart
-        # Router only needs to restart if room assignments changed (needs to join/leave rooms)
-        # Note: Router loads its model dynamically on each routing decision, so model changes
-        # don't require a restart
+        # Check if router needs restart (only if room assignments changed)
         router_needs_restart = False
         if ROUTER_AGENT_NAME in agent_users:
             old_rooms = get_all_configured_rooms(self.current_config)
             new_rooms = get_all_configured_rooms(new_config)
-
-            # Check room changes
-            if old_rooms != new_rooms:
-                router_needs_restart = True
-                logger.info("Router room assignments changed")
+            router_needs_restart = old_rooms != new_rooms
 
         # Collect all entities to restart
         entities_to_restart = agents_to_restart | teams_to_restart
@@ -994,7 +959,6 @@ class MultiAgentOrchestrator:
             entities_to_restart.add(ROUTER_AGENT_NAME)
 
         if not entities_to_restart:
-            logger.info("No configuration changes detected")
             self.current_config = new_config
             return False
 
@@ -1006,7 +970,6 @@ class MultiAgentOrchestrator:
                 stop_tasks.append(bot.stop())
 
         if stop_tasks:
-            logger.info(f"Stopping {len(stop_tasks)} bots...")
             await asyncio.gather(*stop_tasks)
 
         # Remove stopped bots
@@ -1025,17 +988,13 @@ class MultiAgentOrchestrator:
             bot = create_bot_for_entity(entity_name, agent_user, new_config, self.storage_path)  # type: ignore[assignment]
 
             if bot is None:
-                # Entity was removed from config
-                logger.info(f"Skipping {entity_name} - no longer in configuration")
-                continue
+                continue  # Entity was removed from config
 
             bot.orchestrator = self
             self.agent_bots[entity_name] = bot
 
             await bot.start()
             asyncio.create_task(bot.sync_forever())
-
-            logger.info(f"Started bot: {entity_name}")
 
         logger.info(f"Configuration update complete: {len(entities_to_restart)} bots affected")
         return True
@@ -1079,8 +1038,6 @@ async def main(log_level: str, storage_path: Path) -> None:
         log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
         storage_path: The base directory for storing agent data
     """
-    from watchfiles import awatch
-
     # Set up logging with the specified level
     setup_logging(level=log_level)
 
