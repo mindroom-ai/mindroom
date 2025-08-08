@@ -47,7 +47,7 @@ from .scheduling import (
     schedule_task,
 )
 from .streaming import IN_PROGRESS_MARKER, StreamingResponse
-from .teams import create_team_response, should_form_team
+from .teams import TeamMode, create_team_response, get_team_model, should_form_team
 from .thread_invites import ThreadInviteManager
 from .thread_utils import (
     check_agent_mentioned,
@@ -750,8 +750,6 @@ class TeamBot(AgentBot):
             return
 
         # Get the appropriate model for this team and room
-        from .teams import TeamMode, create_team_response, get_team_model
-
         model_name = get_team_model(self.agent_name, room_id)
 
         # Convert team_mode string to TeamMode enum
