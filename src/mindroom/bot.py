@@ -153,6 +153,11 @@ class AgentBot:
     async def stop(self) -> None:
         """Stop the agent bot."""
         self.running = False
+
+        # Give a brief moment for any in-progress messages to complete
+        # This helps avoid cutting off streaming responses mid-sentence
+        await asyncio.sleep(0.5)
+
         if hasattr(self, "client") and self.client:
             await self.client.close()
         self.logger.info("Stopped agent bot")
@@ -172,6 +177,10 @@ class AgentBot:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+        # Skip if we're shutting down
+        if not self.running:
+            return
+
         if event.sender == self.agent_user.user_id:
             return
 
@@ -860,6 +869,16 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+
+        # First signal all bots to stop accepting new messages
+        for bot in self.agent_bots.values():
+            bot.running = False
+
+        # Give time for in-progress messages to complete (up to 3 seconds)
+        logger.info("Waiting for in-progress messages to complete...")
+        await asyncio.sleep(3)
+
+        # Now stop all bots
         stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         logger.info("All agent bots stopped")
