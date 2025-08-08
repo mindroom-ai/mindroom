@@ -156,7 +156,24 @@ async def test_streaming_edits_e2e(
         mock_cfg.teams = {}
         mock_config.return_value = mock_cfg
 
-        await orchestrator.initialize()
+        # Patch create_bot_for_entity to create bots with proper user_ids
+        with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+            from mindroom.bot import AgentBot
+
+            def create_bot_side_effect(entity_name, agent_user, config, storage_path):
+                # Update the agent_user with proper user_id
+                if entity_name == "helper":
+                    agent_user.user_id = "@mindroom_helper:localhost"
+                elif entity_name == "calculator":
+                    agent_user.user_id = "@mindroom_calculator:localhost"
+                elif entity_name == "router":
+                    agent_user.user_id = "@mindroom_router:localhost"
+
+                # Create the actual bot
+                return AgentBot(agent_user, storage_path, rooms=[test_room_id])
+
+            mock_create_bot.side_effect = create_bot_side_effect
+            await orchestrator.initialize()
 
     # Start the orchestrator (in background)
     start_task = asyncio.create_task(orchestrator.start())

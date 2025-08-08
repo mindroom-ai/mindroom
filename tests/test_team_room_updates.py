@@ -47,9 +47,14 @@ class TestTeamRoomUpdates:
             mock_load_config.return_value = config1
 
             with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure_users:
+                mock_agent1_user = MagicMock(user_id="@agent1:localhost", agent_name="agent1")
                 mock_team_user = MagicMock(user_id="@team1:localhost", agent_name="team1")
                 mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
-                mock_ensure_users.return_value = {"team1": mock_team_user, "router": mock_router_user}
+                mock_ensure_users.return_value = {
+                    "agent1": mock_agent1_user,
+                    "team1": mock_team_user,
+                    "router": mock_router_user,
+                }
 
                 orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
 
@@ -75,8 +80,10 @@ class TestTeamRoomUpdates:
                     # Verify the team was restarted
                     assert updated is True
                     assert mock_bot.stop.called
-                    # Should create bot twice: once on init, once on update
-                    assert mock_create_bot.call_count == 4  # team1 + router on init, team1 + router on update
+
+                    # Should create: agent1 + team1 + router on init, team1 + router on update
+                    # (router gets recreated when teams change)
+                    assert mock_create_bot.call_count == 5
 
     @pytest.mark.asyncio
     async def test_new_team_gets_created(self):

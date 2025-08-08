@@ -123,6 +123,15 @@ async def _ensure_rooms_exist(client: nio.AsyncClient, required_rooms: set[str])
 
 
 @app.command()
+def version():
+    """Show the current version of Mindroom."""
+    from mindroom import __version__
+
+    console.print(f"Mindroom version: [bold]{__version__}[/bold]")
+    console.print("Multi-agent Matrix bot system")
+
+
+@app.command()
 def run(
     log_level: str = typer.Option(
         "INFO",
