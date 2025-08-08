@@ -40,7 +40,7 @@ class TestExtractContent:
         response.messages = [msg1, msg2, msg3]
 
         result = _extract_content(response)
-        assert result == "First message Second message"
+        assert result == "First message\n\n Second message"
 
     def test_extract_content_empty(self):
         """Test extracting content when no content available."""
@@ -129,7 +129,7 @@ class TestExtractTeamMemberContributions:
         team.messages = []
 
         result = extract_team_member_contributions(team)
-        assert result == ["**agent1**: Response 1"]
+        assert result == ["**agent1**: Response 1", "\n*No team consensus - showing individual responses only*"]
 
     def test_team_with_only_consensus(self):
         """Test team with consensus but no member responses."""
