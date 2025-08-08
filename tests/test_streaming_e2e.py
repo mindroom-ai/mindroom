@@ -23,7 +23,7 @@ async def test_streaming_edits_e2e(
     """End-to-end test that agents don't respond to streaming edits from other agents."""
 
     # Mock ensure_user_account to set proper user IDs
-    def ensure_user_side_effect(bot_self):
+    async def ensure_user_side_effect(bot_self):
         # Set a proper user_id based on agent_name
         if bot_self.agent_name == "helper":
             bot_self.agent_user.user_id = "@mindroom_helper:localhost"
@@ -31,8 +31,15 @@ async def test_streaming_edits_e2e(
             bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
         elif bot_self.agent_name == "router":
             bot_self.agent_user.user_id = "@mindroom_router:localhost"
+        return None  # ensure_user_account doesn't return anything
 
-    mock_ensure_user.side_effect = ensure_user_side_effect
+    # Need to handle both positional and method call
+    def ensure_user_wrapper(*args, **kwargs):
+        if len(args) > 0:
+            return ensure_user_side_effect(args[0])
+        return ensure_user_side_effect(kwargs.get("self"))
+
+    mock_ensure_user.side_effect = ensure_user_wrapper
 
     # Create test room
     test_room_id = "!streaming_test:localhost"
