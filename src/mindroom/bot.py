@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import nio
 
@@ -38,6 +38,7 @@ from .matrix import (
     login_agent_user,
     resolve_room_aliases,
 )
+from .models import Config
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .scheduling import (
@@ -791,15 +792,15 @@ class MultiAgentOrchestrator:
     storage_path: Path
     agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
-    current_config: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
+    current_config: Config | None = field(default=None, init=False)
 
     async def initialize(self) -> None:
         """Initialize all agent bots."""
         logger.info("Initializing multi-agent system...")
 
         config = load_config()
+        self.current_config = config
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
-        self.current_config = {}
 
         for agent_name, agent_user in agent_users.items():
             if agent_name == ROUTER_AGENT_NAME:
@@ -811,10 +812,6 @@ class MultiAgentOrchestrator:
                 rooms = resolve_room_aliases(list(all_room_aliases))
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
-                self.current_config[agent_name] = {
-                    "type": "router",
-                    "rooms": sorted(list(all_room_aliases)),
-                }
 
             elif agent_name in config.teams:
                 team_config = config.teams[agent_name]
@@ -828,26 +825,12 @@ class MultiAgentOrchestrator:
                     team_model=team_config.model,
                     enable_streaming=False,
                 )
-                self.current_config[agent_name] = {
-                    "type": "team",
-                    "rooms": sorted(team_config.rooms),
-                    "agents": sorted(team_config.agents),
-                    "mode": team_config.mode,
-                    "model": team_config.model,
-                }
 
             elif agent_name in config.agents:
                 agent_config = config.agents[agent_name]
                 rooms = resolve_room_aliases(agent_config.rooms)
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
-                self.current_config[agent_name] = {
-                    "type": "agent",
-                    "rooms": sorted(agent_config.rooms),
-                    "model": agent_config.model,
-                    "role": agent_config.role,
-                    "tools": sorted(agent_config.tools) if agent_config.tools else [],
-                }
             else:
                 raise ValueError(f"Unknown agent configuration for {agent_name}")
 
@@ -886,130 +869,141 @@ class MultiAgentOrchestrator:
         """
         load_config.cache_clear()
         new_config = load_config()
+
+        if not self.current_config:
+            self.current_config = new_config
+            return False
+
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
 
         agents_to_restart = set()
-        new_agents = set()
+        teams_to_restart = set()
 
-        new_config_dict: dict[str, dict[str, Any]] = {}
+        # Check for agent changes - compare each agent individually
+        for agent_name in set(self.current_config.agents.keys()) | set(new_config.agents.keys()):
+            old_agent = self.current_config.agents.get(agent_name)
+            new_agent = new_config.agents.get(agent_name)
 
-        if ROUTER_AGENT_NAME in agent_users:
-            all_room_aliases = set()
-            for agent_config in new_config.agents.values():
-                all_room_aliases.update(agent_config.rooms)
-            for team_config in new_config.teams.values():
-                all_room_aliases.update(team_config.rooms)
-            new_config_dict[ROUTER_AGENT_NAME] = {
-                "type": "router",
-                "rooms": sorted(list(all_room_aliases)),  # Sort for consistent comparison
-            }
-
-        # Process teams
-        for team_name, team_config in new_config.teams.items():
-            if team_name in agent_users:
-                new_config_dict[team_name] = {
-                    "type": "team",
-                    "rooms": sorted(team_config.rooms),
-                    "agents": sorted(team_config.agents),
-                    "mode": str(team_config.mode),
-                    "model": str(team_config.model) if team_config.model else None,
-                }
-
-        # Process agents
-        for agent_name, agent_config in new_config.agents.items():
-            if agent_name in agent_users:
-                new_config_dict[agent_name] = {
-                    "type": "agent",
-                    "rooms": sorted(agent_config.rooms),
-                    "model": agent_config.model,
-                    "role": agent_config.role,
-                    "tools": sorted(agent_config.tools) if agent_config.tools else [],
-                }
-
-        # Compare configurations
-        for agent_name, new_cfg in new_config_dict.items():
-            old_cfg = self.current_config.get(agent_name)
-            if old_cfg != new_cfg:
-                if agent_name in self.agent_bots:
-                    agents_to_restart.add(agent_name)
-                    logger.info(f"Configuration changed for {agent_name}, will restart")
+            if old_agent != new_agent and agent_name in self.agent_bots:
+                agents_to_restart.add(agent_name)
+                if old_agent and new_agent:
+                    logger.info(f"Configuration changed for {agent_name}")
+                elif not old_agent:
+                    logger.info(f"New agent {agent_name} added")
                 else:
-                    new_agents.add(agent_name)
-                    logger.info(f"New agent detected: {agent_name}")
+                    logger.info(f"Agent {agent_name} removed")
 
-        # Check for removed agents
-        removed_agents = set(self.agent_bots.keys()) - set(new_config_dict.keys())
-        for agent_name in removed_agents:
-            logger.info(f"Agent removed from config: {agent_name}")
+        # Check for team changes - compare each team individually
+        for team_name in set(self.current_config.teams.keys()) | set(new_config.teams.keys()):
+            old_team = self.current_config.teams.get(team_name)
+            new_team = new_config.teams.get(team_name)
 
-        # Stop removed and changed agents
+            if old_team != new_team and team_name in self.agent_bots:
+                teams_to_restart.add(team_name)
+                if old_team and new_team:
+                    logger.info(f"Configuration changed for team {team_name}")
+                elif not old_team:
+                    logger.info(f"New team {team_name} added")
+                else:
+                    logger.info(f"Team {team_name} removed")
+
+        # Check if router needs restart (if any room assignments changed)
+        router_needs_restart = False
+        if ROUTER_AGENT_NAME in agent_users:
+            old_rooms = set()
+            for agent in self.current_config.agents.values():
+                old_rooms.update(agent.rooms)
+            for team in self.current_config.teams.values():
+                old_rooms.update(team.rooms)
+
+            new_rooms = set()
+            for agent in new_config.agents.values():
+                new_rooms.update(agent.rooms)
+            for team in new_config.teams.values():
+                new_rooms.update(team.rooms)
+
+            if old_rooms != new_rooms:
+                router_needs_restart = True
+                logger.info("Router room assignments changed")
+
+        # Collect all entities to restart
+        entities_to_restart = agents_to_restart | teams_to_restart
+        if router_needs_restart:
+            entities_to_restart.add(ROUTER_AGENT_NAME)
+
+        if not entities_to_restart:
+            logger.info("No configuration changes detected")
+            self.current_config = new_config
+            return False
+
+        # Stop affected bots
         stop_tasks = []
-        for agent_name in removed_agents | agents_to_restart:
-            if agent_name in self.agent_bots:
-                bot = self.agent_bots[agent_name]
+        for entity_name in entities_to_restart:
+            if entity_name in self.agent_bots:
+                bot = self.agent_bots[entity_name]
                 bot.running = False
                 stop_tasks.append(bot.stop())
 
         if stop_tasks:
-            logger.info(f"Stopping {len(stop_tasks)} agents...")
+            logger.info(f"Stopping {len(stop_tasks)} bots...")
             await asyncio.gather(*stop_tasks)
 
-        # Remove stopped agents from orchestrator
-        for agent_name in removed_agents | agents_to_restart:
-            self.agent_bots.pop(agent_name, None)
-            self.current_config.pop(agent_name, None)
+        # Remove stopped bots
+        for entity_name in entities_to_restart:
+            self.agent_bots.pop(entity_name, None)
 
-        # Create new and updated agents
-        for agent_name in new_agents | agents_to_restart:
-            if agent_name not in agent_users:
+        # Update stored config
+        self.current_config = new_config
+
+        # Recreate bots
+        for entity_name in entities_to_restart:
+            if entity_name not in agent_users:
                 continue
 
-            agent_user = agent_users[agent_name]
-            cfg = new_config_dict[agent_name]
+            agent_user = agent_users[entity_name]
 
-            if cfg["type"] == "router":
-                rooms = resolve_room_aliases(list(cfg["rooms"]))
+            if entity_name == ROUTER_AGENT_NAME:
+                all_room_aliases = set()
+                for agent in new_config.agents.values():
+                    all_room_aliases.update(agent.rooms)
+                for team in new_config.teams.values():
+                    all_room_aliases.update(team.rooms)
+                rooms = resolve_room_aliases(list(all_room_aliases))
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
 
-            elif cfg["type"] == "team":
-                rooms = resolve_room_aliases(list(cfg["rooms"]))
+            elif entity_name in new_config.teams:
+                team_config = new_config.teams[entity_name]
+                rooms = resolve_room_aliases(team_config.rooms)
                 bot = TeamBot(
                     agent_user=agent_user,
                     storage_path=self.storage_path,
                     rooms=rooms,
-                    team_agents=list(cfg["agents"]),
-                    team_mode=str(cfg["mode"]),
-                    team_model=str(cfg["model"]) if cfg["model"] else None,
+                    team_agents=team_config.agents,
+                    team_mode=team_config.mode,
+                    team_model=team_config.model,
                     enable_streaming=False,
                 )
 
-            elif cfg["type"] == "agent":
-                rooms = resolve_room_aliases(list(cfg["rooms"]))
+            elif entity_name in new_config.agents:
+                agent_config = new_config.agents[entity_name]
+                rooms = resolve_room_aliases(agent_config.rooms)
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
 
             else:
                 continue
 
-            # Setup and start the bot
             bot.orchestrator = self
-            self.agent_bots[agent_name] = bot
-            self.current_config[agent_name] = cfg
+            self.agent_bots[entity_name] = bot
 
             await bot.start()
-            # Create sync task for the new bot
             asyncio.create_task(bot.sync_forever())
 
-            logger.info(f"Started agent: {agent_name}")
+            logger.info(f"Started bot: {entity_name}")
 
-        updated_count = len(removed_agents) + len(agents_to_restart) + len(new_agents)
-        if updated_count > 0:
-            logger.info(f"Configuration update complete: {updated_count} agents affected")
-            return True
-        else:
-            logger.info("No configuration changes detected")
-            return False
+        logger.info(f"Configuration update complete: {len(entities_to_restart)} bots affected")
+        return True
 
     async def stop(self) -> None:
         """Stop all agent bots."""
