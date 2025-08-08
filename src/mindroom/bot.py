@@ -304,10 +304,10 @@ class AgentBot:
             ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
             # When already in a thread, we can't use event.reacts_to as reply_to_event_id
             # because it might have relations that prevent starting a new thread from it
-            # In threads, we'll just send to the thread without a specific reply-to
+            # In threads, pass None as reply_to_event_id to avoid the relation issue
             ack_event_id = await self._send_response(
                 room,
-                thread_id if thread_id else event.reacts_to,  # Use thread_id as reply_to when in thread
+                None if thread_id else event.reacts_to,  # Don't reply to specific message when in thread
                 ack_text,
                 thread_id,
             )
@@ -489,7 +489,7 @@ class AgentBot:
     async def _send_response(
         self,
         room: nio.MatrixRoom,
-        reply_to_event_id: str,
+        reply_to_event_id: str | None,
         response_text: str,
         thread_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
@@ -498,7 +498,7 @@ class AgentBot:
 
         Args:
             room: The room to send to
-            reply_to_event_id: The event ID to reply to
+            reply_to_event_id: The event ID to reply to (can be None when in a thread)
             response_text: The text to send
             thread_id: The thread ID if already in a thread
             reply_to_event: Optional event object for the message we're replying to (used to check for safe thread root)
@@ -522,7 +522,9 @@ class AgentBot:
 
         response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
         if isinstance(response, nio.RoomSendResponse):
-            self.response_tracker.mark_responded(reply_to_event_id)
+            # Only mark as responded if we have a specific event we're replying to
+            if reply_to_event_id:
+                self.response_tracker.mark_responded(reply_to_event_id)
             self.logger.info("Sent response", event_id=response.event_id, room_name=room.name)
             return response.event_id  # type: ignore[no-any-return]
         else:
