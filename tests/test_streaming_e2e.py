@@ -13,24 +13,63 @@ from mindroom.bot import MultiAgentOrchestrator
 
 @pytest.mark.asyncio
 @pytest.mark.e2e  # Mark as end-to-end test
+@patch("mindroom.matrix.users.ensure_all_agent_users")
 @patch("mindroom.bot.login_agent_user")
 @patch("mindroom.bot.AgentBot.ensure_user_account")
 async def test_streaming_edits_e2e(
     mock_ensure_user: AsyncMock,
     mock_login: AsyncMock,
+    mock_ensure_all: AsyncMock,
     tmp_path: Path,
 ) -> None:
     """End-to-end test that agents don't respond to streaming edits from other agents."""
 
+    # Mock ensure_all_agent_users to return proper user objects
+    from mindroom.matrix import AgentMatrixUser
+
+    mock_agents = {
+        "helper": AgentMatrixUser(
+            agent_name="helper",
+            user_id="@mindroom_helper:localhost",
+            display_name="HelperAgent",
+            password="helper_pass",
+            access_token="helper_token",
+        ),
+        "calculator": AgentMatrixUser(
+            agent_name="calculator",
+            user_id="@mindroom_calculator:localhost",
+            display_name="CalculatorAgent",
+            password="calc_pass",
+            access_token="calc_token",
+        ),
+        "router": AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+            password="router_pass",
+            access_token="router_token",
+        ),
+    }
+    mock_ensure_all.return_value = mock_agents
+
     # Mock ensure_user_account to set proper user IDs
     async def ensure_user_side_effect(bot_self):
-        # Set a proper user_id based on agent_name
-        if bot_self.agent_name == "helper":
-            bot_self.agent_user.user_id = "@mindroom_helper:localhost"
-        elif bot_self.agent_name == "calculator":
-            bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
-        elif bot_self.agent_name == "router":
-            bot_self.agent_user.user_id = "@mindroom_router:localhost"
+        # Set a proper user_id based on agent_name if we have agent_name
+        if hasattr(bot_self, "agent_name"):
+            if bot_self.agent_name == "helper":
+                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
+            elif bot_self.agent_name == "calculator":
+                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
+            elif bot_self.agent_name == "router":
+                bot_self.agent_user.user_id = "@mindroom_router:localhost"
+        elif hasattr(bot_self, "agent_user") and hasattr(bot_self.agent_user, "agent_name"):
+            # Alternative: get agent_name from agent_user
+            if bot_self.agent_user.agent_name == "helper":
+                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
+            elif bot_self.agent_user.agent_name == "calculator":
+                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
+            elif bot_self.agent_user.agent_name == "router":
+                bot_self.agent_user.user_id = "@mindroom_router:localhost"
         return None  # ensure_user_account doesn't return anything
 
     # Need to handle both positional and method call

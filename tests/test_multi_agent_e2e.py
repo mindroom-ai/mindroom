@@ -434,8 +434,8 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
             for bot in orchestrator.agent_bots.values():
                 await bot.start()
 
-            # Verify all agents were started
-            assert mock_login.call_count == 2
+            # Verify all agents were started (2 agents + 1 router = 3)
+            assert mock_login.call_count == 3
             assert all(bot.running for bot in orchestrator.agent_bots.values())
             assert all(bot.client is not None for bot in orchestrator.agent_bots.values())
 

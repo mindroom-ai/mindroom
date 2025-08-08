@@ -126,14 +126,11 @@ class Config(BaseModel):
             all_room_aliases.update(team_config.rooms)
         return all_room_aliases
 
-    def get_configured_bots_for_room(
-        self, room_id: str, resolved_rooms_cache: dict[str, set[str]] | None = None
-    ) -> set[str]:
+    def get_configured_bots_for_room(self, room_id: str) -> set[str]:
         """Get the set of bot usernames that should be in a specific room.
 
         Args:
             room_id: The Matrix room ID
-            resolved_rooms_cache: Optional cache of resolved room aliases to avoid repeated resolution
 
         Returns:
             Set of bot usernames (without domain) that should be in this room
@@ -145,26 +142,13 @@ class Config(BaseModel):
 
         # Check which agents should be in this room
         for agent_name, agent_config in self.agents.items():
-            if resolved_rooms_cache and agent_name in resolved_rooms_cache:
-                resolved_rooms = resolved_rooms_cache[agent_name]
-            else:
-                resolved_rooms = set(resolve_room_aliases(agent_config.rooms))
-                if resolved_rooms_cache is not None:
-                    resolved_rooms_cache[agent_name] = resolved_rooms
-
+            resolved_rooms = set(resolve_room_aliases(agent_config.rooms))
             if room_id in resolved_rooms:
                 configured_bots.add(f"mindroom_{agent_name}")
 
         # Check which teams should be in this room
         for team_name, team_config in self.teams.items():
-            cache_key = f"team_{team_name}"
-            if resolved_rooms_cache and cache_key in resolved_rooms_cache:
-                resolved_rooms = resolved_rooms_cache[cache_key]
-            else:
-                resolved_rooms = set(resolve_room_aliases(team_config.rooms))
-                if resolved_rooms_cache is not None:
-                    resolved_rooms_cache[cache_key] = resolved_rooms
-
+            resolved_rooms = set(resolve_room_aliases(team_config.rooms))
             if room_id in resolved_rooms:
                 configured_bots.add(f"mindroom_{team_name}")
 
