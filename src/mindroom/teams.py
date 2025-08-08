@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from agno.agent import Agent
 from agno.models.message import Message
+from agno.run.response import RunResponse
 from agno.run.team import TeamRunResponse
 from agno.team import Team
 
@@ -87,7 +88,6 @@ async def create_team_response(
 
     # Get existing agent instances from the orchestrator
     agents: list[Agent] = []
-    team_agent_names: list[str] = []  # Track actual agents in the team
     for name in agent_names:
         if name == ROUTER_AGENT_NAME:
             continue
@@ -95,7 +95,6 @@ async def create_team_response(
         # Use the existing agent instance from the bot
         agent_bot = orchestrator.agent_bots[name]
         agents.append(agent_bot.agent)
-        team_agent_names.append(name)  # Track the name for later use
 
     if not agents:
         return "Sorry, no agents available for team collaboration."
@@ -130,7 +129,7 @@ async def create_team_response(
     )
 
     # Create agent list for logging
-    agent_list = ", ".join(team_agent_names)
+    agent_list = ", ".join(a.name for a in agents if a.name)
 
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")  # Log first 500 chars of prompt
@@ -147,11 +146,14 @@ async def create_team_response(
             logger.debug(f"Team had {len(response.member_responses)} member responses")
 
             # Add individual member contributions
-            # Note: We assume member_responses are in the same order as we provided agents,
-            # but this is not guaranteed by the Agno Team API. The responses don't include
-            # agent identifiers, so we can only guess based on order.
-            for i, member_resp in enumerate(response.member_responses):
+            for member_resp in response.member_responses:
                 member_content = ""
+                member_name = None
+
+                # RunResponse has agent_name attribute, TeamRunResponse might not
+                if isinstance(member_resp, RunResponse) and member_resp.agent_name:
+                    member_name = member_resp.agent_name
+
                 # Extract content from the response
                 if member_resp.content:
                     member_content = str(member_resp.content)
@@ -163,12 +165,12 @@ async def create_team_response(
                             member_content += str(msg.content)
 
                 if member_content:
-                    # Best effort: assume response order matches agent order
-                    if i < len(team_agent_names):
-                        parts.append(f"**{team_agent_names[i]}**: {member_content}")
+                    # Use the agent name from the response if available
+                    if member_name:
+                        parts.append(f"**{member_name}**: {member_content}")
                     else:
-                        # Fallback if we have more responses than expected
-                        parts.append(f"**Member {i + 1}**: {member_content}")
+                        # Fallback to generic label if no name available
+                        parts.append(f"**Team Member**: {member_content}")
 
         # Add the final aggregated response
         if response.content:
