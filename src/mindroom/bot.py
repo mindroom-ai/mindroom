@@ -273,8 +273,6 @@ class AgentBot:
             except Exception as e:
                 self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
 
-        # Start periodic cleanup task for the general agent only
-        if self.agent_name == "general":
             asyncio.create_task(self._periodic_cleanup())
 
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")

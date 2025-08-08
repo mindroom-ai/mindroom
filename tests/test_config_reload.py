@@ -395,6 +395,12 @@ async def test_orchestrator_handles_config_reload(initial_config, updated_config
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Create orchestrator
+    # Mock start/sync at class level so newly created bots during update_config don't perform real login/sync
+    monkeypatch.setattr("mindroom.bot.AgentBot.start", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.TeamBot.start", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
+
     orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
 
     # Initialize with initial config

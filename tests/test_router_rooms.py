@@ -239,6 +239,12 @@ async def test_router_updates_rooms_on_config_change(monkeypatch):
     monkeypatch.setattr("mindroom.bot.load_config", mock_load_config)
 
     # Create orchestrator with initial config
+    # Mock start/sync_forever at class level so newly created bots in update_config don't perform real login/sync
+    monkeypatch.setattr("mindroom.bot.AgentBot.start", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.TeamBot.start", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
+
     orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
 
     await orchestrator.initialize()
