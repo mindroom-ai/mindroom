@@ -1,5 +1,7 @@
 """Matrix client operations and utilities."""
 
+import os
+import ssl as ssl_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -26,9 +28,6 @@ def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
 
 def _maybe_ssl_context(homeserver: str) -> Any:
     if homeserver.startswith("https://"):
-        import os
-        import ssl as ssl_module
-
         if os.getenv("MATRIX_SSL_VERIFY", "true").lower() == "false":
             # Create context that disables verification for dev/self-signed certs
             ssl_context = ssl_module.create_default_context()

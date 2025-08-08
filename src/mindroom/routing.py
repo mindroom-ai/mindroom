@@ -5,7 +5,7 @@ from typing import Any
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from .agent_config import describe_agent
+from .agent_config import describe_agent, load_config
 from .ai import get_model_instance
 from .logging_config import get_logger
 from .matrix import MatrixID
@@ -69,8 +69,6 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             prompt = context + "\n" + prompt
 
         # Get router model from config
-        from .agent_config import load_config
-
         config = load_config()
         router_model_name = config.router.model
 

@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING
 
 import nio
 
+from ..logging_config import get_logger
+from .client import create_room
+from .identity import extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from ..models import Config
@@ -94,11 +99,6 @@ async def ensure_room_exists(
     Returns:
         Room ID if room exists or was created, None on failure
     """
-    from ..logging_config import get_logger
-    from .client import create_room
-    from .identity import extract_server_name_from_homeserver
-
-    logger = get_logger(__name__)
     existing_rooms = load_rooms()
 
     # Check if room already exists in our state

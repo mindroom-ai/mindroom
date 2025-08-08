@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
 from .logging_config import get_logger
+from .matrix import send_message
 
 logger = get_logger(__name__)
 
@@ -217,8 +218,6 @@ async def _execute_scheduled_task(
                 "rel_type": "m.thread",
                 "event_id": thread_id,
             }
-
-        from mindroom.matrix import send_message
 
         await send_message(client, room_id, content)
 

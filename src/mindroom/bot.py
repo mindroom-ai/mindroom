@@ -33,13 +33,19 @@ from .matrix import (
     MatrixID,
     create_mention_content_from_text,
     edit_message,
+    ensure_all_rooms_exist,
     extract_agent_name,
     extract_thread_info,
     fetch_thread_history,
+    get_joined_rooms,
+    invite_to_room,
     join_room,
+    leave_room,
     login_agent_user,
     resolve_room_aliases,
+    send_message,
 )
+from .matrix.users import create_agent_user
 from .models import Config
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
@@ -172,9 +178,6 @@ class AgentBot:
 
         This should only be called by the router agent or during initial setup.
         """
-        from .agent_config import load_config
-        from .matrix import ensure_all_rooms_exist
-
         config = load_config()
         await ensure_all_rooms_exist(self.client, config)
 
@@ -192,8 +195,6 @@ class AgentBot:
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
-        from .matrix import get_joined_rooms, leave_room
-
         # Get all rooms we're currently in
         joined_rooms = await get_joined_rooms(self.client)
         if joined_rooms is None:
@@ -216,8 +217,6 @@ class AgentBot:
         This method makes the agent responsible for its own user account creation,
         moving this responsibility from the orchestrator to the agent itself.
         """
-        from .matrix.users import create_agent_user
-
         # Create or retrieve the Matrix user account
         self.agent_user = await create_agent_user(
             MATRIX_HOMESERVER,
@@ -280,8 +279,6 @@ class AgentBot:
 
         This method ensures clean shutdown when an agent is removed from config.
         """
-        from .matrix import get_joined_rooms, leave_room
-
         if hasattr(self, "client") and self.client:
             # Leave all rooms
             try:
@@ -671,8 +668,6 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
         )
 
-        from .matrix import send_message
-
         event_id = await send_message(self.client, room.room_id, content)
         if event_id:
             self.logger.info("Sent response", event_id=event_id, room_name=room.name)
@@ -746,8 +741,6 @@ class AgentBot:
             thread_event_id=thread_event_id,
             reply_to_event_id=event.event_id,
         )
-
-        from .matrix import send_message
 
         event_id = await send_message(self.client, room.room_id, content)
         if event_id:
@@ -1125,8 +1118,6 @@ class MultiAgentOrchestrator:
             room_id: The room to invite agents to
             inviter_client: An authenticated client with invite permissions
         """
-        from .matrix import invite_to_room
-
         for agent_name, bot in self.agent_bots.items():
             success = await invite_to_room(inviter_client, room_id, bot.agent_user.user_id)
             if success:
