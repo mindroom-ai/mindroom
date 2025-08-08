@@ -153,11 +153,15 @@ class AgentBot:
     async def stop(self) -> None:
         """Stop the agent bot."""
         self.running = False
-        await self.client.close()
+        if hasattr(self, "client") and self.client:
+            await self.client.close()
         self.logger.info("Stopped agent bot")
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
+        if not hasattr(self, "client") or not self.client:
+            self.logger.error("Cannot sync - client not initialized")
+            return
         await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
