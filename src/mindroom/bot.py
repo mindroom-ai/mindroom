@@ -34,9 +34,9 @@ from .matrix import (
     extract_agent_name,
     extract_thread_info,
     fetch_thread_history,
-    get_room_aliases,
     join_room,
     login_agent_user,
+    resolve_room_aliases,
 )
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
@@ -789,7 +789,6 @@ class MultiAgentOrchestrator:
 
         config = load_config()
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
-        room_aliases = get_room_aliases()
 
         for agent_name, agent_user in agent_users.items():
             bot = None
@@ -801,14 +800,14 @@ class MultiAgentOrchestrator:
                     all_room_aliases.update(agent_config.rooms)
                 for team_config in config.teams.values():
                     all_room_aliases.update(team_config.rooms)
-                rooms = [room_aliases.get(r, r) for r in all_room_aliases]
+                rooms = resolve_room_aliases(list(all_room_aliases))
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
 
             elif agent_name in config.teams:
                 # This is a team - create TeamBot
                 team_config = config.teams[agent_name]
-                rooms = [room_aliases.get(r, r) for r in team_config.rooms]
+                rooms = resolve_room_aliases(team_config.rooms)
 
                 bot = TeamBot(
                     agent_user=agent_user,
@@ -823,7 +822,7 @@ class MultiAgentOrchestrator:
             elif agent_name in config.agents:
                 # Regular agent - use configured rooms
                 agent_config = config.agents[agent_name]
-                rooms = [room_aliases.get(r, r) for r in agent_config.rooms]
+                rooms = resolve_room_aliases(agent_config.rooms)
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
             else:

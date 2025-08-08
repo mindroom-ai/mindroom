@@ -14,7 +14,7 @@ from agno.team import Team
 from .agent_config import ROUTER_AGENT_NAME, load_config
 from .ai import get_model_instance
 from .logging_config import get_logger
-from .matrix import get_room_aliases
+from .matrix import get_room_alias_from_id
 
 if TYPE_CHECKING:
     from .bot import MultiAgentOrchestrator
@@ -197,14 +197,9 @@ def get_team_model(team_name: str, room_id: str) -> str:
         Model name to use
     """
     config = load_config()
-    room_aliases = get_room_aliases()
 
     # Find room alias from room ID
-    room_alias = None
-    for alias, rid in room_aliases.items():
-        if rid == room_id:
-            room_alias = alias
-            break
+    room_alias = get_room_alias_from_id(room_id)
 
     # Check room-specific model first
     if room_alias and room_alias in config.room_models:
