@@ -26,7 +26,7 @@ class StreamingResponse:
     accumulated_text: str = ""
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
-    update_interval: float = 1.0
+    update_interval: float = 0.1  # 100ms updates
 
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""

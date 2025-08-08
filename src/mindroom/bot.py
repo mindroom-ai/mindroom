@@ -280,6 +280,8 @@ class AgentBot:
             thread_id=context.thread_id,
             thread_history=context.thread_history,
         )
+        # Mark as responded after response generation
+        self.response_tracker.mark_responded(event.event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
@@ -302,7 +304,14 @@ class AgentBot:
 
             # Send immediate acknowledgment
             ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
-            ack_event_id = await self._send_response(room, event.reacts_to, ack_text, thread_id)
+            # Matrix doesn't allow reply relations to events that already have relations (reactions)
+            # In threads, omit reply_to_event_id; the thread_id ensures correct placement
+            ack_event_id = await self._send_response(
+                room,
+                None if thread_id else event.reacts_to,
+                ack_text,
+                thread_id,
+            )
 
             if not ack_event_id:
                 self.logger.error("Failed to send acknowledgment for reaction")
@@ -320,6 +329,8 @@ class AgentBot:
                 thread_history=thread_history,
                 existing_event_id=ack_event_id,  # Edit the acknowledgment
             )
+            # Mark the original interactive question as responded
+            self.response_tracker.mark_responded(event.reacts_to)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
@@ -424,9 +435,7 @@ class AgentBot:
 
             await streaming.finalize(self.client)
 
-            # Only mark as responded after successful completion
-            if streaming.event_id and not existing_event_id:
-                self.response_tracker.mark_responded(reply_to_event_id)
+            if streaming.event_id:
                 self.logger.info("Sent streaming response", event_id=streaming.event_id)
 
         except Exception as e:
@@ -481,7 +490,7 @@ class AgentBot:
     async def _send_response(
         self,
         room: nio.MatrixRoom,
-        reply_to_event_id: str,
+        reply_to_event_id: str | None,
         response_text: str,
         thread_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
@@ -490,7 +499,7 @@ class AgentBot:
 
         Args:
             room: The room to send to
-            reply_to_event_id: The event ID to reply to
+            reply_to_event_id: The event ID to reply to (can be None when in a thread)
             response_text: The text to send
             thread_id: The thread ID if already in a thread
             reply_to_event: Optional event object for the message we're replying to (used to check for safe thread root)
@@ -514,7 +523,6 @@ class AgentBot:
 
         response = await self.client.room_send(room_id=room.room_id, message_type="m.room.message", content=content)
         if isinstance(response, nio.RoomSendResponse):
-            self.response_tracker.mark_responded(reply_to_event_id)
             self.logger.info("Sent response", event_id=response.event_id, room_name=room.name)
             return response.event_id  # type: ignore[no-any-return]
         else:
