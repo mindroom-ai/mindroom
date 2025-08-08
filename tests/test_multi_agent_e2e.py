@@ -475,6 +475,11 @@ async def test_orchestrator_invites_agents_to_room(tmp_path: Path) -> None:
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
             await orchestrator.initialize()
 
+            # Set proper user_ids for the bots after initialization
+            orchestrator.agent_bots["calculator"].agent_user.user_id = "@mindroom_calculator:localhost"
+            orchestrator.agent_bots["general"].agent_user.user_id = "@mindroom_general:localhost"
+            orchestrator.agent_bots["router"].agent_user.user_id = "@mindroom_router:localhost"
+
             # Test inviting agents
             mock_inviter_client = AsyncMock()
             await orchestrator.invite_agents_to_room(test_room_id, mock_inviter_client)
