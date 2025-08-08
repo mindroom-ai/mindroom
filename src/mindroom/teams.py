@@ -87,6 +87,7 @@ async def create_team_response(
 
     # Get existing agent instances from the orchestrator
     agents: list[Agent] = []
+    team_agent_names: list[str] = []  # Track actual agents in the team
     for name in agent_names:
         if name == ROUTER_AGENT_NAME:
             continue
@@ -94,6 +95,7 @@ async def create_team_response(
         # Use the existing agent instance from the bot
         agent_bot = orchestrator.agent_bots[name]
         agents.append(agent_bot.agent)
+        team_agent_names.append(name)  # Track the name for later use
 
     if not agents:
         return "Sorry, no agents available for team collaboration."
@@ -128,7 +130,7 @@ async def create_team_response(
     )
 
     # Create agent list for logging
-    agent_list = ", ".join([name for name in agent_names if name != ROUTER_AGENT_NAME])
+    agent_list = ", ".join(team_agent_names)
 
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")  # Log first 500 chars of prompt
@@ -159,8 +161,8 @@ async def create_team_response(
 
                 if member_content:
                     # Use agent name from our list if available
-                    if i < len(agent_names):
-                        parts.append(f"**{agent_names[i]}**: {member_content}")
+                    if i < len(team_agent_names):
+                        parts.append(f"**{team_agent_names[i]}**: {member_content}")
                     else:
                         parts.append(f"**Agent {i + 1}**: {member_content}")
 
