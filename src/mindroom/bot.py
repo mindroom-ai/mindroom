@@ -33,7 +33,6 @@ from .matrix import (
     MatrixID,
     create_mention_content_from_text,
     edit_message,
-    ensure_all_agent_users,
     extract_agent_name,
     extract_server_name_from_homeserver,
     extract_thread_info,
@@ -247,33 +246,64 @@ class AgentBot:
             else:
                 self.logger.error(f"Failed to leave room {room_id}: {leave_response}")
 
-    async def start(self) -> None:
-        """Start the agent bot."""
+    async def ensure_user_account(self) -> None:
+        """Ensure this agent has a Matrix user account.
+
+        This method makes the agent responsible for its own user account creation,
+        moving this responsibility from the orchestrator to the agent itself.
+        """
+        from .matrix.users import create_agent_user
+
+        # Create or retrieve the Matrix user account
+        self.agent_user = await create_agent_user(
+            MATRIX_HOMESERVER,
+            self.agent_name,
+            self.agent_user.display_name,  # Use existing display name if available
+        )
+        self.logger.info(f"Ensured Matrix user account: {self.agent_user.user_id}")
+
+    async def ensure_rooms(self) -> None:
+        """Ensure agent is in the correct rooms based on configuration.
+
+        This consolidates room management into a single method that:
+        1. Joins configured rooms
+        2. Leaves unconfigured rooms
+        """
+        await self.join_configured_rooms()
+        await self.leave_unconfigured_rooms()
+
+    async def ensure_setup(self) -> None:
+        """Ensure the agent is fully set up with user account and rooms.
+
+        This is the main entry point for agent self-management.
+        Call this after creating an agent bot to ensure it's ready.
+        """
+        # Ensure user account exists
+        await self.ensure_user_account()
+
+        # Login with the account
         self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
 
-        # Initialize response tracker
+        # Initialize response tracker and thread invite manager
         self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
-
-        # Initialize thread invite manager
         self.thread_invite_manager = ThreadInviteManager(self.client)
 
+        # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
         self.client.add_event_callback(self._on_message, nio.RoomMessageText)
         self.client.add_event_callback(self._on_reaction, nio.ReactionEvent)
 
         self.running = True
-        self.logger.info("Started bot", user_id=self.agent_user.user_id)
 
-        # Agents manage their own room memberships
-        await self.join_configured_rooms()
-        await self.leave_unconfigured_rooms()
+        # Ensure correct room memberships
+        await self.ensure_rooms()
 
         # Router bot has additional responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
             # Ensure all configured rooms exist
             await self.ensure_rooms_exist()
 
-            # Clean up any orphaned bots (bots in rooms they shouldn't be in)
+            # Clean up any orphaned bots
             try:
                 await cleanup_all_orphaned_bots(self.client)
             except Exception as e:
@@ -282,6 +312,44 @@ class AgentBot:
         # Start periodic cleanup task for the general agent only
         if self.agent_name == "general":
             asyncio.create_task(self._periodic_cleanup())
+
+        self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
+
+    async def cleanup(self) -> None:
+        """Clean up the agent by leaving all rooms and stopping.
+
+        This method ensures clean shutdown when an agent is removed from config.
+        """
+        if hasattr(self, "client") and self.client:
+            # Leave all rooms
+            try:
+                joined_rooms_response = await self.client.joined_rooms()
+                if isinstance(joined_rooms_response, nio.JoinedRoomsResponse):
+                    for room_id in joined_rooms_response.rooms:
+                        leave_response = await self.client.room_leave(room_id)
+                        if isinstance(leave_response, nio.RoomLeaveResponse):
+                            self.logger.info(f"Left room {room_id} during cleanup")
+                        else:
+                            self.logger.error(f"Failed to leave room {room_id} during cleanup: {leave_response}")
+            except Exception as e:
+                self.logger.error(f"Error leaving rooms during cleanup: {e}")
+
+        # Stop the bot
+        await self.stop()
+
+    async def start(self) -> None:
+        """Start the agent bot (backward compatibility).
+
+        This method now delegates to ensure_setup() for the actual setup.
+        Kept for backward compatibility with existing code.
+        """
+        # If client is not already initialized, do full setup
+        if not hasattr(self, "client") or not self.client:
+            await self.ensure_setup()
+        else:
+            # Just ensure rooms are correct if already set up
+            await self.ensure_rooms()
+            self.logger.info("Started bot", user_id=self.agent_user.user_id)
 
     async def stop(self) -> None:
         """Stop the agent bot."""
@@ -940,20 +1008,52 @@ class MultiAgentOrchestrator:
     current_config: Config | None = field(default=None, init=False)
 
     async def initialize(self) -> None:
-        """Initialize all agent bots."""
+        """Initialize all agent bots with self-management.
+
+        Each agent is now responsible for ensuring its own user account and rooms.
+        """
         logger.info("Initializing multi-agent system...")
 
         config = load_config()
         self.current_config = config
-        agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
 
-        for agent_name, agent_user in agent_users.items():
-            bot = create_bot_for_entity(agent_name, agent_user, config, self.storage_path)
+        # Create bots for all configured entities
+        # Note: We no longer need to ensure all agent users upfront
+        all_entities = list(config.agents.keys()) + list(config.teams.keys()) + [ROUTER_AGENT_NAME]
+
+        for entity_name in all_entities:
+            # Create a temporary agent user object (will be updated by ensure_user_account)
+            if entity_name == ROUTER_AGENT_NAME:
+                temp_user = AgentMatrixUser(
+                    agent_name=ROUTER_AGENT_NAME,
+                    user_id="",  # Will be set by ensure_user_account
+                    display_name="RouterAgent",
+                    password="",  # Will be set by ensure_user_account
+                )
+            elif entity_name in config.agents:
+                temp_user = AgentMatrixUser(
+                    agent_name=entity_name,
+                    user_id="",
+                    display_name=config.agents[entity_name].display_name,
+                    password="",
+                )
+            elif entity_name in config.teams:
+                temp_user = AgentMatrixUser(
+                    agent_name=entity_name,
+                    user_id="",
+                    display_name=config.teams[entity_name].display_name,
+                    password="",
+                )
+            else:
+                continue
+
+            bot = create_bot_for_entity(entity_name, temp_user, config, self.storage_path)
             if bot is None:
-                raise ValueError(f"Unknown agent configuration for {agent_name}")
+                logger.warning(f"Could not create bot for {entity_name}")
+                continue
 
             bot.orchestrator = self
-            self.agent_bots[agent_name] = bot
+            self.agent_bots[entity_name] = bot
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))
 
@@ -979,7 +1079,9 @@ class MultiAgentOrchestrator:
         await asyncio.gather(*sync_tasks)
 
     async def update_config(self) -> bool:
-        """Update configuration and restart only changed agents.
+        """Update configuration with simplified self-managing agents.
+
+        Each agent handles its own user account creation and room management.
 
         Returns:
             True if any agents were updated, False otherwise.
@@ -990,20 +1092,64 @@ class MultiAgentOrchestrator:
             self.current_config = new_config
             return False
 
-        agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
-        entities_to_restart = await _identify_entities_to_restart(
-            self.current_config, new_config, agent_users, self.agent_bots
+        # Identify what changed - we can keep using the existing helper functions
+        entities_to_restart = await _identify_entities_to_restart_simplified(
+            self.current_config, new_config, self.agent_bots
         )
 
-        if not entities_to_restart:
+        # Also check for new entities that didn't exist before
+        all_new_entities = set(new_config.agents.keys()) | set(new_config.teams.keys()) | {ROUTER_AGENT_NAME}
+        existing_entities = set(self.agent_bots.keys())
+        new_entities = all_new_entities - existing_entities
+
+        if not entities_to_restart and not new_entities:
             self.current_config = new_config
             return False
 
-        await _stop_entities(entities_to_restart, self.agent_bots)
-        self.current_config = new_config
-        await _recreate_entities(entities_to_restart, agent_users, new_config, self.storage_path, self)
+        # Stop entities that need restarting
+        if entities_to_restart:
+            await _stop_entities(entities_to_restart, self.agent_bots)
 
-        logger.info(f"Configuration update complete: {len(entities_to_restart)} bots affected")
+        # Update config
+        self.current_config = new_config
+
+        # Recreate entities that need restarting using self-management
+        for entity_name in entities_to_restart:
+            if entity_name in all_new_entities:
+                # Create temporary user object (will be updated by ensure_user_account)
+                temp_user = _create_temp_user(entity_name, new_config)
+                bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
+                if bot:
+                    bot.orchestrator = self
+                    self.agent_bots[entity_name] = bot
+                    # Agent handles its own setup
+                    await bot.ensure_setup()
+                    # Start sync loop
+                    asyncio.create_task(bot.sync_forever())
+            else:
+                # Entity was removed from config
+                if entity_name in self.agent_bots:
+                    del self.agent_bots[entity_name]
+
+        # Create new entities
+        for entity_name in new_entities:
+            temp_user = _create_temp_user(entity_name, new_config)
+            bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
+            if bot:
+                bot.orchestrator = self
+                self.agent_bots[entity_name] = bot
+                await bot.ensure_setup()
+                asyncio.create_task(bot.sync_forever())
+
+        # Handle removed entities (cleanup)
+        removed_entities = existing_entities - all_new_entities
+        for entity_name in removed_entities:
+            if entity_name in self.agent_bots:
+                bot = self.agent_bots[entity_name]
+                await bot.cleanup()  # Agent handles its own cleanup
+                del self.agent_bots[entity_name]
+
+        logger.info(f"Configuration update complete: {len(entities_to_restart) + len(new_entities)} bots affected")
         return True
 
     async def stop(self) -> None:
@@ -1034,18 +1180,18 @@ class MultiAgentOrchestrator:
                 logger.error("Failed to invite agent", agent=agent_name, error=str(result))
 
 
-async def _identify_entities_to_restart(
+async def _identify_entities_to_restart_simplified(
     current_config: Config | None,
     new_config: Config,
-    agent_users: dict[str, AgentMatrixUser],
     agent_bots: dict[str, Any],
 ) -> set[str]:
+    """Identify entities that need restarting due to config changes."""
     agents_to_restart = _get_changed_agents(current_config, new_config, agent_bots)
     teams_to_restart = _get_changed_teams(current_config, new_config, agent_bots)
 
     entities_to_restart = agents_to_restart | teams_to_restart
 
-    if _router_needs_restart(current_config, new_config, agent_users):
+    if _router_needs_restart_simplified(current_config, new_config):
         entities_to_restart.add(ROUTER_AGENT_NAME)
 
     return entities_to_restart
@@ -1083,15 +1229,33 @@ def _get_changed_teams(current_config: Config | None, new_config: Config, agent_
     return changed
 
 
-def _router_needs_restart(
-    current_config: Config | None, new_config: Config, agent_users: dict[str, AgentMatrixUser]
-) -> bool:
-    if ROUTER_AGENT_NAME not in agent_users or not current_config:
+def _router_needs_restart_simplified(current_config: Config | None, new_config: Config) -> bool:
+    """Check if router needs restart due to room changes."""
+    if not current_config:
         return False
 
     old_rooms = current_config.get_all_configured_rooms()
     new_rooms = new_config.get_all_configured_rooms()
     return old_rooms != new_rooms
+
+
+def _create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
+    """Create a temporary user object that will be updated by ensure_user_account."""
+    if entity_name == ROUTER_AGENT_NAME:
+        display_name = "RouterAgent"
+    elif entity_name in config.agents:
+        display_name = config.agents[entity_name].display_name
+    elif entity_name in config.teams:
+        display_name = config.teams[entity_name].display_name
+    else:
+        display_name = entity_name
+
+    return AgentMatrixUser(
+        agent_name=entity_name,
+        user_id="",  # Will be set by ensure_user_account
+        display_name=display_name,
+        password="",  # Will be set by ensure_user_account
+    )
 
 
 async def _stop_entities(entities_to_restart: set[str], agent_bots: dict[str, Any]) -> None:
@@ -1106,34 +1270,6 @@ async def _stop_entities(entities_to_restart: set[str], agent_bots: dict[str, An
 
     for entity_name in entities_to_restart:
         agent_bots.pop(entity_name, None)
-
-
-async def _recreate_entities(
-    entities_to_restart: set[str],
-    agent_users: dict[str, AgentMatrixUser],
-    new_config: Config,
-    storage_path: Path,
-    orchestrator: MultiAgentOrchestrator,
-) -> None:
-    for entity_name in entities_to_restart:
-        if entity_name not in agent_users:
-            continue
-
-        agent_user = agent_users[entity_name]
-        bot = create_bot_for_entity(entity_name, agent_user, new_config, storage_path)
-
-        if bot is None:
-            continue  # Entity was removed from config
-
-        bot.orchestrator = orchestrator
-        orchestrator.agent_bots[entity_name] = bot
-
-        await bot.start()
-        asyncio.create_task(bot.sync_forever())
-
-        # Update rooms if bot configuration changed
-        await bot.join_configured_rooms()
-        await bot.leave_unconfigured_rooms()
 
 
 async def main(log_level: str, storage_path: Path) -> None:
