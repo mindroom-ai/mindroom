@@ -65,58 +65,73 @@ def parse_mentions_in_text(text: str, sender_domain: str = "localhost") -> tuple
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
     """
     config = load_config()
-    known_agents = set(config.agents.keys())
-    mentioned_user_ids = []
 
-    # Keep track of replacements for markdown version
-    replacements = []
-
-    # Pattern to match @agent_name (with optional @mindroom_ prefix)
+    # Pattern to match @agent_name (with optional @mindroom_ prefix or domain)
     # Matches: @calculator, @mindroom_calculator, @mindroom_calculator:localhost
     pattern = r"@(mindroom_)?(\w+)(?::[^\s]+)?"
 
-    def collect_mentions(match):
-        prefix = match.group(1) or ""  # "mindroom_" or empty
-        agent_name = match.group(2)
+    # Find all mentions and process them
+    mentions_data = []
+    for match in re.finditer(pattern, text):
+        mention_info = _process_mention(match, config, sender_domain)
+        if mention_info:
+            mentions_data.append(mention_info)
 
-        # Skip if this is a user (mindroom_user_*)
-        if agent_name.startswith("user_"):
-            return match.group(0)
-
-        # Check if it's a known agent
-        if agent_name in known_agents:
-            agent_config = config.agents[agent_name]
-            user_id = MatrixID.from_agent(agent_name, sender_domain).full_id
-            if user_id not in mentioned_user_ids:
-                mentioned_user_ids.append(user_id)
-            # Store replacement info for later markdown generation
-            replacements.append((match.group(0), user_id, agent_config.display_name))
-            return user_id
-        elif prefix and agent_name.replace("mindroom_", "") in known_agents:
-            # Handle case where someone wrote @mindroom_mindroom_calculator
-            actual_agent = agent_name.replace("mindroom_", "")
-            agent_config = config.agents[actual_agent]
-            user_id = MatrixID.from_agent(actual_agent, sender_domain).full_id
-            if user_id not in mentioned_user_ids:
-                mentioned_user_ids.append(user_id)
-            replacements.append((match.group(0), user_id, agent_config.display_name))
-            return user_id
-        else:
-            # Not a known agent, leave as is
-            return match.group(0)
-
-    # Generate plain text version (just user IDs)
-    plain_text = re.sub(pattern, collect_mentions, text)
-
-    # Generate markdown version with proper matrix.to links
+    # Build outputs from collected data
+    plain_text = text
     markdown_text = text
-    for original, user_id, display_name in replacements:
-        # Create markdown link that will be converted to HTML
-        # This matches Element's format: [@DisplayName](https://matrix.to/#/@user:domain)
+    mentioned_user_ids: list[str] = []
+
+    # Apply replacements (reverse order to preserve positions)
+    for original, user_id, display_name in reversed(mentions_data):
+        # Plain text: replace with full Matrix ID
+        plain_text = plain_text.replace(original, user_id, 1)
+
+        # Markdown: replace with clickable link
         link = f"[@{display_name}](https://matrix.to/#/{user_id})"
         markdown_text = markdown_text.replace(original, link, 1)
 
+        # Collect unique user IDs
+        if user_id not in mentioned_user_ids:
+            mentioned_user_ids.insert(0, user_id)  # Insert at start to maintain order
+
     return plain_text, mentioned_user_ids, markdown_text
+
+
+def _process_mention(match: re.Match, config: Any, sender_domain: str) -> tuple[str, str, str] | None:
+    """Process a single mention match and return replacement data.
+
+    Args:
+        match: The regex match object
+        config: The loaded config
+        sender_domain: Domain for constructing Matrix IDs
+
+    Returns:
+        Tuple of (original_text, matrix_user_id, display_name) or None if not a valid agent
+    """
+    original = match.group(0)
+    prefix = match.group(1) or ""  # "mindroom_" or empty
+    name = match.group(2)
+
+    # Skip user mentions (mindroom_user_*)
+    if name.startswith("user_"):
+        return None
+
+    # Try to find the agent
+    agent_name = None
+    if name in config.agents:
+        # Direct match: @calculator
+        agent_name = name
+    elif prefix and name.replace("mindroom_", "") in config.agents:
+        # Handle @mindroom_mindroom_calculator
+        agent_name = name.replace("mindroom_", "")
+
+    if agent_name:
+        agent_config = config.agents[agent_name]
+        user_id = MatrixID.from_agent(agent_name, sender_domain).full_id
+        return (original, user_id, agent_config.display_name)
+
+    return None
 
 
 def create_mention_content_from_text(
