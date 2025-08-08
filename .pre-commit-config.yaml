@@ -62,14 +62,14 @@ repos:
     hooks:
       - id: typescript-check
         name: TypeScript type checking
-        entry: bash -c 'cd widget/frontend && npm run type-check'
+        entry: bash -c 'cd widget/frontend && pnpm run type-check'
         language: system
         files: ^widget/frontend/.*\.(ts|tsx)$
         pass_filenames: false
 
       - id: check-package-lock
-        name: Check package-lock.json is up to date
-        entry: bash -c 'cd widget/frontend && npm ls >/dev/null 2>&1'
+        name: Check pnpm-lock.yaml is up to date
+        entry: bash -c 'cd widget/frontend && pnpm ls >/dev/null 2>&1'
         language: system
         files: ^widget/frontend/package\.json$
         pass_filenames: false

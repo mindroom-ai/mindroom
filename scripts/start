@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Simple zellij-based starter that:
 # - Ensures Python deps (uv sync) in repo and widget/backend
-# - Ensures frontend deps (npm ci/install) in widget/frontend
+# - Ensures frontend deps (pnpm install) in widget/frontend
 # - Starts a zellij session with two panes:
 #   1) uv run mindroom run   (repo root)
 #   2) ./widget/run.sh       (starts widget backend+frontend)

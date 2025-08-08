@@ -74,7 +74,7 @@ widget/frontend/screenshots/
 
 ```bash
 cd widget
-DEMO_URL="http://localhost:3003" nix-shell shell.nix --run "cd frontend && npm run screenshot"
+DEMO_URL="http://localhost:3003" nix-shell shell.nix --run "cd frontend && pnpm run screenshot"
 ```
 
 ## Troubleshooting
@@ -98,7 +98,7 @@ The Nix shell provides all necessary dependencies. If screenshots fail:
 
 The `shell.nix` file includes:
 - Chromium for Puppeteer
-- Node.js and npm
+- Node.js and pnpm
 - Python and uv
 - All necessary system libraries
 

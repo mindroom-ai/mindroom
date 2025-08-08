@@ -48,7 +48,7 @@ This starts:
 1. **Build the frontend:**
    ```bash
    cd widget/frontend
-   npm run build
+   pnpm run build
    ```
 
 2. **Deploy with nginx:**
