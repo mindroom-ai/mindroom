@@ -13,14 +13,16 @@ def create_mention_content(
     mentioned_user_ids: list[str],
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
+    formatted_body: str | None = None,
 ) -> dict[str, Any]:
     """Create a properly formatted Matrix message with mentions.
 
     Args:
-        body: The message body text
+        body: The message body text (plain text version)
         mentioned_user_ids: List of Matrix user IDs to mention (e.g., ["@mindroom_calculator:localhost"])
         thread_event_id: Optional thread root event ID
         reply_to_event_id: Optional event ID to reply to
+        formatted_body: Optional HTML formatted body (if not provided, will convert from markdown)
 
     Returns:
         Properly formatted content dict for room_send
@@ -29,7 +31,7 @@ def create_mention_content(
         "msgtype": "m.text",
         "body": body,
         "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(body),
+        "formatted_body": formatted_body if formatted_body else markdown_to_html(body),
     }
 
     # Add mentions if any
@@ -52,7 +54,7 @@ def create_mention_content(
     return content
 
 
-def parse_mentions_in_text(text: str, sender_domain: str = "localhost") -> tuple[str, list[str]]:
+def parse_mentions_in_text(text: str, sender_domain: str = "localhost") -> tuple[str, list[str], str]:
     """Parse text for agent mentions and return processed text with user IDs.
 
     Args:
@@ -60,17 +62,20 @@ def parse_mentions_in_text(text: str, sender_domain: str = "localhost") -> tuple
         sender_domain: Domain part of the sender's user ID (e.g., "localhost" from "@user:localhost")
 
     Returns:
-        Tuple of (processed_text, list_of_mentioned_user_ids)
+        Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
     """
     config = load_config()
     known_agents = set(config.agents.keys())
     mentioned_user_ids = []
 
+    # Keep track of replacements for markdown version
+    replacements = []
+
     # Pattern to match @agent_name (with optional @mindroom_ prefix)
     # Matches: @calculator, @mindroom_calculator, @mindroom_calculator:localhost
     pattern = r"@(mindroom_)?(\w+)(?::[^\s]+)?"
 
-    def replace_mention(match):
+    def collect_mentions(match):
         prefix = match.group(1) or ""  # "mindroom_" or empty
         agent_name = match.group(2)
 
@@ -80,23 +85,38 @@ def parse_mentions_in_text(text: str, sender_domain: str = "localhost") -> tuple
 
         # Check if it's a known agent
         if agent_name in known_agents:
+            agent_config = config.agents[agent_name]
             user_id = MatrixID.from_agent(agent_name, sender_domain).full_id
             if user_id not in mentioned_user_ids:
                 mentioned_user_ids.append(user_id)
+            # Store replacement info for later markdown generation
+            replacements.append((match.group(0), user_id, agent_config.display_name))
             return user_id
         elif prefix and agent_name.replace("mindroom_", "") in known_agents:
             # Handle case where someone wrote @mindroom_mindroom_calculator
             actual_agent = agent_name.replace("mindroom_", "")
+            agent_config = config.agents[actual_agent]
             user_id = MatrixID.from_agent(actual_agent, sender_domain).full_id
             if user_id not in mentioned_user_ids:
                 mentioned_user_ids.append(user_id)
+            replacements.append((match.group(0), user_id, agent_config.display_name))
             return user_id
         else:
             # Not a known agent, leave as is
             return match.group(0)
 
-    processed_text = re.sub(pattern, replace_mention, text)
-    return processed_text, mentioned_user_ids
+    # Generate plain text version (just user IDs)
+    plain_text = re.sub(pattern, collect_mentions, text)
+
+    # Generate markdown version with proper matrix.to links
+    markdown_text = text
+    for original, user_id, display_name in replacements:
+        # Create markdown link that will be converted to HTML
+        # This matches Element's format: [@DisplayName](https://matrix.to/#/@user:domain)
+        link = f"[@{display_name}](https://matrix.to/#/{user_id})"
+        markdown_text = markdown_text.replace(original, link, 1)
+
+    return plain_text, mentioned_user_ids, markdown_text
 
 
 def create_mention_content_from_text(
@@ -118,11 +138,16 @@ def create_mention_content_from_text(
     Returns:
         Properly formatted content dict for room_send
     """
-    processed_text, mentioned_user_ids = parse_mentions_in_text(text, sender_domain)
+    plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(text, sender_domain)
+
+    # Convert markdown (with links) to HTML
+    # The markdown converter will properly handle the [@DisplayName](url) format
+    formatted_html = markdown_to_html(markdown_text)
 
     return create_mention_content(
-        body=processed_text,
+        body=plain_text,
         mentioned_user_ids=mentioned_user_ids,
         thread_event_id=thread_event_id,
         reply_to_event_id=reply_to_event_id,
+        formatted_body=formatted_html,
     )

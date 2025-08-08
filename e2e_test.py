@@ -62,12 +62,19 @@ class MindRoomE2ETest:
         full_message = f"@{agent_name} {message}"
 
         # Parse ALL mentions in the text (including ones in the message body)
-        processed_text, all_mentioned_ids = parse_mentions_in_text(full_message, user_domain)
+        processed_text, all_mentioned_ids, markdown_text = parse_mentions_in_text(full_message, user_domain)
+
+        # Convert markdown to HTML
+        from mindroom.matrix.client import markdown_to_html
+
+        formatted_html = markdown_to_html(markdown_text)
 
         # Create content with all mentions properly set
         content = {
             "msgtype": "m.text",
             "body": processed_text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": formatted_html,
             "m.mentions": {"user_ids": all_mentioned_ids} if all_mentioned_ids else {},
         }
 
