@@ -24,6 +24,23 @@ def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
     return is_thread, thread_id
 
 
+def _maybe_ssl_context(homeserver: str) -> Any:
+    if homeserver.startswith("https://"):
+        import os
+        import ssl as ssl_module
+
+        if os.getenv("MATRIX_SSL_VERIFY", "true").lower() == "false":
+            # Create context that disables verification for dev/self-signed certs
+            ssl_context = ssl_module.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl_module.CERT_NONE
+        else:
+            # Use default context with proper verification
+            ssl_context = ssl_module.create_default_context()
+        return ssl_context
+    return None
+
+
 @asynccontextmanager
 async def matrix_client(
     homeserver: str,
@@ -44,12 +61,13 @@ async def matrix_client(
         async with matrix_client("http://localhost:8008") as client:
             response = await client.login(password="secret")
     """
-    ssl = homeserver.startswith("https://")
+    ssl_context = _maybe_ssl_context(homeserver)
+
     if access_token:
-        client = nio.AsyncClient(homeserver, user_id, store_path=".nio_store", ssl=ssl)
+        client = nio.AsyncClient(homeserver, user_id, store_path=".nio_store", ssl=ssl_context)
         client.access_token = access_token
     else:
-        client = nio.AsyncClient(homeserver, user_id, ssl=ssl)
+        client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
 
     try:
         yield client
@@ -71,8 +89,9 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
     Raises:
         ValueError: If login fails
     """
-    ssl = homeserver.startswith("https://")
-    client = nio.AsyncClient(homeserver, user_id, ssl=ssl)
+    ssl_context = _maybe_ssl_context(homeserver)
+
+    client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):
