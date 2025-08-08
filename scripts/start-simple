@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Simple starter that runs both services in background without zellij
+# Use this if zellij is causing terminal issues
+
+SESSION_NAME="${SESSION_NAME:-mindroom}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
+
+echo "Using repo root: $REPO_ROOT"
+
+# Check for existing processes
+if pgrep -f "mindroom run" >/dev/null || pgrep -f "uvicorn src.main:app" >/dev/null; then
+  echo "MindRoom services already running."
+  echo "Use scripts/stop-simple to stop them first."
+  exit 1
+fi
+
+echo "Syncing Python dependencies..."
+(cd "$REPO_ROOT" && uv sync)
+(cd "$REPO_ROOT/widget/backend" && uv sync)
+
+echo "Installing frontend dependencies..."
+if [ -d "$REPO_ROOT/widget/frontend" ]; then
+  if [ -f "$REPO_ROOT/widget/frontend/package-lock.json" ]; then
+    (cd "$REPO_ROOT/widget/frontend" && npm ci)
+  else
+    (cd "$REPO_ROOT/widget/frontend" && npm install)
+  fi
+fi
+
+# Start mindroom in background
+echo "Starting mindroom..."
+(cd "$REPO_ROOT" && nohup uv run mindroom run > /tmp/mindroom.log 2>&1 &)
+
+# Start widget in background
+echo "Starting widget..."
+(cd "$REPO_ROOT/widget" && nohup ./run.sh > /tmp/widget.log 2>&1 &)
+
+echo ""
+echo "Services started in background!"
+echo "Frontend: http://localhost:3003"
+echo "Backend: http://localhost:8001"
+echo ""
+echo "Logs:"
+echo "  MindRoom: tail -f /tmp/mindroom.log"
+echo "  Widget: tail -f /tmp/widget.log"
+echo ""
+echo "To stop: scripts/stop-simple"

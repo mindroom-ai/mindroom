@@ -69,16 +69,15 @@ fi
 
 echo "Starting zellij session '$SESSION_NAME' with two panes..."
 
-# Create a detached session first (compat across zellij versions)
-if ! zellij action new-session -s "$SESSION_NAME" 2>/dev/null; then
-  if command -v setsid &>/dev/null; then
-    # Start a detached session without taking over the current TTY
-    setsid -f zellij --session "$SESSION_NAME" >/dev/null 2>&1 || true
-  else
-    # Fallback: background it; may still momentarily attach, but returns
-    (zellij --session "$SESSION_NAME" </dev/null >/dev/null 2>&1 &)
-  fi
-fi
+# Use the permanent layout file
+LAYOUT_FILE="$REPO_ROOT/scripts/zellij-mindroom.kdl"
+
+# Start detached session with the layout from repo root directory
+# The key is to pipe some input to prevent zellij from trying to attach
+(
+  cd "$REPO_ROOT"
+  echo "" | zellij --session "$SESSION_NAME" --layout "$LAYOUT_FILE" >/dev/null 2>&1 &
+)
 
 # Wait for the session to become available
 for _ in $(seq 1 50); do
@@ -97,12 +96,6 @@ if ! echo "$sessions_now_clean" | awk '{print $1}' | grep -qx "$SESSION_NAME"; t
   echo "Failed to create zellij session '$SESSION_NAME'."
   exit 1
 fi
-
-# Pane 1: mindroom run (from repo root)
-zellij --session "$SESSION_NAME" run -- bash -lc "cd \"$REPO_ROOT\" && uv run mindroom run"
-
-# Pane 2: widget/run.sh (starts widget backend + frontend)
-zellij --session "$SESSION_NAME" run -- bash -lc "cd \"$REPO_ROOT/widget\" && ./run.sh"
 
 echo "zellij session '$SESSION_NAME' started."
 echo "Run: scripts/attach   to attach"

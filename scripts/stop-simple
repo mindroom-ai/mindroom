@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Simple stopper for background processes
+
+echo "Stopping MindRoom services..."
+
+# Kill mindroom process
+if pgrep -f "mindroom run" >/dev/null; then
+  echo "Stopping mindroom..."
+  pkill -f "mindroom run" || true
+fi
+
+# Kill widget processes
+if pgrep -f "uvicorn src.main:app" >/dev/null; then
+  echo "Stopping widget backend..."
+  pkill -f "uvicorn src.main:app" || true
+fi
+
+if pgrep -f "npm run dev" >/dev/null; then
+  echo "Stopping widget frontend..."
+  pkill -f "npm run dev" || true
+fi
+
+# Give processes time to stop
+sleep 1
+
+# Check if any are still running
+if pgrep -f "mindroom run" >/dev/null || pgrep -f "uvicorn src.main:app" >/dev/null || pgrep -f "npm run dev" >/dev/null; then
+  echo "Warning: Some processes may still be running."
+else
+  echo "All services stopped."
+fi
