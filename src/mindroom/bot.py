@@ -302,7 +302,15 @@ class AgentBot:
 
             # Send immediate acknowledgment
             ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
-            ack_event_id = await self._send_response(room, event.reacts_to, ack_text, thread_id)
+            # When already in a thread, we can't use event.reacts_to as reply_to_event_id
+            # because it might have relations that prevent starting a new thread from it
+            # In threads, we'll just send to the thread without a specific reply-to
+            ack_event_id = await self._send_response(
+                room,
+                thread_id if thread_id else event.reacts_to,  # Use thread_id as reply_to when in thread
+                ack_text,
+                thread_id,
+            )
 
             if not ack_event_id:
                 self.logger.error("Failed to send acknowledgment for reaction")
