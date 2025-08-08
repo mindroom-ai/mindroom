@@ -201,8 +201,11 @@ describe('TeamEditor', () => {
   it('adds room to team when checkbox is checked', async () => {
     render(<TeamEditor />);
 
-    const researchCheckbox = screen.getByRole('checkbox', { name: /Research/ });
-    fireEvent.click(researchCheckbox);
+    // Find the research room checkbox specifically (not the research agent checkbox)
+    const checkboxes = screen.getAllByRole('checkbox');
+    const researchRoomCheckbox = checkboxes.find(cb => cb.id === 'room-research');
+
+    fireEvent.click(researchRoomCheckbox!);
 
     await waitFor(() => {
       expect(mockUpdateTeam).toHaveBeenCalledWith('dev_team', {
@@ -274,9 +277,37 @@ describe('TeamEditor', () => {
   });
 
   it('calls saveConfig when save button is clicked', async () => {
+    // Re-mock with isDirty: true so the button is enabled
+    (useConfigStore as any).mockReturnValue({
+      teams: [mockTeam],
+      agents: mockAgents,
+      rooms: [
+        {
+          id: 'dev',
+          display_name: 'Dev',
+          description: 'Development room',
+          agents: ['code', 'shell'],
+        },
+        { id: 'lobby', display_name: 'Lobby', description: 'Main lobby', agents: [] },
+        {
+          id: 'research',
+          display_name: 'Research',
+          description: 'Research room',
+          agents: ['research'],
+        },
+      ],
+      selectedTeamId: 'dev_team',
+      updateTeam: mockUpdateTeam,
+      deleteTeam: mockDeleteTeam,
+      saveConfig: mockSaveConfig,
+      config: mockConfig,
+      isDirty: true,
+    });
+
     render(<TeamEditor />);
 
     const saveButton = screen.getByRole('button', { name: /Save/i });
+    expect(saveButton).not.toBeDisabled();
     fireEvent.click(saveButton);
 
     await waitFor(() => {

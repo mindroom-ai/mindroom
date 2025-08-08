@@ -138,9 +138,17 @@ describe('MemoryConfig', () => {
     const modelSelect = screen.getByLabelText('Embedding Model');
     fireEvent.click(modelSelect);
 
-    expect(await screen.findByText('nomic-embed-text')).toBeInTheDocument();
-    expect(screen.getByText('all-minilm')).toBeInTheDocument();
-    expect(screen.getByText('mxbai-embed-large')).toBeInTheDocument();
+    // Wait for options to appear
+    await waitFor(() => {
+      const nomicOptions = screen.getAllByText('nomic-embed-text');
+      expect(nomicOptions.length).toBeGreaterThan(0);
+    });
+
+    // Check other options exist
+    const minilmOptions = screen.getAllByText('all-minilm');
+    expect(minilmOptions.length).toBeGreaterThan(0);
+    const mxbaiOptions = screen.getAllByText('mxbai-embed-large');
+    expect(mxbaiOptions.length).toBeGreaterThan(0);
   });
 
   it('shows correct model options for openai', async () => {
@@ -149,16 +157,23 @@ describe('MemoryConfig', () => {
 
     const providerSelect = screen.getByLabelText('Embedder Provider');
     fireEvent.click(providerSelect);
-    const openaiOption = await screen.findByText('OpenAI');
-    fireEvent.click(openaiOption);
+    const openaiOptions = await screen.findAllByText('OpenAI');
+    fireEvent.click(openaiOptions[0]);
 
     // Then check model options
     const modelSelect = screen.getByLabelText('Embedding Model');
     fireEvent.click(modelSelect);
 
-    expect(await screen.findByText('text-embedding-ada-002')).toBeInTheDocument();
-    expect(screen.getByText('text-embedding-3-small')).toBeInTheDocument();
-    expect(screen.getByText('text-embedding-3-large')).toBeInTheDocument();
+    // Wait for options and check they exist
+    await waitFor(() => {
+      const adaOptions = screen.getAllByText('text-embedding-ada-002');
+      expect(adaOptions.length).toBeGreaterThan(0);
+    });
+
+    const smallOptions = screen.getAllByText('text-embedding-3-small');
+    expect(smallOptions.length).toBeGreaterThan(0);
+    const largeOptions = screen.getAllByText('text-embedding-3-large');
+    expect(largeOptions.length).toBeGreaterThan(0);
   });
 
   it('updates model when selection changes', async () => {
@@ -193,9 +208,18 @@ describe('MemoryConfig', () => {
   });
 
   it('calls saveConfig when save button is clicked', async () => {
+    // Re-mock with isDirty: true so the button is enabled
+    (useConfigStore as any).mockReturnValue({
+      config: mockConfig,
+      updateMemoryConfig: mockUpdateMemoryConfig,
+      saveConfig: mockSaveConfig,
+      isDirty: true,
+    });
+
     render(<MemoryConfig />);
 
     const saveButton = screen.getByRole('button', { name: /Save/i });
+    expect(saveButton).not.toBeDisabled();
     fireEvent.click(saveButton);
 
     await waitFor(() => {

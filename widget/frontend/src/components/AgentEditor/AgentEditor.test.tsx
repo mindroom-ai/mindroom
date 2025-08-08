@@ -64,7 +64,9 @@ describe('AgentEditor', () => {
     expect(screen.getByDisplayValue('Test Agent')).toBeTruthy();
     expect(screen.getByDisplayValue('Test role')).toBeTruthy();
     expect(screen.getByDisplayValue('Test instruction')).toBeTruthy();
-    expect(screen.getByDisplayValue('test_room')).toBeTruthy();
+    // Rooms are now displayed as checkboxes, not input fields
+    const testRoomCheckbox = screen.getByRole('checkbox', { name: /Test Room/i });
+    expect(testRoomCheckbox).toBeChecked();
   });
 
   it('shows empty state when no agent is selected', () => {
@@ -196,19 +198,26 @@ describe('AgentEditor', () => {
   it('adds and removes rooms', () => {
     render(<AgentEditor />);
 
-    // Find add room button
-    const addButtons = screen.getAllByRole('button', { name: /add/i });
-    const addRoomButton = addButtons.find(
-      btn => btn.closest('div')?.querySelector('label')?.textContent === 'Rooms'
-    );
+    // Test Room checkbox should be checked initially
+    const testRoomCheckbox = screen.getByRole('checkbox', { name: /Test Room/i });
+    expect(testRoomCheckbox).toBeChecked();
 
-    fireEvent.click(addRoomButton!);
-
-    // Should have called updateAgent with new room
+    // Uncheck Test Room
+    fireEvent.click(testRoomCheckbox);
     expect(mockStore.updateAgent).toHaveBeenCalledWith(
       'test_agent',
       expect.objectContaining({
-        rooms: ['test_room', 'new_room'],
+        rooms: [],
+      })
+    );
+
+    // Check Other Room
+    const otherRoomCheckbox = screen.getByRole('checkbox', { name: /Other Room/i });
+    fireEvent.click(otherRoomCheckbox);
+    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+      'test_agent',
+      expect.objectContaining({
+        rooms: ['other_room'],
       })
     );
   });

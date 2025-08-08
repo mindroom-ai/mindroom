@@ -74,7 +74,7 @@ describe('RoomList', () => {
     render(<RoomList />);
 
     const searchInput = screen.getByPlaceholderText('Search rooms...');
-    fireEvent.change(searchInput, { target: { value: 'discussion' } });
+    fireEvent.change(searchInput, { target: { value: 'Main' } });
 
     expect(screen.getByText('Lobby')).toBeInTheDocument();
     expect(screen.queryByText('Dev Room')).not.toBeInTheDocument();
@@ -121,8 +121,10 @@ describe('RoomList', () => {
     const input = screen.getByPlaceholderText('Room name...');
     fireEvent.change(input, { target: { value: 'Test Room' } });
 
-    const checkButton = screen.getByRole('button', { name: '' });
-    fireEvent.click(checkButton);
+    // Find the check button (submit button with check icon)
+    const buttons = screen.getAllByRole('button');
+    const checkButton = buttons.find(btn => btn.querySelector('.lucide-check'));
+    fireEvent.click(checkButton!);
 
     await waitFor(() => {
       expect(mockCreateRoom).toHaveBeenCalledWith({

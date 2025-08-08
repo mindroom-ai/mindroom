@@ -210,9 +210,22 @@ describe('RoomEditor', () => {
   });
 
   it('calls saveConfig when save button is clicked', async () => {
+    // Re-mock with isDirty: true so the button is enabled
+    (useConfigStore as any).mockReturnValue({
+      rooms: [mockRoom],
+      agents: mockAgents,
+      config: mockConfig,
+      selectedRoomId: 'lobby',
+      updateRoom: mockUpdateRoom,
+      deleteRoom: mockDeleteRoom,
+      saveConfig: mockSaveConfig,
+      isDirty: true,
+    });
+
     render(<RoomEditor />);
 
     const saveButton = screen.getByRole('button', { name: /Save/i });
+    expect(saveButton).not.toBeDisabled();
     fireEvent.click(saveButton);
 
     await waitFor(() => {
