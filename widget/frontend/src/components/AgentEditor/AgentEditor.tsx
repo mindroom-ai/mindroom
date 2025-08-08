@@ -114,6 +114,7 @@ export function AgentEditor() {
           {/* Display Name */}
           <div>
             <Label htmlFor="display_name">Display Name</Label>
+            <p className="text-xs text-muted-foreground mb-1">Human-readable name for the agent</p>
             <Controller
               name="display_name"
               control={control}
@@ -134,6 +135,9 @@ export function AgentEditor() {
           {/* Role */}
           <div>
             <Label htmlFor="role">Role Description</Label>
+            <p className="text-xs text-muted-foreground mb-1">
+              Description of the agent's purpose and capabilities
+            </p>
             <Controller
               name="role"
               control={control}
@@ -155,6 +159,9 @@ export function AgentEditor() {
           {/* Model Selection */}
           <div>
             <Label htmlFor="model">Model</Label>
+            <p className="text-xs text-muted-foreground mb-1">
+              AI model to use (defaults to 'default' model if not specified)
+            </p>
             <Controller
               name="model"
               control={control}
@@ -185,6 +192,7 @@ export function AgentEditor() {
           {/* Tools */}
           <div>
             <Label>Tools</Label>
+            <p className="text-xs text-muted-foreground mb-1">Available tools this agent can use</p>
             <div className="space-y-2 mt-2">
               {AVAILABLE_TOOLS.map(tool => (
                 <Controller
@@ -254,7 +262,10 @@ export function AgentEditor() {
           {/* Instructions */}
           <div>
             <div className="flex items-center justify-between mb-2">
-              <Label>Instructions</Label>
+              <div>
+                <Label>Instructions</Label>
+                <p className="text-xs text-muted-foreground">Custom instructions for this agent</p>
+              </div>
               <Button variant="outline" size="sm" onClick={handleAddInstruction}>
                 <Plus className="h-3 w-3 mr-1" />
                 Add
@@ -343,6 +354,9 @@ export function AgentEditor() {
           {/* History Runs */}
           <div>
             <Label htmlFor="num_history_runs">History Runs</Label>
+            <p className="text-xs text-muted-foreground mb-1">
+              Number of previous conversation turns to include as context
+            </p>
             <Controller
               name="num_history_runs"
               control={control}
