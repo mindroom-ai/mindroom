@@ -159,10 +159,8 @@ async def create_team_response(
 
                 if member_content:
                     # Use agent name from our list if available
-                    agent_index = i if i < len(agent_names) else -1
-                    if agent_index >= 0 and agent_index < len(agent_names):
-                        member_name = agent_names[agent_index]
-                        parts.append(f"**{member_name}**: {member_content}")
+                    if i < len(agent_names):
+                        parts.append(f"**{agent_names[i]}**: {member_content}")
                     else:
                         parts.append(f"**Agent {i + 1}**: {member_content}")
 
