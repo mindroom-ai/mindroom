@@ -280,7 +280,7 @@ class AgentBot:
             thread_id=context.thread_id,
             thread_history=context.thread_history,
         )
-        # Mark as responded after successful response generation
+        # Mark as responded after response generation
         self.response_tracker.mark_responded(event.event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
@@ -304,12 +304,11 @@ class AgentBot:
 
             # Send immediate acknowledgment
             ack_text = f"You selected: {event.key} {selected_value}\n\nProcessing your response..."
-            # When already in a thread, we can't use event.reacts_to as reply_to_event_id
-            # because it might have relations that prevent starting a new thread from it
-            # In threads, pass None as reply_to_event_id to avoid the relation issue
+            # Matrix doesn't allow reply relations to events that already have relations (reactions)
+            # In threads, omit reply_to_event_id; the thread_id ensures correct placement
             ack_event_id = await self._send_response(
                 room,
-                None if thread_id else event.reacts_to,  # Don't reply to specific message when in thread
+                None if thread_id else event.reacts_to,
                 ack_text,
                 thread_id,
             )
