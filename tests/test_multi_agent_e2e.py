@@ -172,7 +172,23 @@ async def test_agent_responds_in_threads_based_on_participation(
     test_user_id = "@alice:example.org"
     thread_root_id = "$thread_root:example.org"
 
-    with patch("mindroom.bot.login_agent_user") as mock_login:
+    # Mock the config to include both agents
+    from mindroom.models import AgentConfig, Config
+
+    mock_config = Config(
+        agents={
+            "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+            "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+        },
+        teams={},
+        room_models={},
+    )
+
+    with (
+        patch("mindroom.bot.login_agent_user") as mock_login,
+        patch("mindroom.agent_config.load_config", return_value=mock_config),
+        patch("mindroom.matrix.identity.load_config", return_value=mock_config),
+    ):
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
         mock_client.user_id = mock_calculator_agent.user_id
@@ -245,6 +261,28 @@ async def test_agent_responds_in_threads_based_on_participation(
         bot.client.room_send.reset_mock()
         mock_team_arun.reset_mock()
 
+        # Create a new message event with a different ID for Test 2
+        message_event_2 = nio.RoomMessageText(
+            body="What about 30% of 400?",
+            formatted_body="What about 30% of 400?",
+            format="org.matrix.custom.html",
+            source={
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "What about 30% of 400?",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": thread_root_id,
+                    },
+                },
+                "event_id": "$test_event_2:example.org",  # Different event ID
+                "sender": test_user_id,
+                "origin_server_ts": 1234567891,
+                "type": "m.room.message",
+            },
+        )
+        message_event_2.sender = test_user_id
+
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
             patch("mindroom.bot.fetch_thread_history") as mock_fetch,
@@ -266,7 +304,7 @@ async def test_agent_responds_in_threads_based_on_participation(
                 },
             ]
 
-            await bot._on_message(room, message_event)
+            await bot._on_message(room, message_event_2)
 
             # Should form team and send team response when multiple agents in thread
             mock_ai.assert_not_called()
