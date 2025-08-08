@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.ai import ai_response
+from mindroom.background_tasks import wait_for_background_tasks
 
 
 class TestMemoryIntegration:
@@ -60,7 +61,6 @@ class TestMemoryIntegration:
             assert call_args[1] == "[Enhanced] What is 2+2?"  # Enhanced prompt
 
             # Wait for background tasks to complete
-            from mindroom.background_tasks import wait_for_background_tasks
 
             await wait_for_background_tasks(timeout=1.0)
 
@@ -84,7 +84,6 @@ class TestMemoryIntegration:
             mock_build.assert_called_once_with("Hello", "general", tmp_path, None)
 
             # Wait for background tasks to complete
-            from mindroom.background_tasks import wait_for_background_tasks
 
             await wait_for_background_tasks(timeout=1.0)
 
@@ -131,7 +130,6 @@ class TestMemoryIntegration:
             )
 
             # Wait for background tasks to complete
-            from mindroom.background_tasks import wait_for_background_tasks
 
             await wait_for_background_tasks(timeout=1.0)
 
