@@ -14,6 +14,7 @@ import nio
 from . import interactive
 from .agent_config import ROUTER_AGENT_NAME, create_agent, load_config
 from .ai import ai_response, ai_response_streaming
+from .background_tasks import wait_for_background_tasks
 from .commands import (
     Command,
     CommandType,
@@ -153,6 +154,14 @@ class AgentBot:
     async def stop(self) -> None:
         """Stop the agent bot."""
         self.running = False
+
+        # Wait for any pending background tasks (like memory saves) to complete
+        try:
+            await wait_for_background_tasks(timeout=5.0)  # 5 second timeout
+            self.logger.info("Background tasks completed")
+        except Exception as e:
+            self.logger.warning(f"Some background tasks did not complete: {e}")
+
         if hasattr(self, "client") and self.client:
             await self.client.close()
         self.logger.info("Stopped agent bot")

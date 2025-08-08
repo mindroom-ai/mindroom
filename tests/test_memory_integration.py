@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.ai import ai_response
+from mindroom.background_tasks import wait_for_background_tasks
 
 
 class TestMemoryIntegration:
@@ -59,6 +60,8 @@ class TestMemoryIntegration:
             call_args = mock_agent_run.call_args[0]
             assert call_args[1] == "[Enhanced] What is 2+2?"  # Enhanced prompt
 
+            await wait_for_background_tasks(timeout=1.0)
+
             # Verify conversation was stored
             mock_store.assert_called_once_with("What is 2+2?", "calculator", tmp_path, "test_session", "!test:room")
 
@@ -77,6 +80,8 @@ class TestMemoryIntegration:
 
             # Verify memory enhancement without room_id
             mock_build.assert_called_once_with("Hello", "general", tmp_path, None)
+
+            await wait_for_background_tasks(timeout=1.0)
 
             # Verify storage without room_id
             mock_store.assert_called_once_with("Hello", "general", tmp_path, "test_session", None)
@@ -119,6 +124,8 @@ class TestMemoryIntegration:
             await ai_response(
                 agent_name="general", prompt="Remember this: A=1", session_id="session1", storage_path=tmp_path
             )
+
+            await wait_for_background_tasks(timeout=1.0)
 
             # Verify memory was stored (only user prompt)
             assert mock_memory.add.called

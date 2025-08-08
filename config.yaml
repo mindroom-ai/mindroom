@@ -1,44 +1,3 @@
-memory:
-  embedder:
-    provider: ollama
-    config:
-      model: nomic-embed-text
-      host: http://localhost:11434
-  llm:
-    provider: ollama
-    config:
-      model: devstral:24b
-      host: http://localhost:11434
-      temperature: 0.1
-      top_p: 1
-models:
-  default:
-    provider: ollama
-    id: devstral:24b
-  haiku:
-    provider: anthropic
-    id: claude-3-5-haiku-latest
-  sonnet:
-    provider: anthropic
-    id: claude-3-5-haiku-latest
-  opus:
-    provider: anthropic
-    id: claude-3-5-haiku-latest
-  ollama:
-    provider: ollama
-    id: devstral:24b
-  glm45:
-    provider: openrouter
-    id: z-ai/glm-4.5-air:free
-  gpt_oss:
-    provider: openrouter
-    id: openai/gpt-oss-120b
-  deepseek:
-    provider: openrouter
-    id: deepseek-ai/deepseek-chat:free
-  gpt4o:
-    provider: openai
-    id: gpt-4o
 agents:
   general:
     display_name: GeneralAgent
@@ -54,6 +13,9 @@ agents:
     - lobby
     - help
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: default
   calculator:
     display_name: CalculatorAgent
     role: Solve mathematical problems.
@@ -69,6 +31,9 @@ agents:
     - science
     - analysis
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: default
   code:
     display_name: CodeAgent
     role: Generate code, manage files, and execute shell commands.
@@ -88,6 +53,9 @@ agents:
     - dev
     - automation
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: default
   shell:
     display_name: ShellAgent
     role: Execute shell commands and manage system operations.
@@ -106,6 +74,9 @@ agents:
     - automation
     - ops
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: default
   summary:
     display_name: SummaryAgent
     role: Summarize long texts and extract key information.
@@ -122,6 +93,9 @@ agents:
     - research
     - docs
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: default
   research:
     display_name: ResearchAgent
     role: Conduct research using web sources, Wikipedia, and academic papers.
@@ -142,6 +116,9 @@ agents:
     - science
     - news
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: gpt5mini
   finance:
     display_name: FinanceAgent
     role: Analyze financial data, stock information, and perform calculations.
@@ -161,6 +138,9 @@ agents:
     - analysis
     - business
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: default
   news:
     display_name: NewsAgent
     role: Gather and summarize news and current events.
@@ -180,6 +160,9 @@ agents:
     - research
     - business
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: default
   data_analyst:
     display_name: DataAnalystAgent
     role: Analyze data, create visualizations, and provide insights.
@@ -200,6 +183,9 @@ agents:
     - finance
     - business
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: default
   security:
     display_name: SecurityAgent
     role: Analyze security aspects and provide recommendations.
@@ -213,6 +199,9 @@ agents:
     - lobby
     - dev
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: default
   analyst:
     display_name: AnalystAgent
     role: Provide analytical insights and recommendations.
@@ -226,6 +215,9 @@ agents:
     - lobby
     - analysis
     num_history_runs: 5
+    markdown: null
+    add_history_to_messages: null
+    model: default
 teams:
   super_team:
     display_name: Super Team
@@ -237,13 +229,78 @@ teams:
     - finance
     rooms:
     - research
-    mode: collaborate
     model: sonnet
+    mode: collaborate
 room_models:
   research: haiku
 defaults:
   num_history_runs: 5
   markdown: true
   add_history_to_messages: true
+memory:
+  embedder:
+    provider: ollama
+    config:
+      model: nomic-embed-text
+      api_key: null
+      host: http://localhost:11434
+  llm:
+    provider: ollama
+    config:
+      model: devstral:24b
+      host: http://localhost:11434
+      temperature: 0.1
+      top_p: 1
+models:
+  default:
+    provider: ollama
+    id: devstral:24b
+    host: null
+    api_key: null
+  haiku:
+    provider: anthropic
+    id: claude-3-5-haiku-latest
+    host: null
+    api_key: null
+  sonnet:
+    provider: anthropic
+    id: claude-3-5-haiku-latest
+    host: null
+    api_key: null
+  opus:
+    provider: anthropic
+    id: claude-3-5-haiku-latest
+    host: null
+    api_key: null
+  ollama:
+    provider: ollama
+    id: devstral:24b
+    host: null
+    api_key: null
+  glm45:
+    provider: openrouter
+    id: z-ai/glm-4.5-air:free
+    host: null
+    api_key: null
+  gpt_oss:
+    provider: openrouter
+    id: openai/gpt-oss-120b
+    host: null
+    api_key: null
+  deepseek:
+    provider: openrouter
+    id: deepseek-ai/deepseek-chat:free
+    host: null
+    api_key: null
+  gpt4o:
+    provider: openai
+    id: gpt-4o
+    host: null
+    api_key: null
+  gpt5mini:
+    provider: openai
+    id: gpt-5-mini
+    host: null
+    api_key: null
 router:
   model: ollama
