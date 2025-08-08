@@ -4,14 +4,14 @@ import nio
 
 from .agent_config import ROUTER_AGENT_NAME, load_config
 from .logging_config import get_logger
-from .matrix import resolve_room_aliases
+from .matrix import MatrixID, resolve_room_aliases
 from .matrix.state import MatrixState
 from .models import Config
 
 logger = get_logger(__name__)
 
 
-def get_configured_bots_for_room(config: Config, room_id: str) -> set[str]:
+def _get_configured_bots_for_room(config: Config, room_id: str) -> set[str]:
     """Get the set of bot usernames that should be in a specific room.
 
     Args:
@@ -48,7 +48,7 @@ def get_configured_bots_for_room(config: Config, room_id: str) -> set[str]:
     return configured_bots
 
 
-def get_all_known_bot_usernames() -> set[str]:
+def _get_all_known_bot_usernames() -> set[str]:
     """Get all bot usernames that have ever been created (from matrix_state.yaml).
 
     Returns:
@@ -66,7 +66,7 @@ def get_all_known_bot_usernames() -> set[str]:
     return bot_usernames
 
 
-async def cleanup_orphaned_bots_in_room(
+async def _cleanup_orphaned_bots_in_room(
     client: nio.AsyncClient,
     room_id: str,
     config: Config,
@@ -81,7 +81,6 @@ async def cleanup_orphaned_bots_in_room(
     Returns:
         List of bot usernames that were kicked
     """
-    from .matrix import MatrixID
 
     # Get room members
     members_response = await client.joined_members(room_id)
@@ -90,8 +89,8 @@ async def cleanup_orphaned_bots_in_room(
         return []
 
     # Get configured bots for this room
-    configured_bots = get_configured_bots_for_room(config, room_id)
-    known_bot_usernames = get_all_known_bot_usernames()
+    configured_bots = _get_configured_bots_for_room(config, room_id)
+    known_bot_usernames = _get_all_known_bot_usernames()
 
     kicked_bots = []
 
@@ -145,7 +144,7 @@ async def cleanup_all_orphaned_bots(client: nio.AsyncClient) -> dict[str, list[s
     logger.info(f"Checking {len(joined_rooms_response.rooms)} rooms for orphaned bots")
 
     for room_id in joined_rooms_response.rooms:
-        room_kicked = await cleanup_orphaned_bots_in_room(client, room_id, config)
+        room_kicked = await _cleanup_orphaned_bots_in_room(client, room_id, config)
         if room_kicked:
             kicked_bots[room_id] = room_kicked
 
