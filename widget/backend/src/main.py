@@ -1,6 +1,10 @@
+import sys
 import threading
 from pathlib import Path
 from typing import Any
+
+# Add parent directory to path to import mindroom
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import yaml
 from fastapi import FastAPI, HTTPException
@@ -8,6 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+
+# Import the actual Config from mindroom
+from src.mindroom.models import Config
 
 app = FastAPI(title="MindRoom Widget Backend")
 
@@ -27,15 +34,7 @@ CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config.yaml"
 current_config: dict[str, Any] = {}
 config_lock = threading.Lock()
 
-
-class Config(BaseModel):
-    memory: dict[str, Any]
-    models: dict[str, dict[str, Any]]
-    agents: dict[str, dict[str, Any]]
-    teams: dict[str, dict[str, Any]] | None = None
-    room_models: dict[str, str] | None = None
-    defaults: dict[str, Any]
-    router: dict[str, Any]
+# Config is now imported from mindroom.models
 
 
 class TestModelRequest(BaseModel):
