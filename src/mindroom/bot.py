@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import nio
 
@@ -795,6 +795,7 @@ class MultiAgentOrchestrator:
     storage_path: Path
     agent_bots: dict[str, AgentBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
+    current_config: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)  # Track current agent configs
 
     async def initialize(self) -> None:
         """Initialize all agent bots."""
@@ -802,6 +803,9 @@ class MultiAgentOrchestrator:
 
         config = load_config()
         agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
+
+        # Store config for each agent for comparison later
+        self.current_config = {}
 
         for agent_name, agent_user in agent_users.items():
             if agent_name == ROUTER_AGENT_NAME:
@@ -814,6 +818,11 @@ class MultiAgentOrchestrator:
                 rooms = resolve_room_aliases(list(all_room_aliases))
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
+                # Store router config
+                self.current_config[agent_name] = {
+                    "type": "router",
+                    "rooms": sorted(list(all_room_aliases)),
+                }
 
             elif agent_name in config.teams:
                 # This is a team - create TeamBot
@@ -829,6 +838,14 @@ class MultiAgentOrchestrator:
                     team_model=team_config.model,
                     enable_streaming=False,  # Teams don't support streaming
                 )
+                # Store team config
+                self.current_config[agent_name] = {
+                    "type": "team",
+                    "rooms": sorted(team_config.rooms),
+                    "agents": sorted(team_config.agents),
+                    "mode": team_config.mode,
+                    "model": team_config.model,
+                }
 
             elif agent_name in config.agents:
                 # Regular agent - use configured rooms
@@ -836,6 +853,14 @@ class MultiAgentOrchestrator:
                 rooms = resolve_room_aliases(agent_config.rooms)
                 enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
                 bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
+                # Store agent config
+                self.current_config[agent_name] = {
+                    "type": "agent",
+                    "rooms": sorted(agent_config.rooms),
+                    "model": agent_config.model,
+                    "role": agent_config.role,
+                    "tools": sorted(agent_config.tools) if agent_config.tools else [],
+                }
             else:
                 raise ValueError(f"Unknown agent configuration for {agent_name}")
 
@@ -865,6 +890,144 @@ class MultiAgentOrchestrator:
 
         # Run all sync tasks
         await asyncio.gather(*sync_tasks)
+
+    async def update_config(self) -> bool:
+        """Update configuration and restart only changed agents.
+
+        Returns:
+            True if any agents were updated, False otherwise.
+        """
+        # Clear the config cache to force reload
+        load_config.cache_clear()
+
+        # Load new configuration
+        new_config = load_config()
+        agent_users = await ensure_all_agent_users(MATRIX_HOMESERVER)
+
+        agents_to_restart = set()
+        new_agents = set()
+
+        # Build new config dict for comparison
+        new_config_dict: dict[str, dict[str, Any]] = {}
+
+        # Process router
+        if ROUTER_AGENT_NAME in agent_users:
+            all_room_aliases = set()
+            for agent_config in new_config.agents.values():
+                all_room_aliases.update(agent_config.rooms)
+            for team_config in new_config.teams.values():
+                all_room_aliases.update(team_config.rooms)
+            new_config_dict[ROUTER_AGENT_NAME] = {
+                "type": "router",
+                "rooms": sorted(list(all_room_aliases)),  # Sort for consistent comparison
+            }
+
+        # Process teams
+        for team_name, team_config in new_config.teams.items():
+            if team_name in agent_users:
+                new_config_dict[team_name] = {
+                    "type": "team",
+                    "rooms": sorted(team_config.rooms),
+                    "agents": sorted(team_config.agents),
+                    "mode": str(team_config.mode),
+                    "model": str(team_config.model) if team_config.model else None,
+                }
+
+        # Process agents
+        for agent_name, agent_config in new_config.agents.items():
+            if agent_name in agent_users:
+                new_config_dict[agent_name] = {
+                    "type": "agent",
+                    "rooms": sorted(agent_config.rooms),
+                    "model": agent_config.model,
+                    "role": agent_config.role,
+                    "tools": sorted(agent_config.tools) if agent_config.tools else [],
+                }
+
+        # Compare configurations
+        for agent_name, new_cfg in new_config_dict.items():
+            old_cfg = self.current_config.get(agent_name)
+            if old_cfg != new_cfg:
+                if agent_name in self.agent_bots:
+                    agents_to_restart.add(agent_name)
+                    logger.info(f"Configuration changed for {agent_name}, will restart")
+                else:
+                    new_agents.add(agent_name)
+                    logger.info(f"New agent detected: {agent_name}")
+
+        # Check for removed agents
+        removed_agents = set(self.agent_bots.keys()) - set(new_config_dict.keys())
+        for agent_name in removed_agents:
+            logger.info(f"Agent removed from config: {agent_name}")
+
+        # Stop removed and changed agents
+        stop_tasks = []
+        for agent_name in removed_agents | agents_to_restart:
+            if agent_name in self.agent_bots:
+                bot = self.agent_bots[agent_name]
+                bot.running = False
+                stop_tasks.append(bot.stop())
+
+        if stop_tasks:
+            logger.info(f"Stopping {len(stop_tasks)} agents...")
+            await asyncio.gather(*stop_tasks)
+
+        # Remove stopped agents from orchestrator
+        for agent_name in removed_agents | agents_to_restart:
+            self.agent_bots.pop(agent_name, None)
+            self.current_config.pop(agent_name, None)
+
+        # Create new and updated agents
+        for agent_name in new_agents | agents_to_restart:
+            if agent_name not in agent_users:
+                continue
+
+            agent_user = agent_users[agent_name]
+            cfg = new_config_dict[agent_name]
+
+            if cfg["type"] == "router":
+                rooms = resolve_room_aliases(list(cfg["rooms"]))
+                enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+                bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
+
+            elif cfg["type"] == "team":
+                rooms = resolve_room_aliases(list(cfg["rooms"]))
+                bot = TeamBot(
+                    agent_user=agent_user,
+                    storage_path=self.storage_path,
+                    rooms=rooms,
+                    team_agents=list(cfg["agents"]),
+                    team_mode=str(cfg["mode"]),
+                    team_model=str(cfg["model"]) if cfg["model"] else None,
+                    enable_streaming=False,
+                )
+
+            elif cfg["type"] == "agent":
+                rooms = resolve_room_aliases(list(cfg["rooms"]))
+                enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+                bot = AgentBot(agent_user, self.storage_path, rooms, enable_streaming=enable_streaming)
+
+            else:
+                continue
+
+            # Setup and start the bot
+            bot.orchestrator = self
+            self.agent_bots[agent_name] = bot
+            self.current_config[agent_name] = cfg
+
+            await bot.start()
+            # Create sync task for the new bot
+            asyncio.create_task(bot.sync_forever())
+
+            logger.info(f"Started agent: {agent_name}")
+
+        updated_count = len(removed_agents) + len(agents_to_restart) + len(new_agents)
+        if updated_count > 0:
+            logger.info(f"Configuration update complete: {updated_count} agents affected")
+            return True
+        else:
+            logger.info("No configuration changes detected")
+            return False
 
     async def stop(self) -> None:
         """Stop all agent bots."""
@@ -917,57 +1080,41 @@ async def main(log_level: str, storage_path: Path) -> None:
     # Track the last modification time
     last_mtime = config_path.stat().st_mtime if config_path.exists() else 0
 
-    orchestrator = None
-    restart_flag = False
+    # Create and start orchestrator
+    logger.info("Starting orchestrator...")
+    orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
 
-    while True:
-        try:
-            # Clean up previous orchestrator if restarting
-            if orchestrator is not None:
-                logger.info("Stopping orchestrator for restart...")
-                await orchestrator.stop()
-                orchestrator = None
-                # Brief pause to ensure cleanup
-                await asyncio.sleep(1)
+    try:
+        # Create task to run the orchestrator
+        orchestrator_task = asyncio.create_task(orchestrator.start())
 
-            # Create and start new orchestrator
-            logger.info("Starting orchestrator...")
-            orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
+        # Monitor config file for changes
+        while not orchestrator_task.done():
+            await asyncio.sleep(2)  # Check every 2 seconds
 
-            # Create task to run the orchestrator
-            orchestrator_task = asyncio.create_task(orchestrator.start())
+            # Check if config file has been modified
+            if config_path.exists():
+                current_mtime = config_path.stat().st_mtime
+                if current_mtime > last_mtime:
+                    logger.info("Configuration file changed, checking for updates...")
+                    last_mtime = current_mtime
 
-            # Monitor config file for changes
-            while not orchestrator_task.done():
-                await asyncio.sleep(2)  # Check every 2 seconds
+                    # Only update affected agents - don't restart everything
+                    if orchestrator.running:
+                        updated = await orchestrator.update_config()
+                        if updated:
+                            logger.info("Configuration update applied to affected agents")
+                        else:
+                            logger.info("No agent changes detected in configuration update")
 
-                # Check if config file has been modified
-                if config_path.exists():
-                    current_mtime = config_path.stat().st_mtime
-                    if current_mtime > last_mtime:
-                        logger.info("Configuration file changed, restarting agents...")
-                        last_mtime = current_mtime
-                        restart_flag = True
-                        orchestrator_task.cancel()
-                        break
+        # Wait for orchestrator task to complete
+        await orchestrator_task
 
-            # If task completed normally (not due to restart), exit
-            if not restart_flag:
-                await orchestrator_task
-                break
-
-            restart_flag = False
-
-        except KeyboardInterrupt:
-            logger.info("Multi-agent bot system stopped by user")
-            break
-        except asyncio.CancelledError:
-            # Task was cancelled for restart
-            pass
-        except Exception as e:
-            logger.error(f"Error in orchestrator: {e}")
-            await asyncio.sleep(5)  # Wait before retry
-
-    # Final cleanup
-    if orchestrator is not None:
-        await orchestrator.stop()
+    except KeyboardInterrupt:
+        logger.info("Multi-agent bot system stopped by user")
+    except Exception as e:
+        logger.error(f"Error in orchestrator: {e}")
+    finally:
+        # Final cleanup
+        if orchestrator is not None:
+            await orchestrator.stop()
