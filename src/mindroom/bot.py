@@ -332,10 +332,11 @@ class AgentBot:
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
         sender_id = MatrixID.parse(event.sender)
-
-        if sender_id.is_agent and sender_id.agent_name:
+        assert self.config is not None
+        sender_agent_name = sender_id.agent_name(self.config)
+        if sender_id.is_agent and sender_agent_name:
             assert self.thread_invite_manager is not None
-            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
+            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
         is_command = event.body.strip().startswith("!")
         if is_command:  # ONLY router handles the command
@@ -352,7 +353,7 @@ class AgentBot:
         context = await self._extract_message_context(room, event)
 
         # If message is from another agent and we're not mentioned, ignore it
-        sender_is_agent = extract_agent_name(event.sender) is not None
+        sender_is_agent = extract_agent_name(event.sender, self.config) is not None
         if sender_is_agent and not context.am_i_mentioned:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
@@ -366,7 +367,7 @@ class AgentBot:
         if self.agent_name == ROUTER_AGENT_NAME:
             if not context.mentioned_agents:
                 # Only route if no agents have participated in the thread yet
-                agents_in_thread = get_agents_in_thread(context.thread_history)
+                agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
                 if not agents_in_thread:
                     await self._handle_ai_routing(room, event, context.thread_history)
             return
@@ -375,8 +376,8 @@ class AgentBot:
             return
 
         # Check if we should form a team first
-        agents_in_thread = get_agents_in_thread(context.thread_history)
-        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history)
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
+        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = should_form_team(context.mentioned_agents, agents_in_thread, all_mentioned_in_thread)
 
         # Simple team formation: only the first agent (alphabetically) handles team formation
@@ -410,6 +411,7 @@ class AgentBot:
             room_id=room.room_id,
             configured_rooms=self.rooms,
             thread_history=context.thread_history,
+            config=self.config,
         )
 
         if should_respond and not context.am_i_mentioned:
@@ -433,7 +435,7 @@ class AgentBot:
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
         assert self.client is not None
-        result = await interactive.handle_reaction(self.client, room, event, self.agent_name)
+        result = await interactive.handle_reaction(self.client, room, event, self.agent_name, self.config)
 
         if result:
             selected_value, thread_id = result
@@ -483,7 +485,7 @@ class AgentBot:
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
         assert self.thread_invite_manager is not None
-        mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
+        mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name, self.config)
 
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
@@ -718,7 +720,7 @@ class AgentBot:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
 
-        available_agents = get_available_agents_in_room(room)
+        available_agents = get_available_agents_in_room(room, self.config)
         if not available_agents:
             self.logger.debug("No available agents to route to")
             return

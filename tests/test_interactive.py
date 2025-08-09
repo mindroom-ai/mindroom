@@ -6,6 +6,7 @@ import nio
 import pytest
 
 import mindroom.interactive as interactive
+from mindroom.models import AgentConfig, Config, ModelConfig
 
 
 @pytest.fixture
@@ -18,6 +19,17 @@ def mock_client():
 
 class TestInteractiveFunctions:
     """Test cases for interactive functions."""
+
+    def setup_method(self):
+        """Set up test config."""
+        self.config = Config(
+            agents={
+                "test_agent": AgentConfig(display_name="Test Agent", rooms=["#test:example.org"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
 
     def test_should_create_interactive_question(self):
         """Test detection of interactive code blocks."""
@@ -183,7 +195,7 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$question123"
         event.key = "🚀"
 
-        result = await interactive.handle_reaction(mock_client, room, event, "test_agent")
+        result = await interactive.handle_reaction(mock_client, room, event, "test_agent", self.config)
 
         # Should return the selected value and thread_id
         assert result == ("fast", "$thread123")
@@ -208,7 +220,7 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$unknown123"
         event.key = "👍"
 
-        result = await interactive.handle_reaction(mock_client, room, event, "test_agent")
+        result = await interactive.handle_reaction(mock_client, room, event, "test_agent", self.config)
 
         # Should return None for unknown reaction
         assert result is None
@@ -236,7 +248,7 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$question123"
         event.key = "✅"
 
-        result = await interactive.handle_reaction(mock_client, room, event, "test_agent")
+        result = await interactive.handle_reaction(mock_client, room, event, "test_agent", self.config)
 
         # Should return None (ignoring own reaction)
         assert result is None
@@ -437,7 +449,7 @@ Just let me know your preference!"""
         reaction_event.reacts_to = event_id
         reaction_event.key = "🔍"
 
-        result = await interactive.handle_reaction(mock_client, room, reaction_event, "test_agent")
+        result = await interactive.handle_reaction(mock_client, room, reaction_event, "test_agent", self.config)
 
         # Verify reaction was processed
         assert result == ("detailed", "$thread123")  # Thread ID from the question

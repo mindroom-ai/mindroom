@@ -1,11 +1,13 @@
 """Unified Matrix ID handling system."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import ClassVar
 
-from ..agent_config import load_config
 from ..constants import ROUTER_AGENT_NAME
+from ..models import Config
 
 
 @dataclass(frozen=True)
@@ -20,7 +22,7 @@ class MatrixID:
     DEFAULT_DOMAIN: ClassVar[str] = "mindroom.space"
 
     @classmethod
-    def parse(cls, matrix_id: str) -> "MatrixID":
+    def parse(cls, matrix_id: str) -> MatrixID:
         """Parse a Matrix ID like @mindroom_calculator:localhost."""
         if not matrix_id.startswith("@"):
             raise ValueError(f"Invalid Matrix ID: {matrix_id}")
@@ -32,12 +34,12 @@ class MatrixID:
         return cls(username=parts[0], domain=parts[1])
 
     @classmethod
-    def from_agent(cls, agent_name: str, domain: str) -> "MatrixID":
+    def from_agent(cls, agent_name: str, domain: str) -> MatrixID:
         """Create a MatrixID for an agent."""
         return cls(username=f"{cls.AGENT_PREFIX}{agent_name}", domain=domain)
 
     @classmethod
-    def from_username(cls, username: str, domain: str) -> "MatrixID":
+    def from_username(cls, username: str, domain: str) -> MatrixID:
         """Create a MatrixID from a username (without @ prefix)."""
         return cls(username=username, domain=domain)
 
@@ -56,8 +58,7 @@ class MatrixID:
         """Check if this is on the mindroom.space domain."""
         return self.domain == self.DEFAULT_DOMAIN
 
-    @property
-    def agent_name(self) -> str | None:
+    def agent_name(self, config: Config) -> str | None:
         """Extract agent name if this is an agent ID."""
         if not self.is_agent:
             return None
@@ -74,7 +75,6 @@ class MatrixID:
             return name
 
         # Validate regular agents against config
-        config = load_config()
         return name if name in config.agents else None
 
     def __str__(self) -> str:
@@ -89,7 +89,7 @@ class ThreadStateKey:
     agent_name: str
 
     @classmethod
-    def parse(cls, state_key: str) -> "ThreadStateKey":
+    def parse(cls, state_key: str) -> ThreadStateKey:
         """Parse a state key."""
         parts = state_key.split(":", 1)
         if len(parts) != 2:
@@ -111,15 +111,15 @@ def parse_matrix_id(matrix_id: str) -> MatrixID:
     return MatrixID.parse(matrix_id)
 
 
-def is_agent_id(matrix_id: str) -> bool:
+def is_agent_id(matrix_id: str, config: Config) -> bool:
     """Quick check if a Matrix ID is an agent."""
     if not matrix_id.startswith("@") or ":" not in matrix_id:
         return False
     mid = parse_matrix_id(matrix_id)
-    return mid.is_agent and mid.agent_name is not None
+    return mid.is_agent and mid.agent_name(config) is not None
 
 
-def extract_agent_name(sender_id: str) -> str | None:
+def extract_agent_name(sender_id: str, config: Config) -> str | None:
     """Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
 
     Returns agent name (e.g., 'calculator') or None if not an agent.
@@ -127,7 +127,7 @@ def extract_agent_name(sender_id: str) -> str | None:
     if not sender_id.startswith("@") or ":" not in sender_id:
         return None
     mid = parse_matrix_id(sender_id)
-    return mid.agent_name
+    return mid.agent_name(config)
 
 
 def extract_server_name_from_homeserver(homeserver: str) -> str:

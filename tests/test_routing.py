@@ -8,7 +8,7 @@ import pytest
 from mindroom.agent_config import describe_agent, load_config
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import Config, RouterConfig
+from mindroom.models import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import extract_agent_name, has_any_agent_mentions_in_thread
 
@@ -128,14 +128,28 @@ class TestAIRouting:
         mock_event.body = "Test message"
 
         with patch("mindroom.bot.suggest_agent_for_message") as mock_suggest:
-            await bot._handle_ai_routing(mock_room, mock_event, [])
+            # Should raise AssertionError since general is not the router agent
+            with pytest.raises(AssertionError):
+                await bot._handle_ai_routing(mock_room, mock_event, [])
 
-            # Should not call routing since general is not the router agent
+            # Should not call routing since it failed the assertion
             mock_suggest.assert_not_called()
 
 
 class TestThreadUtils:
     """Test thread utility functions."""
+
+    def setup_method(self):
+        """Set up test config."""
+        self.config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
 
     def test_has_any_agent_mentions_in_thread_with_mentions(self) -> None:
         """Test detecting agent mentions in thread."""
@@ -152,7 +166,7 @@ class TestThreadUtils:
             },
         ]
 
-        assert has_any_agent_mentions_in_thread(thread_history) is True
+        assert has_any_agent_mentions_in_thread(thread_history, self.config) is True
 
     def test_has_any_agent_mentions_in_thread_no_mentions(self) -> None:
         """Test thread with no agent mentions."""
@@ -169,7 +183,7 @@ class TestThreadUtils:
             },
         ]
 
-        assert has_any_agent_mentions_in_thread(thread_history) is False
+        assert has_any_agent_mentions_in_thread(thread_history, self.config) is False
 
     def test_has_any_agent_mentions_in_thread_user_mentions(self) -> None:
         """Test thread with only user mentions (not agents)."""
@@ -181,19 +195,19 @@ class TestThreadUtils:
             },
         ]
 
-        assert has_any_agent_mentions_in_thread(thread_history) is False
+        assert has_any_agent_mentions_in_thread(thread_history, self.config) is False
 
     def test_extract_agent_name_rejects_unconfigured(self) -> None:
         """Test that unconfigured agents are not recognized."""
         # This should return None because "fake_agent" is not in config.yaml
-        assert extract_agent_name("@mindroom_fake_agent:localhost") is None
+        assert extract_agent_name("@mindroom_fake_agent:localhost", self.config) is None
 
         # But real agents should work
-        assert extract_agent_name("@mindroom_calculator:localhost") == "calculator"
+        assert extract_agent_name("@mindroom_calculator:localhost", self.config) == "calculator"
 
         # Regular users should still be rejected
-        assert extract_agent_name("@mindroom_user:localhost") is None
-        assert extract_agent_name("@regular_user:localhost") is None
+        assert extract_agent_name("@mindroom_user:localhost", self.config) is None
+        assert extract_agent_name("@regular_user:localhost", self.config) is None
 
 
 class TestAgentDescription:

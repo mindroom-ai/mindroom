@@ -12,6 +12,7 @@ import nio
 from .logging_config import get_logger
 from .matrix.client import extract_thread_info
 from .matrix.identity import is_agent_id
+from .models import Config
 
 logger = get_logger(__name__)
 
@@ -61,6 +62,7 @@ async def handle_reaction(
     room: nio.MatrixRoom,
     event: nio.ReactionEvent,
     agent_name: str,
+    config: Config,
 ) -> tuple[str, str | None] | None:
     """Handle a reaction event that might be an answer to a question.
 
@@ -103,7 +105,7 @@ async def handle_reaction(
         return None
 
     # Ignore reactions from other agents
-    if is_agent_id(event.sender):
+    if is_agent_id(event.sender, config):
         logger.debug("Ignoring reaction from agent", sender=event.sender, reaction=reaction_key)
         return None
 

@@ -8,21 +8,28 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import Config, RouterConfig
+from mindroom.models import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
 
 def setup_test_bot(
-    agent: AgentMatrixUser, storage_path: Path, room_id: str, enable_streaming: bool = False
+    agent: AgentMatrixUser, storage_path: Path, room_id: str, enable_streaming: bool = False, config: Config = None
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
-    config = Config(router=RouterConfig(model="default"))
+    if config is None:
+        config = Config(router=RouterConfig(model="default"))
 
     bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()
     bot.response_tracker = ResponseTracker(bot.agent_name, base_path=storage_path)
     bot.thread_invite_manager = ThreadInviteManager(bot.client)
+
+    # Mock orchestrator
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.current_config = config
+    bot.orchestrator = mock_orchestrator
+
     return bot
 
 
@@ -40,6 +47,18 @@ def mock_agent_user() -> AgentMatrixUser:
 class TestStreamingEdits:
     """Test that streaming edits don't trigger duplicate responses."""
 
+    def setup_method(self):
+        """Set up test config."""
+        self.config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
@@ -52,7 +71,7 @@ class TestStreamingEdits:
     ) -> None:
         """Test that agents don't respond to edits of messages they already responded to."""
         # Set up bot
-        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost")
+        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -147,7 +166,7 @@ class TestStreamingEdits:
     ) -> None:
         """Test that agents still respond to new messages after seeing edits."""
         # Set up bot
-        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost")
+        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -191,7 +210,7 @@ class TestStreamingEdits:
     ) -> None:
         """Test that agents ignore ALL edits from other agents, even first-time mentions."""
         # Set up bot
-        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost")
+        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -259,7 +278,7 @@ class TestStreamingEdits:
     ) -> None:
         """Test that agents DO respond to user edits that add new mentions."""
         # Set up bot
-        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost")
+        bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
         # Mock successful room_send response
         mock_send_response = MagicMock()

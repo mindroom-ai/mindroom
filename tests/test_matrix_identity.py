@@ -3,10 +3,24 @@
 import pytest
 
 from mindroom.matrix.identity import MatrixID, ThreadStateKey, extract_agent_name, is_agent_id, parse_matrix_id
+from mindroom.models import AgentConfig, Config, ModelConfig
 
 
 class TestMatrixID:
     """Test the MatrixID class."""
+
+    def setup_method(self):
+        """Set up test config."""
+        self.config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                "router": AgentConfig(display_name="Router", rooms=["#test:example.org"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
 
     def test_parse_valid_matrix_id(self):
         """Test parsing a valid Matrix ID."""
@@ -50,15 +64,15 @@ class TestMatrixID:
         """Test extracting agent name."""
         # Valid agent
         mid = MatrixID.parse("@mindroom_calculator:localhost")
-        assert mid.agent_name == "calculator"
+        assert mid.agent_name(self.config) == "calculator"
 
         # Not an agent
         mid = MatrixID.parse("@user:localhost")
-        assert mid.agent_name is None
+        assert mid.agent_name(self.config) is None
 
         # Agent prefix but not in config
         mid = MatrixID.parse("@mindroom_unknown:localhost")
-        assert mid.agent_name is None
+        assert mid.agent_name(self.config) is None
 
     def test_parse_router(self):
         """Test parsing a router agent ID."""
@@ -67,7 +81,7 @@ class TestMatrixID:
         assert mid.domain == "localhost"
         assert mid.full_id == "@mindroom_router:localhost"
         assert mid.is_agent is True
-        assert mid.agent_name == "router"
+        assert mid.agent_name(self.config) == "router"
 
 
 class TestThreadStateKey:
@@ -96,20 +110,32 @@ class TestThreadStateKey:
 class TestHelperFunctions:
     """Test helper functions."""
 
+    def setup_method(self):
+        """Set up test config."""
+        self.config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+
     def test_is_agent_id(self):
         """Test quick agent ID check."""
-        assert is_agent_id("@mindroom_calculator:localhost") is True
-        assert is_agent_id("@mindroom_general:localhost") is True
-        assert is_agent_id("@user:localhost") is False
-        assert is_agent_id("invalid") is False
-        assert is_agent_id("@mindroom_unknown:localhost") is False
+        assert is_agent_id("@mindroom_calculator:localhost", self.config) is True
+        assert is_agent_id("@mindroom_general:localhost", self.config) is True
+        assert is_agent_id("@user:localhost", self.config) is False
+        assert is_agent_id("invalid", self.config) is False
+        assert is_agent_id("@mindroom_unknown:localhost", self.config) is False
 
     def test_extract_agent_name(self):
         """Test agent name extraction."""
-        assert extract_agent_name("@mindroom_calculator:localhost") == "calculator"
-        assert extract_agent_name("@mindroom_general:localhost") == "general"
-        assert extract_agent_name("@user:localhost") is None
-        assert extract_agent_name("invalid") is None
+        assert extract_agent_name("@mindroom_calculator:localhost", self.config) == "calculator"
+        assert extract_agent_name("@mindroom_general:localhost", self.config) == "general"
+        assert extract_agent_name("@user:localhost", self.config) is None
+        assert extract_agent_name("invalid", self.config) is None
 
     def test_parse_matrix_id_caching(self):
         """Test that parsing is cached."""
