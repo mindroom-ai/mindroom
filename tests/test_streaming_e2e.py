@@ -59,11 +59,11 @@ async def test_streaming_edits_e2e(
         # Set a proper user_id based on agent_name if we have agent_name
         if hasattr(bot_self, "agent_name"):
             if bot_self.agent_name == "helper":
-                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
+                bot_self.agent_user.user_id = "@mindroom_helper:localhost"  # type: ignore[attr-defined]
             elif bot_self.agent_name == "calculator":
-                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
+                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"  # type: ignore[attr-defined]
             elif bot_self.agent_name == "router":
-                bot_self.agent_user.user_id = "@mindroom_router:localhost"
+                bot_self.agent_user.user_id = "@mindroom_router:localhost"  # type: ignore[attr-defined]
         elif hasattr(bot_self, "agent_user") and hasattr(bot_self.agent_user, "agent_name"):
             # Alternative: get agent_name from agent_user
             agent_user = bot_self.agent_user
