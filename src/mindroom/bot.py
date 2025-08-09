@@ -192,8 +192,14 @@ class AgentBot:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
-        """Leave any rooms this agent is no longer configured for."""
+        """Leave any rooms this agent is no longer configured for.
+
+        Note: Agents will stay in rooms where they have thread invitations,
+        even if not configured for the room.
+        """
         assert self.client is not None
+        assert self.thread_invite_manager is not None
+
         # Get all rooms we're currently in
         joined_rooms = await get_joined_rooms(self.client)
         if joined_rooms is None:
@@ -202,8 +208,14 @@ class AgentBot:
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.rooms)
 
-        # Leave rooms we're no longer configured for
+        # Leave rooms we're no longer configured for AND have no thread invitations
         for room_id in current_rooms - configured_rooms:
+            # Check if we have any thread invitations in this room
+            agent_threads = await self.thread_invite_manager.get_agent_threads(room_id, self.agent_name)
+            if agent_threads:
+                self.logger.info(f"Staying in room {room_id} due to {len(agent_threads)} thread invitation(s)")
+                continue
+
             success = await leave_room(self.client, room_id)
             if success:
                 self.logger.info(f"Left unconfigured room {room_id}")
@@ -326,8 +338,15 @@ class AgentBot:
         if event.sender == self.agent_user.user_id:
             return
 
+        # Check if we should process messages in this room
+        # Process if: configured for room OR invited to threads in room
         if room.room_id not in self.rooms:
-            return
+            # Check if we're invited to any threads in this room
+            assert self.thread_invite_manager is not None
+            agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
+            if not agent_threads:
+                # Not configured for room and no thread invitations
+                return
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
