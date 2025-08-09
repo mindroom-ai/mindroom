@@ -14,6 +14,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.models import AgentConfig, Config, RouterConfig, TeamConfig
+from mindroom.thread_invites import ThreadInviteManager
 
 
 @pytest.fixture
@@ -118,6 +119,10 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:
     mock_client = AsyncMock()
     bot.client = mock_client
 
+    # Initialize thread_invite_manager as would happen in start()
+    bot.thread_invite_manager = ThreadInviteManager(mock_client)
+    bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
+
     # Mock joined_rooms to return both room1 and room2 (agent is in both)
     joined_rooms_response = MagicMock()
     joined_rooms_response.__class__ = nio.JoinedRoomsResponse
@@ -167,6 +172,10 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
     # Mock the client
     mock_client = AsyncMock()
     bot.client = mock_client
+
+    # Initialize thread_invite_manager as would happen in start()
+    bot.thread_invite_manager = ThreadInviteManager(mock_client)
+    bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
 
     # Track room operations
     joined_rooms = []

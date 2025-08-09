@@ -270,7 +270,7 @@ class AgentBot:
         # Router bot has additional responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
             try:
-                await cleanup_all_orphaned_bots(self.client, self.config)
+                await cleanup_all_orphaned_bots(self.client, self.config, self.thread_invite_manager)
             except Exception as e:
                 self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
 
