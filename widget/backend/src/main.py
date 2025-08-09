@@ -100,12 +100,10 @@ async def load_config():
 
 
 @app.put("/api/config/save")
-async def save_config(config: Config):
+async def save_config(new_config: Config):
     """Save configuration to file"""
     try:
-        config_dict = config.model_dump()
-
-        # Write to YAML file
+        config_dict = new_config.model_dump(exclude_none=True)
         save_config_to_file(config_dict)
 
         # Update current config
