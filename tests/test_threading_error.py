@@ -13,7 +13,7 @@ import pytest
 import pytest_asyncio
 
 from mindroom.bot import AgentBot
-from mindroom.matrix import AgentMatrixUser
+from mindroom.matrix.users import AgentMatrixUser
 
 
 class TestThreadingBehavior:

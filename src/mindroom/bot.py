@@ -27,14 +27,9 @@ from .commands import (
     handle_widget_command,
 )
 from .logging_config import emoji, get_logger, setup_logging
-from .matrix import (
-    MATRIX_HOMESERVER,
-    AgentMatrixUser,
-    MatrixID,
-    create_mention_content_from_text,
+from .matrix import MATRIX_HOMESERVER
+from .matrix.client import (
     edit_message,
-    extract_agent_name,
-    extract_server_name_from_homeserver,
     extract_thread_info,
     fetch_thread_history,
     get_joined_rooms,
@@ -42,12 +37,17 @@ from .matrix import (
     invite_to_room,
     join_room,
     leave_room,
-    login_agent_user,
     send_message,
 )
+from .matrix.identity import (
+    MatrixID,
+    extract_agent_name,
+    extract_server_name_from_homeserver,
+)
+from .matrix.mentions import create_mention_content_from_text
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
-from .matrix.users import create_agent_user
+from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
 from .models import Config
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots

@@ -2,7 +2,7 @@
 
 import pytest
 
-from mindroom.matrix import MatrixID, ThreadStateKey, extract_agent_name, is_agent_id, parse_matrix_id
+from mindroom.matrix.identity import MatrixID, ThreadStateKey, extract_agent_name, is_agent_id, parse_matrix_id
 
 
 class TestMatrixID:

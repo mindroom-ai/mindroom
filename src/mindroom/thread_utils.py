@@ -5,7 +5,7 @@ from typing import Any
 import nio
 
 from .agent_config import ROUTER_AGENT_NAME
-from .matrix import extract_agent_name
+from .matrix.identity import extract_agent_name
 
 
 def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str], bool]:

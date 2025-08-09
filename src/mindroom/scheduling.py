@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
 from .logging_config import get_logger
-from .matrix import send_message
+from .matrix.client import send_message
 
 logger = get_logger(__name__)
 

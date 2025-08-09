@@ -7,14 +7,14 @@ import nio
 import pytest
 import yaml
 
-from mindroom.matrix import (
+from mindroom.matrix.client import register_user
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.users import (
     AgentMatrixUser,
-    MatrixState,
     create_agent_user,
     ensure_all_agent_users,
     get_agent_credentials,
     login_agent_user,
-    register_user,
     save_agent_credentials,
 )
 

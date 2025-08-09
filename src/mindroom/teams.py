@@ -14,7 +14,7 @@ from agno.team import Team
 from .agent_config import ROUTER_AGENT_NAME, load_config
 from .ai import get_model_instance
 from .logging_config import get_logger
-from .matrix import get_room_alias_from_id
+from .matrix.rooms import get_room_alias_from_id
 
 if TYPE_CHECKING:
     from .bot import MultiAgentOrchestrator

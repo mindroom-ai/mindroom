@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import nio
 
 from .logging_config import get_logger
-from .matrix import MatrixID, ThreadStateKey
+from .matrix.identity import MatrixID, ThreadStateKey
 
 logger = get_logger(__name__)
 

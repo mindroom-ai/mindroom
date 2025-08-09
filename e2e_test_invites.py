@@ -14,7 +14,8 @@ import nio
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from mindroom.cli import _run
-from mindroom.matrix import MATRIX_HOMESERVER, MatrixID
+from mindroom.matrix import MATRIX_HOMESERVER
+from mindroom.matrix.identity import MatrixID
 
 
 class InviteE2ETest:

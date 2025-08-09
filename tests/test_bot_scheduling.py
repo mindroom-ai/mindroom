@@ -7,7 +7,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
-from mindroom.matrix import AgentMatrixUser
+from mindroom.matrix.users import AgentMatrixUser
 
 
 @pytest.fixture
