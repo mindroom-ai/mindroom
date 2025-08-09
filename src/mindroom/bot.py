@@ -257,10 +257,6 @@ class AgentBot:
 
         # Router bot has additional responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
-            # Note: Room creation is now handled by the orchestrator
-            # to ensure consistency between start() and update_config()
-
-            # Clean up any orphaned bots (best effort - don't fail initialization)
             try:
                 await cleanup_all_orphaned_bots(self.client)
             except Exception as e:
@@ -323,6 +319,9 @@ class AgentBot:
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
         assert self.client is not None
+        if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
+            return
+
         if event.sender == self.agent_user.user_id:
             return
 
@@ -709,8 +708,7 @@ class AgentBot:
         self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
     ) -> None:
         # Only router agent should handle routing
-        if self.agent_name != ROUTER_AGENT_NAME:
-            return
+        assert self.agent_name == ROUTER_AGENT_NAME
 
         available_agents = get_available_agents_in_room(room)
         if not available_agents:
@@ -1289,7 +1287,7 @@ async def _identify_entities_to_restart_simplified(
 
     entities_to_restart = agents_to_restart | teams_to_restart
 
-    if _router_needs_restart_simplified(current_config, new_config):
+    if _router_needs_restart(current_config, new_config):
         entities_to_restart.add(ROUTER_AGENT_NAME)
 
     return entities_to_restart
@@ -1327,7 +1325,7 @@ def _get_changed_teams(current_config: Config | None, new_config: Config, agent_
     return changed
 
 
-def _router_needs_restart_simplified(current_config: Config | None, new_config: Config) -> bool:
+def _router_needs_restart(current_config: Config | None, new_config: Config) -> bool:
     """Check if router needs restart due to room changes."""
     if not current_config:
         return False
