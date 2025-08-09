@@ -33,7 +33,7 @@ def save_config_to_file(config: dict[str, Any]) -> None:
 
 
 # Global variable to store current config
-current_config: dict[str, Any] = {}
+config: dict[str, Any] = {}
 config_lock = threading.Lock()
 
 
@@ -52,10 +52,10 @@ class ConfigFileHandler(FileSystemEventHandler):
 
 def load_config_from_file():
     """Load config from YAML file"""
-    global current_config
+    global config
     try:
         with open(CONFIG_PATH) as f, config_lock:
-            current_config = yaml.safe_load(f)
+            config = yaml.safe_load(f)
         print("Config loaded successfully")
     except Exception as e:
         print(f"Error loading config: {e}")
@@ -87,16 +87,16 @@ async def shutdown_event():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "config_loaded": bool(current_config)}
+    return {"status": "healthy", "config_loaded": bool(config)}
 
 
 @app.post("/api/config/load")
 async def load_config():
     """Load configuration from file"""
     with config_lock:
-        if not current_config:
+        if not config:
             raise HTTPException(status_code=500, detail="Failed to load configuration")
-        return current_config
+        return config
 
 
 @app.put("/api/config/save")
@@ -110,7 +110,7 @@ async def save_config(config: Config):
 
         # Update current config
         with config_lock:
-            current_config.update(config_dict)
+            config.update(config_dict)
 
         return {"success": True}
     except Exception as e:
@@ -121,7 +121,7 @@ async def save_config(config: Config):
 async def get_agents():
     """Get all agents"""
     with config_lock:
-        agents = current_config.get("agents", {})
+        agents = config.get("agents", {})
         # Convert to list format with IDs
         agent_list = []
         for agent_id, agent_data in agents.items():
@@ -134,18 +134,18 @@ async def get_agents():
 async def update_agent(agent_id: str, agent_data: dict[str, Any]):
     """Update a specific agent"""
     with config_lock:
-        if "agents" not in current_config:
-            current_config["agents"] = {}
+        if "agents" not in config:
+            config["agents"] = {}
 
         # Remove ID from agent_data if present
         agent_data_copy = agent_data.copy()
         agent_data_copy.pop("id", None)
 
-        current_config["agents"][agent_id] = agent_data_copy
+        config["agents"][agent_id] = agent_data_copy
 
     # Save to file
     try:
-        save_config_to_file(current_config)
+        save_config_to_file(config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save agent: {str(e)}") from e
@@ -157,14 +157,14 @@ async def create_agent(agent_data: dict[str, Any]):
     agent_id = agent_data.get("display_name", "new_agent").lower().replace(" ", "_")
 
     with config_lock:
-        if "agents" not in current_config:
-            current_config["agents"] = {}
+        if "agents" not in config:
+            config["agents"] = {}
 
         # Check if agent already exists
-        if agent_id in current_config["agents"]:
+        if agent_id in config["agents"]:
             # Generate unique ID
             counter = 1
-            while f"{agent_id}_{counter}" in current_config["agents"]:
+            while f"{agent_id}_{counter}" in config["agents"]:
                 counter += 1
             agent_id = f"{agent_id}_{counter}"
 
@@ -172,11 +172,11 @@ async def create_agent(agent_data: dict[str, Any]):
         agent_data_copy = agent_data.copy()
         agent_data_copy.pop("id", None)
 
-        current_config["agents"][agent_id] = agent_data_copy
+        config["agents"][agent_id] = agent_data_copy
 
     # Save to file
     try:
-        save_config_to_file(current_config)
+        save_config_to_file(config)
         return {"id": agent_id, "success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}") from e
@@ -186,14 +186,14 @@ async def create_agent(agent_data: dict[str, Any]):
 async def delete_agent(agent_id: str):
     """Delete an agent"""
     with config_lock:
-        if "agents" not in current_config or agent_id not in current_config["agents"]:
+        if "agents" not in config or agent_id not in config["agents"]:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-        del current_config["agents"][agent_id]
+        del config["agents"][agent_id]
 
     # Save to file
     try:
-        save_config_to_file(current_config)
+        save_config_to_file(config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}") from e
@@ -203,7 +203,7 @@ async def delete_agent(agent_id: str):
 async def get_teams():
     """Get all teams"""
     with config_lock:
-        teams = current_config.get("teams", {})
+        teams = config.get("teams", {})
         # Convert to list format with IDs
         team_list = []
         for team_id, team_data in teams.items():
@@ -216,18 +216,18 @@ async def get_teams():
 async def update_team(team_id: str, team_data: dict[str, Any]):
     """Update a specific team"""
     with config_lock:
-        if "teams" not in current_config:
-            current_config["teams"] = {}
+        if "teams" not in config:
+            config["teams"] = {}
 
         # Remove ID from team_data if present
         team_data_copy = team_data.copy()
         team_data_copy.pop("id", None)
 
-        current_config["teams"][team_id] = team_data_copy
+        config["teams"][team_id] = team_data_copy
 
     # Save to file
     try:
-        save_config_to_file(current_config)
+        save_config_to_file(config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save team: {str(e)}") from e
@@ -239,14 +239,14 @@ async def create_team(team_data: dict[str, Any]):
     team_id = team_data.get("display_name", "new_team").lower().replace(" ", "_")
 
     with config_lock:
-        if "teams" not in current_config:
-            current_config["teams"] = {}
+        if "teams" not in config:
+            config["teams"] = {}
 
         # Check if team already exists
-        if team_id in current_config["teams"]:
+        if team_id in config["teams"]:
             # Generate unique ID
             counter = 1
-            while f"{team_id}_{counter}" in current_config["teams"]:
+            while f"{team_id}_{counter}" in config["teams"]:
                 counter += 1
             team_id = f"{team_id}_{counter}"
 
@@ -254,11 +254,11 @@ async def create_team(team_data: dict[str, Any]):
         team_data_copy = team_data.copy()
         team_data_copy.pop("id", None)
 
-        current_config["teams"][team_id] = team_data_copy
+        config["teams"][team_id] = team_data_copy
 
     # Save to file
     try:
-        save_config_to_file(current_config)
+        save_config_to_file(config)
         return {"id": team_id, "success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create team: {str(e)}") from e
@@ -268,14 +268,14 @@ async def create_team(team_data: dict[str, Any]):
 async def delete_team(team_id: str):
     """Delete a team"""
     with config_lock:
-        if "teams" not in current_config or team_id not in current_config["teams"]:
+        if "teams" not in config or team_id not in config["teams"]:
             raise HTTPException(status_code=404, detail="Team not found")
 
-        del current_config["teams"][team_id]
+        del config["teams"][team_id]
 
     # Save to file
     try:
-        save_config_to_file(current_config)
+        save_config_to_file(config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete team: {str(e)}") from e
@@ -285,21 +285,21 @@ async def delete_team(team_id: str):
 async def get_models():
     """Get all model configurations"""
     with config_lock:
-        return current_config.get("models", {})
+        return config.get("models", {})
 
 
 @app.put("/api/config/models/{model_id}")
 async def update_model(model_id: str, model_data: dict[str, Any]):
     """Update a model configuration"""
     with config_lock:
-        if "models" not in current_config:
-            current_config["models"] = {}
+        if "models" not in config:
+            config["models"] = {}
 
-        current_config["models"][model_id] = model_data
+        config["models"][model_id] = model_data
 
     # Save to file
     try:
-        save_config_to_file(current_config)
+        save_config_to_file(config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save model: {str(e)}") from e
@@ -309,18 +309,18 @@ async def update_model(model_id: str, model_data: dict[str, Any]):
 async def get_room_models():
     """Get room-specific model overrides"""
     with config_lock:
-        return current_config.get("room_models", {})
+        return config.get("room_models", {})
 
 
 @app.put("/api/config/room-models")
 async def update_room_models(room_models: dict[str, str]):
     """Update room-specific model overrides"""
     with config_lock:
-        current_config["room_models"] = room_models
+        config["room_models"] = room_models
 
     # Save to file
     try:
-        save_config_to_file(current_config)
+        save_config_to_file(config)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save room models: {str(e)}") from e
@@ -333,7 +333,7 @@ async def test_model(request: TestModelRequest):
     # For now, just return success for demonstration
     model_id = request.modelId
     with config_lock:
-        if model_id in current_config.get("models", {}):
+        if model_id in config.get("models", {}):
             return {"success": True, "message": f"Model {model_id} is configured"}
         else:
             return {"success": False, "message": f"Model {model_id} not found"}
@@ -373,7 +373,7 @@ async def get_available_rooms():
     # Extract unique rooms from all agents
     rooms = set()
     with config_lock:
-        for agent_data in current_config.get("agents", {}).values():
+        for agent_data in config.get("agents", {}).values():
             agent_rooms = agent_data.get("rooms", [])
             rooms.update(agent_rooms)
 

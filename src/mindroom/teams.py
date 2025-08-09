@@ -260,8 +260,8 @@ async def create_team_response(
             prompt = f"Thread Context:\n{context}\n\nUser: {message}"
 
     # Use provided model or default
-    assert orchestrator.current_config is not None
-    model = get_model_instance(orchestrator.current_config, model_name or "default")
+    assert orchestrator.config is not None
+    model = get_model_instance(orchestrator.config, model_name or "default")
 
     # Let Agno Team handle everything - it already knows how to describe members
     team = Team(
