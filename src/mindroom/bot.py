@@ -1190,8 +1190,13 @@ class MultiAgentOrchestrator:
         await self._ensure_room_invitations()
 
         # Ensure user joins all rooms after being invited
-        if self._created_room_ids:
-            await ensure_user_in_rooms(MATRIX_HOMESERVER, self._created_room_ids)
+        # Get all room IDs (not just newly created ones)
+        from .matrix import load_rooms
+
+        all_rooms = load_rooms()
+        all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
+        if all_room_ids:
+            await ensure_user_in_rooms(MATRIX_HOMESERVER, all_room_ids)
 
         # Now have bots join their configured rooms
         join_tasks = [bot.ensure_rooms() for bot in bots]
