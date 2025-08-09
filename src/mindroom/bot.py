@@ -412,6 +412,7 @@ class AgentBot:
             configured_rooms=self.rooms,
             thread_history=context.thread_history,
             config=self.config,
+            is_invited_to_thread=context.is_invited_to_thread,
         )
 
         if should_respond and not context.am_i_mentioned:
