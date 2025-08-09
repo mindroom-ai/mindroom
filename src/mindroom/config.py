@@ -195,11 +195,8 @@ class Config(BaseModel):
             config_path: Path to save the config to. If None, uses DEFAULT_AGENTS_CONFIG.
         """
         path = config_path or DEFAULT_AGENTS_CONFIG
-
-        # Convert to dict excluding None values
         config_dict = self.model_dump(exclude_none=True)
 
-        # Recursively remove empty lists
         def remove_empty_lists(obj: Any) -> Any:
             if isinstance(obj, dict):
                 return {k: remove_empty_lists(v) for k, v in obj.items() if v != []}
@@ -209,8 +206,6 @@ class Config(BaseModel):
                 return obj
 
         config_dict = remove_empty_lists(config_dict)
-
-        # Save to YAML
         with open(path, "w") as f:
             yaml.dump(config_dict, f, default_flow_style=False, sort_keys=True)
 
