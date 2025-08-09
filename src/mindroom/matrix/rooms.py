@@ -164,7 +164,7 @@ async def ensure_all_rooms_exist(
     client: nio.AsyncClient,
     config: Config,
 ) -> dict[str, str]:
-    """Ensure all configured rooms exist.
+    """Ensure all configured rooms exist and invite user account.
 
     Args:
         client: Matrix client to use for room creation
@@ -198,5 +198,24 @@ async def ensure_all_rooms_exist(
 
         if room_id:
             room_ids[room_key] = room_id
+
+    # Invite the user account to all rooms
+    from .client import invite_to_room
+    from .identity import extract_server_name_from_homeserver
+    from .state import MatrixState
+
+    state = MatrixState.load()
+    user_account = state.get_account("user")
+    if user_account:
+        server_name = extract_server_name_from_homeserver(client.homeserver)
+        user_id = f"@{user_account.username}:{server_name}"
+
+        for room_key, room_id in room_ids.items():
+            # Invite user to room
+            success = await invite_to_room(client, room_id, user_id)
+            if success:
+                logger.info(f"Invited user {user_id} to room {room_key}")
+            else:
+                logger.warning(f"Failed to invite user {user_id} to room {room_key}")
 
     return room_ids
