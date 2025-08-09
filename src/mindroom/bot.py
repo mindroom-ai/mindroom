@@ -46,6 +46,7 @@ from .matrix import (
     send_message,
 )
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, resolve_room_aliases
+from .matrix.state import MatrixState
 from .matrix.users import create_agent_user
 from .models import Config
 from .response_tracker import ResponseTracker
@@ -1230,8 +1231,6 @@ class MultiAgentOrchestrator:
         server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
 
         # First, invite the user account to all rooms
-        from .matrix.state import MatrixState
-
         state = MatrixState.load()
         user_account = state.get_account("user")
         if user_account:
