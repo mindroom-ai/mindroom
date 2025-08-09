@@ -113,9 +113,9 @@ class TestThreadingBehavior:
         )
 
         # Initialize the bot (to set up components it needs)
-        bot.response_tracker.has_responded.return_value = False
-        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
-        bot.thread_invite_manager.update_agent_activity = AsyncMock()
+        bot.response_tracker.has_responded.return_value = False  # type: ignore[attr-defined]
+        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        bot.thread_invite_manager.update_agent_activity = AsyncMock()  # type: ignore[method-assign]
 
         # Mock interactive.handle_text_response to return None (not an interactive response)
         # Mock _generate_response to capture the call and send a test response
@@ -169,21 +169,21 @@ class TestThreadingBehavior:
         )
 
         # Mock the bot's response
-        bot.client.room_send = AsyncMock(
+        bot.client.room_send = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
         )
 
         # Mock thread history
-        bot.client.room_messages = AsyncMock(
+        bot.client.room_messages = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomMessagesResponse.from_dict(
                 {"chunk": [], "start": "s1", "end": "e1"}, room_id="!test:localhost"
             )
         )
 
         # Initialize response tracking
-        bot.response_tracker.has_responded.return_value = False
-        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
-        bot.thread_invite_manager.update_agent_activity = AsyncMock()
+        bot.response_tracker.has_responded.return_value = False  # type: ignore[attr-defined]
+        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        bot.thread_invite_manager.update_agent_activity = AsyncMock()  # type: ignore[method-assign]
 
         # Mock interactive.handle_text_response and make AI fast
         with (
@@ -197,7 +197,7 @@ class TestThreadingBehavior:
         bot.client.room_send.assert_called_once()  # type: ignore[union-attr]
 
         # Check the content
-        call_args = bot.client.room_send.call_args
+        call_args = bot.client.room_send.call_args  # type: ignore[union-attr]
         content = call_args.kwargs["content"]
 
         # The response should be in the same thread
@@ -259,7 +259,7 @@ class TestThreadingBehavior:
         mock_agent.arun = mock_arun
         bot.agent = mock_agent
 
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)  # type: ignore[union-attr]
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
 
         # Create a command that's a reply to another message (not in a thread)
@@ -354,7 +354,7 @@ class TestThreadingBehavior:
         mock_agent.arun = mock_arun
         bot.agent = mock_agent
 
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)  # type: ignore[union-attr]
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
 
         # Create a command in a thread
@@ -430,21 +430,21 @@ class TestThreadingBehavior:
         )
 
         # Mock the bot's response
-        bot.client.room_send = AsyncMock(
+        bot.client.room_send = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
         )
 
         # Mock thread history
-        bot.client.room_messages = AsyncMock(
+        bot.client.room_messages = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomMessagesResponse.from_dict(
                 {"chunk": [], "start": "s1", "end": "e1"}, room_id="!test:localhost"
             )
         )
 
         # Initialize response tracking
-        bot.response_tracker.has_responded.return_value = False
-        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
-        bot.thread_invite_manager.update_agent_activity = AsyncMock()
+        bot.response_tracker.has_responded.return_value = False  # type: ignore[attr-defined]
+        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        bot.thread_invite_manager.update_agent_activity = AsyncMock()  # type: ignore[method-assign]
 
         # Mock interactive.handle_text_response and generate_response
         with (
@@ -466,7 +466,7 @@ class TestThreadingBehavior:
         bot.client.room_send.assert_called_once()  # type: ignore[union-attr]
 
         # Check the content
-        call_args = bot.client.room_send.call_args
+        call_args = bot.client.room_send.call_args  # type: ignore[union-attr]
         content = call_args.kwargs["content"]
 
         # The response should maintain the thread context
