@@ -68,7 +68,7 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args, **kwargs) -> MagicMock:
+        async def mock_arun(*args: object, **kwargs: object) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
@@ -81,7 +81,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_agent_creates_thread_when_mentioned_in_main_room(self, bot: AgentBot) -> None:
         """Test that agents create threads when mentioned in main room messages."""
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)  # type: ignore[union-attr]
         room.name = "Test Room"
 
         # Create a main room message that mentions the agent
@@ -101,12 +101,12 @@ class TestThreadingBehavior:
         )
 
         # The bot should send a response
-        bot.client.room_send = AsyncMock(
+        bot.client.room_send = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
         )
 
         # Mock thread history fetch (returns empty for new thread)
-        bot.client.room_messages = AsyncMock(
+        bot.client.room_messages = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomMessagesResponse.from_dict(
                 {"chunk": [], "start": "s1", "end": "e1"}, room_id="!test:localhost"
             )
@@ -133,10 +133,10 @@ class TestThreadingBehavior:
             await bot._send_response(room, event.event_id, "I can help you with that!", None)
 
         # Verify the bot sent a response
-        bot.client.room_send.assert_called_once()
+        bot.client.room_send.assert_called_once()  # type: ignore[union-attr]
 
         # Check the content of the response
-        call_args = bot.client.room_send.call_args
+        call_args = bot.client.room_send.call_args  # type: ignore[union-attr]
         content = call_args.kwargs["content"]
 
         # The response should create a thread from the original message
@@ -148,7 +148,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_agent_responds_in_existing_thread(self, bot: AgentBot) -> None:
         """Test that agents respond correctly in existing threads."""
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)  # type: ignore[union-attr]
         room.name = "Test Room"
 
         # Create a message in a thread
@@ -194,7 +194,7 @@ class TestThreadingBehavior:
             await bot._on_message(room, event)
 
         # Verify the bot sent a response
-        bot.client.room_send.assert_called_once()
+        bot.client.room_send.assert_called_once()  # type: ignore[union-attr]
 
         # Check the content
         call_args = bot.client.room_send.call_args
@@ -253,13 +253,13 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args, **kwargs) -> MagicMock:
+        async def mock_arun(*args: object, **kwargs: object) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
         bot.agent = mock_agent
 
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)  # type: ignore[union-attr]
         room.name = "Test Room"
 
         # Create a command that's a reply to another message (not in a thread)
@@ -348,13 +348,13 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args, **kwargs) -> MagicMock:
+        async def mock_arun(*args: object, **kwargs: object) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
         bot.agent = mock_agent
 
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)  # type: ignore[union-attr]
         room.name = "Test Room"
 
         # Create a command in a thread
@@ -405,7 +405,7 @@ class TestThreadingBehavior:
     @pytest.mark.asyncio
     async def test_message_with_multiple_relations_handled_correctly(self, bot: AgentBot) -> None:
         """Test that messages with complex relations are handled properly."""
-        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)  # type: ignore[union-attr]
         room.name = "Test Room"
 
         # Create a message that's both in a thread AND a reply (complex relations)
@@ -463,7 +463,7 @@ class TestThreadingBehavior:
             )
 
         # Verify the bot sent a response
-        bot.client.room_send.assert_called_once()
+        bot.client.room_send.assert_called_once()  # type: ignore[union-attr]
 
         # Check the content
         call_args = bot.client.room_send.call_args
