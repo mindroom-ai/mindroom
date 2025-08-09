@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -54,27 +55,28 @@ async def test_streaming_edits_e2e(
     mock_ensure_all.return_value = mock_agents
 
     # Mock ensure_user_account to set proper user IDs
-    async def ensure_user_side_effect(bot_self):
+    async def ensure_user_side_effect(bot_self: object) -> None:
         # Set a proper user_id based on agent_name if we have agent_name
         if hasattr(bot_self, "agent_name"):
             if bot_self.agent_name == "helper":
-                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
+                bot_self.agent_user.user_id = "@mindroom_helper:localhost"  # type: ignore[attr-defined]
             elif bot_self.agent_name == "calculator":
-                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
+                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"  # type: ignore[attr-defined]
             elif bot_self.agent_name == "router":
-                bot_self.agent_user.user_id = "@mindroom_router:localhost"
+                bot_self.agent_user.user_id = "@mindroom_router:localhost"  # type: ignore[attr-defined]
         elif hasattr(bot_self, "agent_user") and hasattr(bot_self.agent_user, "agent_name"):
             # Alternative: get agent_name from agent_user
-            if bot_self.agent_user.agent_name == "helper":
-                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
-            elif bot_self.agent_user.agent_name == "calculator":
-                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
-            elif bot_self.agent_user.agent_name == "router":
-                bot_self.agent_user.user_id = "@mindroom_router:localhost"
+            agent_user = bot_self.agent_user
+            if agent_user.agent_name == "helper":
+                agent_user.user_id = "@mindroom_helper:localhost"
+            elif agent_user.agent_name == "calculator":
+                agent_user.user_id = "@mindroom_calculator:localhost"
+            elif agent_user.agent_name == "router":
+                agent_user.user_id = "@mindroom_router:localhost"
         return None  # ensure_user_account doesn't return anything
 
     # Need to handle both positional and method call
-    def ensure_user_wrapper(*args, **kwargs):
+    def ensure_user_wrapper(*args: object, **kwargs: object) -> object:
         if len(args) > 0:
             return ensure_user_side_effect(args[0])
         return ensure_user_side_effect(kwargs.get("self"))
@@ -87,15 +89,15 @@ async def test_streaming_edits_e2e(
     test_room.name = "Streaming Test Room"
 
     # Track events sent by agents
-    helper_events = []
-    calc_events = []
+    helper_events: list[dict[str, object]] = []
+    calc_events: list[dict[str, object]] = []
 
     # Create mock clients for each agent
     helper_client = AsyncMock()
     calc_client = AsyncMock()
 
     # Configure login to return appropriate clients
-    def login_side_effect(homeserver, agent_user):
+    def login_side_effect(homeserver: str, agent_user: object) -> object:
         if hasattr(agent_user, "agent_name"):
             if agent_user.agent_name == "helper":
                 return helper_client
@@ -112,7 +114,7 @@ async def test_streaming_edits_e2e(
     mock_login.side_effect = login_side_effect
 
     # Track room_send calls
-    async def helper_room_send(room_id, message_type, content):
+    async def helper_room_send(room_id: str, message_type: str, content: dict[str, object]) -> object:
         event_id = f"$helper_{len(helper_events)}"
         helper_events.append(
             {
@@ -124,7 +126,7 @@ async def test_streaming_edits_e2e(
         )
         return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
 
-    async def calc_room_send(room_id, message_type, content):
+    async def calc_room_send(room_id: str, message_type: str, content: dict[str, object]) -> object:
         event_id = f"$calc_{len(calc_events)}"
         calc_events.append(
             {
@@ -161,17 +163,21 @@ async def test_streaming_edits_e2e(
         with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
             from mindroom.bot import AgentBot
 
-            def create_bot_side_effect(entity_name, agent_user, config, storage_path):
+            def create_bot_side_effect(
+                entity_name: str, agent_user: object, config: object, storage_path: object
+            ) -> object:
                 # Update the agent_user with proper user_id
                 if entity_name == "helper":
-                    agent_user.user_id = "@mindroom_helper:localhost"
+                    agent_user.user_id = "@mindroom_helper:localhost"  # type: ignore[attr-defined]
                 elif entity_name == "calculator":
-                    agent_user.user_id = "@mindroom_calculator:localhost"
+                    agent_user.user_id = "@mindroom_calculator:localhost"  # type: ignore[attr-defined]
                 elif entity_name == "router":
-                    agent_user.user_id = "@mindroom_router:localhost"
+                    agent_user.user_id = "@mindroom_router:localhost"  # type: ignore[attr-defined]
 
                 # Create the actual bot with config
-                return AgentBot(agent_user, storage_path, config, rooms=[test_room_id])
+                from pathlib import Path
+
+                return AgentBot(agent_user, Path(str(storage_path)), config, rooms=[test_room_id])  # type: ignore[arg-type]
 
             mock_create_bot.side_effect = create_bot_side_effect
             await orchestrator.initialize()
@@ -210,7 +216,14 @@ async def test_streaming_edits_e2e(
         # Mock AI response for helper (streaming)
         with patch("mindroom.bot.ai_response_streaming") as mock_streaming:
 
-            async def stream_response(agent_name, prompt, session_id, storage_path, thread_history, room_id):
+            async def stream_response(
+                agent_name: str,
+                prompt: str,
+                session_id: str,
+                storage_path: object,
+                thread_history: list[object],
+                room_id: str,
+            ) -> AsyncGenerator[str, None]:
                 yield "I can help! Let me ask "
                 yield "@mindroom_calculator:localhost what's 2+2?"
 
@@ -236,14 +249,16 @@ async def test_streaming_edits_e2e(
         # Find the edit event (if streaming produced one)
         edit_event = None
         for event in helper_events[1:]:
-            if "m.relates_to" in event["content"]:
+            content = event.get("content", {})
+            if isinstance(content, dict) and "m.relates_to" in content:
                 edit_event = event
                 break
 
         if edit_event:
             # Simulate calculator seeing the edit
             calc_edit_event = MagicMock(spec=nio.RoomMessageText)
-            calc_edit_event.body = edit_event["content"].get("body", "")
+            content_dict = edit_event.get("content", {})
+            calc_edit_event.body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
             calc_edit_event.sender = "@mindroom_helper:localhost"
             calc_edit_event.event_id = f"$edit_{helper_events.index(edit_event)}"
             calc_edit_event.source = {
@@ -251,7 +266,7 @@ async def test_streaming_edits_e2e(
                 "sender": "@mindroom_helper:localhost",
                 "origin_server_ts": 1234567891,
                 "type": "m.room.message",
-                "content": edit_event["content"],
+                "content": edit_event.get("content", {}),
             }
 
             # Process edit with calculator bot
@@ -295,7 +310,9 @@ async def test_streaming_edits_e2e(
         assert len(calc_events) == 1, "Calculator should respond to final message"
         calc_response = calc_events[0]
         assert calc_response["type"] == "m.room.message"
-        assert "4" in calc_response["content"].get("body", "")
+        content_dict = calc_response.get("content", {})
+        body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
+        assert "4" in body
 
     finally:
         # Stop the orchestrator
@@ -326,9 +343,9 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         mock_login.return_value = mock_client
 
         # Track events
-        events_sent = []
+        events_sent: list[dict[str, object]] = []
 
-        async def mock_room_send(room_id, message_type, content):
+        async def mock_room_send(room_id: str, message_type: str, content: dict[str, object]) -> object:
             event_id = f"$calc_{len(events_sent)}"
             events_sent.append(
                 {
@@ -414,6 +431,8 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         # Verify bot responded
         assert len(events_sent) == 1, "Bot should respond to user edit with mention"
         response = events_sent[0]
-        assert "4" in response["content"].get("body", "")
+        content_dict = response.get("content", {})
+        body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
+        assert "4" in body
 
         await bot.stop()

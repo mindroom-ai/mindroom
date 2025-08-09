@@ -4,6 +4,7 @@ These tests simulate real-world scenarios to ensure agents behave correctly
 when multiple agents are in a room and routing decisions need to be made.
 """
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,7 +37,7 @@ class TestRoutingIntegration:
         """
 
         # Create generator for streaming response
-        async def streaming_generator():
+        async def streaming_generator() -> AsyncIterator[str]:
             yield "I am MindRoomResearch and I can help with research tasks"
 
         mock_ai_response_streaming.return_value = streaming_generator()
@@ -117,12 +118,12 @@ class TestRoutingIntegration:
         await news_bot._on_message(mock_room, user_message)
 
         # Only research bot should respond (streaming makes 2 calls)
-        assert research_bot.client.room_send.call_count >= 1  # At least initial message
-        assert news_bot.client.room_send.call_count == 0
+        assert research_bot.client.room_send.call_count >= 1  # type: ignore[union-attr]  # At least initial message
+        assert news_bot.client.room_send.call_count == 0  # type: ignore[union-attr]
 
         # Router should NOT have been called at all
         assert mock_suggest_agent.call_count == 0
 
         # Verify the response was sent
-        last_call = research_bot.client.room_send.call_args_list[-1]
+        last_call = research_bot.client.room_send.call_args_list[-1]  # type: ignore[union-attr]
         assert "body" in last_call[1]["content"]

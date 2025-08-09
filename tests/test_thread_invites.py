@@ -10,20 +10,20 @@ from mindroom.thread_invites import AGENT_ACTIVITY_EVENT_TYPE, THREAD_INVITE_EVE
 
 
 @pytest.fixture
-def mock_client():
+def mock_client() -> AsyncMock:
     """Create a mock Matrix client."""
     client = AsyncMock(spec=nio.AsyncClient)
     return client
 
 
 @pytest.fixture
-def invite_manager(mock_client):
+def invite_manager(mock_client: AsyncMock) -> ThreadInviteManager:
     """Create a fresh ThreadInviteManager instance."""
     return ThreadInviteManager(mock_client)
 
 
 @pytest.mark.asyncio
-async def test_add_invite(invite_manager, mock_client):
+async def test_add_invite(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test adding a thread invitation."""
     # Mock the room_put_state response (will be called twice - invite + activity)
     mock_client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$event123", room_id="!room456")
@@ -57,7 +57,7 @@ async def test_add_invite(invite_manager, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_get_thread_agents(invite_manager, mock_client):
+async def test_get_thread_agents(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test getting agents invited to a thread."""
     # Mock room_get_state to return invitations
     mock_events = [
@@ -91,7 +91,7 @@ async def test_get_thread_agents(invite_manager, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_is_agent_invited_to_thread(invite_manager, mock_client):
+async def test_is_agent_invited_to_thread(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test checking if an agent is invited to a thread."""
     # Mock room_get_state_event for checking invitations
     mock_client.room_get_state_event.side_effect = [
@@ -114,7 +114,7 @@ async def test_is_agent_invited_to_thread(invite_manager, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_get_agent_threads(invite_manager, mock_client):
+async def test_get_agent_threads(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test getting threads an agent is invited to."""
     # Mock room_get_state to return invitations for different agents
     mock_client.room_get_state.return_value = nio.RoomGetStateResponse(
@@ -150,7 +150,7 @@ async def test_get_agent_threads(invite_manager, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_remove_invite(invite_manager, mock_client):
+async def test_remove_invite(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test removing an invitation."""
     # Mock is_agent_invited_to_thread check (done internally by remove_invite)
     mock_client.room_get_state_event.side_effect = [
@@ -183,7 +183,7 @@ async def test_remove_invite(invite_manager, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_inactive_agents(invite_manager, mock_client):
+async def test_cleanup_inactive_agents(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test cleanup of inactive agents using last_activity."""
     # Mock room_get_state to return some expired and non-expired invitations
     now = datetime.now()
@@ -245,7 +245,7 @@ async def test_cleanup_inactive_agents(invite_manager, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_get_invite_state(invite_manager, mock_client):
+async def test_get_invite_state(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test getting invitation state."""
     # Mock successful state retrieval
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
@@ -272,7 +272,7 @@ async def test_get_invite_state(invite_manager, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_get_agent_activity(invite_manager, mock_client):
+async def test_get_agent_activity(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test getting agent activity."""
     # Mock successful activity retrieval
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
@@ -294,7 +294,7 @@ async def test_get_agent_activity(invite_manager, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_update_agent_activity(invite_manager, mock_client):
+async def test_update_agent_activity(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test updating agent activity timestamp."""
     # Mock get_invite_state
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
@@ -325,7 +325,7 @@ async def test_update_agent_activity(invite_manager, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_error_handling(invite_manager, mock_client):
+async def test_error_handling(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test error handling in various scenarios."""
     # Test add_invite failure - no longer raises since we removed error handling
     mock_client.room_put_state.return_value = nio.RoomPutStateError(status_code="M_FORBIDDEN", message="Forbidden")

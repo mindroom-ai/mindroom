@@ -14,7 +14,7 @@ class TestBotHelpers:
     """Test bot helper functions."""
 
     @pytest.mark.asyncio
-    async def test_handle_invite_command_unknown_agent(self):
+    async def test_handle_invite_command_unknown_agent(self) -> None:
         """Test _handle_invite_command with unknown agent."""
         mock_client = AsyncMock()
         mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
@@ -36,7 +36,7 @@ class TestBotHelpers:
         assert "Available agents:" in result
 
     @pytest.mark.asyncio
-    async def test_handle_invite_command_thread_invite_success(self):
+    async def test_handle_invite_command_thread_invite_success(self) -> None:
         """Test successful thread invite."""
         mock_client = AsyncMock()
         mock_response = MagicMock()
@@ -63,7 +63,7 @@ class TestBotHelpers:
         assert "✅ Invited @calculator to this thread" in result
 
     @pytest.mark.asyncio
-    async def test_handle_invite_command_thread_invite(self):
+    async def test_handle_invite_command_thread_invite(self) -> None:
         """Test thread invite."""
         config = Config(router=RouterConfig(model="default"))
         config.agents = {"calculator": MagicMock()}
@@ -92,7 +92,7 @@ class TestBotHelpers:
         assert "you've been invited to help in this thread!" in result
 
     @pytest.mark.asyncio
-    async def test_handle_list_invites_command_empty(self):
+    async def test_handle_list_invites_command_empty(self) -> None:
         """Test list invites with no invites."""
         mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
         mock_thread_mgr.get_thread_agents = AsyncMock(return_value=[])
@@ -102,7 +102,7 @@ class TestBotHelpers:
         assert result == "No agents are currently invited to this thread."
 
     @pytest.mark.asyncio
-    async def test_handle_list_invites_command_with_invites(self):
+    async def test_handle_list_invites_command_with_invites(self) -> None:
         """Test list invites with active invites."""
         mock_thread_mgr = AsyncMock(spec=ThreadInviteManager)
         mock_thread_mgr.get_thread_agents = AsyncMock(return_value=["calculator", "research", "code"])

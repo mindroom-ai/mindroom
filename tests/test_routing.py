@@ -139,7 +139,7 @@ class TestAIRouting:
 class TestThreadUtils:
     """Test thread utility functions."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         """Set up test config."""
         self.config = Config(
             agents={

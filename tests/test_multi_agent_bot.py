@@ -2,8 +2,10 @@
 
 import asyncio
 import os
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -20,9 +22,9 @@ from mindroom.thread_invites import ThreadInviteManager
 class MockConfig:
     """Mock configuration for testing."""
 
-    agents: dict = None
+    agents: dict[str, Any] = None  # type: ignore[assignment]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.agents is None:
             self.agents = {
                 "calculator": MagicMock(rooms=["lobby", "science", "analysis"]),
@@ -196,7 +198,7 @@ class TestAgentBot:
         """Test agent bot responding to mentions with both streaming and non-streaming modes."""
 
         # Mock streaming response - return an async generator
-        async def mock_streaming_response():
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "Test"
             yield " response"
 
@@ -342,7 +344,7 @@ class TestAgentBot:
         ]
 
         # Mock streaming response - return an async generator
-        async def mock_streaming_response():
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "Thread"
             yield " response"
 
@@ -442,7 +444,7 @@ class TestAgentBot:
         }
 
         # Set up fresh async generator for the second call
-        async def mock_streaming_response2():
+        async def mock_streaming_response2() -> AsyncGenerator[str, None]:
             yield "Mentioned"
             yield " response"
 
@@ -566,7 +568,7 @@ class TestMultiAgentOrchestrator:
             # Create a mock that tracks the call
             mock_start = AsyncMock()
             # Replace start with our mock
-            bot.start = mock_start
+            bot.start = mock_start  # type: ignore[method-assign]
             start_mocks.append(mock_start)
             bot.running = False
 
@@ -608,14 +610,15 @@ class TestMultiAgentOrchestrator:
         for bot in orchestrator.agent_bots.values():
             bot.client = AsyncMock()
             bot.running = True
-            bot.ensure_user_account = AsyncMock()
+            bot.ensure_user_account = AsyncMock()  # type: ignore[method-assign]
 
         await orchestrator.stop()
 
         assert not orchestrator.running
         for bot in orchestrator.agent_bots.values():
             assert not bot.running
-            bot.client.close.assert_called_once()
+            if bot.client is not None:
+                bot.client.close.assert_called_once()
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.load_config")

@@ -17,7 +17,7 @@ from mindroom.models import (
 class TestMemoryConfig:
     """Test memory configuration."""
 
-    def test_get_memory_config_with_ollama(self):
+    def test_get_memory_config_with_ollama(self) -> None:
         """Test memory config creation with Ollama embedder."""
         # Create config with Ollama embedder
         embedder_config = MemoryEmbedderConfig(
@@ -59,7 +59,7 @@ class TestMemoryConfig:
         assert str(storage_path / "chroma") in result["vector_store"]["config"]["path"]
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
-    def test_get_memory_config_with_openai(self):
+    def test_get_memory_config_with_openai(self) -> None:
         """Test memory config creation with OpenAI embedder."""
         # Create config with OpenAI embedder
         embedder_config = MemoryEmbedderConfig(
@@ -88,7 +88,7 @@ class TestMemoryConfig:
         assert result["llm"]["config"]["api_key"] == "test-key"
 
     @patch.dict("os.environ", {}, clear=True)
-    def test_get_memory_config_no_model_fallback(self):
+    def test_get_memory_config_no_model_fallback(self) -> None:
         """Test memory config falls back to Ollama when no model configured."""
         # Create config with no models
         embedder_config = MemoryEmbedderConfig(
@@ -108,7 +108,7 @@ class TestMemoryConfig:
         assert result["llm"]["config"]["model"] == "llama3.2"
         assert result["llm"]["config"]["ollama_base_url"] == "http://localhost:11434"
 
-    def test_chroma_directory_creation(self, tmp_path):
+    def test_chroma_directory_creation(self, tmp_path: Path) -> None:
         """Test that ChromaDB directory is created."""
         # Create minimal config
         embedder_config = MemoryEmbedderConfig(

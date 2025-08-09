@@ -3,7 +3,7 @@
 from mindroom.commands import CommandType, command_parser, get_command_help
 
 
-def test_invite_command_basic():
+def test_invite_command_basic() -> None:
     """Test basic invite command parsing."""
     command = command_parser.parse("!invite calculator")
     assert command is not None
@@ -11,7 +11,7 @@ def test_invite_command_basic():
     assert command.args["agent_name"] == "calculator"
 
 
-def test_invite_command_with_at_symbol():
+def test_invite_command_with_at_symbol() -> None:
     """Test invite command with @ symbol."""
     command = command_parser.parse("!invite @calculator")
     assert command is not None
@@ -19,14 +19,14 @@ def test_invite_command_with_at_symbol():
     assert command.args["agent_name"] == "calculator"
 
 
-def test_invite_command_invalid_format():
+def test_invite_command_invalid_format() -> None:
     """Test invite command with invalid formats."""
     # Test with extra text (no longer supports duration)
     command = command_parser.parse("!invite calculator for 2 hours")
     assert command is None  # Should not parse with extra text
 
 
-def test_invite_command_case_insensitive():
+def test_invite_command_case_insensitive() -> None:
     """Test invite command is case insensitive."""
     command = command_parser.parse("!INVITE calculator")
     assert command is not None
@@ -37,7 +37,7 @@ def test_invite_command_case_insensitive():
     assert command is None
 
 
-def test_uninvite_command():
+def test_uninvite_command() -> None:
     """Test uninvite command parsing."""
     command = command_parser.parse("!uninvite calculator")
     assert command is not None
@@ -45,7 +45,7 @@ def test_uninvite_command():
     assert command.args["agent_name"] == "calculator"
 
 
-def test_uninvite_command_with_at():
+def test_uninvite_command_with_at() -> None:
     """Test uninvite command with @ symbol."""
     command = command_parser.parse("!uninvite @research")
     assert command is not None
@@ -53,7 +53,7 @@ def test_uninvite_command_with_at():
     assert command.args["agent_name"] == "research"
 
 
-def test_list_invites_command():
+def test_list_invites_command() -> None:
     """Test list invites command parsing."""
     # Test different variations
     variations = [
@@ -71,7 +71,7 @@ def test_list_invites_command():
         assert command.args == {}
 
 
-def test_help_command():
+def test_help_command() -> None:
     """Test help command parsing."""
     # Basic help
     command = command_parser.parse("!help")
@@ -86,7 +86,7 @@ def test_help_command():
     assert command.args["topic"] == "invite"
 
 
-def test_invalid_commands():
+def test_invalid_commands() -> None:
     """Test that invalid commands return None."""
     invalid_commands = [
         "!invalid",
@@ -104,7 +104,7 @@ def test_invalid_commands():
         assert command is None
 
 
-def test_schedule_command():
+def test_schedule_command() -> None:
     """Test schedule command parsing."""
     # Basic schedule with time and message
     command = command_parser.parse("!schedule in 5 minutes Check the deployment")
@@ -125,7 +125,7 @@ def test_schedule_command():
     assert command.args["full_text"] == "tomorrow at 3pm Send the weekly report"
 
 
-def test_list_schedules_command():
+def test_list_schedules_command() -> None:
     """Test list schedules command parsing."""
     variations = [
         "!list_schedules",
@@ -142,7 +142,7 @@ def test_list_schedules_command():
         assert command.args == {}
 
 
-def test_cancel_schedule_command():
+def test_cancel_schedule_command() -> None:
     """Test cancel schedule command parsing."""
     # Basic cancel
     command = command_parser.parse("!cancel_schedule abc123")
@@ -162,7 +162,7 @@ def test_cancel_schedule_command():
     assert command.type == CommandType.CANCEL_SCHEDULE
 
 
-def test_get_command_help():
+def test_get_command_help() -> None:
     """Test help text generation."""
     # General help
     help_text = get_command_help()

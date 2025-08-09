@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,7 +14,7 @@ from mindroom.models import AgentConfig, Config, TeamConfig
 
 
 @pytest.fixture
-def config_with_rooms():
+def config_with_rooms() -> Config:
     """Create a config with agents and teams that have rooms."""
     return Config(
         agents={
@@ -40,11 +41,11 @@ def config_with_rooms():
 
 
 @pytest.mark.asyncio
-async def test_router_gets_all_configured_rooms(config_with_rooms, monkeypatch):
+async def test_router_gets_all_configured_rooms(config_with_rooms: Config, monkeypatch: Any) -> None:
     """Test that the router agent is configured to join all rooms from agents and teams."""
 
     # Mock resolve_room_aliases to return the same aliases (no resolution)
-    def mock_resolve_room_aliases(aliases):
+    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -62,29 +63,30 @@ async def test_router_gets_all_configured_rooms(config_with_rooms, monkeypatch):
 
     # Check that the router has all rooms
     expected_rooms = {"room1", "room2", "room3", "room4"}
+    assert router_bot is not None
     assert set(router_bot.rooms) == expected_rooms
 
 
 @pytest.mark.asyncio
-async def test_router_joins_rooms_on_start(config_with_rooms, monkeypatch):
+async def test_router_joins_rooms_on_start(config_with_rooms: Config, monkeypatch: Any) -> None:
     """Test that the router actually joins all configured rooms when started."""
     # Track which rooms were joined
-    joined_rooms = []
+    joined_rooms: list[str] = []
 
-    async def mock_join_room(client, room_id):
+    async def mock_join_room(client: Any, room_id: str) -> bool:
         joined_rooms.append(room_id)
         return True
 
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client, room_id):
+    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
     # Mock resolve_room_aliases to return the same aliases (no resolution)
-    def mock_resolve_room_aliases(aliases):
+    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -102,6 +104,7 @@ async def test_router_joins_rooms_on_start(config_with_rooms, monkeypatch):
 
     # Mock the client
     mock_client = AsyncMock()
+    assert router_bot is not None
     router_bot.client = mock_client
 
     # Test that the router joins all configured rooms
@@ -113,11 +116,11 @@ async def test_router_joins_rooms_on_start(config_with_rooms, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_creates_router_with_all_rooms(config_with_rooms, monkeypatch):
+async def test_orchestrator_creates_router_with_all_rooms(config_with_rooms: Config, monkeypatch: Any) -> None:
     """Test that the orchestrator properly initializes the router with all rooms."""
 
     # Mock various async operations
-    async def mock_ensure_all_agent_users(homeserver):
+    async def mock_ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
         return {
             ROUTER_AGENT_NAME: AgentMatrixUser(
                 agent_name=ROUTER_AGENT_NAME,
@@ -148,13 +151,13 @@ async def test_orchestrator_creates_router_with_all_rooms(config_with_rooms, mon
     monkeypatch.setattr("mindroom.matrix.users.ensure_all_agent_users", mock_ensure_all_agent_users)
 
     # Mock resolve_room_aliases to return the same aliases (no resolution needed for test)
-    def mock_resolve_room_aliases(aliases):
+    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock load_config to return our test config
-    def mock_load_config(config_path=None):
+    def mock_load_config(config_path: Any = None) -> Config:
         return config_with_rooms
 
     monkeypatch.setattr("mindroom.bot.load_config", mock_load_config)
@@ -174,7 +177,7 @@ async def test_orchestrator_creates_router_with_all_rooms(config_with_rooms, mon
 
 
 @pytest.mark.asyncio
-async def test_router_updates_rooms_on_config_change(monkeypatch):
+async def test_router_updates_rooms_on_config_change(monkeypatch: Any) -> None:
     """Test that the router updates its room list when config changes."""
     # Initial config with some rooms
     initial_config = Config(
@@ -204,7 +207,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch):
     )
 
     # Mock various operations
-    async def mock_ensure_all_agent_users(homeserver):
+    async def mock_ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
         return {
             ROUTER_AGENT_NAME: AgentMatrixUser(
                 agent_name=ROUTER_AGENT_NAME,
@@ -222,7 +225,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch):
 
     monkeypatch.setattr("mindroom.matrix.users.ensure_all_agent_users", mock_ensure_all_agent_users)
 
-    def mock_resolve_room_aliases(aliases):
+    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -231,7 +234,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch):
     load_config_returns = [initial_config, updated_config]
     load_config_counter = [0]
 
-    def mock_load_config(config_path=None):
+    def mock_load_config(config_path: Any = None) -> Config:
         result = load_config_returns[min(load_config_counter[0], len(load_config_returns) - 1)]
         load_config_counter[0] += 1
         return result
@@ -257,12 +260,24 @@ async def test_router_updates_rooms_on_config_change(monkeypatch):
     router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
     assert set(router_bot.rooms) == {"room1"}
 
-    # Mock bot operations
+    # Mock bot operations using monkeypatch to avoid method assignment errors
+    async def mock_stop() -> None:
+        pass
+
+    async def mock_start() -> None:
+        pass
+
+    async def mock_ensure_user_account() -> None:
+        pass
+
+    async def mock_sync_forever() -> None:
+        raise asyncio.CancelledError()
+
     for bot in orchestrator.agent_bots.values():
-        bot.stop = AsyncMock()
-        bot.start = AsyncMock()
-        bot.ensure_user_account = AsyncMock()
-        bot.sync_forever = AsyncMock(side_effect=asyncio.CancelledError())
+        monkeypatch.setattr(bot, "stop", mock_stop)
+        monkeypatch.setattr(bot, "start", mock_start)
+        monkeypatch.setattr(bot, "ensure_user_account", mock_ensure_user_account)
+        monkeypatch.setattr(bot, "sync_forever", mock_sync_forever)
 
     # Update config
     updated = await orchestrator.update_config()

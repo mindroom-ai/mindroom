@@ -10,7 +10,7 @@ from mindroom.scheduling import list_scheduled_tasks
 
 
 @pytest.mark.asyncio
-async def test_list_scheduled_tasks_real_implementation():
+async def test_list_scheduled_tasks_real_implementation() -> None:
     """Test list_scheduled_tasks with real implementation, only mocking Matrix API."""
     # Create mock client
     client = AsyncMock()
@@ -115,7 +115,7 @@ async def test_list_scheduled_tasks_real_implementation():
 
 
 @pytest.mark.asyncio
-async def test_list_scheduled_tasks_no_tasks():
+async def test_list_scheduled_tasks_no_tasks() -> None:
     """Test list_scheduled_tasks when there are no tasks."""
     client = AsyncMock()
 
@@ -129,7 +129,7 @@ async def test_list_scheduled_tasks_no_tasks():
 
 
 @pytest.mark.asyncio
-async def test_list_scheduled_tasks_tasks_in_other_threads():
+async def test_list_scheduled_tasks_tasks_in_other_threads() -> None:
     """Test list_scheduled_tasks when all tasks are in other threads."""
     client = AsyncMock()
 
@@ -167,7 +167,7 @@ async def test_list_scheduled_tasks_tasks_in_other_threads():
 
 
 @pytest.mark.asyncio
-async def test_list_scheduled_tasks_error_response():
+async def test_list_scheduled_tasks_error_response() -> None:
     """Test list_scheduled_tasks when Matrix returns an error."""
     client = AsyncMock()
 
@@ -181,7 +181,7 @@ async def test_list_scheduled_tasks_error_response():
 
 
 @pytest.mark.asyncio
-async def test_list_scheduled_tasks_invalid_task_data():
+async def test_list_scheduled_tasks_invalid_task_data() -> None:
     """Test list_scheduled_tasks handles invalid task data gracefully."""
     client = AsyncMock()
 

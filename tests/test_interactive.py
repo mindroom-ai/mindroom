@@ -10,7 +10,7 @@ from mindroom.models import AgentConfig, Config, ModelConfig
 
 
 @pytest.fixture
-def mock_client():
+def mock_client() -> AsyncMock:
     """Create a mock Matrix client."""
     client = AsyncMock()
     client.user_id = "@mindroom_test:localhost"
@@ -20,7 +20,7 @@ def mock_client():
 class TestInteractiveFunctions:
     """Test cases for interactive functions."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         """Set up test config."""
         self.config = Config(
             agents={
@@ -31,7 +31,7 @@ class TestInteractiveFunctions:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
 
-    def test_should_create_interactive_question(self):
+    def test_should_create_interactive_question(self) -> None:
         """Test detection of interactive code blocks."""
         # Should detect - standard format
         assert interactive.should_create_interactive_question("Here's a question:\n```interactive\n{}\n```")
@@ -52,7 +52,7 @@ class TestInteractiveFunctions:
         assert not interactive.should_create_interactive_question("```python\nprint('hello')\n```")
 
     @pytest.mark.asyncio
-    async def test_handle_interactive_response_valid_json(self, mock_client):
+    async def test_handle_interactive_response_valid_json(self, mock_client: AsyncMock) -> None:
         """Test creating interactive question from valid JSON."""
         # Clear any existing questions
         interactive._active_questions.clear()
@@ -122,7 +122,7 @@ Based on your choice, I'll proceed accordingly."""
         assert mock_client.room_send.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_handle_interactive_response_invalid_json(self, mock_client):
+    async def test_handle_interactive_response_invalid_json(self, mock_client: AsyncMock) -> None:
         """Test handling invalid JSON in interactive block."""
         interactive._active_questions.clear()
 
@@ -145,7 +145,7 @@ Based on your choice, I'll proceed accordingly."""
         assert len(interactive._active_questions) == 0
 
     @pytest.mark.asyncio
-    async def test_handle_interactive_response_missing_options(self, mock_client):
+    async def test_handle_interactive_response_missing_options(self, mock_client: AsyncMock) -> None:
         """Test handling JSON without options."""
         interactive._active_questions.clear()
 
@@ -171,7 +171,7 @@ Based on your choice, I'll proceed accordingly."""
         assert len(interactive._active_questions) == 0
 
     @pytest.mark.asyncio
-    async def test_handle_reaction_valid_response(self, mock_client):
+    async def test_handle_reaction_valid_response(self, mock_client: AsyncMock) -> None:
         """Test handling a valid reaction response."""
         interactive._active_questions.clear()
 
@@ -207,7 +207,7 @@ Based on your choice, I'll proceed accordingly."""
         assert "$question123" not in interactive._active_questions
 
     @pytest.mark.asyncio
-    async def test_handle_reaction_unknown_event(self, mock_client):
+    async def test_handle_reaction_unknown_event(self, mock_client: AsyncMock) -> None:
         """Test handling reaction to unknown event."""
         interactive._active_questions.clear()
 
@@ -229,7 +229,7 @@ Based on your choice, I'll proceed accordingly."""
         mock_client.room_send.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_handle_reaction_bot_own_reaction(self, mock_client):
+    async def test_handle_reaction_bot_own_reaction(self, mock_client: AsyncMock) -> None:
         """Test that bot ignores its own reactions."""
         interactive._active_questions.clear()
 
@@ -260,7 +260,7 @@ Based on your choice, I'll proceed accordingly."""
         assert "$question123" in interactive._active_questions
 
     @pytest.mark.asyncio
-    async def test_handle_text_response_valid(self, mock_client):
+    async def test_handle_text_response_valid(self, mock_client: AsyncMock) -> None:
         """Test handling valid text responses (1, 2, 3)."""
         interactive._active_questions.clear()
 
@@ -293,7 +293,7 @@ Based on your choice, I'll proceed accordingly."""
         assert "$question123" not in interactive._active_questions
 
     @pytest.mark.asyncio
-    async def test_handle_text_response_invalid(self, mock_client):
+    async def test_handle_text_response_invalid(self, mock_client: AsyncMock) -> None:
         """Test that invalid text responses are ignored."""
         interactive._active_questions.clear()
 
@@ -326,7 +326,7 @@ Based on your choice, I'll proceed accordingly."""
         assert "$question123" in interactive._active_questions
 
     @pytest.mark.asyncio
-    async def test_handle_interactive_response_newline_format(self, mock_client):
+    async def test_handle_interactive_response_newline_format(self, mock_client: AsyncMock) -> None:
         """Test creating interactive question from JSON with newline format."""
         # Clear any existing questions
         interactive._active_questions.clear()
@@ -380,7 +380,7 @@ interactive
         assert question.options["1"] == "yes"
 
     @pytest.mark.asyncio
-    async def test_complete_flow(self, mock_client):
+    async def test_complete_flow(self, mock_client: AsyncMock) -> None:
         """Test complete flow from AI response to user reaction."""
         interactive._active_questions.clear()
 
@@ -425,7 +425,9 @@ Just let me know your preference!"""
 
         # Register the question
         event_id = "$q123"
-        interactive.register_interactive_question(event_id, "!room:localhost", "$thread123", option_map, "test_agent")
+        interactive.register_interactive_question(
+            event_id, "!room:localhost", "$thread123", option_map or {}, "test_agent"
+        )
 
         # Verify question was created
         assert event_id in interactive._active_questions
@@ -435,7 +437,7 @@ Just let me know your preference!"""
         assert len(question.options) == 6  # 3 emojis + 3 numbers
 
         # Add reaction buttons
-        await interactive.add_reaction_buttons(mock_client, "!room:localhost", event_id, options)
+        await interactive.add_reaction_buttons(mock_client, "!room:localhost", event_id, options or [])
 
         # Should have added 3 reactions
         assert mock_client.room_send.call_count == 3
@@ -456,7 +458,7 @@ Just let me know your preference!"""
         assert event_id not in interactive._active_questions
 
     @pytest.mark.asyncio
-    async def test_handle_interactive_response_with_checkmark(self, mock_client):
+    async def test_handle_interactive_response_with_checkmark(self, mock_client: AsyncMock) -> None:
         """Test creating interactive question from JSON with trailing checkmark."""
         # Clear any existing questions
         interactive._active_questions.clear()

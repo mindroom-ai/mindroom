@@ -14,7 +14,7 @@ console = Console()
 
 
 @app.command()
-def version():
+def version() -> None:
     """Show the current version of Mindroom."""
     from mindroom import __version__
 
@@ -61,7 +61,7 @@ async def _run(log_level: str, storage_path: Path) -> None:
         console.print("\n✋ Stopped")
 
 
-def main():
+def main() -> None:
     """Main entry point that shows help by default."""
 
     # Handle -h flag by replacing with --help

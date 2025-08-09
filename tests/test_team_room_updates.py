@@ -1,6 +1,7 @@
 """Tests for team room update functionality."""
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,10 +14,10 @@ class TestTeamRoomUpdates:
     """Test team room configuration updates."""
 
     @pytest.mark.asyncio
-    async def test_team_room_change_triggers_restart(self):
+    async def test_team_room_change_triggers_restart(self) -> None:
         """Test that changing a team's room configuration triggers a restart."""
         # Create initial config
-        initial_config_data = {
+        initial_config_data: dict[str, Any] = {
             "agents": {
                 "agent1": {
                     "display_name": "Agent1",
@@ -43,7 +44,7 @@ class TestTeamRoomUpdates:
         }
 
         with patch("mindroom.bot.load_config") as mock_load_config:
-            config1 = Config(**initial_config_data)
+            config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
             with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure_users:
@@ -71,7 +72,7 @@ class TestTeamRoomUpdates:
                     # Update config with different rooms for the team
                     updated_config_data = initial_config_data.copy()
                     updated_config_data["teams"]["team1"]["rooms"] = ["room2", "room3", "room4"]
-                    config2 = Config(**updated_config_data)
+                    config2 = Config.model_validate(updated_config_data)
                     mock_load_config.return_value = config2
 
                     # Update config
@@ -86,10 +87,10 @@ class TestTeamRoomUpdates:
                     assert mock_create_bot.call_count == 5
 
     @pytest.mark.asyncio
-    async def test_new_team_gets_created(self):
+    async def test_new_team_gets_created(self) -> None:
         """Test that a new team in config gets created."""
         # Start with no teams
-        initial_config_data = {
+        initial_config_data: dict[str, Any] = {
             "agents": {},
             "teams": {},
             "defaults": {"num_history_runs": 5, "markdown": True, "add_history_to_messages": True},
@@ -98,7 +99,7 @@ class TestTeamRoomUpdates:
         }
 
         with patch("mindroom.bot.load_config") as mock_load_config:
-            config1 = Config(**initial_config_data)
+            config1 = Config.model_validate(initial_config_data)
             mock_load_config.return_value = config1
 
             with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure_users:
@@ -127,7 +128,7 @@ class TestTeamRoomUpdates:
                         "model": "default",
                         "mode": "coordinate",
                     }
-                    config2 = Config(**updated_config_data)
+                    config2 = Config.model_validate(updated_config_data)
                     mock_load_config.return_value = config2
 
                     # Mock ensure_users to include the new team
@@ -146,9 +147,9 @@ class TestTeamRoomUpdates:
                     assert "new_team" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
-    async def test_no_change_no_restart(self):
+    async def test_no_change_no_restart(self) -> None:
         """Test that no changes in team config doesn't trigger restart."""
-        config_data = {
+        config_data: dict[str, Any] = {
             "agents": {},
             "teams": {
                 "team1": {
@@ -166,7 +167,7 @@ class TestTeamRoomUpdates:
         }
 
         with patch("mindroom.bot.load_config") as mock_load_config:
-            config = Config(**config_data)
+            config = Config.model_validate(config_data)
             mock_load_config.return_value = config
 
             with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure_users:

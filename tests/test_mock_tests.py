@@ -19,7 +19,9 @@ Key insights learned during development:
 import asyncio
 import json
 import re
+from collections.abc import AsyncGenerator
 from contextlib import suppress
+from typing import Any
 
 import nio
 import pytest
@@ -33,7 +35,7 @@ class TestMockingStrategy:
     """Verify our mocking strategy actually intercepts HTTP calls."""
 
     @pytest_asyncio.fixture
-    async def client(self):
+    async def client(self) -> AsyncGenerator[nio.AsyncClient, None]:
         """Create an nio.AsyncClient for testing and ensure cleanup."""
         homeserver = "https://matrix.example.org"
         user_id = "@test:example.org"
@@ -271,7 +273,7 @@ class TestMockingStrategy:
             # Capture the request
             request_data = None
 
-            async def capture_request(url, **kwargs):
+            async def capture_request(url: str, **kwargs: Any) -> CallbackResult:
                 nonlocal request_data
                 request_data = kwargs
 
@@ -317,7 +319,7 @@ class TestMockingStrategyExtended:
     """Additional mocking tests for Matrix client methods."""
 
     @pytest_asyncio.fixture
-    async def client(self):
+    async def client(self) -> AsyncGenerator[nio.AsyncClient, None]:
         """Create an nio.AsyncClient for testing and ensure cleanup."""
         homeserver = "https://matrix.example.org"
         user_id = "@test:example.org"

@@ -12,7 +12,7 @@ from mindroom.teams import _extract_content, extract_team_member_contributions
 class TestExtractContent:
     """Tests for _extract_content function."""
 
-    def test_extract_content_from_response_with_content(self):
+    def test_extract_content_from_response_with_content(self) -> None:
         """Test extracting content when response.content is present."""
         response = MagicMock()
         response.content = "Direct content"
@@ -21,7 +21,7 @@ class TestExtractContent:
         result = _extract_content(response)
         assert result == "Direct content"
 
-    def test_extract_content_from_messages(self):
+    def test_extract_content_from_messages(self) -> None:
         """Test extracting content from messages when no direct content."""
         msg1 = MagicMock(spec=Message)
         msg1.role = "assistant"
@@ -42,7 +42,7 @@ class TestExtractContent:
         result = _extract_content(response)
         assert result == "First message\n\n Second message"
 
-    def test_extract_content_empty(self):
+    def test_extract_content_empty(self) -> None:
         """Test extracting content when no content available."""
         response = MagicMock()
         response.content = None
@@ -51,7 +51,7 @@ class TestExtractContent:
         result = _extract_content(response)
         assert result == ""
 
-    def test_extract_content_prefers_direct_content(self):
+    def test_extract_content_prefers_direct_content(self) -> None:
         """Test that direct content is preferred over messages."""
         msg = MagicMock(spec=Message)
         msg.role = "assistant"
@@ -68,7 +68,7 @@ class TestExtractContent:
 class TestExtractTeamMemberContributions:
     """Tests for extract_team_member_contributions function."""
 
-    def test_single_agent_response(self):
+    def test_single_agent_response(self) -> None:
         """Test extraction from a single agent response."""
         response = MagicMock(spec=RunResponse)
         response.agent_name = "test_agent"
@@ -78,7 +78,7 @@ class TestExtractTeamMemberContributions:
         result = extract_team_member_contributions(response)
         assert result == ["**test_agent**: Agent response"]
 
-    def test_single_agent_no_name(self):
+    def test_single_agent_no_name(self) -> None:
         """Test extraction from agent without name."""
         response = MagicMock(spec=RunResponse)
         response.agent_name = None
@@ -88,7 +88,7 @@ class TestExtractTeamMemberContributions:
         result = extract_team_member_contributions(response)
         assert result == ["**Agent**: Agent response"]
 
-    def test_simple_team_response(self):
+    def test_simple_team_response(self) -> None:
         """Test extraction from a simple team with two agents."""
         agent1 = MagicMock(spec=RunResponse)
         agent1.agent_name = "analyzer"
@@ -115,7 +115,7 @@ class TestExtractTeamMemberContributions:
         ]
         assert result == expected
 
-    def test_team_without_consensus(self):
+    def test_team_without_consensus(self) -> None:
         """Test team that only has member responses, no consensus."""
         agent1 = MagicMock(spec=RunResponse)
         agent1.agent_name = "agent1"
@@ -131,7 +131,7 @@ class TestExtractTeamMemberContributions:
         result = extract_team_member_contributions(team)
         assert result == ["**agent1**: Response 1", "\n*No team consensus - showing individual responses only*"]
 
-    def test_team_with_only_consensus(self):
+    def test_team_with_only_consensus(self) -> None:
         """Test team with consensus but no member responses."""
         team = MagicMock(spec=TeamRunResponse)
         team.team_name = "Team"
@@ -142,7 +142,7 @@ class TestExtractTeamMemberContributions:
         result = extract_team_member_contributions(team)
         assert result == ["Team consensus only"]
 
-    def test_nested_teams(self):
+    def test_nested_teams(self) -> None:
         """Test extraction from nested teams."""
         # Inner team members
         inner_agent1 = MagicMock(spec=RunResponse)
@@ -186,7 +186,7 @@ class TestExtractTeamMemberContributions:
         ]
         assert result == expected
 
-    def test_deeply_nested_teams(self):
+    def test_deeply_nested_teams(self) -> None:
         """Test extraction from deeply nested teams (3 levels)."""
         # Level 3 agent
         deep_agent = MagicMock(spec=RunResponse)
@@ -232,7 +232,7 @@ class TestExtractTeamMemberContributions:
         ]
         assert result == expected
 
-    def test_team_with_no_name(self):
+    def test_team_with_no_name(self) -> None:
         """Test team without a name falls back to default."""
         agent = MagicMock(spec=RunResponse)
         agent.agent_name = "agent"
@@ -260,7 +260,7 @@ class TestExtractTeamMemberContributions:
         ]
         assert result == expected
 
-    def test_empty_response(self):
+    def test_empty_response(self) -> None:
         """Test handling of completely empty responses."""
         response = MagicMock(spec=RunResponse)
         response.agent_name = "empty_agent"
@@ -270,7 +270,7 @@ class TestExtractTeamMemberContributions:
         result = extract_team_member_contributions(response)
         assert result == []
 
-    def test_mixed_content_sources(self):
+    def test_mixed_content_sources(self) -> None:
         """Test team with agents using different content sources."""
         # Agent with direct content
         agent1 = MagicMock(spec=RunResponse)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -19,7 +21,7 @@ class TestTeamCoordination:
         mock_ai_response_streaming: AsyncMock,
         mock_fetch_thread_history: AsyncMock,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test that team members respond in a coordinated sequence."""
         # Test coordination between research and writer agents
         # room_id = "!team:localhost", thread_id = "$thread_root"
@@ -35,14 +37,14 @@ class TestTeamCoordination:
         # 2. Writer agent uses that data to create report
 
         # Research agent's response
-        async def research_response():
+        async def research_response() -> AsyncGenerator[str, None]:
             yield "I've found the following AI trends:\n"
             yield "1. LLMs are becoming multimodal\n"
             yield "2. Edge AI deployment is growing\n"
             yield "3. AI agents are collaborating more effectively"
 
         # Writer should wait for research to complete, then use that context
-        async def writer_response():
+        async def writer_response() -> AsyncGenerator[str, None]:
             yield "Based on the research findings, here's the report:\n"
             yield "# AI Trends Report\n"
             yield "The landscape of AI is rapidly evolving with three key trends..."
@@ -65,7 +67,7 @@ class TestTeamCoordination:
     async def test_team_synthesis_response(
         self,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test synthesis of multiple agent responses into unified team response."""
         # Individual agent contributions
         agent_responses = {
@@ -82,7 +84,7 @@ class TestTeamCoordination:
     async def test_team_conflict_resolution(
         self,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test how team handles conflicting recommendations."""
         # Test setup for conflicting recommendations
 
@@ -108,7 +110,7 @@ We have different recommendations:
         self,
         mock_ai_response: AsyncMock,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test explicit handoffs between team members."""
         # Scenario: Complex task requiring handoffs
         # Task: "Analyze this code for security issues and then optimize it"
@@ -135,7 +137,7 @@ I'll optimize the code:
     async def test_team_parallel_processing(
         self,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test team members working in parallel on different aspects."""
         # Parallel task: "Create a secure web API"
 
@@ -158,7 +160,7 @@ I'll optimize the code:
     async def test_team_context_sharing(
         self,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test how team members share context and build on each other's work."""
         # Initial context: "We're building a fintech application"
         # Context would accumulate from each agent's contribution
@@ -177,7 +179,7 @@ I'll optimize the code:
     async def test_team_role_assignment(
         self,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test dynamic role assignment within teams."""
         # Complex request that needs role assignment
         # Request: "Design, implement, test, and document a user authentication system"
@@ -199,7 +201,7 @@ I'll optimize the code:
     async def test_team_progress_tracking(
         self,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test tracking progress across team members."""
         # Multi-step team task
         team_task = {
@@ -213,7 +215,7 @@ I'll optimize the code:
         }
 
         # Team coordinator should track overall progress
-        def get_team_progress(task):
+        def get_team_progress(task: dict[str, Any]) -> str:
             completed = sum(1 for step in task["steps"] if step["status"] == "complete")
             total = len(task["steps"])
             return f"{completed}/{total} steps completed"
@@ -225,7 +227,7 @@ I'll optimize the code:
     async def test_team_error_handling(
         self,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test team behavior when one member encounters an error."""
         # Scenario: One agent fails during team operation
         # Test scenario setup omitted - focus is on error handling behavior
