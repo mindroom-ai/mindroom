@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from ..logging_config import get_logger
-from .client import create_room, join_room, login
+from .client import create_room, join_room, matrix_client
 from .identity import extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
 
@@ -219,14 +219,14 @@ async def ensure_user_in_rooms(
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = f"@{user_account.username}:{server_name}"
 
-    # Login as the user
-    try:
-        user_client = await login(homeserver, user_id, user_account.password)
-    except ValueError as e:
-        logger.error(f"Failed to login as user {user_id}: {e}")
-        return
+    # Create a client for the user to join rooms
+    async with matrix_client(homeserver, user_id) as user_client:
+        # Login as the user
+        login_response = await user_client.login(password=user_account.password)
+        if not isinstance(login_response, nio.LoginResponse):
+            logger.error(f"Failed to login as user {user_id}: {login_response}")
+            return
 
-    try:
         logger.info(f"User {user_id} logged in to join rooms")
 
         for room_key, room_id in room_ids.items():
@@ -236,5 +236,3 @@ async def ensure_user_in_rooms(
                 logger.info(f"User {user_id} joined room {room_key}")
             else:
                 logger.warning(f"User {user_id} failed to join room {room_key} - may need invitation")
-    finally:
-        await user_client.close()
