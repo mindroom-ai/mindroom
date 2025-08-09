@@ -13,6 +13,8 @@ from mindroom.matrix import AgentMatrixUser
 @pytest.fixture
 def mock_agent_bot():
     """Create a mock agent bot for testing."""
+    from mindroom.models import Config
+
     agent_user = AgentMatrixUser(
         agent_name="general",
         user_id="@mindroom_general:localhost",
@@ -20,7 +22,8 @@ def mock_agent_bot():
         password="mock_password",
         access_token="mock_token",
     )
-    bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+    config = Config()  # Empty config for testing
+    bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
     bot.thread_invite_manager = AsyncMock()
     bot.logger = MagicMock()
@@ -170,6 +173,8 @@ class TestBotTaskRestoration:
         import tempfile
         from pathlib import Path
 
+        from mindroom.models import Config
+
         agent_user = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -179,7 +184,8 @@ class TestBotTaskRestoration:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), rooms=["!test:server"])
+            config = Config()  # Empty config for testing
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
 
             # Mock the necessary methods
             with (
@@ -205,6 +211,8 @@ class TestBotTaskRestoration:
         import tempfile
         from pathlib import Path
 
+        from mindroom.models import Config
+
         agent_user = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -214,7 +222,8 @@ class TestBotTaskRestoration:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), rooms=["!test:server"])
+            config = Config()  # Empty config for testing
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
 
             with (
                 patch("mindroom.bot.login_agent_user") as mock_login,

@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -13,34 +13,72 @@ from mindroom.bot import MultiAgentOrchestrator
 
 @pytest.mark.asyncio
 @pytest.mark.e2e  # Mark as end-to-end test
-@patch("mindroom.bot.ensure_all_agent_users")
+@patch("mindroom.matrix.users.ensure_all_agent_users")
 @patch("mindroom.bot.login_agent_user")
+@patch("mindroom.bot.AgentBot.ensure_user_account")
 async def test_streaming_edits_e2e(
+    mock_ensure_user: AsyncMock,
     mock_login: AsyncMock,
-    mock_ensure_users: AsyncMock,
+    mock_ensure_all: AsyncMock,
     tmp_path: Path,
 ) -> None:
     """End-to-end test that agents don't respond to streaming edits from other agents."""
-    # Mock user setup
+
+    # Mock ensure_all_agent_users to return proper user objects
     from mindroom.matrix import AgentMatrixUser
 
-    mock_users = {
+    mock_agents = {
         "helper": AgentMatrixUser(
             agent_name="helper",
             user_id="@mindroom_helper:localhost",
             display_name="HelperAgent",
-            password="test_pass",
+            password="helper_pass",
             access_token="helper_token",
         ),
         "calculator": AgentMatrixUser(
             agent_name="calculator",
             user_id="@mindroom_calculator:localhost",
             display_name="CalculatorAgent",
-            password="test_pass",
+            password="calc_pass",
             access_token="calc_token",
         ),
+        "router": AgentMatrixUser(
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="RouterAgent",
+            password="router_pass",
+            access_token="router_token",
+        ),
     }
-    mock_ensure_users.return_value = mock_users
+    mock_ensure_all.return_value = mock_agents
+
+    # Mock ensure_user_account to set proper user IDs
+    async def ensure_user_side_effect(bot_self):
+        # Set a proper user_id based on agent_name if we have agent_name
+        if hasattr(bot_self, "agent_name"):
+            if bot_self.agent_name == "helper":
+                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
+            elif bot_self.agent_name == "calculator":
+                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
+            elif bot_self.agent_name == "router":
+                bot_self.agent_user.user_id = "@mindroom_router:localhost"
+        elif hasattr(bot_self, "agent_user") and hasattr(bot_self.agent_user, "agent_name"):
+            # Alternative: get agent_name from agent_user
+            if bot_self.agent_user.agent_name == "helper":
+                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
+            elif bot_self.agent_user.agent_name == "calculator":
+                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
+            elif bot_self.agent_user.agent_name == "router":
+                bot_self.agent_user.user_id = "@mindroom_router:localhost"
+        return None  # ensure_user_account doesn't return anything
+
+    # Need to handle both positional and method call
+    def ensure_user_wrapper(*args, **kwargs):
+        if len(args) > 0:
+            return ensure_user_side_effect(args[0])
+        return ensure_user_side_effect(kwargs.get("self"))
+
+    mock_ensure_user.side_effect = ensure_user_wrapper
 
     # Create test room
     test_room_id = "!streaming_test:localhost"
@@ -57,11 +95,18 @@ async def test_streaming_edits_e2e(
 
     # Configure login to return appropriate clients
     def login_side_effect(homeserver, agent_user):
-        if agent_user.agent_name == "helper":
-            return helper_client
-        elif agent_user.agent_name == "calculator":
-            return calc_client
-        raise ValueError(f"Unknown agent: {agent_user.agent_name}")
+        if hasattr(agent_user, "agent_name"):
+            if agent_user.agent_name == "helper":
+                return helper_client
+            elif agent_user.agent_name == "calculator":
+                return calc_client
+            elif agent_user.agent_name == "router":
+                # Return a mock client for the router
+                router_client = AsyncMock()
+                router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[test_room_id])
+                router_client.sync_forever = AsyncMock()
+                return router_client
+        return AsyncMock()  # Default mock client
 
     mock_login.side_effect = login_side_effect
 
@@ -103,12 +148,32 @@ async def test_streaming_edits_e2e(
 
     # Patch the config loading to assign rooms
     with patch("mindroom.bot.load_config") as mock_config:
-        mock_config.return_value.agents = {
-            "helper": type("obj", (), {"rooms": [test_room_id]})(),
-            "calculator": type("obj", (), {"rooms": [test_room_id]})(),
+        mock_cfg = MagicMock()
+        mock_cfg.agents = {
+            "helper": MagicMock(display_name="HelperAgent", rooms=[test_room_id]),
+            "calculator": MagicMock(display_name="CalculatorAgent", rooms=[test_room_id]),
         }
+        mock_cfg.teams = {}
+        mock_config.return_value = mock_cfg
 
-        await orchestrator.initialize()
+        # Patch create_bot_for_entity to create bots with proper user_ids
+        with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
+            from mindroom.bot import AgentBot
+
+            def create_bot_side_effect(entity_name, agent_user, config, storage_path):
+                # Update the agent_user with proper user_id
+                if entity_name == "helper":
+                    agent_user.user_id = "@mindroom_helper:localhost"
+                elif entity_name == "calculator":
+                    agent_user.user_id = "@mindroom_calculator:localhost"
+                elif entity_name == "router":
+                    agent_user.user_id = "@mindroom_router:localhost"
+
+                # Create the actual bot with config
+                return AgentBot(agent_user, storage_path, config, rooms=[test_room_id])
+
+            mock_create_bot.side_effect = create_bot_side_effect
+            await orchestrator.initialize()
 
     # Start the orchestrator (in background)
     start_task = asyncio.create_task(orchestrator.start())
@@ -125,8 +190,6 @@ async def test_streaming_edits_e2e(
         calc_bot.enable_streaming = False
 
         # Simulate user mentioning helper
-        from unittest.mock import MagicMock
-
         user_event = MagicMock(spec=nio.RoomMessageText)
         user_event.body = "@mindroom_helper:localhost can you help with math?"
         user_event.sender = "@user:localhost"

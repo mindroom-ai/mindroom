@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
 from .logging_config import get_logger
+from .matrix import send_message
 
 logger = get_logger(__name__)
 
@@ -218,11 +219,7 @@ async def _execute_scheduled_task(
                 "event_id": thread_id,
             }
 
-        await client.room_send(
-            room_id=room_id,
-            message_type="m.room.message",
-            content=content,
-        )
+        await send_message(client, room_id, content)
 
         # Update task status to completed
         await client.room_put_state(

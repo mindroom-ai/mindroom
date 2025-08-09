@@ -1,5 +1,7 @@
 """Matrix client operations and utilities."""
 
+import os
+import ssl as ssl_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -8,7 +10,7 @@ import markdown
 import nio
 
 from ..logging_config import get_logger
-from .users import extract_server_name_from_homeserver
+from .identity import MatrixID, extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
 
@@ -26,9 +28,6 @@ def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
 
 def _maybe_ssl_context(homeserver: str) -> Any:
     if homeserver.startswith("https://"):
-        import os
-        import ssl as ssl_module
-
         if os.getenv("MATRIX_SSL_VERIFY", "true").lower() == "false":
             # Create context that disables verification for dev/self-signed certs
             ssl_context = ssl_module.create_default_context()
@@ -122,7 +121,7 @@ async def register_user(
     """
     # Extract server name from homeserver URL
     server_name = extract_server_name_from_homeserver(homeserver)
-    user_id = f"@{username}:{server_name}"
+    user_id = MatrixID.from_username(username, server_name).full_id
 
     async with matrix_client(homeserver) as client:
         # Try to register the user
@@ -218,7 +217,16 @@ async def create_room(
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
         logger.info(f"Created room: {name} ({response.room_id})")
-        return str(response.room_id)
+        room_id = str(response.room_id)
+
+        # Invite power users to the room
+        if power_users:
+            for user_id in power_users:
+                # Skip inviting ourselves
+                if user_id != client.user_id:
+                    await invite_to_room(client, room_id, user_id)
+
+        return room_id
     else:
         logger.error(f"Failed to create room {name}: {response}")
         return None
@@ -259,6 +267,66 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
     else:
         logger.warning(f"⚠️ Could not check members for room {room_id}")
         return set()
+
+
+async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
+    """Get all rooms the client has joined.
+
+    Args:
+        client: Authenticated Matrix client
+
+    Returns:
+        List of room IDs the client has joined, or None if the request failed
+    """
+    response = await client.joined_rooms()
+    if isinstance(response, nio.JoinedRoomsResponse):
+        return list(response.rooms)
+    else:
+        logger.error(f"Failed to get joined rooms: {response}")
+        return None
+
+
+async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
+    """Leave a Matrix room.
+
+    Args:
+        client: Authenticated Matrix client
+        room_id: The room ID to leave
+
+    Returns:
+        True if successfully left the room, False otherwise
+    """
+    response = await client.room_leave(room_id)
+    if isinstance(response, nio.RoomLeaveResponse):
+        logger.info(f"Left room {room_id}")
+        return True
+    else:
+        logger.error(f"Failed to leave room {room_id}: {response}")
+        return False
+
+
+async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
+    """Send a message to a Matrix room.
+
+    Args:
+        client: Authenticated Matrix client
+        room_id: The room ID to send the message to
+        content: The message content dictionary
+
+    Returns:
+        The event ID of the sent message, or None if sending failed
+    """
+    response = await client.room_send(
+        room_id=room_id,
+        message_type="m.room.message",
+        content=content,
+    )
+    if isinstance(response, nio.RoomSendResponse):
+        logger.debug(f"Sent message to {room_id}: {response.event_id}")
+        return str(response.event_id)
+    else:
+        logger.error(f"Failed to send message to {room_id}: {response}")
+        return None
 
 
 def _extract_message_data(event: nio.RoomMessageText) -> dict[str, Any]:
@@ -362,7 +430,7 @@ async def edit_message(
     event_id: str,
     new_content: dict[str, Any],
     new_text: str,
-) -> nio.RoomSendResponse | nio.ErrorResponse:
+) -> str | None:
     """Edit an existing Matrix message.
 
     Args:
@@ -373,7 +441,7 @@ async def edit_message(
         new_text: The new text (plain text version)
 
     Returns:
-        The response from the room_send call
+        The event ID of the edit message, or None if editing failed
     """
     edit_content = {
         "msgtype": "m.text",
@@ -384,8 +452,4 @@ async def edit_message(
         "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
     }
 
-    return await client.room_send(
-        room_id=room_id,
-        message_type="m.room.message",
-        content=edit_content,
-    )
+    return await send_message(client, room_id, edit_content)

@@ -237,7 +237,8 @@ async def create_team_response(
 
         # Use the existing agent instance from the bot
         agent_bot = orchestrator.agent_bots[name]
-        agents.append(agent_bot.agent)
+        if agent_bot.agent is not None:
+            agents.append(agent_bot.agent)
 
     if not agents:
         return "Sorry, no agents available for team collaboration."

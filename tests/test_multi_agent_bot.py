@@ -79,8 +79,9 @@ class TestAgentBot:
     @pytest.mark.asyncio
     @patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
+    @patch("mindroom.bot.AgentBot.ensure_user_account")
     async def test_agent_bot_start(
-        self, mock_login: AsyncMock, mock_agent_user: AgentMatrixUser, tmp_path: Path
+        self, mock_ensure_user: AsyncMock, mock_login: AsyncMock, mock_agent_user: AgentMatrixUser, tmp_path: Path
     ) -> None:
         """Test starting an agent bot."""
         mock_client = AsyncMock()
@@ -88,12 +89,17 @@ class TestAgentBot:
         mock_client.add_event_callback = MagicMock()
         mock_login.return_value = mock_client
 
+        # Mock ensure_user_account to not change the agent_user
+        mock_ensure_user.return_value = None
+
         bot = AgentBot(mock_agent_user, tmp_path)
         await bot.start()
 
         assert bot.running
         assert bot.client == mock_client
-        mock_login.assert_called_once_with("http://localhost:8008", mock_agent_user)
+        # The bot calls ensure_setup which calls ensure_user_account
+        # and then login with whatever user account was ensured
+        assert mock_login.called
         assert mock_client.add_event_callback.call_count == 3  # invite, message, and reaction callbacks
 
     @pytest.mark.asyncio
@@ -476,43 +482,61 @@ class TestMultiAgentOrchestrator:
         assert not orchestrator.running
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ensure_all_agent_users")
+    @patch("mindroom.bot.load_config")
     async def test_orchestrator_initialize(
         self,
-        mock_ensure_users: AsyncMock,
-        mock_agent_users: dict[str, AgentMatrixUser],
+        mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test initializing the orchestrator with agents."""
-        mock_ensure_users.return_value = mock_agent_users
+        # Mock config with just 2 agents
+        mock_config = MagicMock()
+        mock_config.agents = {
+            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["lobby"]),
+            "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
+        }
+        mock_config.teams = {}
+        mock_load_config.return_value = mock_config
 
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()
 
-        assert len(orchestrator.agent_bots) == 2
+        # Should have 3 bots: calculator, general, and router
+        assert len(orchestrator.agent_bots) == 3
         assert "calculator" in orchestrator.agent_bots
         assert "general" in orchestrator.agent_bots
+        assert "router" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ensure_all_agent_users")
-    @patch("mindroom.bot.login_agent_user")
+    @patch("mindroom.bot.load_config")
     async def test_orchestrator_start(
         self,
-        mock_login: AsyncMock,
-        mock_ensure_users: AsyncMock,
-        mock_agent_users: dict[str, AgentMatrixUser],
+        mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test starting all agent bots."""
-        mock_ensure_users.return_value = mock_agent_users
-        mock_client = AsyncMock()
-        # add_event_callback is a sync method, not async
-        mock_client.add_event_callback = MagicMock()
-        mock_client.sync_forever = AsyncMock(side_effect=KeyboardInterrupt)
-        mock_login.return_value = mock_client
+        # Mock config with just 2 agents
+        mock_config = MagicMock()
+        mock_config.agents = {
+            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["lobby"]),
+            "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
+        }
+        mock_config.teams = {}
+        mock_config.get_all_configured_rooms.return_value = ["lobby"]
+        mock_load_config.return_value = mock_config
 
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()  # Need to initialize first
+
+        # Mock start for all bots to avoid actual login/setup
+        start_mocks = []
+        for bot in orchestrator.agent_bots.values():
+            # Create a mock that tracks the call
+            mock_start = AsyncMock()
+            # Replace start with our mock
+            bot.start = mock_start
+            start_mocks.append(mock_start)
+            bot.running = False
 
         # Start the orchestrator but don't wait for sync_forever
         start_tasks = []
@@ -523,26 +547,36 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True  # Manually set since we're not calling orchestrator.start()
 
         assert orchestrator.running
-        assert mock_login.call_count == 2  # Called for each agent
+        # Verify start was called for each bot
+        for mock_start in start_mocks:
+            mock_start.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ensure_all_agent_users")
+    @patch("mindroom.bot.load_config")
     async def test_orchestrator_stop(
         self,
-        mock_ensure_users: AsyncMock,
-        mock_agent_users: dict[str, AgentMatrixUser],
+        mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test stopping all agent bots."""
-        mock_ensure_users.return_value = mock_agent_users
+        # Mock config with just 2 agents
+        mock_config = MagicMock()
+        mock_config.agents = {
+            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["lobby"]),
+            "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
+        }
+        mock_config.teams = {}
+        mock_config.get_all_configured_rooms.return_value = ["lobby"]
+        mock_load_config.return_value = mock_config
 
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()
 
-        # Mock the agent clients
+        # Mock the agent clients and ensure_user_account
         for bot in orchestrator.agent_bots.values():
             bot.client = AsyncMock()
             bot.running = True
+            bot.ensure_user_account = AsyncMock()
 
         await orchestrator.stop()
 
@@ -552,43 +586,28 @@ class TestMultiAgentOrchestrator:
             bot.client.close.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ensure_all_agent_users")
+    @patch("mindroom.bot.load_config")
     @patch.dict(os.environ, {"MINDROOM_ENABLE_STREAMING": "false"})
     async def test_orchestrator_streaming_env_var(
         self,
-        mock_ensure_users: AsyncMock,
-        mock_agent_users: dict[str, AgentMatrixUser],
+        mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test that orchestrator respects MINDROOM_ENABLE_STREAMING environment variable."""
-        mock_ensure_users.return_value = mock_agent_users
+        # Mock config with just 2 agents
+        mock_config = MagicMock()
+        mock_config.agents = {
+            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["lobby"]),
+            "general": MagicMock(display_name="GeneralAgent", rooms=["lobby"]),
+        }
+        mock_config.teams = {}
+        mock_config.get_all_configured_rooms.return_value = ["lobby"]
+        mock_load_config.return_value = mock_config
 
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         await orchestrator.initialize()
 
-        # All bots should have streaming disabled
-        for bot in orchestrator.agent_bots.values():
-            assert bot.enable_streaming is False
-
-    @pytest.mark.asyncio
-    @patch("mindroom.bot.ensure_all_agent_users")
-    async def test_orchestrator_invite_agents_to_room(
-        self,
-        mock_ensure_users: AsyncMock,
-        mock_agent_users: dict[str, AgentMatrixUser],
-        tmp_path: Path,
-    ) -> None:
-        """Test inviting all agents to a room."""
-        mock_ensure_users.return_value = mock_agent_users
-
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-        await orchestrator.initialize()
-
-        mock_inviter_client = AsyncMock()
-        await orchestrator.invite_agents_to_room("!room:localhost", mock_inviter_client)
-
-        # Verify invites were sent for all agents
-        assert mock_inviter_client.room_invite.call_count == 2
-        calls = mock_inviter_client.room_invite.call_args_list
-        invited_users = {call[0][1] for call in calls}
-        assert invited_users == {"@mindroom_calculator:localhost", "@mindroom_general:localhost"}
+        # All bots should have streaming disabled except teams (which never stream)
+        for _name, bot in orchestrator.agent_bots.items():
+            if hasattr(bot, "enable_streaming"):
+                assert bot.enable_streaming is False

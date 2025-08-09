@@ -35,6 +35,7 @@ dependencies = [
   "structlog>=24.1",                                                                                             # for structured logging
   "tavily-python",                                                                                               # for Tavily tool
   "typer>=0.16",
+  "watchfiles>=1.1",
   "wikipedia",                                                                                                   # for Wikipedia tool
 ]
 
@@ -73,13 +74,14 @@ target-version = "py312"
 
 line-length = 120
 lint.select = [
-  "B",   # flake8-bugbear
-  "E",   # pycodestyle errors
-  "F",   # pyflakes
-  "I",   # isort
-  "SIM", # flake8-simplify
-  "UP",  # pyupgrade
-  "W",   # pycodestyle warnings
+  "B",    # flake8-bugbear
+  "E",    # pycodestyle errors
+  "E402", # module level import not at top of file
+  "F",    # pyflakes
+  "I",    # isort
+  "SIM",  # flake8-simplify
+  "UP",   # pyupgrade
+  "W",    # pycodestyle warnings
 ]
 lint.ignore = [
   "E501", # Line too long

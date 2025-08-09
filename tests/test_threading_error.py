@@ -171,8 +171,11 @@ class TestThreadingBehavior:
         bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
         bot.thread_invite_manager.update_agent_activity = AsyncMock()
 
-        # Mock interactive.handle_text_response
-        with patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)):
+        # Mock interactive.handle_text_response and make AI fast
+        with (
+            patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
+            patch("mindroom.bot.ai_response", AsyncMock(return_value="OK")),
+        ):
             # Process the message
             await bot._on_message(room, event)
 

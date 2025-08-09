@@ -276,13 +276,13 @@ async def handle_invite_command(
     if isinstance(room_members, set):
         if agent_user_id not in room_members:
             # Invite the agent to the room (regular room invitation)
-            invite_response = await client.room_invite(room_id, agent_user_id)
-            if isinstance(invite_response, nio.RoomInviteResponse):
+            from mindroom.matrix import invite_to_room
+
+            success = await invite_to_room(client, room_id, agent_user_id)
+            if success:
                 logger.info("Invited agent to room", agent=agent_name, room_id=room_id)
             else:
-                logger.error(
-                    "Failed to invite agent to room", agent=agent_name, room_id=room_id, error=str(invite_response)
-                )
+                logger.error("Failed to invite agent to room", agent=agent_name, room_id=room_id)
     else:
         logger.error("Failed to get room members", room_id=room_id, error=str(room_members))
 

@@ -383,7 +383,7 @@ async def test_agent_responds_in_threads_based_on_participation(
 @pytest.mark.asyncio
 async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     """Test that the orchestrator manages multiple agents correctly."""
-    with patch("mindroom.bot.ensure_all_agent_users") as mock_ensure:
+    with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure:
         # Mock agent users
         mock_agents = {
             "calculator": AgentMatrixUser(
@@ -401,13 +401,24 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
         }
         mock_ensure.return_value = mock_agents
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-        await orchestrator.initialize()
+        # Mock the config loading
+        with patch("mindroom.bot.load_config") as mock_load_config:
+            mock_config = MagicMock()
+            mock_config.agents = {
+                "calculator": MagicMock(display_name="CalculatorAgent", rooms=["room1"]),
+                "general": MagicMock(display_name="GeneralAgent", rooms=["room1"]),
+            }
+            mock_config.teams = {}
+            mock_load_config.return_value = mock_config
 
-        # Verify agents were created
-        assert len(orchestrator.agent_bots) == 2
-        assert "calculator" in orchestrator.agent_bots
-        assert "general" in orchestrator.agent_bots
+            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+            await orchestrator.initialize()
+
+            # Verify agents were created (2 agents + 1 router)
+            assert len(orchestrator.agent_bots) == 3
+            assert "calculator" in orchestrator.agent_bots
+            assert "general" in orchestrator.agent_bots
+            assert "router" in orchestrator.agent_bots
 
         # Test that agents can be started
         with patch("mindroom.bot.login_agent_user") as mock_login:
@@ -423,49 +434,10 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
             for bot in orchestrator.agent_bots.values():
                 await bot.start()
 
-            # Verify all agents were started
-            assert mock_login.call_count == 2
+            # Verify all agents were started (2 agents + 1 router = 3)
+            assert mock_login.call_count == 3
             assert all(bot.running for bot in orchestrator.agent_bots.values())
             assert all(bot.client is not None for bot in orchestrator.agent_bots.values())
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_invites_agents_to_room(tmp_path: Path) -> None:
-    """Test that the orchestrator can invite all agents to a room."""
-    test_room_id = "!test:example.org"
-
-    with patch("mindroom.bot.ensure_all_agent_users") as mock_ensure:
-        mock_agents = {
-            "calculator": AgentMatrixUser(
-                agent_name="calculator",
-                user_id="@mindroom_calculator:localhost",
-                display_name="CalculatorAgent",
-                password="calc_pass",
-            ),
-            "general": AgentMatrixUser(
-                agent_name="general",
-                user_id="@mindroom_general:localhost",
-                display_name="GeneralAgent",
-                password="gen_pass",
-            ),
-        }
-        mock_ensure.return_value = mock_agents
-
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-        await orchestrator.initialize()
-
-        # Test inviting agents
-        mock_inviter_client = AsyncMock()
-        await orchestrator.invite_agents_to_room(test_room_id, mock_inviter_client)
-
-        # Verify invites
-        assert mock_inviter_client.room_invite.call_count == 2
-        invite_calls = mock_inviter_client.room_invite.call_args_list
-        invited_users = {call[0][1] for call in invite_calls}
-        assert invited_users == {
-            "@mindroom_calculator:localhost",
-            "@mindroom_general:localhost",
-        }
 
 
 @pytest.mark.asyncio

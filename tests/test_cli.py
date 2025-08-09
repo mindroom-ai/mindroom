@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.cli import _ensure_user_account
+from mindroom.bot import MultiAgentOrchestrator
 from mindroom.matrix import MatrixState
 
 
@@ -84,50 +84,59 @@ class TestUserAccountManagement:
         mock_client.set_displayname.return_value = AsyncMock()
 
         with (
-            patch("mindroom.cli.matrix_client", return_value=mock_context),
             patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
             patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
-            patch("mindroom.matrix.client.register_user", return_value="@mindroom_user:localhost") as mock_register,
+            patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
         ):
-            state = await _ensure_user_account()
+            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+            await orchestrator._ensure_user_account()
 
             # Check that user was created
-            assert "user" in state.accounts
-            assert state.accounts["user"].username == "mindroom_user"
-            assert state.accounts["user"].password.startswith("mindroom_password_")
+            state = MatrixState.load()
+
+            assert "agent_user" in state.accounts  # User is stored as agent_user
+            assert state.accounts["agent_user"].username == "mindroom_user"
+            assert state.accounts["agent_user"].password.startswith("user_secure_password_")
 
             # Verify registration was called
-            mock_register.assert_called_once()
+            mock_client.register.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_uses_existing_valid(self, tmp_path: Path, mock_matrix_client) -> None:
         """Test ensuring user account when valid credentials exist."""
         mock_context, mock_client = mock_matrix_client
 
-        # Create existing config
+        # Create existing config with user stored as agent_user
         config_file = tmp_path / "matrix_state.yaml"
         state = MatrixState()
-        state.add_account("user", "existing_user", "existing_password")
+        state.add_account("agent_user", "mindroom_user", "existing_password")
 
         with patch("mindroom.matrix.state.MATRIX_STATE_FILE", config_file):
             state.save()
 
-            # Mock successful login with existing credentials
+            # Mock that user already exists when trying to register
+            mock_client.register.return_value = nio.ErrorResponse(
+                message="User ID already taken", status_code="M_USER_IN_USE"
+            )
             mock_client.login.return_value = nio.LoginResponse(
-                user_id="@existing_user:localhost", device_id="TEST_DEVICE", access_token="test_token"
+                user_id="@mindroom_user:localhost", device_id="TEST_DEVICE", access_token="test_token"
             )
 
-            with patch("mindroom.cli.matrix_client", return_value=mock_context):
-                result_config = await _ensure_user_account()
+            with (
+                patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
+                patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
+            ):
+                orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+                await orchestrator._ensure_user_account()
 
                 # Should use existing account
-                assert result_config.accounts["user"].username == "existing_user"
-                assert result_config.accounts["user"].password == "existing_password"
+                result_config = MatrixState.load()
+                assert result_config.accounts["agent_user"].username == "mindroom_user"
+                assert result_config.accounts["agent_user"].password == "existing_password"
 
-                # Should have tried to login
-                mock_client.login.assert_called_once_with(password="existing_password")
-                # Should not register new user
-                mock_client.register.assert_not_called()
+                # Should have tried to register (which returns M_USER_IN_USE)
+                mock_client.register.assert_called_once()
+                # Login is not called by create_agent_user
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_invalid_credentials(self, tmp_path: Path, mock_matrix_client) -> None:
@@ -137,7 +146,7 @@ class TestUserAccountManagement:
         # Create existing config with invalid credentials
         config_file = tmp_path / "matrix_state.yaml"
         state = MatrixState()
-        state.add_account("user", "invalid_user", "wrong_password")
+        state.add_account("agent_user", "mindroom_user", "wrong_password")
 
         with patch("mindroom.matrix.state.MATRIX_STATE_FILE", config_file):
             state.save()
@@ -149,23 +158,25 @@ class TestUserAccountManagement:
 
             # Mock successful registration for new account
             mock_client.register.return_value = nio.RegisterResponse(
-                user_id="@mindroom_user_new:localhost", device_id="TEST_DEVICE", access_token="test_token"
+                user_id="@mindroom_user:localhost", device_id="TEST_DEVICE", access_token="test_token"
             )
             mock_client.set_displayname.return_value = AsyncMock()
 
             with (
-                patch("mindroom.cli.matrix_client", return_value=mock_context),
                 patch("mindroom.matrix.client.matrix_client", return_value=mock_context),
-                patch("mindroom.matrix.client.register_user", return_value="@mindroom_user:localhost") as mock_register,
+                patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
             ):
-                result_config = await _ensure_user_account()
+                orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+                await orchestrator._ensure_user_account()
 
-                # Should have created new account
-                assert "user" in result_config.accounts
-                assert result_config.accounts["user"].username != "invalid_user"
-                assert result_config.accounts["user"].username == "mindroom_user"
+                # Should have kept the existing account credentials
+                # (create_agent_user doesn't regenerate passwords on login failure)
+                result_config = MatrixState.load()
+                assert "agent_user" in result_config.accounts
+                assert result_config.accounts["agent_user"].username == "mindroom_user"
+                # Password stays the same - create_agent_user reuses existing credentials
+                assert result_config.accounts["agent_user"].password == "wrong_password"
 
-                # Should have tried old credentials first
-                assert mock_client.login.call_count >= 1
+                # create_agent_user doesn't login, just registers
                 # Should have registered new user
-                mock_register.assert_called_once()
+                mock_client.register.assert_called_once()

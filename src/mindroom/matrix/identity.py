@@ -35,6 +35,11 @@ class MatrixID:
         """Create a MatrixID for an agent."""
         return cls(username=f"{cls.AGENT_PREFIX}{agent_name}", domain=domain)
 
+    @classmethod
+    def from_username(cls, username: str, domain: str) -> "MatrixID":
+        """Create a MatrixID from a username (without @ prefix)."""
+        return cls(username=username, domain=domain)
+
     @property
     def full_id(self) -> str:
         """Get the full Matrix ID like @mindroom_calculator:localhost."""

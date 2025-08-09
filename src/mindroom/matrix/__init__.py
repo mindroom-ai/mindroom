@@ -9,12 +9,15 @@ from .client import (
     edit_message,
     extract_thread_info,
     fetch_thread_history,
+    get_joined_rooms,
     get_room_members,
     invite_to_room,
     join_room,
+    leave_room,
     login,
     matrix_client,
     register_user,
+    send_message,
 )
 from .identity import (
     MatrixID,
@@ -28,6 +31,8 @@ from .identity import (
 from .mentions import create_mention_content, create_mention_content_from_text
 from .rooms import (
     add_room,
+    ensure_all_rooms_exist,
+    ensure_room_exists,
     get_room_alias_from_id,
     get_room_aliases,
     get_room_id,
@@ -58,12 +63,15 @@ __all__ = [
     "edit_message",
     "extract_thread_info",
     "fetch_thread_history",
+    "get_joined_rooms",
     "get_room_members",
     "invite_to_room",
     "join_room",
+    "leave_room",
     "login",
     "matrix_client",
     "register_user",
+    "send_message",
     # Identity classes and functions
     "MatrixID",
     "ThreadStateKey",
@@ -78,6 +86,8 @@ __all__ = [
     "MatrixRoom",
     # Room functions
     "add_room",
+    "ensure_all_rooms_exist",
+    "ensure_room_exists",
     "get_room_alias_from_id",
     "get_room_aliases",
     "get_room_id",

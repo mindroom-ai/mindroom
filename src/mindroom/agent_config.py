@@ -1,6 +1,5 @@
 """Agent loader that reads agent configurations from YAML file."""
 
-import functools
 from pathlib import Path
 
 import yaml
@@ -34,7 +33,6 @@ RICH_PROMPTS = {
 }
 
 
-@functools.cache
 def load_config(config_path: Path | None = None) -> Config:
     """Load agent configuration from YAML file.
 
@@ -221,3 +219,28 @@ def get_agent_ids_for_room(room_key: str, config: Config | None = None, homeserv
             agent_ids.append(MatrixID.from_agent(agent_name, server_name).full_id)
 
     return agent_ids
+
+
+def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
+    """Get the list of room aliases that an entity (agent/team) should be in.
+
+    Args:
+        entity_name: Name of the agent or team
+        config: Configuration object
+
+    Returns:
+        List of room aliases the entity should be in
+    """
+    # TeamBot check (teams)
+    if entity_name in config.teams:
+        return config.teams[entity_name].rooms
+
+    # Router agent special case - gets all rooms
+    if entity_name == ROUTER_AGENT_NAME:
+        return list(config.get_all_configured_rooms())
+
+    # Regular agents
+    if entity_name in config.agents:
+        return config.agents[entity_name].rooms
+
+    return []
