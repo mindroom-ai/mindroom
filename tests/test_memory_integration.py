@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.ai import ai_response
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.models import Config
+from mindroom.config import Config
 
 
 class TestMemoryIntegration:

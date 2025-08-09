@@ -6,7 +6,7 @@ import nio
 import pytest
 
 import mindroom.interactive as interactive
-from mindroom.models import AgentConfig, Config, ModelConfig
+from mindroom.config import AgentConfig, Config, ModelConfig
 
 
 @pytest.fixture

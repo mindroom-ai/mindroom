@@ -12,7 +12,7 @@ These tests ensure no regressions in the core response logic.
 
 from typing import Any
 
-from mindroom.models import AgentConfig, Config, ModelConfig
+from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.thread_utils import should_agent_respond
 
 

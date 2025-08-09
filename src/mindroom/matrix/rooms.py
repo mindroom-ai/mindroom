@@ -14,7 +14,7 @@ from .state import MatrixRoom, MatrixState
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from ..models import Config
+    from ..config import Config
 
 
 def load_rooms() -> dict[str, MatrixRoom]:

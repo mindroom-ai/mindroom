@@ -9,10 +9,10 @@ from typing import NamedTuple
 
 import nio
 
+from .config import Config
 from .logging_config import get_logger
 from .matrix.client import extract_thread_info
 from .matrix.identity import is_agent_id
-from .models import Config
 
 logger = get_logger(__name__)
 

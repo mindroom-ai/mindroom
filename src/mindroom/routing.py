@@ -9,9 +9,9 @@ from pydantic import BaseModel, Field
 
 from .agent_config import describe_agent
 from .ai import get_model_instance
+from .config import Config
 from .logging_config import get_logger
 from .matrix.identity import MatrixID
-from .models import Config
 
 logger = get_logger(__name__)
 

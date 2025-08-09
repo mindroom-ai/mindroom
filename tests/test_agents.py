@@ -5,7 +5,7 @@ import pytest
 from agno.agent import Agent
 
 from mindroom.agent_config import create_agent
-from mindroom.models import Config
+from mindroom.config import Config
 
 
 @patch("mindroom.agent_config.SqliteStorage")

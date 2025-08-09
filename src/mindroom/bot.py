@@ -25,6 +25,7 @@ from .commands import (
     handle_list_invites_command,
     handle_widget_command,
 )
+from .config import Config
 from .constants import ROUTER_AGENT_NAME
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
@@ -49,7 +50,6 @@ from .matrix.mentions import create_mention_content_from_text
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
-from .models import Config
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message

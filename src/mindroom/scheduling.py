@@ -12,9 +12,9 @@ from agno.agent import Agent
 from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
+from .config import Config
 from .logging_config import get_logger
 from .matrix.client import send_message
-from .models import Config
 
 logger = get_logger(__name__)
 

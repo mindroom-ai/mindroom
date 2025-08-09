@@ -2,8 +2,8 @@
 
 import pytest
 
+from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.identity import MatrixID, ThreadStateKey, extract_agent_name, is_agent_id, parse_matrix_id
-from mindroom.models import AgentConfig, Config, ModelConfig
 
 
 class TestMatrixID:

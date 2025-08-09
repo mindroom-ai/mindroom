@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import ClassVar
 
+from ..config import Config
 from ..constants import ROUTER_AGENT_NAME
-from ..models import Config
 
 
 @dataclass(frozen=True)

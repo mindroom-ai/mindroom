@@ -6,9 +6,9 @@ from typing import Any
 
 import nio
 
+from .config import Config
 from .constants import ROUTER_AGENT_NAME
 from .matrix.identity import extract_agent_name
-from .models import Config
 
 
 def check_agent_mentioned(event_source: dict, agent_name: str, config: Config) -> tuple[list[str], bool]:

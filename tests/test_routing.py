@@ -7,8 +7,8 @@ import pytest
 
 from mindroom.agent_config import describe_agent
 from mindroom.bot import AgentBot
+from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import extract_agent_name, has_any_agent_mentions_in_thread
 

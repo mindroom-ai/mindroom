@@ -9,8 +9,8 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.response_tracker import ResponseTracker
 from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse
 from mindroom.thread_invites import ThreadInviteManager

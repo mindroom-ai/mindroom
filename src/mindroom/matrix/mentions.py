@@ -3,7 +3,7 @@
 import re
 from typing import Any
 
-from ..models import Config
+from ..config import Config
 from .client import markdown_to_html
 from .identity import MatrixID
 

@@ -10,7 +10,7 @@ import nio
 import pytest
 
 from mindroom.bot import MultiAgentOrchestrator
-from mindroom.models import Config, RouterConfig
+from mindroom.config import Config, RouterConfig
 
 
 @pytest.mark.asyncio
@@ -150,7 +150,7 @@ async def test_streaming_edits_e2e(
     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
     # Patch the config loading to assign rooms
-    with patch("mindroom.models.Config.from_yaml") as mock_config:
+    with patch("mindroom.config.Config.from_yaml") as mock_config:
         mock_cfg = MagicMock()
         mock_cfg.agents = {
             "helper": MagicMock(display_name="HelperAgent", rooms=[test_room_id]),

@@ -3,8 +3,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from mindroom.memory.config import get_memory_config
-from mindroom.models import (
+from mindroom.config import (
     Config,
     EmbedderConfig,
     MemoryConfig,
@@ -12,6 +11,7 @@ from mindroom.models import (
     MemoryLLMConfig,
     RouterConfig,
 )
+from mindroom.memory.config import get_memory_config
 
 
 class TestMemoryConfig:

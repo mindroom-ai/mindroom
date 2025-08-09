@@ -12,8 +12,8 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.config import Config
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import Config
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
@@ -203,7 +203,7 @@ class TestRoutingRegression:
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.teams.get_model_instance")
-    @patch("mindroom.models.Config.from_yaml")
+    @patch("mindroom.config.Config.from_yaml")
     async def test_multiple_mentions_each_responds_once(
         self,
         mock_from_yaml: MagicMock,
@@ -216,7 +216,7 @@ class TestRoutingRegression:
     ) -> None:
         """Test that when multiple agents are mentioned, each responds exactly once."""
         # Create a mock config with proper models
-        from mindroom.models import AgentConfig, Config, ModelConfig
+        from mindroom.config import AgentConfig, Config, ModelConfig
 
         mock_config = Config(
             agents={

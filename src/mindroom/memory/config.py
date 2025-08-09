@@ -6,8 +6,8 @@ from typing import Any
 
 from mem0 import AsyncMemory
 
+from ..config import Config
 from ..logging_config import get_logger
-from ..models import Config
 
 logger = get_logger(__name__)
 

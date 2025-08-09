@@ -24,12 +24,12 @@ from dotenv import load_dotenv
 
 from .agent_config import create_agent
 from .background_tasks import create_background_task
+from .config import Config
 from .logging_config import get_logger
 from .memory import (
     build_memory_enhanced_prompt,
     store_conversation_memory,
 )
-from .models import Config
 
 logger = get_logger(__name__)
 

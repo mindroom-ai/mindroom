@@ -5,9 +5,9 @@ from dataclasses import dataclass
 
 import nio
 
+from ..config import Config
 from ..constants import ROUTER_AGENT_NAME
 from ..logging_config import get_logger
-from ..models import Config
 from .identity import MatrixID, extract_server_name_from_homeserver, parse_matrix_id
 from .state import MatrixState
 

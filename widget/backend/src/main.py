@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from mindroom.models import Config
+from mindroom.config import Config
 
 app = FastAPI(title="MindRoom Widget Backend")
 

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mindroom.config import Config
 from mindroom.memory.functions import (
     MemoryResult,
     add_agent_memory,
@@ -14,7 +15,6 @@ from mindroom.memory.functions import (
     search_agent_memories,
     store_conversation_memory,
 )
-from mindroom.models import Config
 
 
 class TestMemoryFunctions:

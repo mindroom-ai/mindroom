@@ -12,10 +12,10 @@ from agno.run.team import TeamRunResponse
 from agno.team import Team
 
 from .ai import get_model_instance
+from .config import Config
 from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
-from .models import Config
 
 if TYPE_CHECKING:
     from .bot import MultiAgentOrchestrator

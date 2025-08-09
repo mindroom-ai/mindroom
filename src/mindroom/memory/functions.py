@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, TypedDict
 
+from ..config import Config
 from ..logging_config import get_logger
-from ..models import Config
 from .config import create_memory_instance
 
 

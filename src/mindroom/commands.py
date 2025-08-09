@@ -9,10 +9,10 @@ from typing import Any
 
 import nio
 
+from .config import Config
 from .logging_config import get_logger
 from .matrix.client import get_room_members, invite_to_room
 from .matrix.identity import MatrixID
-from .models import Config
 
 logger = get_logger(__name__)
 

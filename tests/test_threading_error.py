@@ -15,8 +15,8 @@ import pytest
 import pytest_asyncio
 
 from mindroom.bot import AgentBot
+from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import AgentConfig, Config, ModelConfig, RouterConfig
 
 
 class TestThreadingBehavior:

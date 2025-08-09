@@ -8,10 +8,10 @@ from dataclasses import dataclass
 import nio
 
 from . import interactive
+from .config import Config
 from .logging_config import get_logger
 from .matrix.client import edit_message, send_message
 from .matrix.mentions import create_mention_content_from_text
-from .models import Config
 
 logger = get_logger(__name__)
 

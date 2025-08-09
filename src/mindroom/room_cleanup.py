@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import nio
 
+from .config import Config
 from .logging_config import get_logger
 from .matrix.client import get_joined_rooms, get_room_members
 from .matrix.identity import MatrixID
 from .matrix.state import MatrixState
-from .models import Config
 from .thread_invites import ThreadInviteManager
 
 logger = get_logger(__name__)

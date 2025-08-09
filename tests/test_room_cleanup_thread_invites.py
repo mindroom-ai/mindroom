@@ -14,7 +14,7 @@ import nio
 import pytest
 
 import mindroom.room_cleanup
-from mindroom.models import AgentConfig, Config, RouterConfig
+from mindroom.config import AgentConfig, Config, RouterConfig
 from mindroom.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.thread_invites import ThreadInviteManager
 

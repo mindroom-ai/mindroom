@@ -7,6 +7,7 @@ import nio
 import pytest
 import yaml
 
+from mindroom.config import Config
 from mindroom.matrix.client import register_user
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
@@ -17,7 +18,6 @@ from mindroom.matrix.users import (
     login_agent_user,
     save_agent_credentials,
 )
-from mindroom.models import Config
 
 
 @pytest.fixture

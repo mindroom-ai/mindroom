@@ -6,7 +6,7 @@ import nio
 import pytest
 
 from mindroom.commands import handle_invite_command, handle_list_invites_command
-from mindroom.models import Config, RouterConfig
+from mindroom.config import Config, RouterConfig
 from mindroom.thread_invites import ThreadInviteManager
 
 

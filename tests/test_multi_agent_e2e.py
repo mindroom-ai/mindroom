@@ -10,8 +10,8 @@ import pytest
 from aioresponses import aioresponses
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
+from mindroom.config import Config
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import Config
 
 
 @pytest.fixture
@@ -180,7 +180,7 @@ async def test_agent_responds_in_threads_based_on_participation(
     thread_root_id = "$thread_root:example.org"
 
     # Mock the config to include both agents
-    from mindroom.models import AgentConfig, ModelConfig
+    from mindroom.config import AgentConfig, ModelConfig
 
     mock_config = Config(
         agents={
@@ -194,7 +194,7 @@ async def test_agent_responds_in_threads_based_on_participation(
 
     with (
         patch("mindroom.bot.login_agent_user") as mock_login,
-        patch("mindroom.models.Config.from_yaml", return_value=mock_config),
+        patch("mindroom.config.Config.from_yaml", return_value=mock_config),
         patch("mindroom.teams.get_model_instance") as mock_get_model_instance,
     ):
         mock_client = AsyncMock()
@@ -419,7 +419,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
         mock_ensure.return_value = mock_agents
 
         # Mock the config loading
-        with patch("mindroom.models.Config.from_yaml") as mock_from_yaml:
+        with patch("mindroom.config.Config.from_yaml") as mock_from_yaml:
             mock_config = MagicMock()
             mock_config.agents = {
                 "calculator": MagicMock(display_name="CalculatorAgent", rooms=["room1"]),
