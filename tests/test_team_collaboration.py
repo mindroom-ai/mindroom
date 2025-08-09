@@ -70,7 +70,7 @@ def team_room_id() -> str:
 class TestTeamFormation:
     """Test team formation logic."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         """Set up test config."""
         self.config = Config(
             agents={
@@ -276,7 +276,7 @@ class TestTeamCollaboration:
 class TestTeamResponseBehavior:
     """Test specific team response behaviors."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         """Set up test config."""
         self.config = Config(
             agents={
