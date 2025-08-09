@@ -7,7 +7,7 @@ from mindroom.matrix.mentions import create_mention_content_from_text, parse_men
 class TestMentionParsing:
     """Test the universal mention parsing system."""
 
-    def test_parse_single_mention(self):
+    def test_parse_single_mention(self) -> None:
         """Test parsing a single agent mention."""
         config = load_config()
 
@@ -17,7 +17,7 @@ class TestMentionParsing:
         assert processed == "Hey @mindroom_calculator:localhost can you help with this?"
         assert mentions == ["@mindroom_calculator:localhost"]
 
-    def test_parse_multiple_mentions(self):
+    def test_parse_multiple_mentions(self) -> None:
         """Test parsing multiple agent mentions."""
         config = load_config()
 
@@ -30,7 +30,7 @@ class TestMentionParsing:
         assert set(mentions) == {"@mindroom_calculator:localhost", "@mindroom_general:localhost"}
         assert len(mentions) == 2
 
-    def test_parse_with_full_mention(self):
+    def test_parse_with_full_mention(self) -> None:
         """Test parsing when full @mindroom_agent format is used."""
         config = load_config()
 
@@ -40,7 +40,7 @@ class TestMentionParsing:
         assert processed == "Ask @mindroom_calculator:localhost for help"
         assert mentions == ["@mindroom_calculator:localhost"]
 
-    def test_parse_with_domain(self):
+    def test_parse_with_domain(self) -> None:
         """Test parsing when mention already has domain."""
         config = load_config()
 
@@ -51,7 +51,7 @@ class TestMentionParsing:
         assert processed == "Ask @mindroom_calculator:localhost for help"
         assert mentions == ["@mindroom_calculator:localhost"]
 
-    def test_custom_domain(self):
+    def test_custom_domain(self) -> None:
         """Test with custom sender domain."""
         config = load_config()
 
@@ -61,7 +61,7 @@ class TestMentionParsing:
         assert processed == "Hey @mindroom_calculator:matrix.org"
         assert mentions == ["@mindroom_calculator:matrix.org"]
 
-    def test_ignore_unknown_mentions(self):
+    def test_ignore_unknown_mentions(self) -> None:
         """Test that unknown agents are not converted."""
         config = load_config()
 
@@ -71,7 +71,7 @@ class TestMentionParsing:
         assert processed == "@mindroom_calculator:localhost is real but @unknown is not"
         assert mentions == ["@mindroom_calculator:localhost"]
 
-    def test_ignore_user_mentions(self):
+    def test_ignore_user_mentions(self) -> None:
         """Test that user mentions are ignored."""
         config = load_config()
 
@@ -81,7 +81,7 @@ class TestMentionParsing:
         assert processed == "@mindroom_user_123 and @mindroom_calculator:localhost"
         assert mentions == ["@mindroom_calculator:localhost"]
 
-    def test_no_duplicate_mentions(self):
+    def test_no_duplicate_mentions(self) -> None:
         """Test that duplicate mentions are handled."""
         config = load_config()
 
@@ -91,7 +91,7 @@ class TestMentionParsing:
         assert processed == "@mindroom_calculator:localhost help! @mindroom_calculator:localhost are you there?"
         assert mentions == ["@mindroom_calculator:localhost"]  # Only one entry
 
-    def test_create_mention_content_from_text(self):
+    def test_create_mention_content_from_text(self) -> None:
         """Test the full content creation with mentions."""
         config = load_config()
 
@@ -108,7 +108,7 @@ class TestMentionParsing:
         assert content["m.relates_to"]["event_id"] == "$thread123"
         assert content["m.relates_to"]["rel_type"] == "m.thread"
 
-    def test_no_mentions_in_text(self):
+    def test_no_mentions_in_text(self) -> None:
         """Test text with no mentions."""
         config = load_config()
 
@@ -118,7 +118,7 @@ class TestMentionParsing:
         assert processed == text
         assert mentions == []
 
-    def test_mention_in_middle_of_word(self):
+    def test_mention_in_middle_of_word(self) -> None:
         """Test that mentions in middle of words are not parsed."""
         config = load_config()
 
