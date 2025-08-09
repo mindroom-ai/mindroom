@@ -363,8 +363,10 @@ class AgentBot:
             if command:
                 await self._handle_command(room, event, command)
             else:
+                # Extract thread info for unknown commands too
+                is_thread, thread_id = extract_thread_info(event.source)
                 help_text = "❌ Unknown command. Try !help for available commands."
-                await self._send_response(room, event.event_id, help_text, thread_id=None, reply_to_event=event)
+                await self._send_response(room, event.event_id, help_text, thread_id=thread_id, reply_to_event=event)
             return
 
         context = await self._extract_message_context(room, event)
