@@ -260,7 +260,6 @@ async def create_team_response(
             prompt = f"Thread Context:\n{context}\n\nUser: {message}"
 
     # Use provided model or default
-    # Get config from orchestrator
     assert orchestrator.current_config is not None
     model = get_model_instance(orchestrator.current_config, model_name or "default")
 

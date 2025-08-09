@@ -8,9 +8,10 @@ import nio
 import pytest
 from aioresponses import aioresponses
 
+from mindroom.agent_config import load_config
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import Config, RouterConfig
+from mindroom.models import Config
 
 
 @pytest.fixture
@@ -55,7 +56,7 @@ async def test_agent_processes_direct_mention(
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
 
-        config = Config(router=RouterConfig(model="default"))
+        config = load_config()
 
         bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
         await bot.start()
@@ -135,7 +136,7 @@ async def test_agent_ignores_other_agents(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = Config(router=RouterConfig(model="default"))
+        config = load_config()
 
         bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
         await bot.start()
@@ -178,7 +179,7 @@ async def test_agent_responds_in_threads_based_on_participation(
     thread_root_id = "$thread_root:example.org"
 
     # Mock the config to include both agents
-    from mindroom.models import AgentConfig, Config
+    from mindroom.models import AgentConfig
 
     mock_config = Config(
         agents={
@@ -199,7 +200,7 @@ async def test_agent_responds_in_threads_based_on_participation(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = Config(router=RouterConfig(model="default"))
+        config = load_config()
 
         bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False, config=config)
 
@@ -459,7 +460,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = Config(router=RouterConfig(model="default"))
+        config = load_config()
 
         bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[initial_room], config=config)
         await bot.start()

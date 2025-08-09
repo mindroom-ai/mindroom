@@ -389,12 +389,14 @@ class AgentBot:
                 return
 
             # Create and execute team response
+            model_name = get_team_model(self.agent_name, room.room_id, self.config)
             team_response = await create_team_response(
                 agent_names=form_team.agents,
                 mode=form_team.mode,
                 message=event.body,
                 orchestrator=self.orchestrator,
                 thread_history=context.thread_history,
+                model_name=model_name,
             )
             await self._send_response(room, event.event_id, team_response, context.thread_id)
             # Mark as responded after team response
