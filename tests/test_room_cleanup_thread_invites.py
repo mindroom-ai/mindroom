@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+import mindroom.room_cleanup
 from mindroom.models import AgentConfig, Config, RouterConfig
 from mindroom.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.thread_invites import ThreadInviteManager
@@ -77,8 +78,6 @@ async def test_cleanup_preserves_invited_agents() -> None:
     mock_client.room_kick = mock_room_kick
 
     # Patch the imports
-    import mindroom.room_cleanup
-
     original_get_members = mindroom.room_cleanup.get_room_members
     original_get_bot_usernames = mindroom.room_cleanup._get_all_known_bot_usernames
 
@@ -181,8 +180,6 @@ async def test_cleanup_all_preserves_invited_agents() -> None:
     mock_client.room_kick = mock_room_kick
 
     # Patch the imports
-    import mindroom.room_cleanup
-
     original_get_members = mindroom.room_cleanup.get_room_members
     original_get_bot_usernames = mindroom.room_cleanup._get_all_known_bot_usernames
     original_get_joined = mindroom.room_cleanup.get_joined_rooms
