@@ -101,28 +101,47 @@ async def ensure_room_exists(
     """
     existing_rooms = load_rooms()
 
-    # Check if room already exists in our state
-    if room_key in existing_rooms:
-        logger.debug(f"Room {room_key} already exists")
-        room_id = existing_rooms[room_key].room_id
-        # Try to join the room in case we're not a member
+    # First, try to resolve the room alias on the server
+    # This handles cases where the room exists on server but not in our state
+    server_name = extract_server_name_from_homeserver(client.homeserver)
+    full_alias = f"#{room_key}:{server_name}"
+
+    response = await client.room_resolve_alias(full_alias)
+    if isinstance(response, nio.RoomResolveAliasResponse):
+        room_id = response.room_id
+        logger.debug(f"Room alias {full_alias} exists on server, room ID: {room_id}")
+
+        # Update our state if needed
+        if room_key not in existing_rooms or existing_rooms[room_key].room_id != room_id:
+            if room_name is None:
+                room_name = room_key.replace("_", " ").title()
+            add_room(room_key, room_id, full_alias, room_name)
+            logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
+
+        # Try to join the room
         from .client import join_room
 
         if await join_room(client, room_id):
-            return room_id
+            return str(room_id)
         else:
-            # Room exists in state but we can't join it - it might be stale
-            # Remove it from state and continue to create a new one
-            logger.warning(f"Room {room_key} exists in state but cannot be joined, recreating")
-            remove_room(room_key)
+            # Room exists but we can't join - this means the room was created
+            # but this user isn't a member. Return the room ID anyway since
+            # the room does exist and invitations will be handled separately
+            logger.debug(f"Room {room_key} exists but user not a member, returning room ID for invitation handling")
+            return str(room_id)
 
-    # Room doesn't exist, create it
+    # Room alias doesn't exist on server, so we can create it
+    if room_key in existing_rooms:
+        # Remove stale entry from state
+        logger.debug(f"Removing stale room {room_key} from state")
+        remove_room(room_key)
+
+    # Create the room
     if room_name is None:
         room_name = room_key.replace("_", " ").title()
 
     logger.info(f"Creating room {room_key}")
 
-    # Create the room
     created_room_id = await create_room(
         client=client,
         name=room_name,
@@ -133,30 +152,12 @@ async def ensure_room_exists(
 
     if created_room_id:
         # Save room info
-        server_name = extract_server_name_from_homeserver(client.homeserver)
-        add_room(room_key, created_room_id, f"#{room_key}:{server_name}", room_name)
+        add_room(room_key, created_room_id, full_alias, room_name)
         logger.info(f"Created room {room_key} with ID {created_room_id}")
         return created_room_id
     else:
-        # Try to resolve the alias in case it already exists
-        server_name = extract_server_name_from_homeserver(client.homeserver)
-        full_alias = f"#{room_key}:{server_name}"
-
-        # Try to resolve the room alias
-        response = await client.room_resolve_alias(full_alias)
-        if isinstance(response, nio.RoomResolveAliasResponse):
-            room_id = response.room_id
-            logger.info(f"Room alias {full_alias} already exists, using room {room_id}")
-            # Save to our state
-            add_room(room_key, room_id, full_alias, room_name)
-            # Try to join the room
-            from .client import join_room
-
-            await join_room(client, room_id)
-            return str(room_id)
-        else:
-            logger.error(f"Failed to create room {room_key} and could not resolve existing alias")
-            return None
+        logger.error(f"Failed to create room {room_key}")
+        return None
 
 
 async def ensure_all_rooms_exist(
