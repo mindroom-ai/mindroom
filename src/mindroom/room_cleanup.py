@@ -28,7 +28,8 @@ def _get_all_known_bot_usernames() -> set[str]:
 
     # Get all agent accounts from state
     for key in state.accounts:
-        if key.startswith("agent_"):
+        # Skip the user account (agent_user is the human user, not a bot)
+        if key.startswith("agent_") and key != "agent_user":
             account = state.accounts[key]
             bot_usernames.add(account.username)
 
