@@ -35,7 +35,7 @@ dependencies = [
   "structlog>=24.1",                                                                                             # for structured logging
   "tavily-python",                                                                                               # for Tavily tool
   "typer>=0.16",
-  "watchfiles>=1.1",
+  "watchdog>=6",
   "wikipedia",                                                                                                   # for Wikipedia tool
 ]
 

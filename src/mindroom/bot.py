@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
-from watchfiles import awatch
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 from . import interactive
 from .agent_config import create_agent, get_rooms_for_entity, load_config
@@ -1425,21 +1426,41 @@ async def main(log_level: str, storage_path: Path) -> None:
         # Create task to watch config file for changes
         async def watch_config() -> None:
             """Watch config file for changes and reload when modified."""
-            async for _changes in awatch(config_path):
-                # The changes set contains tuples of (change_type, path)
-                # We only care that the file changed, not the specific type
-                logger.info("Configuration file changed, checking for updates...")
+            # Use asyncio event to signal changes
+            change_event = asyncio.Event()
 
-                if orchestrator.running:
-                    updated = await orchestrator.update_config()
-                    if updated:
-                        logger.info("Configuration update applied to affected agents")
-                    else:
-                        logger.info("No agent changes detected in configuration update")
+            class ConfigChangeHandler(FileSystemEventHandler):
+                def on_modified(self, event: Any) -> None:
+                    if not event.is_directory and Path(event.src_path).resolve() == Path(config_path).resolve():
+                        change_event.set()
 
-                # Break if orchestrator is no longer running
-                if not orchestrator.running:
-                    break
+            # Set up the observer
+            event_handler = ConfigChangeHandler()
+            observer = Observer()
+            observer.schedule(event_handler, str(Path(config_path).parent), recursive=False)
+            observer.start()
+
+            try:
+                while orchestrator.running:
+                    # Wait for file change with timeout to check if orchestrator is still running
+                    try:
+                        await asyncio.wait_for(change_event.wait(), timeout=1.0)
+                        change_event.clear()
+
+                        logger.info("Configuration file changed, checking for updates...")
+
+                        if orchestrator.running:
+                            updated = await orchestrator.update_config()
+                            if updated:
+                                logger.info("Configuration update applied to affected agents")
+                            else:
+                                logger.info("No agent changes detected in configuration update")
+                    except TimeoutError:
+                        # Check if orchestrator is still running
+                        continue
+            finally:
+                observer.stop()
+                observer.join()
 
         # Run config watcher in parallel with orchestrator
         watcher_task = asyncio.create_task(watch_config())
