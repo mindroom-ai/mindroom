@@ -14,7 +14,12 @@ from agno.models.base import Model
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
-from agno.run.response import RunResponse, RunResponseContentEvent
+from agno.run.response import (
+    RunResponse,
+    RunResponseContentEvent,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
 from dotenv import load_dotenv
 
 from .agent_config import create_agent
@@ -30,6 +35,57 @@ logger = get_logger(__name__)
 
 load_dotenv()
 ENABLE_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
+
+
+def _extract_response_content(response: RunResponse) -> str:
+    response_parts = []
+
+    # Add main content if present
+    if response.content:
+        response_parts.append(response.content)
+
+    # Add formatted tool calls if present (similar to agno's print_response)
+    # Only add if there are actual tool calls to display
+    if response.formatted_tool_calls and any(response.formatted_tool_calls):
+        tool_calls_section = "\n\n**Tool Calls:**"
+        for tool_call in response.formatted_tool_calls:
+            tool_calls_section += f"\n• {tool_call}"
+        response_parts.append(tool_calls_section)
+
+    return "\n".join(response_parts) if response_parts else ""
+
+
+def _format_tool_started_message(event: ToolCallStartedEvent) -> str:
+    if not event.tool:
+        return ""
+
+    tool_name = event.tool.tool_name if event.tool.tool_name else "tool"
+    tool_args = event.tool.tool_args if event.tool.tool_args else {}
+
+    # Format similar to agno's formatted_tool_calls
+    if tool_args:
+        args_str = ", ".join(f"{k}={v}" for k, v in tool_args.items())
+        msg = f"\n\n🔧 **Tool Call:** {tool_name}({args_str})\n"
+    else:
+        msg = f"\n\n🔧 **Tool Call:** {tool_name}()\n"
+
+    return msg
+
+
+def _format_tool_completed_message(event: ToolCallCompletedEvent) -> str:
+    if not event.tool:
+        return ""
+
+    tool_name = event.tool.tool_name if event.tool.tool_name else "tool"
+
+    # Check both event.content and tool.result for the output
+    result = event.content or (event.tool.result if event.tool else None)
+
+    if result:
+        # Format the result nicely
+        return f"✅ **{tool_name} Result:**\n{result}\n\n"
+
+    return f"✅ **{tool_name}** completed\n\n"
 
 
 @functools.cache
@@ -173,7 +229,7 @@ async def ai_response(
         )
 
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
-        response_text = response.content or ""
+        response_text = _extract_response_content(response)
 
         # Save memory in background to avoid blocking
         create_background_task(
@@ -248,6 +304,18 @@ async def ai_response_streaming(
                 chunk_text = str(event.content)
                 full_response += chunk_text
                 yield chunk_text
+            elif isinstance(event, ToolCallStartedEvent):
+                tool_msg = _format_tool_started_message(event)
+                if tool_msg:
+                    full_response += tool_msg
+                    yield tool_msg
+            elif isinstance(event, ToolCallCompletedEvent):
+                result_msg = _format_tool_completed_message(event)
+                if result_msg:
+                    full_response += result_msg
+                    yield result_msg
+            else:
+                logger.warning(f"Unhandled event type: {type(event).__name__} - {event}")
 
     except Exception as e:
         logger.exception(f"Error generating streaming AI response: {e}")
