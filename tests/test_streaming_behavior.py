@@ -9,7 +9,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import Config, RouterConfig
+from mindroom.models import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.response_tracker import ResponseTracker
 from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse
 from mindroom.thread_invites import ThreadInviteManager
@@ -40,6 +40,19 @@ def mock_calculator_agent() -> AgentMatrixUser:
 class TestStreamingBehavior:
     """Test the complete streaming behavior including agent interactions."""
 
+    def setup_method(self):
+        """Set up test config."""
+        self.config = Config(
+            agents={
+                "helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"]),
+                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
@@ -53,7 +66,7 @@ class TestStreamingBehavior:
     ) -> None:
         """Test complete flow of one agent streaming and mentioning another."""
         # Set up helper bot (the one that will stream)
-        config = Config(router=RouterConfig(model="default"))
+        config = self.config
 
         helper_bot = AgentBot(
             mock_helper_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=True, config=config
@@ -62,8 +75,13 @@ class TestStreamingBehavior:
         helper_bot.response_tracker = ResponseTracker(helper_bot.agent_name, base_path=tmp_path)
         helper_bot.thread_invite_manager = ThreadInviteManager(helper_bot.client)
 
+        # Mock orchestrator
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.current_config = config
+        helper_bot.orchestrator = mock_orchestrator
+
         # Set up calculator bot (the one that will be mentioned)
-        config = Config(router=RouterConfig(model="default"))
+        config = self.config
 
         calc_bot = AgentBot(
             mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
@@ -71,6 +89,11 @@ class TestStreamingBehavior:
         calc_bot.client = AsyncMock()
         calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
         calc_bot.thread_invite_manager = ThreadInviteManager(calc_bot.client)
+
+        # Mock orchestrator
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.current_config = config
+        calc_bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send responses
         mock_send_response = MagicMock()
@@ -178,7 +201,7 @@ class TestStreamingBehavior:
     ) -> None:
         """Test that agents respond to the final complete message, not edits."""
         # Set up calculator bot
-        config = Config(router=RouterConfig(model="default"))
+        config = self.config
 
         calc_bot = AgentBot(
             mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
@@ -186,6 +209,11 @@ class TestStreamingBehavior:
         calc_bot.client = AsyncMock()
         calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
         calc_bot.thread_invite_manager = ThreadInviteManager(calc_bot.client)
+
+        # Mock orchestrator
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.current_config = config
+        calc_bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -256,7 +284,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_send_response
 
         # Create streaming response
-        config = Config(router=RouterConfig(model="default"))
+        config = self.config
         streaming = StreamingResponse(
             room_id="!test:localhost",
             reply_to_event_id="$original_123",
@@ -318,7 +346,7 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_send_response
 
         # Create streaming response
-        config = Config(router=RouterConfig(model="default"))
+        config = self.config
         streaming = StreamingResponse(
             room_id="!test:localhost",
             reply_to_event_id="$original_123",

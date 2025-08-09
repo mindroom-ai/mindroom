@@ -67,7 +67,7 @@ Choose the most appropriate agent based on their role, tools, and instructions."
                 if sender.startswith("@") and ":" in sender:
                     sender_id = MatrixID.parse(sender)
                     # Show agent name or just domain for users
-                    sender = sender_id.agent_name or sender_id.domain
+                    sender = sender_id.agent_name(config) or sender_id.domain
                 body = msg.get("body", "")[:100]
                 context += f"{sender}: {body}\n"
             prompt = context + "\n" + prompt

@@ -9,7 +9,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import Config, RouterConfig
+from mindroom.models import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import get_agents_in_thread
 
@@ -67,6 +67,20 @@ def team_room_id() -> str:
 
 class TestTeamFormation:
     """Test team formation logic."""
+
+    def setup_method(self):
+        """Set up test config."""
+        self.config = Config(
+            agents={
+                "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
+                "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
+                "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
+                "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
 
     @pytest.mark.asyncio
     async def test_multiple_agents_tagged_form_team(
@@ -156,7 +170,7 @@ class TestTeamFormation:
         # (message_event setup omitted as it's tested via thread_history)
 
         # Verify both agents are in thread
-        agents_in_thread = get_agents_in_thread(thread_history)
+        agents_in_thread = get_agents_in_thread(thread_history, self.config)
         assert "code" in agents_in_thread
         assert "security" in agents_in_thread
         assert len(agents_in_thread) == 2
@@ -260,6 +274,20 @@ class TestTeamCollaboration:
 class TestTeamResponseBehavior:
     """Test specific team response behaviors."""
 
+    def setup_method(self):
+        """Set up test config."""
+        self.config = Config(
+            agents={
+                "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
+                "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
+                "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
+                "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+
     @pytest.mark.asyncio
     async def test_single_agent_still_continues_conversation(
         self,
@@ -284,7 +312,7 @@ class TestTeamResponseBehavior:
 
         # No mentions in follow-up would cause single agent to continue
 
-        agents_in_thread = get_agents_in_thread(thread_history)
+        agents_in_thread = get_agents_in_thread(thread_history, self.config)
         assert agents_in_thread == ["code"]
         # Single agent should continue responding
 
@@ -340,7 +368,7 @@ class TestTeamResponseBehavior:
             },
         ]
 
-        agents = get_agents_in_thread(thread_with_both)
+        agents = get_agents_in_thread(thread_with_both, self.config)
         assert len(agents) == 2
         assert "research" in agents
         assert "analyst" in agents

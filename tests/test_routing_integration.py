@@ -12,7 +12,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import Config, RouterConfig
+from mindroom.models import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
@@ -57,12 +57,20 @@ class TestRoutingIntegration:
         )
 
         # Set up bots
-        config = Config(router=RouterConfig(model="default"))
+        config = Config(
+            agents={
+                "research": AgentConfig(display_name="MindRoomResearch", rooms=["!research:localhost"]),
+                "news": AgentConfig(display_name="MindRoomNews", rooms=["!research:localhost"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
 
         research_bot = AgentBot(
             research_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True, config=config
         )
-        config = Config(router=RouterConfig(model="default"))
 
         news_bot = AgentBot(news_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True, config=config)
 
@@ -71,6 +79,11 @@ class TestRoutingIntegration:
             bot.client = AsyncMock()
             bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
             bot.thread_invite_manager = ThreadInviteManager(bot.client)
+
+            # Mock orchestrator
+            mock_orchestrator = MagicMock()
+            mock_orchestrator.current_config = config
+            bot.orchestrator = mock_orchestrator
 
             # Mock room_send for streaming
             mock_send = MagicMock()

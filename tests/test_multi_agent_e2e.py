@@ -195,7 +195,6 @@ async def test_agent_responds_in_threads_based_on_participation(
     with (
         patch("mindroom.bot.login_agent_user") as mock_login,
         patch("mindroom.agent_config.load_config", return_value=mock_config),
-        patch("mindroom.matrix.identity.load_config", return_value=mock_config),
     ):
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
