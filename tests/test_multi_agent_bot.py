@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config, RouterConfig
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
@@ -65,7 +66,9 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_initialization(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test AgentBot initialization."""
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"])
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], config=config)
         assert bot.agent_user == mock_agent_user
         assert bot.agent_name == "calculator"
         assert bot.rooms == ["!test:localhost"]
@@ -73,7 +76,11 @@ class TestAgentBot:
         assert bot.enable_streaming is True  # Default value
 
         # Test with streaming disabled
-        bot_no_stream = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot_no_stream = AgentBot(
+            mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
+        )
         assert bot_no_stream.enable_streaming is False
 
     @pytest.mark.asyncio
@@ -92,7 +99,9 @@ class TestAgentBot:
         # Mock ensure_user_account to not change the agent_user
         mock_ensure_user.return_value = None
 
-        bot = AgentBot(mock_agent_user, tmp_path)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
         await bot.start()
 
         assert bot.running
@@ -105,7 +114,9 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
-        bot = AgentBot(mock_agent_user, tmp_path)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
         bot.running = True
 
@@ -117,7 +128,9 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_on_invite(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test handling room invitations."""
-        bot = AgentBot(mock_agent_user, tmp_path)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -133,7 +146,9 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_ignore_own(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test that agent ignores its own messages."""
-        bot = AgentBot(mock_agent_user, tmp_path)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -150,7 +165,9 @@ class TestAgentBot:
         self, mock_agent_user: AgentMatrixUser, tmp_path: Path
     ) -> None:
         """Test that agent ignores messages from other agents."""
-        bot = AgentBot(mock_agent_user, tmp_path)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -187,7 +204,11 @@ class TestAgentBot:
         mock_ai_response.return_value = "Test response"
         mock_fetch_history.return_value = []
 
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(
+            mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming, config=config
+        )
         bot.client = AsyncMock()
 
         # Mock successful room_send response
@@ -245,7 +266,9 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test agent bot not responding when not mentioned."""
-        bot = AgentBot(mock_agent_user, tmp_path)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -276,7 +299,11 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Test agent bot thread response behavior based on agent participation."""
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(
+            mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming, config=config
+        )
         bot.client = AsyncMock()
 
         # Mock orchestrator with agent_bots
@@ -440,7 +467,9 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Test that agent bot skips messages it has already responded to."""
-        bot = AgentBot(mock_agent_user, tmp_path)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
         # Initialize response tracker with isolated path
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)

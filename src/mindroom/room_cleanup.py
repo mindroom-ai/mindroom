@@ -4,6 +4,8 @@ With the new self-managing agent pattern, agents handle their own room
 memberships. This module only handles cleanup of stale/orphaned bots.
 """
 
+from __future__ import annotations
+
 import nio
 
 from .agent_config import load_config

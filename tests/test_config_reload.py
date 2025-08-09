@@ -9,7 +9,7 @@ import pytest
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import AgentConfig, Config, TeamConfig
+from mindroom.models import AgentConfig, Config, RouterConfig, TeamConfig
 
 
 @pytest.fixture
@@ -160,9 +160,11 @@ async def test_agent_joins_new_rooms_on_config_reload(initial_config, updated_co
     monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Create agent1 bot with initial config
+    config = Config(router=RouterConfig(model="default"))
     agent1_bot = AgentBot(
         agent_user=mock_agent_users["agent1"],
         storage_path=Path("/tmp/test"),
+        config=config,
         rooms=["room1", "room2"],  # Initial rooms
     )
     mock_client = AsyncMock()
@@ -228,9 +230,11 @@ async def test_router_updates_rooms_on_config_reload(initial_config, updated_con
     assert updated_router_rooms == {"room1", "room2", "room3", "room4", "room5", "room6"}
 
     # Create router bot with updated config
+    config = Config(router=RouterConfig(model="default"))
     router_bot = AgentBot(
         agent_user=mock_agent_users[ROUTER_AGENT_NAME],
         storage_path=Path("/tmp/test"),
+        config=config,
         rooms=list(updated_router_rooms),
     )
     mock_client = AsyncMock()
@@ -289,10 +293,12 @@ async def test_new_agent_joins_rooms_on_config_reload(initial_config, updated_co
     monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Create agent3 bot (new agent in updated config)
+    config = Config(router=RouterConfig(model="default"))
     agent3_bot = AgentBot(
         agent_user=mock_agent_users["agent3"],
         storage_path=Path("/tmp/test"),
-        rooms=["room5"],  # From updated config
+        config=config,
+        rooms=["room5"],
     )
     mock_client = AsyncMock()
     mock_client.user_id = "@mindroom_agent3:localhost"
@@ -351,10 +357,12 @@ async def test_team_room_changes_on_config_reload(initial_config, updated_config
     monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Create team1 bot with updated config
+    config = Config(router=RouterConfig(model="default"))
     team1_bot = AgentBot(
         agent_user=mock_agent_users["team1"],
         storage_path=Path("/tmp/test"),
-        rooms=["room3", "room6"],  # Updated rooms: added room6
+        config=config,
+        rooms=["room3", "room6"],
     )
     mock_client = AsyncMock()
     mock_client.user_id = "@mindroom_team1:localhost"
@@ -547,10 +555,13 @@ async def test_room_membership_state_after_config_update(initial_config, updated
         else:
             agent_user = mock_agent_users[ROUTER_AGENT_NAME]
 
+        config = Config(router=RouterConfig(model="default"))
+
         bot = AgentBot(
             agent_user=agent_user,
             storage_path=Path("/tmp/test"),
-            rooms=config["new"],
+            config=config,
+            rooms=bots_config[user_id]["new"],
         )
         bot.client = mock_client
 

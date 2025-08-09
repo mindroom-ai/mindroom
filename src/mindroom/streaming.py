@@ -1,5 +1,7 @@
 """Streaming response implementation for real-time message updates."""
 
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass
 

@@ -10,6 +10,7 @@ from aioresponses import aioresponses
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config, RouterConfig
 
 
 @pytest.fixture
@@ -54,7 +55,9 @@ async def test_agent_processes_direct_mention(
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id])
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
         await bot.start()
 
         # Create a message mentioning the calculator agent
@@ -132,7 +135,9 @@ async def test_agent_ignores_other_agents(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id])
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
         await bot.start()
 
         # Create a message from another agent
@@ -194,7 +199,9 @@ async def test_agent_responds_in_threads_based_on_participation(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False, config=config)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -452,7 +459,9 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[initial_room])
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[initial_room], config=config)
         await bot.start()
 
         # Create invite event for a different room

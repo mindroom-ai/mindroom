@@ -12,7 +12,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import AgentConfig, Config, TeamConfig
+from mindroom.models import AgentConfig, Config, RouterConfig, TeamConfig
 
 
 @pytest.fixture
@@ -55,9 +55,12 @@ async def test_agent_joins_configured_rooms(monkeypatch):
     )
 
     # Create the agent bot with configured rooms
+    config = Config(router=RouterConfig(model="default"))
+
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=Path("/tmp/test"),
+        config=config,
         rooms=["!room1:localhost", "!room2:localhost"],
     )
 
@@ -101,9 +104,12 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch):
     )
 
     # Create the agent bot with only room1 configured
+    config = Config(router=RouterConfig(model="default"))
+
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=Path("/tmp/test"),
+        config=config,
         rooms=["!room1:localhost"],  # Only configured for room1
     )
 
@@ -148,9 +154,12 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch):
     )
 
     # Start with agent configured for room1 only
+    config = Config(router=RouterConfig(model="default"))
+
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=Path("/tmp/test"),
+        config=config,
         rooms=["!room1:localhost"],
     )
 

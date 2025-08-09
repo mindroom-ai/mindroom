@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.bot import MultiAgentOrchestrator
+from mindroom.models import Config, RouterConfig
 
 
 @pytest.mark.asyncio
@@ -342,7 +343,9 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         # Create bot
         from mindroom.bot import AgentBot
 
-        bot = AgentBot(calc_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(calc_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config)
         await bot.start()
 
         test_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="", encrypted=False)

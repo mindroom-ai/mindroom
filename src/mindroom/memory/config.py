@@ -6,23 +6,23 @@ from typing import Any
 
 from mem0 import AsyncMemory
 
-from ..agent_config import load_config
 from ..logging_config import get_logger
+from ..models import Config
 
 logger = get_logger(__name__)
 
 
-def get_memory_config(storage_path: Path) -> dict:
+def get_memory_config(storage_path: Path, config: Config) -> dict:
     """Get Mem0 configuration with ChromaDB backend.
 
     Args:
         storage_path: Base directory for memory storage
+        config: Application configuration
 
     Returns:
         Configuration dictionary for Mem0
     """
-    # Load configuration from config.yaml
-    app_config = load_config()
+    app_config = config
 
     # Ensure storage directories exist
     chroma_path = storage_path / "chroma"
@@ -85,7 +85,7 @@ def get_memory_config(storage_path: Path) -> dict:
             },
         }
 
-    config = {
+    memory_config = {
         "embedder": embedder_config,
         "llm": llm_config,
         "vector_store": {
@@ -97,19 +97,20 @@ def get_memory_config(storage_path: Path) -> dict:
         },
     }
 
-    return config
+    return memory_config
 
 
-async def create_memory_instance(storage_path: Path) -> AsyncMemory:
+async def create_memory_instance(storage_path: Path, config: Config) -> AsyncMemory:
     """Create a Mem0 memory instance with ChromaDB backend.
 
     Args:
         storage_path: Base directory for memory storage
+        config: Application configuration
 
     Returns:
         Configured AsyncMemory instance
     """
-    config_dict = get_memory_config(storage_path)
+    config_dict = get_memory_config(storage_path, config)
 
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects

@@ -147,7 +147,7 @@ class AgentBot:
 
     agent_user: AgentMatrixUser
     storage_path: Path
-    config: Config | None = None  # Optional for backward compatibility
+    config: Config
     rooms: list[str] = field(default_factory=list)
 
     client: nio.AsyncClient | None = field(default=None, init=False)
@@ -724,6 +724,7 @@ class AgentBot:
         suggested_agent = await suggest_agent_for_message(
             event.body,
             available_agents,
+            self.config,
             thread_history,
             thread_event_id,
             room.room_id,
@@ -790,6 +791,7 @@ class AgentBot:
                 agent_domain=agent_domain,
                 client=self.client,
                 thread_invite_manager=self.thread_invite_manager,
+                config=self.config,
             )
 
         elif command.type == CommandType.UNINVITE:

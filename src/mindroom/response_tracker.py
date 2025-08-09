@@ -1,5 +1,7 @@
 """Track which messages have been responded to by agents."""
 
+from __future__ import annotations
+
 import fcntl
 import json
 import time

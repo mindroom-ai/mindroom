@@ -1,5 +1,7 @@
 """Scheduled task management with AI-powered natural language time parsing."""
 
+from __future__ import annotations
+
 import asyncio
 import uuid
 from datetime import UTC, datetime

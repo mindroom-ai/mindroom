@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, TypedDict
 
+from ..agent_config import load_config
 from ..logging_config import get_logger
 from .config import create_memory_instance
 
@@ -37,7 +38,8 @@ async def add_agent_memory(
         user_id: Optional user ID to associate memory with
         metadata: Optional metadata to store with memory
     """
-    memory = await create_memory_instance(storage_path)
+    config = load_config()
+    memory = await create_memory_instance(storage_path, config)
 
     if metadata is None:
         metadata = {}
@@ -65,7 +67,8 @@ async def search_agent_memories(query: str, agent_name: str, storage_path: Path,
     Returns:
         List of relevant memories
     """
-    memory = await create_memory_instance(storage_path)
+    config = load_config()
+    memory = await create_memory_instance(storage_path, config)
     search_result = await memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
 
     results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
@@ -86,7 +89,8 @@ async def add_room_memory(
         agent_name: Optional agent that created this memory
         metadata: Optional metadata to store with memory
     """
-    memory = await create_memory_instance(storage_path)
+    config = load_config()
+    memory = await create_memory_instance(storage_path, config)
 
     if metadata is None:
         metadata = {}
@@ -113,7 +117,8 @@ async def search_room_memories(query: str, room_id: str, storage_path: Path, lim
     Returns:
         List of relevant memories
     """
-    memory = await create_memory_instance(storage_path)
+    config = load_config()
+    memory = await create_memory_instance(storage_path, config)
     safe_room_id = room_id.replace(":", "_").replace("!", "")
     search_result = await memory.search(query, user_id=f"room_{safe_room_id}", limit=limit)
 

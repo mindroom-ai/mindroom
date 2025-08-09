@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import functools
 import os
 import traceback
@@ -22,6 +24,7 @@ from .memory import (
     build_memory_enhanced_prompt,
     store_conversation_memory,
 )
+from .models import Config
 
 logger = get_logger(__name__)
 
@@ -35,11 +38,12 @@ def get_cache(storage_path: Path) -> diskcache.Cache | None:
     return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_CACHE else None
 
 
-def get_model_instance(model_name: str = "default") -> Model:
+def get_model_instance(model_name: str = "default", config: Config | None = None) -> Model:
     """Get a model instance from config.yaml.
 
     Args:
         model_name: Name of the model configuration to use (default: "default")
+        config: Application configuration (if None, loads from file for backward compatibility)
 
     Returns:
         Instantiated model
@@ -47,7 +51,8 @@ def get_model_instance(model_name: str = "default") -> Model:
     Raises:
         ValueError: If model not found or provider not supported
     """
-    config = load_config()
+    if config is None:
+        config = load_config()
 
     if model_name not in config.models:
         available = ", ".join(sorted(config.models.keys()))

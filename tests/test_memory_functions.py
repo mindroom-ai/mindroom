@@ -37,11 +37,12 @@ class TestMemoryFunctions:
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
             # Test add_agent_memory creates instance
             await add_agent_memory("Test content", "test_agent", storage_path)
-            mock_create.assert_called_with(storage_path)
+            # The function now loads config internally, so we check the first arg
+            assert mock_create.call_args[0][0] == storage_path
 
             # Test search_agent_memories creates instance
             await search_agent_memories("query", "test_agent", storage_path)
-            mock_create.assert_called_with(storage_path)
+            assert mock_create.call_args[0][0] == storage_path
 
     @pytest.mark.asyncio
     async def test_add_agent_memory(self, mock_memory, storage_path):

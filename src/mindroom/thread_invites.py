@@ -1,5 +1,7 @@
 """Thread-specific agent invitation management using Matrix state events."""
 
+from __future__ import annotations
+
 from datetime import datetime, timedelta
 
 import nio

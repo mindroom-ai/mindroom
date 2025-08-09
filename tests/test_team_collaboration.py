@@ -9,6 +9,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config, RouterConfig
 from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import get_agents_in_thread
 
@@ -77,8 +78,12 @@ class TestTeamFormation:
     ):
         """Test that multiple agents tagged in a message form a team."""
         # Create bots
-        research_bot = AgentBot(mock_research_agent, tmp_path, rooms=[team_room_id])
-        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, rooms=[team_room_id])
+        config = Config(router=RouterConfig(model="default"))
+
+        research_bot = AgentBot(mock_research_agent, tmp_path, rooms=[team_room_id], config=config)
+        config = Config(router=RouterConfig(model="default"))
+
+        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, rooms=[team_room_id], config=config)
 
         # Setup bots
         research_bot.client = AsyncMock()
