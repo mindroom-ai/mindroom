@@ -9,7 +9,6 @@ import nio
 import pytest
 from aioresponses import aioresponses
 
-from mindroom.agent_config import load_config
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.models import Config
@@ -57,7 +56,7 @@ async def test_agent_processes_direct_mention(
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
 
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
         await bot.start()
@@ -138,7 +137,7 @@ async def test_agent_ignores_other_agents(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
         await bot.start()
@@ -195,7 +194,7 @@ async def test_agent_responds_in_threads_based_on_participation(
 
     with (
         patch("mindroom.bot.login_agent_user") as mock_login,
-        patch("mindroom.agent_config.load_config", return_value=mock_config),
+        patch("mindroom.models.Config.from_yaml", return_value=mock_config),
         patch("mindroom.teams.get_model_instance") as mock_get_model_instance,
     ):
         mock_client = AsyncMock()
@@ -207,7 +206,7 @@ async def test_agent_responds_in_threads_based_on_participation(
         mock_model = MagicMock()
         mock_get_model_instance.return_value = mock_model
 
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False, config=config)
 
@@ -420,14 +419,14 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
         mock_ensure.return_value = mock_agents
 
         # Mock the config loading
-        with patch("mindroom.bot.load_config") as mock_load_config:
+        with patch("mindroom.models.Config.from_yaml") as mock_from_yaml:
             mock_config = MagicMock()
             mock_config.agents = {
                 "calculator": MagicMock(display_name="CalculatorAgent", rooms=["room1"]),
                 "general": MagicMock(display_name="GeneralAgent", rooms=["room1"]),
             }
             mock_config.teams = {}
-            mock_load_config.return_value = mock_config
+            mock_from_yaml.return_value = mock_config
 
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
             await orchestrator.initialize()
@@ -470,7 +469,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[initial_room], config=config)
         await bot.start()

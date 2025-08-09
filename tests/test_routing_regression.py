@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.agent_config import load_config
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
@@ -22,7 +22,7 @@ def setup_test_bot(
     agent: AgentMatrixUser, storage_path: Path, room_id: str, enable_streaming: bool = False
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
-    config = load_config()
+    config = Config.from_yaml()
 
     bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()
@@ -203,10 +203,10 @@ class TestRoutingRegression:
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.teams.get_model_instance")
-    @patch("tests.test_routing_regression.load_config")
+    @patch("mindroom.models.Config.from_yaml")
     async def test_multiple_mentions_each_responds_once(
         self,
-        mock_load_config: MagicMock,
+        mock_from_yaml: MagicMock,
         mock_get_model_instance: MagicMock,
         mock_ai_response: AsyncMock,
         mock_team_arun: AsyncMock,
@@ -227,7 +227,7 @@ class TestRoutingRegression:
             room_models={},
             models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
         )
-        mock_load_config.return_value = mock_config
+        mock_from_yaml.return_value = mock_config
 
         # Mock get_model_instance to return a mock model
         mock_model = MagicMock()

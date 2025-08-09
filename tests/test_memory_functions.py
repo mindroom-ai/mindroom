@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.agent_config import load_config
 from mindroom.memory.functions import (
     MemoryResult,
     add_agent_memory,
@@ -15,6 +14,7 @@ from mindroom.memory.functions import (
     search_agent_memories,
     store_conversation_memory,
 )
+from mindroom.models import Config
 
 
 class TestMemoryFunctions:
@@ -36,7 +36,7 @@ class TestMemoryFunctions:
     @pytest.fixture
     def config(self) -> Any:
         """Load config for testing."""
-        return load_config()
+        return Config.from_yaml()
 
     @pytest.mark.asyncio
     async def test_memory_instance_creation(self, mock_memory: AsyncMock, storage_path: Any, config: Any) -> None:

@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.agent_config import load_config
 from mindroom.ai import ai_response
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.models import Config
 
 
 class TestMemoryIntegration:
@@ -38,7 +38,7 @@ class TestMemoryIntegration:
     @pytest.fixture
     def config(self) -> Any:
         """Load config for testing."""
-        return load_config()
+        return Config.from_yaml()
 
     @pytest.mark.asyncio
     async def test_ai_response_with_memory(

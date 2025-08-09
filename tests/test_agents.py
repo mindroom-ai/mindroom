@@ -4,13 +4,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from agno.agent import Agent
 
-from mindroom.agent_config import create_agent, load_config
+from mindroom.agent_config import create_agent
+from mindroom.models import Config
 
 
 @patch("mindroom.agent_config.SqliteStorage")
 def test_get_agent_calculator(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Tests that the calculator agent is created correctly."""
-    config = load_config()
+    config = Config.from_yaml()
     agent = create_agent("calculator", storage_path=tmp_path, config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "CalculatorAgent"
@@ -20,7 +21,7 @@ def test_get_agent_calculator(mock_storage: MagicMock, tmp_path: Path) -> None:
 @patch("mindroom.agent_config.SqliteStorage")
 def test_get_agent_general(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Tests that the general agent is created correctly."""
-    config = load_config()
+    config = Config.from_yaml()
     agent = create_agent("general", storage_path=tmp_path, config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "GeneralAgent"
@@ -30,7 +31,7 @@ def test_get_agent_general(mock_storage: MagicMock, tmp_path: Path) -> None:
 @patch("mindroom.agent_config.SqliteStorage")
 def test_get_agent_code(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Tests that the code agent is created correctly."""
-    config = load_config()
+    config = Config.from_yaml()
     agent = create_agent("code", storage_path=tmp_path, config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "CodeAgent"
@@ -40,7 +41,7 @@ def test_get_agent_code(mock_storage: MagicMock, tmp_path: Path) -> None:
 @patch("mindroom.agent_config.SqliteStorage")
 def test_get_agent_shell(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Tests that the shell agent is created correctly."""
-    config = load_config()
+    config = Config.from_yaml()
     agent = create_agent("shell", storage_path=tmp_path, config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "ShellAgent"
@@ -50,7 +51,7 @@ def test_get_agent_shell(mock_storage: MagicMock, tmp_path: Path) -> None:
 @patch("mindroom.agent_config.SqliteStorage")
 def test_get_agent_summary(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Tests that the summary agent is created correctly."""
-    config = load_config()
+    config = Config.from_yaml()
     agent = create_agent("summary", storage_path=tmp_path, config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "SummaryAgent"
@@ -59,7 +60,7 @@ def test_get_agent_summary(mock_storage: MagicMock, tmp_path: Path) -> None:
 
 def test_get_agent_unknown(tmp_path: Path) -> None:
     """Tests that an unknown agent raises a ValueError."""
-    config = load_config()
+    config = Config.from_yaml()
     with pytest.raises(ValueError) as exc_info:
         create_agent("unknown", storage_path=tmp_path, config=config)
     assert "Unknown agent: unknown" in str(exc_info.value)

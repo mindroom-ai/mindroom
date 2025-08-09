@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from . import interactive
-from .agent_config import create_agent, get_rooms_for_entity, load_config
+from .agent_config import create_agent, get_rooms_for_entity
 from .ai import ai_response, ai_response_streaming
 from .background_tasks import wait_for_background_tasks
 from .commands import (
@@ -1025,7 +1025,7 @@ class MultiAgentOrchestrator:
         # Ensure user account exists first
         await self._ensure_user_account()
 
-        config = load_config()
+        config = Config.from_yaml()
         self.config = config
 
         # Create bots for all configured entities
@@ -1100,7 +1100,7 @@ class MultiAgentOrchestrator:
         Returns:
             True if any agents were updated, False otherwise.
         """
-        new_config = load_config()
+        new_config = Config.from_yaml()
 
         if not self.config:
             self.config = new_config

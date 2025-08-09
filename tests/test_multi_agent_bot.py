@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.agent_config import load_config
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
@@ -85,7 +85,7 @@ class TestAgentBot:
         return mock_config
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.load_config")
+    @patch("mindroom.models.Config.from_yaml")
     async def test_agent_bot_initialization(
         self, mock_load_config: MagicMock, mock_agent_user: AgentMatrixUser, tmp_path: Path
     ) -> None:
@@ -110,7 +110,7 @@ class TestAgentBot:
     @patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
-    @patch("mindroom.bot.load_config")
+    @patch("mindroom.models.Config.from_yaml")
     async def test_agent_bot_start(
         self,
         mock_load_config: MagicMock,
@@ -144,7 +144,7 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -158,7 +158,7 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_on_invite(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test handling room invitations."""
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -176,7 +176,7 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_ignore_own(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test that agent ignores its own messages."""
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -195,7 +195,7 @@ class TestAgentBot:
         self, mock_agent_user: AgentMatrixUser, tmp_path: Path
     ) -> None:
         """Test that agent ignores messages from other agents."""
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -234,7 +234,7 @@ class TestAgentBot:
         mock_ai_response.return_value = "Test response"
         mock_fetch_history.return_value = []
 
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(
             mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming, config=config
@@ -298,7 +298,7 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test agent bot not responding when not mentioned."""
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -320,7 +320,7 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
-    @patch("mindroom.bot.load_config")
+    @patch("mindroom.models.Config.from_yaml")
     @patch("mindroom.teams.get_model_instance")
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
@@ -515,7 +515,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Test that agent bot skips messages it has already responded to."""
-        config = load_config()
+        config = Config.from_yaml()
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -559,7 +559,7 @@ class TestMultiAgentOrchestrator:
         assert not orchestrator.running
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.load_config")
+    @patch("mindroom.models.Config.from_yaml")
     async def test_orchestrator_initialize(
         self,
         mock_load_config: MagicMock,
@@ -585,7 +585,7 @@ class TestMultiAgentOrchestrator:
         assert "router" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.load_config")
+    @patch("mindroom.models.Config.from_yaml")
     async def test_orchestrator_start(
         self,
         mock_load_config: MagicMock,
@@ -629,7 +629,7 @@ class TestMultiAgentOrchestrator:
             mock_start.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.load_config")
+    @patch("mindroom.models.Config.from_yaml")
     async def test_orchestrator_stop(
         self,
         mock_load_config: MagicMock,
@@ -664,7 +664,7 @@ class TestMultiAgentOrchestrator:
                 bot.client.close.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.load_config")
+    @patch("mindroom.models.Config.from_yaml")
     @patch.dict(os.environ, {"MINDROOM_ENABLE_STREAMING": "false"})
     async def test_orchestrator_streaming_env_var(
         self,

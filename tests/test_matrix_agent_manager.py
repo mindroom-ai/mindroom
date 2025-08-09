@@ -7,7 +7,6 @@ import nio
 import pytest
 import yaml
 
-from mindroom.agent_config import load_config
 from mindroom.matrix.client import register_user
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
@@ -18,6 +17,7 @@ from mindroom.matrix.users import (
     login_agent_user,
     save_agent_credentials,
 )
+from mindroom.models import Config
 
 
 @pytest.fixture
@@ -302,7 +302,7 @@ class TestEnsureAllAgentUsers:
     ) -> None:
         """Test ensuring all configured agents have users."""
         # Load real configuration
-        config = load_config()
+        config = Config.from_yaml()
 
         # Mock user creation - router is created first, then configured agents
         mock_users = []
@@ -337,7 +337,7 @@ class TestEnsureAllAgentUsers:
     ) -> None:
         """Test handling errors when creating agent users."""
         # Load real configuration
-        config = load_config()
+        config = Config.from_yaml()
 
         # Mock user creation with a failure - create list of results with one error
         mock_results = []

@@ -1,10 +1,17 @@
 """Pydantic models for configuration."""
 
+from __future__ import annotations
+
+from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel, Field
 
-from .constants import ROUTER_AGENT_NAME
+from .constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class AgentConfig(BaseModel):
@@ -97,6 +104,28 @@ class Config(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
+
+    @classmethod
+    def from_yaml(cls, config_path: Path | None = None) -> Config:
+        """Create a Config instance from YAML data."""
+        path = config_path or DEFAULT_AGENTS_CONFIG
+
+        if not path.exists():
+            raise FileNotFoundError(f"Agent configuration file not found: {path}")
+
+        with open(path) as f:
+            data = yaml.safe_load(f)
+
+        # Handle None values for optional dictionaries
+        if data.get("teams") is None:
+            data["teams"] = {}
+        if data.get("room_models") is None:
+            data["room_models"] = {}
+
+        config = cls(**data)
+        logger.info(f"Loaded agent configuration from {path}")
+        logger.info(f"Found {len(config.agents)} agent configurations")
+        return config
 
     def get_agent(self, agent_name: str) -> AgentConfig:
         """Get an agent configuration by name.

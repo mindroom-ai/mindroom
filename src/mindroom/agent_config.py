@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
 from agno.agent import Agent
 from agno.storage.sqlite import SqliteStorage
 
@@ -15,9 +14,6 @@ from .models import Config
 from .tools import get_tool_by_name
 
 logger = get_logger(__name__)
-
-# Default path to agents configuration file
-DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
 RICH_PROMPTS = {
@@ -31,39 +27,6 @@ RICH_PROMPTS = {
     "news": agent_prompts.NEWS_AGENT_PROMPT,
     "data_analyst": agent_prompts.DATA_ANALYST_AGENT_PROMPT,
 }
-
-
-def load_config(config_path: Path | None = None) -> Config:
-    """Load agent configuration from YAML file.
-
-    Args:
-        config_path: Path to agents configuration file. If None, uses default.
-
-    Returns:
-        Config object
-
-    Raises:
-        FileNotFoundError: If configuration file not found
-    """
-    path = config_path or DEFAULT_AGENTS_CONFIG
-
-    if not path.exists():
-        raise FileNotFoundError(f"Agent configuration file not found: {path}")
-
-    with open(path) as f:
-        data = yaml.safe_load(f)
-
-    # Handle None values for optional dictionaries
-    if data.get("teams") is None:
-        data["teams"] = {}
-    if data.get("room_models") is None:
-        data["room_models"] = {}
-
-    config = Config(**data)
-    logger.info(f"Loaded agent configuration from {path}")
-    logger.info(f"Found {len(config.agents)} agent configurations")
-
-    return config
 
 
 def create_agent(agent_name: str, storage_path: Path, config: Config, config_path: Path | None = None) -> Agent:
