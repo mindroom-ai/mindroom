@@ -35,9 +35,11 @@ from .matrix import (
     edit_message,
     ensure_all_rooms_exist,
     extract_agent_name,
+    extract_server_name_from_homeserver,
     extract_thread_info,
     fetch_thread_history,
     get_joined_rooms,
+    get_room_members,
     invite_to_room,
     join_room,
     leave_room,
@@ -147,7 +149,7 @@ class AgentBot:
     config: Config | None = None  # Optional for backward compatibility
     rooms: list[str] = field(default_factory=list)
 
-    client: nio.AsyncClient = field(init=False)
+    client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
     thread_invite_manager: ThreadInviteManager = field(init=False)
@@ -183,6 +185,44 @@ class AgentBot:
         assert self.client is not None
         config = self.config if self.config else load_config()
         await ensure_all_rooms_exist(self.client, config)
+
+    async def ensure_room_invitations(self) -> None:
+        """Ensure all configured agents are invited to their rooms.
+
+        This is called by the router to handle dynamic config changes where
+        agents are added to existing rooms.
+        """
+        assert self.client is not None
+        config = self.config if self.config else load_config()
+
+        # Get all rooms we (router) are in
+        joined_rooms = await get_joined_rooms(self.client)
+        if not joined_rooms:
+            return
+
+        server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+
+        for room_id in joined_rooms:
+            # Get who should be in this room
+            configured_bots = config.get_configured_bots_for_room(room_id)
+
+            if not configured_bots:
+                continue
+
+            # Get current members
+            current_members = await get_room_members(self.client, room_id)
+
+            # Invite missing bots
+            for bot_username in configured_bots:
+                bot_user_id = f"@{bot_username}:{server_name}"
+
+                if bot_user_id not in current_members:
+                    # Bot should be in room but isn't - invite them
+                    success = await invite_to_room(self.client, room_id, bot_user_id)
+                    if success:
+                        self.logger.info(f"Invited {bot_username} to room {room_id}")
+                    else:
+                        self.logger.warning(f"Failed to invite {bot_username} to room {room_id}")
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -269,6 +309,9 @@ class AgentBot:
         if self.agent_name == ROUTER_AGENT_NAME:
             # Ensure all configured rooms exist
             await self.ensure_rooms_exist()
+
+            # Note: Room invitations are handled at the orchestrator level
+            # after all bots have started, to ensure consistency
 
             # Clean up any orphaned bots (best effort - don't fail initialization)
             try:
@@ -958,6 +1001,7 @@ class TeamBot(AgentBot):
         )
 
         # Send the response (reuse parent's method for consistency)
+        assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
         if existing_event_id:
@@ -987,8 +1031,8 @@ class MultiAgentOrchestrator:
         self.current_config = config
 
         # Create bots for all configured entities
-        # Note: We no longer need to ensure all agent users upfront
-        all_entities = list(config.agents.keys()) + list(config.teams.keys()) + [ROUTER_AGENT_NAME]
+        # Make Router the first so that it can manage room invitations
+        all_entities = [ROUTER_AGENT_NAME] + list(config.agents.keys()) + list(config.teams.keys())
 
         for entity_name in all_entities:
             # Create a temporary agent user object (will be updated by ensure_user_account)
@@ -1036,6 +1080,9 @@ class MultiAgentOrchestrator:
         await asyncio.gather(*start_tasks)
         self.running = True
         logger.info("All agent bots started successfully")
+
+        # After all bots are started, ensure room invitations are up to date
+        await self._ensure_room_invitations()
 
         # Create sync tasks for each bot
         sync_tasks = []
@@ -1118,6 +1165,9 @@ class MultiAgentOrchestrator:
                 await bot.cleanup()  # Agent handles its own cleanup
                 del self.agent_bots[entity_name]
 
+        # After all config changes, ensure room invitations are up to date
+        await self._ensure_room_invitations()
+
         logger.info(f"Configuration update complete: {len(entities_to_restart) + len(new_entities)} bots affected")
         return True
 
@@ -1133,6 +1183,24 @@ class MultiAgentOrchestrator:
         stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         logger.info("All agent bots stopped")
+
+    async def _ensure_room_invitations(self) -> None:
+        """Centralized method to ensure all agents are invited to their configured rooms.
+
+        This is called from the orchestrator level after bots are started or config is updated,
+        ensuring it's only called in one place and the router is always available.
+        """
+        if ROUTER_AGENT_NAME not in self.agent_bots:
+            logger.warning("Router not available, cannot ensure room invitations")
+            return
+
+        router_bot = self.agent_bots[ROUTER_AGENT_NAME]
+        if not hasattr(router_bot, "client") or not router_bot.client:
+            logger.warning("Router client not available, cannot ensure room invitations")
+            return
+
+        await router_bot.ensure_room_invitations()
+        logger.info("Ensured room invitations for all configured agents")
 
     async def invite_agents_to_room(self, room_id: str, inviter_client: nio.AsyncClient) -> None:
         """Invite all agent users to a room.

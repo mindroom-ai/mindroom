@@ -217,16 +217,7 @@ async def create_room(
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
         logger.info(f"Created room: {name} ({response.room_id})")
-        room_id = str(response.room_id)
-
-        # Invite power users to the room
-        if power_users:
-            for user_id in power_users:
-                # Skip inviting ourselves
-                if user_id != client.user_id:
-                    await invite_to_room(client, room_id, user_id)
-
-        return room_id
+        return str(response.room_id)
     else:
         logger.error(f"Failed to create room {name}: {response}")
         return None
