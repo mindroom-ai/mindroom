@@ -367,6 +367,8 @@ class AgentBot:
                 is_thread, thread_id = extract_thread_info(event.source)
                 help_text = "❌ Unknown command. Try !help for available commands."
                 await self._send_response(room, event.event_id, help_text, thread_id=thread_id, reply_to_event=event)
+                # Mark as responded to prevent re-processing after restart
+                self.response_tracker.mark_responded(event.event_id)
             return
 
         context = await self._extract_message_context(room, event)
@@ -781,6 +783,8 @@ class AgentBot:
         event_id = await send_message(self.client, room.room_id, content)
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
+            # Mark as responded to prevent re-routing after restart
+            self.response_tracker.mark_responded(event.event_id)
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
 
@@ -874,6 +878,8 @@ class AgentBot:
 
         if response_text:
             await self._send_response(room, event.event_id, response_text, thread_id, reply_to_event=event)
+            # Mark as responded to prevent re-processing commands after restart
+            self.response_tracker.mark_responded(event.event_id)
 
     async def _periodic_cleanup(self) -> None:
         """Periodically clean up expired thread invitations."""
