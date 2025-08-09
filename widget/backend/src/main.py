@@ -27,9 +27,21 @@ CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config.yaml"
 
 
 def save_config_to_file(config: dict[str, Any]) -> None:
-    """Save config to YAML file with deterministic ordering."""
+    """Save config to YAML file with deterministic ordering, excluding None values."""
+
+    # Recursively remove None values from the config
+    def remove_none_values(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            return {k: remove_none_values(v) for k, v in obj.items() if v is not None}
+        elif isinstance(obj, list):
+            return [remove_none_values(item) for item in obj]
+        else:
+            return obj
+
+    clean_config = remove_none_values(config)
+
     with open(CONFIG_PATH, "w") as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=True)
+        yaml.dump(clean_config, f, default_flow_style=False, sort_keys=True)
 
 
 # Global variable to store current config
@@ -100,10 +112,11 @@ async def load_config():
 
 
 @app.put("/api/config/save")
-async def save_config(config: Config):
+async def save_config(new_config: Config):
     """Save configuration to file"""
     try:
-        config_dict = config.model_dump()
+        # Use exclude_none to skip None values when converting to dict
+        config_dict = new_config.model_dump(exclude_none=True)
 
         # Write to YAML file
         save_config_to_file(config_dict)

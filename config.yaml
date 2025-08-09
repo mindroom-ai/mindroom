@@ -1,45 +1,36 @@
 agents:
-  general:
-    display_name: GeneralAgent
-    role: A general-purpose assistant that provides helpful, conversational responses
-      to users.
-    tools: []
+  analyst:
+    display_name: AnalystAgent
     instructions:
-    - Always provide a clear, helpful response to the user after any reasoning.
-    - Remember context from the conversation.
-    - Be conversational and friendly.
-    - Ask clarifying questions when needed.
+    - Analyze information comprehensively.
+    - Provide structured insights.
+    - Consider multiple perspectives.
+    - Make evidence-based recommendations.
+    model: default
+    num_history_runs: 5
+    role: Provide analytical insights and recommendations.
     rooms:
     - lobby
-    - help
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
-    model: default
+    - analysis
+    tools: []
   calculator:
     display_name: CalculatorAgent
-    role: Solve mathematical problems.
-    tools:
-    - calculator
     instructions:
     - Use the calculator tools to solve mathematical problems accurately.
     - Show your work step by step.
     - Explain the mathematical concepts when helpful.
     - Double-check calculations for accuracy.
+    model: default
+    num_history_runs: 5
+    role: Solve mathematical problems.
     rooms:
     - lobby
     - science
     - analysis
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
-    model: default
+    tools:
+    - calculator
   code:
     display_name: CodeAgent
-    role: Generate code, manage files, and execute shell commands.
-    tools:
-    - file
-    - shell
     instructions:
     - Write clean, well-documented code following best practices
     - Use appropriate error handling
@@ -48,127 +39,18 @@ agents:
     - Be careful with shell commands - explain what they do
     - Always read files before modifying them
     - Follow the project's existing style and conventions
+    model: default
+    num_history_runs: 5
+    role: Generate code, manage files, and execute shell commands.
     rooms:
     - lobby
     - dev
     - automation
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
-    model: default
-  shell:
-    display_name: ShellAgent
-    role: Execute shell commands and manage system operations.
     tools:
+    - file
     - shell
-    instructions:
-    - Execute shell commands to help users with system tasks.
-    - Always explain what a command does before running it.
-    - Be cautious with potentially destructive commands.
-    - Provide clear output and error messages.
-    - Suggest safer alternatives when appropriate.
-    - Remember the user's working directory context.
-    rooms:
-    - lobby
-    - dev
-    - automation
-    - ops
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
-    model: default
-  summary:
-    display_name: SummaryAgent
-    role: Summarize long texts and extract key information.
-    tools: []
-    instructions:
-    - Provide clear, concise summaries of long texts.
-    - Extract and highlight key points and main ideas.
-    - Maintain the original meaning and context.
-    - Use bullet points for clarity when appropriate.
-    - Indicate the level of detail in your summary.
-    - Preserve important quotes or specific data points.
-    rooms:
-    - lobby
-    - research
-    - docs
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
-    model: default
-  research:
-    display_name: ResearchAgent
-    role: Conduct research using web sources, Wikipedia, and academic papers.
-    tools:
-    - duckduckgo
-    - wikipedia
-    - arxiv
-    instructions:
-    - Search for accurate, up-to-date information from reliable sources.
-    - Cross-reference multiple sources when possible.
-    - Clearly cite your sources.
-    - Distinguish between facts and opinions.
-    - Provide balanced viewpoints on controversial topics.
-    - Summarize findings in a clear, organized manner.
-    rooms:
-    - lobby
-    - research
-    - science
-    - news
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
-    model: gpt5mini
-  finance:
-    display_name: FinanceAgent
-    role: Analyze financial data, stock information, and perform calculations.
-    tools:
-    - yfinance
-    - calculator
-    instructions:
-    - Provide accurate financial data and analysis.
-    - Use yfinance for real-time stock and market data.
-    - Perform financial calculations accurately.
-    - Explain financial concepts clearly.
-    - Include relevant disclaimers about investment advice.
-    - Present data in a clear, organized format.
-    rooms:
-    - lobby
-    - finance
-    - analysis
-    - business
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
-    model: default
-  news:
-    display_name: NewsAgent
-    role: Gather and summarize news and current events.
-    tools:
-    - duckduckgo
-    - newspaper
-    instructions:
-    - Search for recent news and current events.
-    - Provide balanced coverage from multiple sources.
-    - Summarize articles clearly and objectively.
-    - Include publication dates and sources.
-    - Distinguish between news and opinion pieces.
-    - Highlight key developments and their significance.
-    rooms:
-    - lobby
-    - news
-    - research
-    - business
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
-    model: default
   data_analyst:
     display_name: DataAnalystAgent
-    role: Analyze data, create visualizations, and provide insights.
-    tools:
-    - csv
-    - calculator
     instructions:
     - Analyze data thoroughly and accurately.
     - Create clear visualizations when helpful.
@@ -176,131 +58,206 @@ agents:
     - Identify patterns and trends in data.
     - Provide actionable insights and recommendations.
     - Handle missing or inconsistent data appropriately.
+    model: default
+    num_history_runs: 5
+    role: Analyze data, create visualizations, and provide insights.
     rooms:
     - lobby
     - analysis
     - science
     - finance
     - business
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
+    tools:
+    - csv
+    - calculator
+  finance:
+    display_name: FinanceAgent
+    instructions:
+    - Provide accurate financial data and analysis.
+    - Use yfinance for real-time stock and market data.
+    - Perform financial calculations accurately.
+    - Explain financial concepts clearly.
+    - Include relevant disclaimers about investment advice.
+    - Present data in a clear, organized format.
     model: default
+    num_history_runs: 5
+    role: Analyze financial data, stock information, and perform calculations.
+    rooms:
+    - lobby
+    - finance
+    - analysis
+    - business
+    tools:
+    - yfinance
+    - calculator
+  general:
+    display_name: GeneralAgent
+    instructions:
+    - Always provide a clear, helpful response to the user after any reasoning.
+    - Remember context from the conversation.
+    - Be conversational and friendly.
+    - Ask clarifying questions when needed.
+    model: default
+    num_history_runs: 5
+    role: A general-purpose assistant that provides helpful, conversational responses
+      to users.
+    rooms:
+    - lobby
+    - help
+    tools: []
+  news:
+    display_name: NewsAgent
+    instructions:
+    - Search for recent news and current events.
+    - Provide balanced coverage from multiple sources.
+    - Summarize articles clearly and objectively.
+    - Include publication dates and sources.
+    - Distinguish between news and opinion pieces.
+    - Highlight key developments and their significance.
+    model: default
+    num_history_runs: 5
+    role: Gather and summarize news and current events.
+    rooms:
+    - lobby
+    - news
+    - research
+    - business
+    tools:
+    - duckduckgo
+    - newspaper
+  research:
+    display_name: ResearchAgent
+    instructions:
+    - Search for accurate, up-to-date information from reliable sources.
+    - Cross-reference multiple sources when possible.
+    - Clearly cite your sources.
+    - Distinguish between facts and opinions.
+    - Provide balanced viewpoints on controversial topics.
+    - Summarize findings in a clear, organized manner.
+    model: gpt5mini
+    num_history_runs: 5
+    role: Conduct research using web sources, Wikipedia, and academic papers.
+    rooms:
+    - lobby
+    - research
+    - science
+    - news
+    tools:
+    - duckduckgo
+    - wikipedia
+    - arxiv
   security:
     display_name: SecurityAgent
-    role: Analyze security aspects and provide recommendations.
-    tools: []
     instructions:
     - Analyze security implications thoroughly.
     - Provide security best practices.
     - Identify potential vulnerabilities.
     - Suggest mitigation strategies.
+    model: default
+    num_history_runs: 5
+    role: Analyze security aspects and provide recommendations.
     rooms:
     - lobby
     - dev
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
-    model: default
-  analyst:
-    display_name: AnalystAgent
-    role: Provide analytical insights and recommendations.
     tools: []
+  shell:
+    display_name: ShellAgent
     instructions:
-    - Analyze information comprehensively.
-    - Provide structured insights.
-    - Consider multiple perspectives.
-    - Make evidence-based recommendations.
+    - Execute shell commands to help users with system tasks.
+    - Always explain what a command does before running it.
+    - Be cautious with potentially destructive commands.
+    - Provide clear output and error messages.
+    - Suggest safer alternatives when appropriate.
+    - Remember the user's working directory context.
+    model: default
+    num_history_runs: 5
+    role: Execute shell commands and manage system operations.
     rooms:
     - lobby
-    - analysis
-    num_history_runs: 5
-    markdown: null
-    add_history_to_messages: null
+    - dev
+    - automation
+    - ops
+    tools:
+    - shell
+  summary:
+    display_name: SummaryAgent
+    instructions:
+    - Provide clear, concise summaries of long texts.
+    - Extract and highlight key points and main ideas.
+    - Maintain the original meaning and context.
+    - Use bullet points for clarity when appropriate.
+    - Indicate the level of detail in your summary.
+    - Preserve important quotes or specific data points.
     model: default
+    num_history_runs: 5
+    role: Summarize long texts and extract key information.
+    rooms:
+    - lobby
+    - research
+    - docs
+    tools: []
+defaults:
+  add_history_to_messages: true
+  markdown: true
+  num_history_runs: 5
+memory:
+  embedder:
+    config:
+      host: http://localhost:11434
+      model: nomic-embed-text
+    provider: ollama
+  llm:
+    config:
+      host: http://localhost:11434
+      model: devstral:24b
+      temperature: 0.1
+      top_p: 1
+    provider: ollama
+models:
+  deepseek:
+    id: deepseek-ai/deepseek-chat:free
+    provider: openrouter
+  default:
+    id: devstral:24b
+    provider: ollama
+  glm45:
+    id: z-ai/glm-4.5-air:free
+    provider: openrouter
+  gpt4o:
+    id: gpt-4o
+    provider: openai
+  gpt5mini:
+    id: gpt-5-mini
+    provider: openai
+  gpt_oss:
+    id: openai/gpt-oss-120b
+    provider: openrouter
+  haiku:
+    id: claude-3-5-haiku-latest
+    provider: anthropic
+  ollama:
+    id: devstral:24b
+    provider: ollama
+  opus:
+    id: claude-3-5-haiku-latest
+    provider: anthropic
+  sonnet:
+    id: claude-3-5-haiku-latest
+    provider: anthropic
+room_models:
+  research: haiku
+router:
+  model: ollama
 teams:
   super_team:
-    display_name: Super Team
-    role: A team with all the great agents.
     agents:
     - code
     - shell
     - research
     - finance
+    display_name: Super Team
+    mode: collaborate
+    model: sonnet
+    role: A team with all the great agents.
     rooms:
     - research
-    model: sonnet
-    mode: collaborate
-room_models:
-  research: haiku
-defaults:
-  num_history_runs: 5
-  markdown: true
-  add_history_to_messages: true
-memory:
-  embedder:
-    provider: ollama
-    config:
-      model: nomic-embed-text
-      api_key: null
-      host: http://localhost:11434
-  llm:
-    provider: ollama
-    config:
-      model: devstral:24b
-      host: http://localhost:11434
-      temperature: 0.1
-      top_p: 1
-models:
-  default:
-    provider: ollama
-    id: devstral:24b
-    host: null
-    api_key: null
-  haiku:
-    provider: anthropic
-    id: claude-3-5-haiku-latest
-    host: null
-    api_key: null
-  sonnet:
-    provider: anthropic
-    id: claude-3-5-haiku-latest
-    host: null
-    api_key: null
-  opus:
-    provider: anthropic
-    id: claude-3-5-haiku-latest
-    host: null
-    api_key: null
-  ollama:
-    provider: ollama
-    id: devstral:24b
-    host: null
-    api_key: null
-  glm45:
-    provider: openrouter
-    id: z-ai/glm-4.5-air:free
-    host: null
-    api_key: null
-  gpt_oss:
-    provider: openrouter
-    id: openai/gpt-oss-120b
-    host: null
-    api_key: null
-  deepseek:
-    provider: openrouter
-    id: deepseek-ai/deepseek-chat:free
-    host: null
-    api_key: null
-  gpt4o:
-    provider: openai
-    id: gpt-4o
-    host: null
-    api_key: null
-  gpt5mini:
-    provider: openai
-    id: gpt-5-mini
-    host: null
-    api_key: null
-router:
-  model: ollama
