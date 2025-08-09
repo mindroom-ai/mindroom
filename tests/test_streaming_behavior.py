@@ -1,6 +1,7 @@
 """Comprehensive unit tests for streaming behavior with agent edits."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -40,7 +41,7 @@ def mock_calculator_agent() -> AgentMatrixUser:
 class TestStreamingBehavior:
     """Test the complete streaming behavior including agent interactions."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         """Set up test config."""
         self.config = Config(
             agents={
@@ -106,7 +107,7 @@ class TestStreamingBehavior:
         mock_ai_response.return_value = "4"
 
         # Create a generator that yields the streaming response
-        async def streaming_generator():
+        async def streaming_generator() -> AsyncIterator[str]:
             yield "Let me help with that calculation. "
             yield "@mindroom_calculator:localhost what's 2+2?"
 
