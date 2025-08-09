@@ -10,11 +10,25 @@ This module comprehensively tests all agent response rules:
 These tests ensure no regressions in the core response logic.
 """
 
+from mindroom.models import AgentConfig, Config, ModelConfig
 from mindroom.thread_utils import should_agent_respond
 
 
 class TestAgentResponseLogic:
     """Test the should_agent_respond logic."""
+
+    def setup_method(self):
+        """Set up test config."""
+        self.config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                "agent1": AgentConfig(display_name="Agent1", rooms=["#test:example.org"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
 
     def test_mentioned_agent_always_responds(self):
         """If an agent is mentioned, it should always respond."""
@@ -25,6 +39,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
+            config=self.config,
         )
         assert should_respond is True
 
@@ -42,6 +57,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
+            config=self.config,
         )
         assert should_respond is True
 
@@ -55,6 +71,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=[],  # Not native to room
             thread_history=[],
+            config=self.config,
         )
         assert should_respond is False
 
@@ -70,6 +87,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=[],  # Not native to room
             thread_history=thread_history,
+            config=self.config,
         )
         assert should_respond is True
 
@@ -86,6 +104,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=[],  # Not native to room
             thread_history=thread_history,
+            config=self.config,
         )
         assert should_respond is False
 
@@ -98,6 +117,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
+            config=self.config,
         )
         assert should_respond is False
 
@@ -116,6 +136,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
+            config=self.config,
         )
         assert should_respond is False
 
@@ -128,6 +149,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
+            config=self.config,
         )
         assert should_respond is False
 
@@ -140,6 +162,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!other_room:localhost"],  # Different room
             thread_history=[],
+            config=self.config,
         )
         assert should_respond is False
 
@@ -152,6 +175,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
+            config=self.config,
         )
         assert should_respond is True
 
@@ -176,6 +200,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
+            config=self.config,
         )
         assert should_respond is False
 
@@ -189,6 +214,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=[],
+            config=self.config,
         )
         assert should_respond is False
 
@@ -204,6 +230,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
+            config=self.config,
         )
         assert should_respond is False
 
@@ -216,6 +243,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=[],  # No access to this room
             thread_history=[],
+            config=self.config,
         )
         assert should_respond is False
 
@@ -229,6 +257,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=[],  # No native rooms
             thread_history=[],
+            config=self.config,
         )
         assert should_respond is False
 
@@ -251,6 +280,7 @@ class TestAgentResponseLogic:
             room_id="!room:localhost",
             configured_rooms=["!room:localhost"],
             thread_history=thread_history,
+            config=self.config,
         )
         assert should_respond is False
 
@@ -264,6 +294,7 @@ class TestAgentResponseLogic:
             room_id="!test:example.org",
             configured_rooms=["!test:example.org"],
             thread_history=[],
+            config=self.config,
         )
         # Agent1 should not respond and should NOT use router
         assert not should_respond
@@ -276,6 +307,7 @@ class TestAgentResponseLogic:
             room_id="!test:example.org",
             configured_rooms=["!test:example.org"],
             thread_history=[],
+            config=self.config,
             # No agents mentioned
         )
         # Agent1 should not respond but SHOULD use router
@@ -289,6 +321,7 @@ class TestAgentResponseLogic:
             room_id="!test:example.org",
             configured_rooms=["!test:example.org"],
             thread_history=[],
+            config=self.config,
         )
         # Agent1 SHOULD respond and should NOT use router
         assert should_respond

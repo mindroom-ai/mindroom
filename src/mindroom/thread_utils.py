@@ -1,20 +1,23 @@
 """Utilities for thread analysis and agent detection."""
 
+from __future__ import annotations
+
 from typing import Any
 
 import nio
 
 from .constants import ROUTER_AGENT_NAME
 from .matrix.identity import extract_agent_name
+from .models import Config
 
 
-def check_agent_mentioned(event_source: dict, agent_name: str) -> tuple[list[str], bool]:
+def check_agent_mentioned(event_source: dict, agent_name: str, config: Config) -> tuple[list[str], bool]:
     """Check if an agent is mentioned in a message.
 
     Returns (mentioned_agents, am_i_mentioned).
     """
     mentions = event_source.get("content", {}).get("m.mentions", {})
-    mentioned_agents = get_mentioned_agents(mentions)
+    mentioned_agents = get_mentioned_agents(mentions, config)
     am_i_mentioned = agent_name in mentioned_agents
     return mentioned_agents, am_i_mentioned
 
@@ -24,7 +27,7 @@ def create_session_id(room_id: str, thread_id: str | None) -> str:
     return f"{room_id}:{thread_id}" if thread_id else room_id
 
 
-def get_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
+def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[str]:
     """Get list of unique agents that have participated in thread.
 
     Note: Router agent is excluded from the participant list as it's not
@@ -34,20 +37,20 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
 
     for msg in thread_history:
         sender = msg.get("sender", "")
-        agent_name = extract_agent_name(sender)
+        agent_name = extract_agent_name(sender, config)
         if agent_name and agent_name != ROUTER_AGENT_NAME:
             agents.add(agent_name)
 
     return sorted(list(agents))
 
 
-def get_mentioned_agents(mentions: dict[str, Any]) -> list[str]:
+def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[str]:
     """Extract agent names from mentions."""
     user_ids = mentions.get("user_ids", [])
     agents = []
 
     for user_id in user_ids:
-        agent_name = extract_agent_name(user_id)
+        agent_name = extract_agent_name(user_id, config)
         if agent_name:
             agents.append(agent_name)
 
@@ -75,7 +78,7 @@ def has_user_responded_after_message(thread_history: list[dict], target_event_id
     return False
 
 
-def get_available_agents_in_room(room: Any) -> list[str]:
+def get_available_agents_in_room(room: Any, config: Config) -> list[str]:
     """Get list of available agents in a room.
 
     Note: Router agent is excluded as it's not a regular conversation participant.
@@ -84,31 +87,31 @@ def get_available_agents_in_room(room: Any) -> list[str]:
     room_members = list(room.users.keys()) if room.users else []
 
     for member_id in room_members:
-        agent_name = extract_agent_name(member_id)
+        agent_name = extract_agent_name(member_id, config)
         if agent_name and agent_name != ROUTER_AGENT_NAME:
             agents.append(agent_name)
 
     return sorted(agents)
 
 
-def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]]) -> bool:
+def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
     """Check if any agents are mentioned anywhere in the thread."""
     for msg in thread_history:
         content = msg.get("content", {})
         mentions = content.get("m.mentions", {})
-        if get_mentioned_agents(mentions):
+        if get_mentioned_agents(mentions, config):
             return True
     return False
 
 
-def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]]) -> list[str]:
+def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[str]:
     """Get all unique agents that have been mentioned anywhere in the thread."""
     mentioned_agents = set()
 
     for msg in thread_history:
         content = msg.get("content", {})
         mentions = content.get("m.mentions", {})
-        agents = get_mentioned_agents(mentions)
+        agents = get_mentioned_agents(mentions, config)
         mentioned_agents.update(agents)
 
     return sorted(list(mentioned_agents))
@@ -121,6 +124,7 @@ def should_agent_respond(
     room_id: str,
     configured_rooms: list[str],
     thread_history: list[dict],
+    config: Config,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
 
@@ -137,7 +141,7 @@ def should_agent_respond(
         return True
 
     # For threads, check agent participation
-    agents_in_thread = get_agents_in_thread(thread_history)
+    agents_in_thread = get_agents_in_thread(thread_history, config)
 
     # Multiple agents in thread with no specific mention - team scenario
     if len(agents_in_thread) > 1:

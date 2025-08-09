@@ -332,10 +332,11 @@ class AgentBot:
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
         sender_id = MatrixID.parse(event.sender)
-
-        if sender_id.is_agent and sender_id.agent_name:
+        assert self.config is not None
+        sender_agent_name = sender_id.agent_name(self.config)
+        if sender_id.is_agent and sender_agent_name:
             assert self.thread_invite_manager is not None
-            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_id.agent_name)
+            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
         is_command = event.body.strip().startswith("!")
         if is_command:  # ONLY router handles the command
@@ -352,7 +353,7 @@ class AgentBot:
         context = await self._extract_message_context(room, event)
 
         # If message is from another agent and we're not mentioned, ignore it
-        sender_is_agent = extract_agent_name(event.sender) is not None
+        sender_is_agent = extract_agent_name(event.sender, self.config) is not None
         if sender_is_agent and not context.am_i_mentioned:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
@@ -366,7 +367,7 @@ class AgentBot:
         if self.agent_name == ROUTER_AGENT_NAME:
             if not context.mentioned_agents:
                 # Only route if no agents have participated in the thread yet
-                agents_in_thread = get_agents_in_thread(context.thread_history)
+                agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
                 if not agents_in_thread:
                     await self._handle_ai_routing(room, event, context.thread_history)
             return
@@ -375,8 +376,8 @@ class AgentBot:
             return
 
         # Check if we should form a team first
-        agents_in_thread = get_agents_in_thread(context.thread_history)
-        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history)
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
+        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = should_form_team(context.mentioned_agents, agents_in_thread, all_mentioned_in_thread)
 
         # Simple team formation: only the first agent (alphabetically) handles team formation
@@ -410,6 +411,7 @@ class AgentBot:
             room_id=room.room_id,
             configured_rooms=self.rooms,
             thread_history=context.thread_history,
+            config=self.config,
         )
 
         if should_respond and not context.am_i_mentioned:
@@ -433,7 +435,7 @@ class AgentBot:
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
         assert self.client is not None
-        result = await interactive.handle_reaction(self.client, room, event, self.agent_name)
+        result = await interactive.handle_reaction(self.client, room, event, self.agent_name, self.config)
 
         if result:
             selected_value, thread_id = result
@@ -483,7 +485,7 @@ class AgentBot:
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
         assert self.thread_invite_manager is not None
-        mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name)
+        mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name, self.config)
 
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
@@ -718,7 +720,7 @@ class AgentBot:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
 
-        available_agents = get_available_agents_in_room(room)
+        available_agents = get_available_agents_in_room(room, self.config)
         if not available_agents:
             self.logger.debug("No available agents to route to")
             return
@@ -976,7 +978,7 @@ class MultiAgentOrchestrator:
     storage_path: Path
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
-    current_config: Config | None = field(default=None, init=False)
+    config: Config | None = field(default=None, init=False)
     _created_room_ids: dict[str, str] = field(default_factory=dict, init=False)
 
     async def _ensure_user_account(self) -> None:
@@ -1004,7 +1006,7 @@ class MultiAgentOrchestrator:
         await self._ensure_user_account()
 
         config = load_config()
-        self.current_config = config
+        self.config = config
 
         # Create bots for all configured entities
         # Make Router the first so that it can manage room invitations
@@ -1080,14 +1082,12 @@ class MultiAgentOrchestrator:
         """
         new_config = load_config()
 
-        if not self.current_config:
-            self.current_config = new_config
+        if not self.config:
+            self.config = new_config
             return False
 
         # Identify what changed - we can keep using the existing helper functions
-        entities_to_restart = await _identify_entities_to_restart_simplified(
-            self.current_config, new_config, self.agent_bots
-        )
+        entities_to_restart = await _identify_entities_to_restart_simplified(self.config, new_config, self.agent_bots)
 
         # Also check for new entities that didn't exist before
         all_new_entities = set(new_config.agents.keys()) | set(new_config.teams.keys()) | {ROUTER_AGENT_NAME}
@@ -1095,7 +1095,7 @@ class MultiAgentOrchestrator:
         new_entities = all_new_entities - existing_entities
 
         if not entities_to_restart and not new_entities:
-            self.current_config = new_config
+            self.config = new_config
             return False
 
         # Stop entities that need restarting
@@ -1103,7 +1103,7 @@ class MultiAgentOrchestrator:
             await _stop_entities(entities_to_restart, self.agent_bots)
 
         # Update config
-        self.current_config = new_config
+        self.config = new_config
 
         # Recreate entities that need restarting using self-management
         for entity_name in entities_to_restart:
@@ -1179,10 +1179,10 @@ class MultiAgentOrchestrator:
         await self._ensure_rooms_exist()
 
         # After rooms exist, update each bot's room list to use room IDs instead of aliases
-        assert self.current_config is not None
+        assert self.config is not None
         for bot in bots:
             # Get the room aliases for this entity from config and resolve to IDs
-            room_aliases = get_rooms_for_entity(bot.agent_name, self.current_config)
+            room_aliases = get_rooms_for_entity(bot.agent_name, self.config)
             bot.rooms = resolve_room_aliases(room_aliases)
 
         # After rooms exist, ensure room invitations are up to date
@@ -1215,8 +1215,8 @@ class MultiAgentOrchestrator:
             return
 
         # Directly create rooms using the router's client
-        assert self.current_config is not None
-        room_ids = await ensure_all_rooms_exist(router_bot.client, self.current_config)
+        assert self.config is not None
+        room_ids = await ensure_all_rooms_exist(router_bot.client, self.config)
 
         # Store room IDs for later use
         self._created_room_ids = room_ids
@@ -1237,7 +1237,7 @@ class MultiAgentOrchestrator:
             return
 
         # Get the current configuration
-        config = self.current_config
+        config = self.config
         if not config:
             logger.warning("No configuration available, cannot ensure room invitations")
             return
@@ -1289,31 +1289,31 @@ class MultiAgentOrchestrator:
 
 
 async def _identify_entities_to_restart_simplified(
-    current_config: Config | None,
+    config: Config | None,
     new_config: Config,
     agent_bots: dict[str, Any],
 ) -> set[str]:
     """Identify entities that need restarting due to config changes."""
-    agents_to_restart = _get_changed_agents(current_config, new_config, agent_bots)
-    teams_to_restart = _get_changed_teams(current_config, new_config, agent_bots)
+    agents_to_restart = _get_changed_agents(config, new_config, agent_bots)
+    teams_to_restart = _get_changed_teams(config, new_config, agent_bots)
 
     entities_to_restart = agents_to_restart | teams_to_restart
 
-    if _router_needs_restart(current_config, new_config):
+    if _router_needs_restart(config, new_config):
         entities_to_restart.add(ROUTER_AGENT_NAME)
 
     return entities_to_restart
 
 
-def _get_changed_agents(current_config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:
-    if not current_config:
+def _get_changed_agents(config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:
+    if not config:
         return set()
 
     changed = set()
-    all_agents = set(current_config.agents.keys()) | set(new_config.agents.keys())
+    all_agents = set(config.agents.keys()) | set(new_config.agents.keys())
 
     for agent_name in all_agents:
-        old_agent = current_config.agents.get(agent_name)
+        old_agent = config.agents.get(agent_name)
         new_agent = new_config.agents.get(agent_name)
         if old_agent != new_agent and (agent_name in agent_bots or new_agent is not None):
             changed.add(agent_name)
@@ -1321,15 +1321,15 @@ def _get_changed_agents(current_config: Config | None, new_config: Config, agent
     return changed
 
 
-def _get_changed_teams(current_config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:
-    if not current_config:
+def _get_changed_teams(config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:
+    if not config:
         return set()
 
     changed = set()
-    all_teams = set(current_config.teams.keys()) | set(new_config.teams.keys())
+    all_teams = set(config.teams.keys()) | set(new_config.teams.keys())
 
     for team_name in all_teams:
-        old_team = current_config.teams.get(team_name)
+        old_team = config.teams.get(team_name)
         new_team = new_config.teams.get(team_name)
         if old_team != new_team and (team_name in agent_bots or new_team is not None):
             changed.add(team_name)
@@ -1337,12 +1337,12 @@ def _get_changed_teams(current_config: Config | None, new_config: Config, agent_
     return changed
 
 
-def _router_needs_restart(current_config: Config | None, new_config: Config) -> bool:
+def _router_needs_restart(config: Config | None, new_config: Config) -> bool:
     """Check if router needs restart due to room changes."""
-    if not current_config:
+    if not config:
         return False
 
-    old_rooms = current_config.get_all_configured_rooms()
+    old_rooms = config.get_all_configured_rooms()
     new_rooms = new_config.get_all_configured_rooms()
     return old_rooms != new_rooms
 

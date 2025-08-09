@@ -8,7 +8,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import Config, RouterConfig
+from mindroom.models import AgentConfig, Config, ModelConfig, RouterConfig
 
 
 @pytest.fixture
@@ -253,6 +253,19 @@ class TestBotTaskRestoration:
 class TestCommandHandling:
     """Test command handling behavior across different agents."""
 
+    def setup_method(self):
+        """Set up test config."""
+        self.config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                "finance": AgentConfig(display_name="Finance", rooms=["#test:example.org"]),
+                "router": AgentConfig(display_name="Router", rooms=["#test:example.org"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+
     @pytest.mark.asyncio
     async def test_non_router_agent_ignores_commands(self) -> None:
         """Test that non-router agents ignore command messages."""
@@ -476,6 +489,7 @@ class TestCommandHandling:
             room_id="!test:localhost",
             configured_rooms=["!test:localhost"],
             thread_history=thread_history,  # Full history including router's error
+            config=self.config,
         )
 
         assert not should_respond, "Finance agent should not respond to router error without mentions"
@@ -489,6 +503,7 @@ class TestCommandHandling:
             room_id="!test:localhost",
             configured_rooms=["!test:localhost"],
             thread_history=thread_history,  # Include router's error in history
+            config=self.config,
         )
 
         assert not should_respond, "Finance agent should not respond even if it was previously in thread"
@@ -578,7 +593,7 @@ class TestCommandHandling:
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
-                lambda x: "router"
+                lambda x, config: "router"
                 if "router" in x
                 else ("news" if "news" in x else ("research" if "research" in x else None))
             )
@@ -687,7 +702,9 @@ class TestCommandHandling:
             patch("mindroom.bot.extract_agent_name") as mock_extract,
         ):
             mock_interactive.handle_text_response = AsyncMock()
-            mock_extract.side_effect = lambda x: "router" if "router" in x else ("finance" if "finance" in x else None)
+            mock_extract.side_effect = (
+                lambda x, config: "router" if "router" in x else ("finance" if "finance" in x else None)
+            )
 
             await bot._on_message(room, event)
 

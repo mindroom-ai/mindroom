@@ -14,7 +14,7 @@ import pytest_asyncio
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import Config, RouterConfig
+from mindroom.models import AgentConfig, Config, ModelConfig, RouterConfig
 
 
 class TestThreadingBehavior:
@@ -30,7 +30,13 @@ class TestThreadingBehavior:
             agent_name="general",
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
 
         bot = AgentBot(
             agent_user=agent_user,
@@ -41,7 +47,9 @@ class TestThreadingBehavior:
         )
 
         # Mock the orchestrator
-        bot.orchestrator = MagicMock()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.current_config = config
+        bot.orchestrator = mock_orchestrator
 
         # Create a mock client
         bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -207,7 +215,13 @@ class TestThreadingBehavior:
             agent_name="router",
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = Config(
+            agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
 
         bot = AgentBot(
             agent_user=agent_user,
@@ -218,7 +232,9 @@ class TestThreadingBehavior:
         )
 
         # Mock the orchestrator
-        bot.orchestrator = MagicMock()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.current_config = config
+        bot.orchestrator = mock_orchestrator
 
         # Create a mock client
         bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -295,7 +311,13 @@ class TestThreadingBehavior:
             agent_name="router",
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = Config(
+            agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
 
         bot = AgentBot(
             agent_user=agent_user,
@@ -305,7 +327,9 @@ class TestThreadingBehavior:
             config=config,
         )
         # Mock the orchestrator
-        bot.orchestrator = MagicMock()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.current_config = config
+        bot.orchestrator = mock_orchestrator
 
         # Create a mock client
         bot.client = AsyncMock(spec=nio.AsyncClient)
