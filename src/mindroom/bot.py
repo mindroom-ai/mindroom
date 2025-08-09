@@ -45,7 +45,7 @@ from .matrix import (
     login_agent_user,
     send_message,
 )
-from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, resolve_room_aliases
+from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.users import create_agent_user
 from .models import Config
@@ -1191,8 +1191,6 @@ class MultiAgentOrchestrator:
 
         # Ensure user joins all rooms after being invited
         # Get all room IDs (not just newly created ones)
-        from .matrix import load_rooms
-
         all_rooms = load_rooms()
         all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
         if all_room_ids:
