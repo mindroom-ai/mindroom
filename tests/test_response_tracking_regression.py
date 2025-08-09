@@ -164,29 +164,34 @@ class TestResponseTrackingRegression:
 
         mock_room = MagicMock()
         mock_room.room_id = test_room_id
+        mock_room.users = {mock_router_agent.user_id: MagicMock()}
 
-        # Simulate the flow from _on_message for unknown command
-        # In real code, this happens at lines 366-369
-        from mindroom.commands import command_parser
-        from mindroom.matrix.client import extract_thread_info
+        # Mock the necessary methods for _on_message flow
+        bot._extract_message_context = AsyncMock()  # type: ignore[method-assign]
+        mock_context = MagicMock()
+        mock_context.am_i_mentioned = False
+        mock_context.is_thread = False
+        mock_context.thread_id = None
+        mock_context.thread_history = []
+        mock_context.mentioned_agents = []
+        bot._extract_message_context.return_value = mock_context
 
-        command = command_parser.parse(unknown_command_event.body)
-        assert command is None  # It's an unknown command
+        # Mock the _send_response to track the call
+        original_send_response = bot._send_response
+        bot._send_response = AsyncMock(side_effect=original_send_response)  # type: ignore[method-assign]
 
-        # This is what happens in the actual code
-        is_thread, thread_id = extract_thread_info(unknown_command_event.source)
-        help_text = "❌ Unknown command. Try !help for available commands."
-        await bot._send_response(
-            mock_room,
-            unknown_command_event.event_id,
-            help_text,
-            thread_id=thread_id,
-            reply_to_event=unknown_command_event,
-        )
-        # With the fix, this is now done in the actual code at line 371
-        bot.response_tracker.mark_responded(unknown_command_event.event_id)
+        # Mock constants to make router handle commands
+        with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
+            # Call _on_message which should detect unknown command and respond
+            await bot._on_message(mock_room, unknown_command_event)
 
-        # For now, this test will FAIL without the fix
+        # Verify that _send_response was called with the error message
+        bot._send_response.assert_called_once()
+        call_args = bot._send_response.call_args[0]
+        assert "❌ Unknown command" in call_args[2]
+
+        # IMPORTANT: Check if event was marked as responded
+        # This should be True after the fix in bot.py at line 371
         assert bot.response_tracker.has_responded(unknown_command_event.event_id), (
             "Unknown command event should be marked as responded"
         )
@@ -252,8 +257,8 @@ class TestResponseTrackingRegression:
 
         # Verify routing message was sent
         assert bot.client.room_send.call_count == 1
-        # With the fix, this is now done in the actual code at line 787
-        bot.response_tracker.mark_responded(message_event.event_id)
+        # NOTE: The fix should add mark_responded() in bot.py at line 787
+        # We're NOT adding it here in the test - we're testing that bot.py does it
 
         # IMPORTANT: Check if event was marked as responded
         # This should be True after the fix
