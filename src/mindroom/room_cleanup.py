@@ -120,8 +120,3 @@ async def cleanup_all_orphaned_bots(client: nio.AsyncClient) -> dict[str, list[s
         logger.info("No orphaned bots found in any room")
 
     return kicked_bots
-
-
-# Note: With the new self-managing agent pattern, agents handle their own
-# room invitations and joins. The invite_missing_bots functions are deprecated
-# and kept only for backward compatibility during migration.
