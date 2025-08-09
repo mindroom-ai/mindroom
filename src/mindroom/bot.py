@@ -393,7 +393,7 @@ class AgentBot:
             return
 
         # Check if we should form a team first
-        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)  # Excludes router
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = should_form_team(context.mentioned_agents, agents_in_thread, all_mentioned_in_thread)
 

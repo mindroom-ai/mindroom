@@ -146,13 +146,18 @@ def should_agent_respond(
     if am_i_mentioned and has_access:
         return True
 
-    # For threads, check agent participation
+    # For threads, check agent participation (excluding router)
     agents_in_thread = get_agents_in_thread(thread_history, config)
 
     # Multiple agents in thread with no specific mention - team scenario
     if len(agents_in_thread) > 1:
         # Team will handle the response
         return False
+
+    # Special case: If no agents have spoken yet but this agent is invited to the thread,
+    # they should take ownership of the conversation
+    if len(agents_in_thread) == 0 and is_invited_to_thread:
+        return True
 
     # Single agent continues conversation (only if has access)
     return [agent_name] == agents_in_thread and has_access

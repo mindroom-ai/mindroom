@@ -65,7 +65,7 @@ class TestAgentResponseLogic:
 
     def test_invited_agent_behaves_like_native_agent(self) -> None:
         """Invited agents should follow the same rules as native agents."""
-        # Test 1: Invited agent with no agents in thread - should use router
+        # Test 1: Invited agent with no agents in thread - should take ownership
         should_respond = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
@@ -76,7 +76,7 @@ class TestAgentResponseLogic:
             config=self.config,
             is_invited_to_thread=True,  # Agent is invited
         )
-        assert should_respond is False
+        assert should_respond is True  # Invited agent takes ownership when no one has spoken
 
         # Test 2: Invited agent as only agent in thread - should continue
         thread_history = [
@@ -112,6 +112,34 @@ class TestAgentResponseLogic:
             is_invited_to_thread=True,  # Agent is invited
         )
         assert should_respond is False
+
+    def test_only_invited_agent_responds_when_no_history(self) -> None:
+        """When no agents have spoken yet, only invited agents should respond."""
+        # Non-invited agent should not respond
+        should_respond = should_agent_respond(
+            agent_name="general",
+            am_i_mentioned=False,
+            is_thread=True,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],  # Native to room
+            thread_history=[],  # No one has spoken
+            config=self.config,
+            is_invited_to_thread=False,  # Not invited
+        )
+        assert should_respond is False  # Should wait for router or invited agent
+
+        # Invited agent should respond
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            room_id="!room:localhost",
+            configured_rooms=[],  # Not native
+            thread_history=[],  # No one has spoken
+            config=self.config,
+            is_invited_to_thread=True,  # Invited
+        )
+        assert should_respond is True  # Should take ownership
 
     def test_no_agents_in_thread_uses_router(self) -> None:
         """If no agents have participated, use router."""
