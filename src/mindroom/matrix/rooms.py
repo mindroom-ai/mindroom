@@ -211,7 +211,8 @@ async def ensure_user_in_rooms(
         room_ids: Dict mapping room keys to room IDs
     """
     state = MatrixState.load()
-    user_account = state.get_account("agent_user")  # User is stored as "agent_user"
+    # Try both possible keys for user account
+    user_account = state.get_account("user") or state.get_account("agent_user")
     if not user_account:
         logger.warning("No user account found, skipping user room membership")
         return
