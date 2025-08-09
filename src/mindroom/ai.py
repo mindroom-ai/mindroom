@@ -65,9 +65,9 @@ def _format_tool_started_message(event: ToolCallStartedEvent) -> str:
     # Format similar to agno's formatted_tool_calls
     if tool_args:
         args_str = ", ".join(f"{k}={v}" for k, v in tool_args.items())
-        msg = f"\n\n🔧 **Tool Call:** {tool_name}({args_str})\n"
+        msg = f"\n\n🔧 **Tool Call:** `{tool_name}({args_str})`\n"
     else:
-        msg = f"\n\n🔧 **Tool Call:** {tool_name}()\n"
+        msg = f"\n\n🔧 **Tool Call:** `{tool_name}()`\n"
 
     return msg
 
