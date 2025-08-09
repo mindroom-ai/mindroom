@@ -45,7 +45,8 @@ def _extract_response_content(response: RunResponse) -> str:
         response_parts.append(response.content)
 
     # Add formatted tool calls if present (similar to agno's print_response)
-    if response.formatted_tool_calls:
+    # Only add if there are actual tool calls to display
+    if response.formatted_tool_calls and any(response.formatted_tool_calls):
         tool_calls_section = "\n\n**Tool Calls:**"
         for tool_call in response.formatted_tool_calls:
             tool_calls_section += f"\n• {tool_call}"
