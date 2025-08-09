@@ -128,8 +128,25 @@ async def ensure_room_exists(
         logger.info(f"Created room {room_key} with ID {created_room_id}")
         return created_room_id
     else:
-        logger.error(f"Failed to create room {room_key}")
-        return None
+        # Try to resolve the alias in case it already exists
+        server_name = extract_server_name_from_homeserver(client.homeserver)
+        full_alias = f"#{room_key}:{server_name}"
+
+        # Try to resolve the room alias
+        response = await client.room_resolve_alias(full_alias)
+        if isinstance(response, nio.RoomResolveAliasResponse):
+            room_id = response.room_id
+            logger.info(f"Room alias {full_alias} already exists, using room {room_id}")
+            # Save to our state
+            add_room(room_key, room_id, full_alias, room_name)
+            # Try to join the room
+            from .client import join_room
+
+            await join_room(client, room_id)
+            return str(room_id)
+        else:
+            logger.error(f"Failed to create room {room_key} and could not resolve existing alias")
+            return None
 
 
 async def ensure_all_rooms_exist(
