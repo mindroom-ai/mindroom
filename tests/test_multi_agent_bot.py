@@ -303,6 +303,10 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
+        # Initialize thread_invite_manager as would happen in start()
+        bot.thread_invite_manager = ThreadInviteManager(bot.client)
+        bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
+
         mock_room = MagicMock()
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"

@@ -13,6 +13,7 @@ from .matrix.client import get_joined_rooms, get_room_members
 from .matrix.identity import MatrixID
 from .matrix.state import MatrixState
 from .models import Config
+from .thread_invites import ThreadInviteManager
 
 logger = get_logger(__name__)
 
@@ -40,13 +41,9 @@ async def _cleanup_orphaned_bots_in_room(
     client: nio.AsyncClient,
     room_id: str,
     config: Config,
+    thread_invite_manager: ThreadInviteManager,
 ) -> list[str]:
     """Remove orphaned bots from a single room.
-
-    Args:
-        client: An authenticated Matrix client with kick permissions
-        room_id: The room to check
-        config: Current configuration
 
     Returns:
         List of bot usernames that were kicked
@@ -68,6 +65,19 @@ async def _cleanup_orphaned_bots_in_room(
 
         # Check if this is a mindroom bot and shouldn't be in this room
         if matrix_id.username in known_bot_usernames and matrix_id.username not in configured_bots:
+            # Check if bot has thread invitations in this room
+            agent_name = matrix_id.agent_name(config)
+            if agent_name:
+                agent_threads = await thread_invite_manager.get_agent_threads(room_id, agent_name)
+            else:
+                agent_threads = []
+            if agent_threads:
+                logger.info(
+                    f"Bot {matrix_id.username} not configured for room {room_id} but has "
+                    f"{len(agent_threads)} thread invitation(s), keeping in room"
+                )
+                continue
+
             logger.info(
                 f"Found orphaned bot {matrix_id.username} in room {room_id} "
                 f"(configured bots for this room: {configured_bots})"
@@ -85,14 +95,13 @@ async def _cleanup_orphaned_bots_in_room(
     return kicked_bots
 
 
-async def cleanup_all_orphaned_bots(client: nio.AsyncClient, config: Config) -> dict[str, list[str]]:
+async def cleanup_all_orphaned_bots(
+    client: nio.AsyncClient, config: Config, thread_invite_manager: ThreadInviteManager
+) -> dict[str, list[str]]:
     """Remove all orphaned bots from all rooms the client has access to.
 
     This should be called by a user or bot with admin/moderator permissions
     in the rooms that need cleaning.
-
-    Args:
-        client: An authenticated Matrix client
 
     Returns:
         Dictionary mapping room IDs to lists of kicked bot usernames
@@ -109,7 +118,7 @@ async def cleanup_all_orphaned_bots(client: nio.AsyncClient, config: Config) -> 
     logger.info(f"Checking {len(joined_rooms)} rooms for orphaned bots")
 
     for room_id in joined_rooms:
-        room_kicked = await _cleanup_orphaned_bots_in_room(client, room_id, config)
+        room_kicked = await _cleanup_orphaned_bots_in_room(client, room_id, config, thread_invite_manager)
         if room_kicked:
             kicked_bots[room_id] = room_kicked
 
