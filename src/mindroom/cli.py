@@ -3,75 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-import nio
 import typer
 from rich.console import Console
 
-from mindroom.matrix import (
-    MATRIX_HOMESERVER,
-    MatrixState,
-    extract_server_name_from_homeserver,
-    matrix_client,
-)
-
-if TYPE_CHECKING:
-    pass
 app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
 console = Console()
-
-HOMESERVER = MATRIX_HOMESERVER or "http://localhost:8008"
-SERVER_NAME = extract_server_name_from_homeserver(HOMESERVER)
-
-
-async def _ensure_user_account() -> MatrixState:
-    """Ensure a user account exists, creating one if necessary."""
-    state = MatrixState.load()
-
-    user_account = state.get_account("user")
-
-    # If we have stored credentials, try to login first
-    if user_account:
-        async with matrix_client(HOMESERVER, f"@{user_account.username}:{SERVER_NAME}") as client:
-            response = await client.login(password=user_account.password)
-            if isinstance(response, nio.LoginResponse):
-                console.print(f"✅ User account ready: @{user_account.username}:{SERVER_NAME}")
-                return state
-            else:
-                console.print("⚠️  Stored credentials invalid, creating new account...")
-                state.accounts.pop("user", None)
-
-    # No valid account, create a new one
-    console.print("📝 Creating user account...")
-
-    # Generate credentials
-    user_username = "mindroom_user"
-    user_password = f"mindroom_password_{os.urandom(16).hex()}"
-
-    # Register user
-    from mindroom.matrix.client import register_user
-
-    try:
-        user_id = await register_user(HOMESERVER, user_username, user_password, "Mindroom User")
-        console.print(f"✅ Registered user: {user_id}")
-    except ValueError as e:
-        error_msg = str(e)
-        if "M_USER_IN_USE" in error_msg:
-            console.print(f"ℹ️  User @{user_username}:{SERVER_NAME} already exists")
-        else:
-            console.print(f"❌ Failed to register {user_username}: {error_msg}")
-
-    # Save credentials
-    state.add_account("user", user_username, user_password)
-    state.save()
-
-    console.print(f"✅ User account ready: @{user_username}:{SERVER_NAME}")
-
-    return state
 
 
 @app.command()
@@ -101,26 +40,19 @@ def run(
 ) -> None:
     """Run the mindroom multi-agent system.
 
-    This command automatically:
-    - Creates a user account if needed
-    - Creates all agent accounts
+    This command starts the multi-agent bot system which automatically:
+    - Creates all necessary user and agent accounts
     - Creates all rooms defined in config.yaml
-    - Starts the multi-agent system
+    - Manages agent room memberships
     """
     asyncio.run(_run(log_level=log_level.upper(), storage_path=storage_path))
 
 
 async def _run(log_level: str, storage_path: Path) -> None:
-    """Run the multi-agent system with automatic setup."""
+    """Run the multi-agent system."""
     from mindroom.bot import main
 
-    console.print(f"🚀 Starting Mindroom multi-agent system (log level: {log_level})...\n")
-
-    # Ensure we have a user account
-    await _ensure_user_account()
-
-    # Agent accounts and rooms are created automatically by the bot system
-    console.print("\n🤖 Starting agents...")
+    console.print(f"🚀 Starting Mindroom multi-agent system (log level: {log_level})...")
     console.print("Press Ctrl+C to stop\n")
 
     try:

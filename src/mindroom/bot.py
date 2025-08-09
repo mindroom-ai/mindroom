@@ -969,12 +969,29 @@ class MultiAgentOrchestrator:
     current_config: Config | None = field(default=None, init=False)
     _created_room_ids: dict[str, str] = field(default_factory=dict, init=False)
 
+    async def _ensure_user_account(self) -> None:
+        """Ensure a user account exists, creating one if necessary.
+
+        This reuses the same create_agent_user function that agents use,
+        treating the user as a special "agent" named "user".
+        """
+        # The user account is just another "agent" from the perspective of account management
+        user_account = await create_agent_user(
+            MATRIX_HOMESERVER,
+            "user",  # Special agent name for the human user
+            "Mindroom User",  # Display name
+        )
+        logger.info(f"User account ready: {user_account.user_id}")
+
     async def initialize(self) -> None:
         """Initialize all agent bots with self-management.
 
         Each agent is now responsible for ensuring its own user account and rooms.
         """
         logger.info("Initializing multi-agent system...")
+
+        # Ensure user account exists first
+        await self._ensure_user_account()
 
         config = load_config()
         self.current_config = config
@@ -1232,7 +1249,7 @@ class MultiAgentOrchestrator:
 
         # First, invite the user account to all rooms
         state = MatrixState.load()
-        user_account = state.get_account("user")
+        user_account = state.get_account("agent_user")  # User is stored as "agent_user"
         if user_account:
             user_id = f"@{user_account.username}:{server_name}"
             for room_id in joined_rooms:
