@@ -210,7 +210,6 @@ class AgentBot:
 
         # Leave rooms we're no longer configured for AND have no thread invitations
         for room_id in current_rooms - configured_rooms:
-            # Check if we have any thread invitations in this room
             agent_threads = await self.thread_invite_manager.get_agent_threads(room_id, self.agent_name)
             if agent_threads:
                 self.logger.info(f"Staying in room {room_id} due to {len(agent_threads)} thread invitation(s)")
@@ -341,7 +340,6 @@ class AgentBot:
         # Check if we should process messages in this room
         # Process if: configured for room OR invited to threads in room
         if room.room_id not in self.rooms:
-            # Check if we're invited to any threads in this room
             assert self.thread_invite_manager is not None
             agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
             if not agent_threads:
