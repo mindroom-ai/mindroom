@@ -83,9 +83,9 @@ def _format_tool_completed_message(event: ToolCallCompletedEvent) -> str:
 
     if result:
         # Format the result nicely
-        return f"✅ **{tool_name} Result:**\n{result}\n\n"
+        return f"✅ **`{tool_name}` result:**\n{result}\n\n"
 
-    return f"✅ **{tool_name}** completed\n\n"
+    return f"✅ **`{tool_name}`** completed\n\n"
 
 
 @functools.cache
