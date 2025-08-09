@@ -27,18 +27,18 @@ CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config.yaml"
 
 
 def save_config_to_file(config: dict[str, Any]) -> None:
-    """Save config to YAML file with deterministic ordering, excluding None values."""
+    """Save config to YAML file with deterministic ordering, excluding None values and empty lists."""
 
-    # Recursively remove None values from the config
-    def remove_none_values(obj: Any) -> Any:
+    # Recursively remove None values and empty lists from the config
+    def remove_none_and_empty(obj: Any) -> Any:
         if isinstance(obj, dict):
-            return {k: remove_none_values(v) for k, v in obj.items() if v is not None}
+            return {k: remove_none_and_empty(v) for k, v in obj.items() if v is not None and v != []}
         elif isinstance(obj, list):
-            return [remove_none_values(item) for item in obj]
+            return [remove_none_and_empty(item) for item in obj]
         else:
             return obj
 
-    clean_config = remove_none_values(config)
+    clean_config = remove_none_and_empty(config)
 
     with open(CONFIG_PATH, "w") as f:
         yaml.dump(clean_config, f, default_flow_style=False, sort_keys=True)
@@ -116,6 +116,7 @@ async def save_config(new_config: Config):
     """Save configuration to file"""
     try:
         # Use exclude_none to skip None values when converting to dict
+        # Note: We're not using exclude_defaults=True here to preserve user's explicit choices
         config_dict = new_config.model_dump(exclude_none=True)
 
         # Write to YAML file

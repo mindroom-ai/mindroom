@@ -12,7 +12,6 @@ agents:
     rooms:
     - lobby
     - analysis
-    tools: []
   calculator:
     display_name: CalculatorAgent
     instructions:
@@ -104,7 +103,6 @@ agents:
     rooms:
     - lobby
     - help
-    tools: []
   news:
     display_name: NewsAgent
     instructions:
@@ -159,7 +157,6 @@ agents:
     rooms:
     - lobby
     - dev
-    tools: []
   shell:
     display_name: ShellAgent
     instructions:
@@ -195,7 +192,6 @@ agents:
     - lobby
     - research
     - docs
-    tools: []
 defaults:
   add_history_to_messages: true
   markdown: true
