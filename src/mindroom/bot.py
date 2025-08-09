@@ -1087,7 +1087,7 @@ class MultiAgentOrchestrator:
             return False
 
         # Identify what changed - we can keep using the existing helper functions
-        entities_to_restart = await _identify_entities_to_restart_simplified(self.config, new_config, self.agent_bots)
+        entities_to_restart = await _identify_entities_to_restart(self.config, new_config, self.agent_bots)
 
         # Also check for new entities that didn't exist before
         all_new_entities = set(new_config.agents.keys()) | set(new_config.teams.keys()) | {ROUTER_AGENT_NAME}
@@ -1288,7 +1288,7 @@ class MultiAgentOrchestrator:
         logger.info("Ensured room invitations for all configured agents")
 
 
-async def _identify_entities_to_restart_simplified(
+async def _identify_entities_to_restart(
     config: Config | None,
     new_config: Config,
     agent_bots: dict[str, Any],
