@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
-from watchfiles import awatch
 
 from . import interactive
 from .agent_config import create_agent, get_rooms_for_entity, load_config
@@ -27,6 +26,7 @@ from .commands import (
     handle_widget_command,
 )
 from .constants import ROUTER_AGENT_NAME
+from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import MATRIX_HOMESERVER
 from .matrix.client import (
@@ -1398,6 +1398,29 @@ async def _stop_entities(entities_to_restart: set[str], agent_bots: dict[str, An
         agent_bots.pop(entity_name, None)
 
 
+async def _handle_config_change(orchestrator: MultiAgentOrchestrator, stop_watching: asyncio.Event) -> None:
+    """Handle configuration file changes."""
+    logger.info("Configuration file changed, checking for updates...")
+    if orchestrator.running:
+        updated = await orchestrator.update_config()
+        if updated:
+            logger.info("Configuration update applied to affected agents")
+        else:
+            logger.info("No agent changes detected in configuration update")
+    if not orchestrator.running:
+        stop_watching.set()
+
+
+async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestrator) -> None:
+    """Watch config file for changes."""
+    stop_watching = asyncio.Event()
+
+    async def on_config_change() -> None:
+        await _handle_config_change(orchestrator, stop_watching)
+
+    await watch_file(config_path, on_config_change, stop_watching)
+
+
 async def main(log_level: str, storage_path: Path) -> None:
     """Main entry point for the multi-agent bot system.
 
@@ -1423,26 +1446,7 @@ async def main(log_level: str, storage_path: Path) -> None:
         orchestrator_task = asyncio.create_task(orchestrator.start())
 
         # Create task to watch config file for changes
-        async def watch_config() -> None:
-            """Watch config file for changes and reload when modified."""
-            async for _changes in awatch(config_path):
-                # The changes set contains tuples of (change_type, path)
-                # We only care that the file changed, not the specific type
-                logger.info("Configuration file changed, checking for updates...")
-
-                if orchestrator.running:
-                    updated = await orchestrator.update_config()
-                    if updated:
-                        logger.info("Configuration update applied to affected agents")
-                    else:
-                        logger.info("No agent changes detected in configuration update")
-
-                # Break if orchestrator is no longer running
-                if not orchestrator.running:
-                    break
-
-        # Run config watcher in parallel with orchestrator
-        watcher_task = asyncio.create_task(watch_config())
+        watcher_task = asyncio.create_task(_watch_config_task(config_path, orchestrator))
 
         # Wait for either orchestrator or watcher to complete
         done, pending = await asyncio.wait({orchestrator_task, watcher_task}, return_when=asyncio.FIRST_COMPLETED)

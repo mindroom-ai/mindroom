@@ -1441,7 +1441,6 @@ dependencies = [
     { name = "structlog" },
     { name = "tavily-python" },
     { name = "typer" },
-    { name = "watchfiles" },
     { name = "wikipedia" },
 ]
 
@@ -1483,7 +1482,6 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.1" },
     { name = "tavily-python" },
     { name = "typer", specifier = ">=0.16" },
-    { name = "watchfiles", specifier = ">=1.1.0" },
     { name = "wikipedia" },
 ]
 
