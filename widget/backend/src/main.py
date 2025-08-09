@@ -28,7 +28,6 @@ CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config.yaml"
 
 def save_config_to_file(config: dict[str, Any]) -> None:
     """Save config to YAML file with deterministic ordering."""
-    # The config should already have None values excluded via model_dump(exclude_none=True)
     with open(CONFIG_PATH, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=True)
 
@@ -104,11 +103,7 @@ async def load_config():
 async def save_config(new_config: Config):
     """Save configuration to file"""
     try:
-        # Use exclude_none to skip None values when converting to dict
-        # Note: We're not using exclude_defaults=True here to preserve user's explicit choices
         config_dict = new_config.model_dump(exclude_none=True)
-
-        # Write to YAML file
         save_config_to_file(config_dict)
 
         # Update current config

@@ -195,12 +195,7 @@ class Config(BaseModel):
             config_path: Path to save the config to. If None, uses DEFAULT_AGENTS_CONFIG.
         """
         path = config_path or DEFAULT_AGENTS_CONFIG
-
-        # Convert to dict excluding None values
         config_dict = self.model_dump(exclude_none=True)
-
-        # Save to YAML with sorted keys
         with open(path, "w") as f:
             yaml.dump(config_dict, f, default_flow_style=False, sort_keys=True)
-
         logger.info(f"Saved configuration to {path}")
