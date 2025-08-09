@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -100,7 +101,7 @@ class TestTeamFormation:
             "content": {
                 "msgtype": "m.text",
                 "body": f"@{mock_research_agent.display_name} @{mock_analyst_agent.display_name} analyze the market trends",
-                "mentions": {
+                "m.mentions": {
                     "user_ids": [
                         mock_research_agent.user_id,
                         mock_analyst_agent.user_id,
@@ -122,8 +123,8 @@ class TestTeamFormation:
         # Both agents should recognize they're part of a team request
         # This test verifies the setup - actual team behavior will be tested
         # once implementation is done
-        assert mock_research_agent.user_id in message_event["content"]["mentions"]["user_ids"]
-        assert mock_analyst_agent.user_id in message_event["content"]["mentions"]["user_ids"]
+        assert mock_research_agent.user_id in message_event["content"]["m.mentions"]["user_ids"]
+        assert mock_analyst_agent.user_id in message_event["content"]["m.mentions"]["user_ids"]
 
     @pytest.mark.asyncio
     async def test_multiple_agents_in_thread_form_team(
@@ -175,16 +176,16 @@ class TestTeamCollaboration:
         mock_analyst_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test team coordination mode where agents build on each other's work."""
 
         # Setup responses for coordinate mode
-        async def research_response():
+        async def research_response() -> AsyncGenerator[str, None]:
             yield "I've gathered the following data on renewable energy:\n"
             yield "- Solar capacity increased 23% YoY\n"
             yield "- Wind energy adoption up 18%"
 
-        async def analyst_response():
+        async def analyst_response() -> AsyncGenerator[str, None]:
             yield "Based on the research data:\n"
             yield "- The 23% solar growth indicates strong market momentum\n"
             yield "- Combined renewable growth of 20.5% exceeds projections"
@@ -213,7 +214,7 @@ class TestTeamCollaboration:
         mock_security_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test team collaboration mode where agents work in parallel."""
         # In collaborate mode, multiple agents analyze the same problem
         # and provide different perspectives simultaneously
@@ -240,7 +241,7 @@ class TestTeamCollaboration:
         mock_analyst_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test team route mode where lead agent delegates to specialists."""
         # In route mode, a lead agent determines who should handle what
 
@@ -267,7 +268,7 @@ class TestTeamResponseBehavior:
         mock_code_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test that single agent behavior remains unchanged."""
         # Thread with only one agent
         thread_history = [
@@ -296,7 +297,7 @@ class TestTeamResponseBehavior:
         mock_security_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test that explicit mention of one agent prevents team formation."""
         # Thread with multiple agents (thread_history would show both agents)
 
@@ -306,13 +307,16 @@ class TestTeamResponseBehavior:
             "content": {
                 "msgtype": "m.text",
                 "body": f"@{mock_code_agent.display_name} can you add error handling?",
-                "mentions": {"user_ids": [mock_code_agent.user_id]},
+                "m.mentions": {"user_ids": [mock_code_agent.user_id]},
             },
         }
 
         # Only mentioned agent should respond, not the team
-        assert len(message_event["content"]["mentions"]["user_ids"]) == 1
-        assert mock_code_agent.user_id in message_event["content"]["mentions"]["user_ids"]
+        content = cast(dict[str, Any], message_event["content"])
+        mentions = cast(dict[str, Any], content["m.mentions"])
+        user_ids = cast(list[str], mentions["user_ids"])
+        assert len(user_ids) == 1
+        assert mock_code_agent.user_id in user_ids
 
     @pytest.mark.asyncio
     async def test_team_with_invited_agents(
@@ -321,7 +325,7 @@ class TestTeamResponseBehavior:
         mock_analyst_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test team formation with invited agents."""
         # One agent is native to room, another is invited
         native_agent = mock_research_agent
@@ -357,7 +361,7 @@ class TestTeamEdgeCases:
         mock_security_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test behavior when a team member is unavailable."""
         # Setup scenario where one agent is offline/unavailable
         # Team should adapt and continue with available members
@@ -370,7 +374,7 @@ class TestTeamEdgeCases:
         mock_research_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test handling of conflicting information from team members."""
         # Agents might have different data or opinions
         # Team synthesis should handle gracefully
@@ -384,7 +388,7 @@ class TestTeamEdgeCases:
         mock_analyst_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test team behavior when context window is nearly full."""
         # Large thread history approaching token limits
         # Team should coordinate to provide concise responses
@@ -399,7 +403,7 @@ class TestRouterTeamFormation:
         self,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test router creating a team for multi-domain queries."""
         # Complex query requiring multiple agents:
         # "I need to build a secure web API with authentication,
@@ -417,7 +421,7 @@ class TestRouterTeamFormation:
         self,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test router selecting single agent for simple queries."""
         # Simple query = "What's 2 + 2?"
         # Router should select only calculator agent, not form a team

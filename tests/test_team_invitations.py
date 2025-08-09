@@ -128,7 +128,7 @@ class TestTeamRoomMembership:
         # Track which rooms were left
         left_rooms = []
 
-        async def mock_room_leave(room_id):
+        async def mock_room_leave(room_id: str) -> MagicMock:
             left_rooms.append(room_id)
             response = MagicMock()
             response.__class__ = nio.RoomLeaveResponse
