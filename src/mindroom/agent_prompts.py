@@ -7,7 +7,9 @@ When working in teams with other agents, you should identify yourself as {displa
 
 """
 
-INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between options, create an interactive question by including this JSON in your response:
+INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:
+
+IMPORTANT: This is just an example. You can customize the question and options as needed.
 
 ```interactive
 {
