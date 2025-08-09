@@ -45,6 +45,12 @@ async def _cleanup_orphaned_bots_in_room(
 ) -> list[str]:
     """Remove orphaned bots from a single room.
 
+    Args:
+        client: An authenticated Matrix client with kick permissions
+        room_id: The room to check
+        config: Current configuration
+        thread_invite_manager: Thread invite manager to check for thread invitations
+
     Returns:
         List of bot usernames that were kicked
     """
