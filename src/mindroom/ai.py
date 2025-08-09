@@ -38,73 +38,53 @@ ENABLE_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
 
 
 def _extract_response_content(response: RunResponse) -> str:
-    """Extract complete content from a RunResponse including tool calls.
-
-    Args:
-        response: The RunResponse object from agent.arun()
-
-    Returns:
-        Combined text content including main response and tool calls
-    """
     response_parts = []
 
     # Add main content if present
     if response.content:
         response_parts.append(response.content)
 
-    # Add formatted tool calls if present
+    # Add formatted tool calls if present (similar to agno's print_response)
     if response.formatted_tool_calls:
+        tool_calls_section = "\n\n**Tool Calls:**"
         for tool_call in response.formatted_tool_calls:
-            response_parts.append(f"\n{tool_call}")
+            tool_calls_section += f"\n• {tool_call}"
+        response_parts.append(tool_calls_section)
 
     return "\n".join(response_parts) if response_parts else ""
 
 
 def _format_tool_started_message(event: ToolCallStartedEvent) -> str:
-    """Format a message for when a tool call starts.
-
-    Args:
-        event: The ToolCallStartedEvent
-
-    Returns:
-        Formatted message string
-    """
     if not event.tool:
         return ""
 
     tool_name = event.tool.tool_name if event.tool.tool_name else "tool"
     tool_args = event.tool.tool_args if event.tool.tool_args else {}
 
-    msg = f"\n\n🔧 Using {tool_name}"
+    # Format similar to agno's formatted_tool_calls
     if tool_args:
-        msg += f" with arguments: {tool_args}"
-    msg += "...\n"
+        args_str = ", ".join(f"{k}={v}" for k, v in tool_args.items())
+        msg = f"\n\n🔧 **Tool Call:** {tool_name}({args_str})\n"
+    else:
+        msg = f"\n\n🔧 **Tool Call:** {tool_name}()\n"
 
     return msg
 
 
 def _format_tool_completed_message(event: ToolCallCompletedEvent) -> str:
-    """Format a message for when a tool call completes.
-
-    Args:
-        event: The ToolCallCompletedEvent
-
-    Returns:
-        Formatted message string
-    """
     if not event.tool:
         return ""
 
     tool_name = event.tool.tool_name if event.tool.tool_name else "tool"
-    msg = f"✅ {tool_name} completed"
 
     # Check both event.content and tool.result for the output
     result = event.content or (event.tool.result if event.tool else None)
-    if result:
-        msg += f": {result}"
 
-    msg += "\n\n"
-    return msg
+    if result:
+        # Format the result nicely
+        return f"✅ **{tool_name} Result:**\n{result}\n\n"
+
+    return f"✅ **{tool_name}** completed\n\n"
 
 
 @functools.cache
