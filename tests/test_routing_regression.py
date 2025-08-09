@@ -202,8 +202,12 @@ class TestRoutingRegression:
     @pytest.mark.asyncio
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
+    @patch("mindroom.teams.get_model_instance")
+    @patch("tests.test_routing_regression.load_config")
     async def test_multiple_mentions_each_responds_once(
         self,
+        mock_load_config: MagicMock,
+        mock_get_model_instance: MagicMock,
         mock_ai_response: AsyncMock,
         mock_team_arun: AsyncMock,
         mock_research_agent: AgentMatrixUser,
@@ -211,6 +215,24 @@ class TestRoutingRegression:
         tmp_path: Path,
     ) -> None:
         """Test that when multiple agents are mentioned, each responds exactly once."""
+        # Create a mock config with proper models
+        from mindroom.models import AgentConfig, Config, ModelConfig
+
+        mock_config = Config(
+            agents={
+                "research": AgentConfig(display_name="ResearchAgent", rooms=["!research:localhost"]),
+                "news": AgentConfig(display_name="NewsAgent", rooms=["!research:localhost"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
+        )
+        mock_load_config.return_value = mock_config
+
+        # Mock get_model_instance to return a mock model
+        mock_model = MagicMock()
+        mock_get_model_instance.return_value = mock_model
+
         test_room_id = "!research:localhost"
 
         # Set up both bots
@@ -222,6 +244,7 @@ class TestRoutingRegression:
         mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"research": mock_agent_bot, "news": mock_agent_bot}
         mock_orchestrator.current_config = research_bot.config
+        mock_orchestrator.config = research_bot.config  # This is what teams.py uses
         research_bot.orchestrator = mock_orchestrator
 
         news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)

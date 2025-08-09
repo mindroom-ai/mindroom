@@ -65,10 +65,33 @@ def mock_agent_users() -> dict[str, AgentMatrixUser]:
 class TestAgentBot:
     """Test cases for AgentBot class."""
 
+    def create_mock_config(self) -> MagicMock:
+        """Create a mock config for testing."""
+        from mindroom.models import ModelConfig
+
+        mock_config = MagicMock()
+        mock_config.agents = {
+            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+            "general": MagicMock(display_name="GeneralAgent", rooms=["!test:localhost"]),
+        }
+        mock_config.teams = {}
+
+        # Create a proper ModelConfig for the default model
+        default_model = ModelConfig(provider="test", id="test-model")
+        mock_config.models = {"default": default_model}
+
+        mock_config.router = MagicMock(model="default")
+        mock_config.get_all_configured_rooms = MagicMock(return_value=["!test:localhost"])
+        return mock_config
+
     @pytest.mark.asyncio
-    async def test_agent_bot_initialization(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
+    @patch("mindroom.bot.load_config")
+    async def test_agent_bot_initialization(
+        self, mock_load_config: MagicMock, mock_agent_user: AgentMatrixUser, tmp_path: Path
+    ) -> None:
         """Test AgentBot initialization."""
-        config = load_config()
+        mock_load_config.return_value = self.create_mock_config()
+        config = mock_load_config.return_value
 
         bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], config=config)
         assert bot.agent_user == mock_agent_user
@@ -78,8 +101,6 @@ class TestAgentBot:
         assert bot.enable_streaming is True  # Default value
 
         # Test with streaming disabled
-        config = load_config()
-
         bot_no_stream = AgentBot(
             mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
         )
@@ -89,8 +110,14 @@ class TestAgentBot:
     @patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
+    @patch("mindroom.bot.load_config")
     async def test_agent_bot_start(
-        self, mock_ensure_user: AsyncMock, mock_login: AsyncMock, mock_agent_user: AgentMatrixUser, tmp_path: Path
+        self,
+        mock_load_config: MagicMock,
+        mock_ensure_user: AsyncMock,
+        mock_login: AsyncMock,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
     ) -> None:
         """Test starting an agent bot."""
         mock_client = AsyncMock()
@@ -101,7 +128,8 @@ class TestAgentBot:
         # Mock ensure_user_account to not change the agent_user
         mock_ensure_user.return_value = None
 
-        config = load_config()
+        mock_load_config.return_value = self.create_mock_config()
+        config = mock_load_config.return_value
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         await bot.start()
@@ -288,6 +316,8 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
+    @patch("mindroom.bot.load_config")
+    @patch("mindroom.teams.get_model_instance")
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
@@ -298,12 +328,20 @@ class TestAgentBot:
         mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,
         mock_team_arun: AsyncMock,
+        mock_get_model_instance: MagicMock,
+        mock_load_config: MagicMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Test agent bot thread response behavior based on agent participation."""
-        config = load_config()
+        # Use the helper method to create mock config
+        config = self.create_mock_config()
+        mock_load_config.return_value = config
+
+        # Mock get_model_instance to return a mock model
+        mock_model = MagicMock()
+        mock_get_model_instance.return_value = mock_model
 
         bot = AgentBot(
             mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming, config=config
@@ -316,6 +354,7 @@ class TestAgentBot:
         mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
         mock_orchestrator.current_config = config
+        mock_orchestrator.config = config  # This is what teams.py uses
         bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send response

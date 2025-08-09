@@ -190,17 +190,22 @@ async def test_agent_responds_in_threads_based_on_participation(
         },
         teams={},
         room_models={},
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
     )
 
     with (
         patch("mindroom.bot.login_agent_user") as mock_login,
         patch("mindroom.agent_config.load_config", return_value=mock_config),
+        patch("mindroom.teams.get_model_instance") as mock_get_model_instance,
     ):
         mock_client = AsyncMock()
         mock_client.add_event_callback = MagicMock()
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
+
+        # Mock get_model_instance to return a mock model
+        mock_model = MagicMock()
+        mock_get_model_instance.return_value = mock_model
 
         config = load_config()
 
@@ -212,6 +217,7 @@ async def test_agent_responds_in_threads_based_on_participation(
         mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
         mock_orchestrator.current_config = mock_config
+        mock_orchestrator.config = mock_config  # This is what teams.py uses
         bot.orchestrator = mock_orchestrator
         mock_team_arun.return_value = "Team response"
 
