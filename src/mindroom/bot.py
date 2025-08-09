@@ -1038,16 +1038,8 @@ class MultiAgentOrchestrator:
         self.running = True
         logger.info("All agent bots started successfully")
 
-        # Ensure all configured rooms exist (router creates them if needed)
-        await self._ensure_rooms_exist()
-
-        # After rooms exist, ensure room invitations are up to date
-        await self._ensure_room_invitations()
-
-        # Now have all bots join their configured rooms
-        join_tasks = [bot.ensure_rooms() for bot in self.agent_bots.values()]
-        await asyncio.gather(*join_tasks)
-        logger.info("All agents have joined their configured rooms")
+        # Setup rooms and have all bots join them
+        await self._setup_rooms_and_memberships(self.agent_bots.values())
 
         # Create sync tasks for each bot
         sync_tasks = []
@@ -1130,20 +1122,14 @@ class MultiAgentOrchestrator:
                 await bot.cleanup()  # Agent handles its own cleanup
                 del self.agent_bots[entity_name]
 
-        # After all config changes, ensure rooms exist and invitations are up to date
-        # This uses the same pattern as start() for consistency
-        await self._ensure_rooms_exist()
-        await self._ensure_room_invitations()
-
-        # Now have new/restarted bots join their rooms
-        bots_to_join = []
+        # Setup rooms and have new/restarted bots join them
+        bots_to_setup = []
         for entity_name in entities_to_restart | new_entities:
             if entity_name in self.agent_bots:
-                bots_to_join.append(self.agent_bots[entity_name])
+                bots_to_setup.append(self.agent_bots[entity_name])
 
-        if bots_to_join:
-            join_tasks = [bot.ensure_rooms() for bot in bots_to_join]
-            await asyncio.gather(*join_tasks)
+        if bots_to_setup:
+            await self._setup_rooms_and_memberships(bots_to_setup)
 
         logger.info(f"Configuration update complete: {len(entities_to_restart) + len(new_entities)} bots affected")
         return True
@@ -1160,6 +1146,26 @@ class MultiAgentOrchestrator:
         stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         logger.info("All agent bots stopped")
+
+    async def _setup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot] | Any) -> None:
+        """Setup rooms and ensure all bots have correct memberships.
+
+        This shared method handles the common room setup flow for both
+        initial startup and configuration updates.
+
+        Args:
+            bots: Collection of bots to setup room memberships for
+        """
+        # Ensure all configured rooms exist (router creates them if needed)
+        await self._ensure_rooms_exist()
+
+        # After rooms exist, ensure room invitations are up to date
+        await self._ensure_room_invitations()
+
+        # Now have bots join their configured rooms
+        join_tasks = [bot.ensure_rooms() for bot in bots]
+        await asyncio.gather(*join_tasks)
+        logger.info("All agents have joined their configured rooms")
 
     async def _ensure_rooms_exist(self) -> None:
         """Ensure all configured rooms exist, creating them if necessary.
