@@ -74,54 +74,6 @@ async def _ensure_user_account() -> MatrixState:
     return state
 
 
-async def _ensure_rooms_exist(client: nio.AsyncClient, required_rooms: set[str]) -> None:
-    """Ensure all required rooms exist.
-
-    With the new self-managing agent pattern, agents handle their own room
-    memberships. This function only ensures the rooms exist.
-    """
-    from mindroom.agent_config import get_agent_ids_for_room, load_config
-    from mindroom.matrix import ensure_room_exists, load_rooms
-
-    console.print("\n🔄 Ensuring required rooms exist...")
-
-    config = load_config()
-    existing_rooms = load_rooms()
-
-    # Track statistics
-    rooms_created = 0
-    rooms_existed = 0
-
-    for room_key in required_rooms:
-        # Skip if this is a room ID (starts with !)
-        if room_key.startswith("!"):
-            continue
-
-        # Check if room already exists
-        if room_key in existing_rooms:
-            rooms_existed += 1
-            continue
-
-        # Get power users for this room
-        power_users = get_agent_ids_for_room(room_key, config, client.homeserver)
-
-        # Create the room using the shared function
-        room_id = await ensure_room_exists(
-            client=client,
-            room_key=room_key,
-            power_users=power_users,
-        )
-
-        if room_id:
-            rooms_created += 1
-            console.print(f"   ✅ Created room {room_key.replace('_', ' ').title()}")
-            console.print("   ℹ️  Agents will join automatically when they start")
-        else:
-            console.print(f"❌ Failed to create room {room_key}")
-
-    console.print(f"\n📊 Room setup: {rooms_created} created, {rooms_existed} already existed")
-
-
 @app.command()
 def version():
     """Show the current version of Mindroom."""
@@ -160,39 +112,14 @@ def run(
 
 async def _run(log_level: str, storage_path: Path) -> None:
     """Run the multi-agent system with automatic setup."""
-    from mindroom.agent_config import load_config
     from mindroom.bot import main
 
     console.print(f"🚀 Starting Mindroom multi-agent system (log level: {log_level})...\n")
 
     # Ensure we have a user account
-    state = await _ensure_user_account()
+    await _ensure_user_account()
 
-    # Load agent configuration and collect required rooms
-    agent_config = load_config()
-    required_rooms = set(room for agent_cfg in agent_config.agents.values() for room in agent_cfg.rooms)
-
-    # Handle room creation and agent invitations if needed
-    if required_rooms:
-        # Login as user for room operations
-        user_account = state.get_account("user")
-        if not user_account:
-            console.print("❌ No user account found")
-            sys.exit(1)
-
-        username = f"@{user_account.username}:{SERVER_NAME}"
-        password = user_account.password
-
-        async with matrix_client(HOMESERVER, username) as client:
-            response = await client.login(password=password)
-            if isinstance(response, nio.LoginResponse):
-                # Create missing rooms and ensure all agents are invited
-                await _ensure_rooms_exist(client, required_rooms)
-            else:
-                console.print(f"❌ Failed to login: {response}")
-                sys.exit(1)
-
-    # Agent accounts are created automatically by the bot system
+    # Agent accounts and rooms are created automatically by the bot system
     console.print("\n🤖 Starting agents...")
     console.print("Press Ctrl+C to stop\n")
 
@@ -204,7 +131,6 @@ async def _run(log_level: str, storage_path: Path) -> None:
 
 def main():
     """Main entry point that shows help by default."""
-    import sys
 
     # Handle -h flag by replacing with --help
     for i, arg in enumerate(sys.argv):
