@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -214,7 +215,7 @@ I'll optimize the code:
         }
 
         # Team coordinator should track overall progress
-        def get_team_progress(task):
+        def get_team_progress(task: dict[str, Any]) -> str:
             completed = sum(1 for step in task["steps"] if step["status"] == "complete")
             total = len(task["steps"])
             return f"{completed}/{total} steps completed"
