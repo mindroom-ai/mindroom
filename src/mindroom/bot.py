@@ -246,7 +246,7 @@ class AgentBot:
         await self.leave_unconfigured_rooms()
 
     async def start(self) -> None:
-        """Start the agent bot with user account and rooms setup."""
+        """Start the agent bot with user account setup (but don't join rooms yet)."""
         # Ensure user account exists
         await self.ensure_user_account()
 
@@ -264,13 +264,10 @@ class AgentBot:
 
         self.running = True
 
-        # Ensure correct room memberships
-        await self.ensure_rooms()
-
         # Router bot has additional responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
-            # Ensure all configured rooms exist
-            await self.ensure_rooms_exist()
+            # Note: Room creation is now handled by the orchestrator
+            # to ensure consistency between start() and update_config()
 
             # Clean up any orphaned bots (best effort - don't fail initialization)
             try:
@@ -280,6 +277,7 @@ class AgentBot:
 
             asyncio.create_task(self._periodic_cleanup())
 
+        # Note: Room joining is deferred until after invitations are handled
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
 
     async def cleanup(self) -> None:
@@ -1034,14 +1032,22 @@ class MultiAgentOrchestrator:
         if not self.agent_bots:
             await self.initialize()
 
-        # Start each agent bot (this registers callbacks and logs in)
+        # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
         start_tasks = [bot.start() for bot in self.agent_bots.values()]
         await asyncio.gather(*start_tasks)
         self.running = True
         logger.info("All agent bots started successfully")
 
-        # After all bots are started, ensure room invitations are up to date
+        # Ensure all configured rooms exist (router creates them if needed)
+        await self._ensure_rooms_exist()
+
+        # After rooms exist, ensure room invitations are up to date
         await self._ensure_room_invitations()
+
+        # Now have all bots join their configured rooms
+        join_tasks = [bot.ensure_rooms() for bot in self.agent_bots.values()]
+        await asyncio.gather(*join_tasks)
+        logger.info("All agents have joined their configured rooms")
 
         # Create sync tasks for each bot
         sync_tasks = []
@@ -1097,7 +1103,7 @@ class MultiAgentOrchestrator:
                 if bot:
                     bot.orchestrator = self
                     self.agent_bots[entity_name] = bot
-                    # Agent handles its own setup
+                    # Agent handles its own setup (but doesn't join rooms yet)
                     await bot.start()
                     # Start sync loop
                     asyncio.create_task(bot.sync_forever())
@@ -1124,8 +1130,20 @@ class MultiAgentOrchestrator:
                 await bot.cleanup()  # Agent handles its own cleanup
                 del self.agent_bots[entity_name]
 
-        # After all config changes, ensure room invitations are up to date
+        # After all config changes, ensure rooms exist and invitations are up to date
+        # This uses the same pattern as start() for consistency
+        await self._ensure_rooms_exist()
         await self._ensure_room_invitations()
+
+        # Now have new/restarted bots join their rooms
+        bots_to_join = []
+        for entity_name in entities_to_restart | new_entities:
+            if entity_name in self.agent_bots:
+                bots_to_join.append(self.agent_bots[entity_name])
+
+        if bots_to_join:
+            join_tasks = [bot.ensure_rooms() for bot in bots_to_join]
+            await asyncio.gather(*join_tasks)
 
         logger.info(f"Configuration update complete: {len(entities_to_restart) + len(new_entities)} bots affected")
         return True
@@ -1142,6 +1160,23 @@ class MultiAgentOrchestrator:
         stop_tasks = [bot.stop() for bot in self.agent_bots.values()]
         await asyncio.gather(*stop_tasks)
         logger.info("All agent bots stopped")
+
+    async def _ensure_rooms_exist(self) -> None:
+        """Ensure all configured rooms exist, creating them if necessary.
+
+        This uses the router bot to create rooms since it has the necessary permissions.
+        """
+        if ROUTER_AGENT_NAME not in self.agent_bots:
+            logger.warning("Router not available, cannot ensure rooms exist")
+            return
+
+        router_bot = self.agent_bots[ROUTER_AGENT_NAME]
+        if router_bot.client is None:
+            logger.warning("Router client not available, cannot ensure rooms exist")
+            return
+
+        # Router ensures all configured rooms exist
+        await router_bot.ensure_rooms_exist()
 
     async def _ensure_room_invitations(self) -> None:
         """Ensure all agents are invited to their configured rooms.

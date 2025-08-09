@@ -396,9 +396,16 @@ async def test_orchestrator_handles_config_reload(initial_config, updated_config
 
     # Create orchestrator
     # Mock start/sync at class level so newly created bots during update_config don't perform real login/sync
-    monkeypatch.setattr("mindroom.bot.AgentBot.start", AsyncMock())
+    # But we need to ensure client gets set when start() is called
+    async def mock_start(self):
+        """Mock start that sets a mock client."""
+        self.client = AsyncMock()
+        self.client.user_id = self.agent_user.user_id
+        self.running = True
+
+    monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.AgentBot.sync_forever", AsyncMock())
-    monkeypatch.setattr("mindroom.bot.TeamBot.start", AsyncMock())
+    monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
 
     orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))

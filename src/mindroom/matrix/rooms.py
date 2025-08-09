@@ -104,7 +104,17 @@ async def ensure_room_exists(
     # Check if room already exists in our state
     if room_key in existing_rooms:
         logger.debug(f"Room {room_key} already exists")
-        return existing_rooms[room_key].room_id
+        room_id = existing_rooms[room_key].room_id
+        # Try to join the room in case we're not a member
+        from .client import join_room
+
+        if await join_room(client, room_id):
+            return room_id
+        else:
+            # Room exists in state but we can't join it - it might be stale
+            # Remove it from state and continue to create a new one
+            logger.warning(f"Room {room_key} exists in state but cannot be joined, recreating")
+            remove_room(room_key)
 
     # Room doesn't exist, create it
     if room_name is None:
