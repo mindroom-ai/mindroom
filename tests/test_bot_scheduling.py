@@ -12,7 +12,7 @@ from mindroom.models import Config, RouterConfig
 
 
 @pytest.fixture
-def mock_agent_bot():
+def mock_agent_bot() -> AgentBot:
     """Create a mock agent bot for testing."""
     from mindroom.agent_config import load_config
 
@@ -28,7 +28,7 @@ def mock_agent_bot():
     bot.client = AsyncMock()
     bot.thread_invite_manager = AsyncMock()
     bot.logger = MagicMock()
-    bot._send_response = AsyncMock()
+    bot._send_response = AsyncMock()  # type: ignore[method-assign]
     return bot
 
 
@@ -36,7 +36,7 @@ class TestBotScheduleCommands:
     """Test bot handling of schedule commands."""
 
     @pytest.mark.asyncio
-    async def test_handle_schedule_command(self, mock_agent_bot):
+    async def test_handle_schedule_command(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles schedule command correctly."""
         room = MagicMock()
         room.room_id = "!test:server"
@@ -71,12 +71,12 @@ class TestBotScheduleCommands:
             )
 
             # Verify response was sent
-            mock_agent_bot._send_response.assert_called_once()
-            call_args = mock_agent_bot._send_response.call_args
+            mock_agent_bot._send_response.assert_called_once()  # type: ignore[attr-defined]
+            call_args = mock_agent_bot._send_response.call_args  # type: ignore[attr-defined]
             assert "✅ Scheduled: 5 minutes from now" in call_args[0][2]
 
     @pytest.mark.asyncio
-    async def test_handle_schedule_command_no_message(self, mock_agent_bot):
+    async def test_handle_schedule_command_no_message(self, mock_agent_bot: AgentBot) -> None:
         """Test schedule command with no message uses default."""
         room = MagicMock()
         room.room_id = "!test:server"
@@ -99,7 +99,7 @@ class TestBotScheduleCommands:
             assert call_args[1]["full_text"] == "tomorrow"
 
     @pytest.mark.asyncio
-    async def test_handle_list_schedules_command(self, mock_agent_bot):
+    async def test_handle_list_schedules_command(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles list schedules command."""
         room = MagicMock()
         room.room_id = "!test:server"
@@ -120,10 +120,10 @@ class TestBotScheduleCommands:
                 client=mock_agent_bot.client, room_id="!test:server", thread_id="$thread123"
             )
 
-            mock_agent_bot._send_response.assert_called_once()
+            mock_agent_bot._send_response.assert_called_once()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
-    async def test_handle_cancel_schedule_command(self, mock_agent_bot):
+    async def test_handle_cancel_schedule_command(self, mock_agent_bot: AgentBot) -> None:
         """Test bot handles cancel schedule command."""
         room = MagicMock()
         room.room_id = "!test:server"
@@ -143,7 +143,7 @@ class TestBotScheduleCommands:
             mock_cancel.assert_called_once_with(client=mock_agent_bot.client, room_id="!test:server", task_id="task123")
 
     @pytest.mark.asyncio
-    async def test_schedule_command_auto_creates_thread(self, mock_agent_bot):
+    async def test_schedule_command_auto_creates_thread(self, mock_agent_bot: AgentBot) -> None:
         """Test that schedule commands auto-create threads when used in main room."""
         room = MagicMock()
         room.room_id = "!test:server"
@@ -158,8 +158,8 @@ class TestBotScheduleCommands:
         await mock_agent_bot._handle_command(room, event, command)
 
         # Should successfully schedule the task (auto-creates thread)
-        mock_agent_bot._send_response.assert_called_once()
-        call_args = mock_agent_bot._send_response.call_args
+        mock_agent_bot._send_response.assert_called_once()  # type: ignore[attr-defined]
+        call_args = mock_agent_bot._send_response.call_args  # type: ignore[attr-defined]
         assert "✅" in call_args[0][2] or "Task ID" in call_args[0][2]
         # The thread_id should be None (will be handled by _send_response)
         # and the event should be passed for thread creation
@@ -170,7 +170,7 @@ class TestBotTaskRestoration:
     """Test scheduled task restoration on bot startup."""
 
     @pytest.mark.asyncio
-    async def test_restore_tasks_on_room_join(self):
+    async def test_restore_tasks_on_room_join(self) -> None:
         """Test that scheduled tasks are restored when joining rooms."""
         import tempfile
         from pathlib import Path
@@ -212,7 +212,7 @@ class TestBotTaskRestoration:
                 assert mock_restore.called
 
     @pytest.mark.asyncio
-    async def test_no_log_when_no_tasks_restored(self):
+    async def test_no_log_when_no_tasks_restored(self) -> None:
         """Test that no log is generated when no tasks are restored."""
         import tempfile
         from pathlib import Path
@@ -254,7 +254,7 @@ class TestCommandHandling:
     """Test command handling behavior across different agents."""
 
     @pytest.mark.asyncio
-    async def test_non_router_agent_ignores_commands(self):
+    async def test_non_router_agent_ignores_commands(self) -> None:
         """Test that non-router agents ignore command messages."""
         # Create a calculator agent (not router)
         agent_user = AgentMatrixUser(
@@ -269,8 +269,8 @@ class TestCommandHandling:
         bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
-        bot._extract_message_context = AsyncMock()
+        bot._generate_response = AsyncMock()  # type: ignore[method-assign]
+        bot._extract_message_context = AsyncMock()  # type: ignore[method-assign]
 
         # Create a room and event
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -291,7 +291,7 @@ class TestCommandHandling:
         # Debug logging has been removed, so we just verify the behavior
 
     @pytest.mark.asyncio
-    async def test_router_agent_handles_commands(self):
+    async def test_router_agent_handles_commands(self) -> None:
         """Test that router agent does handle commands."""
         # Create router agent
         agent_user = AgentMatrixUser(
@@ -306,7 +306,7 @@ class TestCommandHandling:
         bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._handle_command = AsyncMock()
+        bot._handle_command = AsyncMock()  # type: ignore[method-assign]
 
         # Create a room and event with thread info
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -330,7 +330,7 @@ class TestCommandHandling:
         bot._handle_command.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_non_router_agent_responds_to_non_commands(self):
+    async def test_non_router_agent_responds_to_non_commands(self) -> None:
         """Test that non-router agents still respond to regular messages."""
         # Create a calculator agent (not router)
         agent_user = AgentMatrixUser(
@@ -345,7 +345,7 @@ class TestCommandHandling:
         bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
+        bot._generate_response = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
 
@@ -356,7 +356,7 @@ class TestCommandHandling:
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = []
         mock_context.mentioned_agents = ["calculator"]
-        bot._extract_message_context = AsyncMock(return_value=mock_context)
+        bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
 
         # Mock should_agent_respond to return True
         with patch("mindroom.bot.should_agent_respond", return_value=True):
@@ -377,7 +377,7 @@ class TestCommandHandling:
             bot._generate_response.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_agents_ignore_error_messages_from_other_agents(self):
+    async def test_agents_ignore_error_messages_from_other_agents(self) -> None:
         """Test that agents don't respond to error messages from other agents."""
         # Create a general agent
         agent_user = AgentMatrixUser(
@@ -393,7 +393,7 @@ class TestCommandHandling:
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"  # Set the bot's user ID
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
+        bot._generate_response = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
         bot.thread_invite_manager = AsyncMock()  # Mock the thread invite manager
@@ -405,7 +405,7 @@ class TestCommandHandling:
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = []
         mock_context.mentioned_agents = []
-        bot._extract_message_context = AsyncMock(return_value=mock_context)
+        bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
 
         # Create a room and event with error message from router agent
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -438,7 +438,7 @@ class TestCommandHandling:
         assert "Ignoring message from other agent (not mentioned)" in debug_calls
 
     @pytest.mark.asyncio
-    async def test_router_error_without_mentions_ignored_by_other_agents(self):
+    async def test_router_error_without_mentions_ignored_by_other_agents(self) -> None:
         """Test the exact scenario where RouterAgent sends an error without mentions and other agents ignore it."""
         # This tests the specific case where:
         # 1. User sends a schedule command
@@ -494,7 +494,7 @@ class TestCommandHandling:
         assert not should_respond, "Finance agent should not respond even if it was previously in thread"
 
     @pytest.mark.asyncio
-    async def test_router_error_prevents_team_formation(self):
+    async def test_router_error_prevents_team_formation(self) -> None:
         """Test that RouterAgent error messages don't trigger team formation."""
         # This tests the scenario where multiple agents were mentioned earlier in thread
         # but RouterAgent sends an error without mentions - no team should form
@@ -513,8 +513,8 @@ class TestCommandHandling:
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_news:localhost"
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
-        bot._send_response = AsyncMock()
+        bot._generate_response = AsyncMock()  # type: ignore[method-assign]
+        bot._send_response = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
         bot.thread_invite_manager = AsyncMock()
@@ -555,7 +555,7 @@ class TestCommandHandling:
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = thread_history  # History before router error
         mock_context.mentioned_agents = []  # Router doesn't mention anyone
-        bot._extract_message_context = AsyncMock(return_value=mock_context)
+        bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
 
         # Create room and event for router error
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -596,7 +596,7 @@ class TestCommandHandling:
         assert "Ignoring message from other agent (not mentioned)" in debug_calls
 
     @pytest.mark.asyncio
-    async def test_full_router_error_flow_integration(self):
+    async def test_full_router_error_flow_integration(self) -> None:
         """Integration test for the full flow of router error handling."""
         # Create a finance agent
         agent_user = AgentMatrixUser(
@@ -612,7 +612,7 @@ class TestCommandHandling:
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_finance:localhost"
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
+        bot._generate_response = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
         bot.thread_invite_manager = AsyncMock()
@@ -666,7 +666,7 @@ class TestCommandHandling:
             }
         ]
         mock_context.mentioned_agents = []
-        bot._extract_message_context = AsyncMock(return_value=mock_context)
+        bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
 
         # Create room and event for router error
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
@@ -699,7 +699,7 @@ class TestCommandHandling:
         assert "Ignoring message from other agent (not mentioned)" in debug_calls
 
     @pytest.mark.asyncio
-    async def test_agents_ignore_any_agent_messages_without_mentions(self):
+    async def test_agents_ignore_any_agent_messages_without_mentions(self) -> None:
         """Test that agents don't respond to ANY agent messages that don't mention anyone."""
         # Create a general agent
         agent_user = AgentMatrixUser(
@@ -715,7 +715,7 @@ class TestCommandHandling:
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"
         bot.logger = MagicMock()
-        bot._generate_response = AsyncMock()
+        bot._generate_response = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
         bot.thread_invite_manager = AsyncMock()
@@ -727,7 +727,7 @@ class TestCommandHandling:
         mock_context.is_thread = True
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = []
-        bot._extract_message_context = AsyncMock(return_value=mock_context)
+        bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
 
         # Create a room and event with message from router agent without mentions
         room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)

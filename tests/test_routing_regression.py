@@ -88,8 +88,8 @@ class TestRoutingRegression:
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_123"
-        research_bot.client.room_send.return_value = mock_send_response
-        news_bot.client.room_send.return_value = mock_send_response
+        research_bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
+        news_bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
 
         # Create room with both agents
         mock_room = MagicMock()
@@ -113,12 +113,12 @@ class TestRoutingRegression:
 
         # Process with research bot - SHOULD respond
         await research_bot._on_message(mock_room, message_event)
-        assert research_bot.client.room_send.call_count == 1
+        assert research_bot.client.room_send.call_count == 1  # type: ignore[union-attr]
         assert mock_ai_response.call_count == 1
 
         # Process with news bot - should NOT respond and NOT use router
         await news_bot._on_message(mock_room, message_event)
-        assert news_bot.client.room_send.call_count == 0
+        assert news_bot.client.room_send.call_count == 0  # type: ignore[union-attr]
         # Router should NOT have been called
         assert mock_suggest_agent.call_count == 0
 
@@ -161,9 +161,9 @@ class TestRoutingRegression:
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_123"
-        router_bot.client.room_send.return_value = mock_send_response
-        research_bot.client.room_send.return_value = mock_send_response
-        news_bot.client.room_send.return_value = mock_send_response
+        router_bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
+        research_bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
+        news_bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
 
         # Create room with all agents
         mock_room = MagicMock()
@@ -191,13 +191,13 @@ class TestRoutingRegression:
         # Router SHOULD have been called
         mock_suggest_agent.assert_called_once()
         # Router bot should send the routing message
-        assert router_bot.client.room_send.call_count == 1
+        assert router_bot.client.room_send.call_count == 1  # type: ignore[union-attr]
 
         # Process with other bots - they should not do anything
         await research_bot._on_message(mock_room, message_event)
         await news_bot._on_message(mock_room, message_event)
-        assert research_bot.client.room_send.call_count == 0
-        assert news_bot.client.room_send.call_count == 0
+        assert research_bot.client.room_send.call_count == 0  # type: ignore[union-attr]
+        assert news_bot.client.room_send.call_count == 0  # type: ignore[union-attr]
 
     @pytest.mark.asyncio
     @patch("mindroom.teams.Team.arun")
@@ -237,8 +237,8 @@ class TestRoutingRegression:
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$response_123"
-        research_bot.client.room_send.return_value = mock_send_response
-        news_bot.client.room_send.return_value = mock_send_response
+        research_bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
+        news_bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
 
         # Create room
         mock_room = MagicMock()
@@ -263,8 +263,8 @@ class TestRoutingRegression:
         # With simplified team behavior: multiple mentions should form a team
         # The alphabetically first agent (news) handles team formation
         # The other agent (research) does not respond individually
-        assert research_bot.client.room_send.call_count == 0  # No individual response
-        assert news_bot.client.room_send.call_count == 1  # Team response
+        assert research_bot.client.room_send.call_count == 0  # type: ignore[union-attr]  # No individual response
+        assert news_bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # Team response
         assert mock_team_arun.call_count == 1  # Team formed once
 
     @pytest.mark.asyncio
@@ -304,8 +304,8 @@ class TestRoutingRegression:
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         mock_send_response.event_id = "$router_msg"
-        router_bot.client.room_send.return_value = mock_send_response
-        research_bot.client.room_send.return_value = mock_send_response
+        router_bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
+        research_bot.client.room_send.return_value = mock_send_response  # type: ignore[union-attr]
 
         # Create room
         mock_room = MagicMock()
@@ -328,5 +328,5 @@ class TestRoutingRegression:
         await research_bot._on_message(mock_room, router_message)
 
         # Research bot SHOULD respond
-        assert research_bot.client.room_send.call_count == 1
+        assert research_bot.client.room_send.call_count == 1  # type: ignore[union-attr]
         assert mock_ai_response.call_count == 1
