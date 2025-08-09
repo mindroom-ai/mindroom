@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import nio
 
-from .agent_config import load_config
 from .logging_config import get_logger
 from .matrix.client import get_joined_rooms, get_room_members
 from .matrix.identity import MatrixID
@@ -85,7 +84,7 @@ async def _cleanup_orphaned_bots_in_room(
     return kicked_bots
 
 
-async def cleanup_all_orphaned_bots(client: nio.AsyncClient) -> dict[str, list[str]]:
+async def cleanup_all_orphaned_bots(client: nio.AsyncClient, config: Config) -> dict[str, list[str]]:
     """Remove all orphaned bots from all rooms the client has access to.
 
     This should be called by a user or bot with admin/moderator permissions
@@ -97,8 +96,6 @@ async def cleanup_all_orphaned_bots(client: nio.AsyncClient) -> dict[str, list[s
     Returns:
         Dictionary mapping room IDs to lists of kicked bot usernames
     """
-    # Get current configuration
-    config = load_config()
 
     # Track what we're doing
     kicked_bots: dict[str, list[str]] = {}

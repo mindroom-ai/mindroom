@@ -14,7 +14,7 @@ from mindroom.models import Config, RouterConfig
 @pytest.fixture
 def mock_agent_bot():
     """Create a mock agent bot for testing."""
-    from mindroom.models import Config
+    from mindroom.agent_config import load_config
 
     agent_user = AgentMatrixUser(
         agent_name="general",
@@ -23,7 +23,7 @@ def mock_agent_bot():
         password="mock_password",
         access_token="mock_token",
     )
-    config = Config()  # Empty config for testing
+    config = load_config()  # Load actual config for testing
     bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
     bot.thread_invite_manager = AsyncMock()
@@ -67,6 +67,7 @@ class TestBotScheduleCommands:
                 agent_user_id="@mindroom_general:localhost",
                 scheduled_by="@user:server",
                 full_text="in 5 minutes Check deployment",
+                config=mock_agent_bot.config,
             )
 
             # Verify response was sent

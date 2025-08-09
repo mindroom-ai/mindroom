@@ -17,7 +17,7 @@ from agno.models.openrouter import OpenRouter
 from agno.run.response import RunResponse, RunResponseContentEvent
 from dotenv import load_dotenv
 
-from .agent_config import create_agent, load_config
+from .agent_config import create_agent
 from .background_tasks import create_background_task
 from .logging_config import get_logger
 from .memory import (
@@ -38,12 +38,12 @@ def get_cache(storage_path: Path) -> diskcache.Cache | None:
     return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_CACHE else None
 
 
-def get_model_instance(model_name: str = "default", config: Config | None = None) -> Model:
+def get_model_instance(config: Config, model_name: str = "default") -> Model:
     """Get a model instance from config.yaml.
 
     Args:
+        config: Application configuration
         model_name: Name of the model configuration to use (default: "default")
-        config: Application configuration (if None, loads from file for backward compatibility)
 
     Returns:
         Instantiated model
@@ -51,8 +51,6 @@ def get_model_instance(model_name: str = "default", config: Config | None = None
     Raises:
         ValueError: If model not found or provider not supported
     """
-    if config is None:
-        config = load_config()
 
     if model_name not in config.models:
         available = ", ".join(sorted(config.models.keys()))
@@ -130,6 +128,7 @@ async def _prepare_agent_and_prompt(
     prompt: str,
     storage_path: Path,
     room_id: str | None,
+    config: Config,
     thread_history: list[dict[str, Any]] | None = None,
 ) -> tuple[Agent, str]:
     """Prepare agent and full prompt for AI processing.
@@ -137,10 +136,10 @@ async def _prepare_agent_and_prompt(
     Returns:
         Tuple of (agent, full_prompt, session_id)
     """
-    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, room_id)
+    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
-    agent = create_agent(agent_name, storage_path=storage_path)
+    agent = create_agent(agent_name, storage_path, config)
     return agent, full_prompt
 
 
@@ -149,6 +148,7 @@ async def ai_response(
     prompt: str,
     session_id: str,
     storage_path: Path,
+    config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
 ) -> str:
@@ -159,6 +159,7 @@ async def ai_response(
         prompt: User prompt
         session_id: Session ID for conversation tracking
         storage_path: Path for storing agent data
+        config: Application configuration
         thread_history: Optional thread history
         room_id: Optional room ID for room memory access
 
@@ -167,14 +168,16 @@ async def ai_response(
     """
     logger.info("AI request", agent=agent_name)
     try:
-        agent, full_prompt = await _prepare_agent_and_prompt(agent_name, prompt, storage_path, room_id, thread_history)
+        agent, full_prompt = await _prepare_agent_and_prompt(
+            agent_name, prompt, storage_path, room_id, config, thread_history
+        )
 
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
         response_text = response.content or ""
 
         # Save memory in background to avoid blocking
         create_background_task(
-            store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id),
+            store_conversation_memory(prompt, agent_name, storage_path, session_id, config, room_id),
             name=f"memory_save_{agent_name}_{session_id}",
         )
 
@@ -193,6 +196,7 @@ async def ai_response_streaming(
     prompt: str,
     session_id: str,
     storage_path: Path,
+    config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
 ) -> AsyncIterator[str]:
@@ -214,7 +218,9 @@ async def ai_response_streaming(
     """
     logger.info("AI streaming request", agent=agent_name)
 
-    agent, full_prompt = await _prepare_agent_and_prompt(agent_name, prompt, storage_path, room_id, thread_history)
+    agent, full_prompt = await _prepare_agent_and_prompt(
+        agent_name, prompt, storage_path, room_id, config, thread_history
+    )
 
     cache = get_cache(storage_path)
     if cache is not None:
@@ -228,7 +234,7 @@ async def ai_response_streaming(
             yield response_text
             # Save memory in background to avoid blocking
             create_background_task(
-                store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id),
+                store_conversation_memory(prompt, agent_name, storage_path, session_id, config, room_id),
                 name=f"memory_save_{agent_name}_{session_id}_cached",
             )
             return
@@ -257,6 +263,6 @@ async def ai_response_streaming(
     if full_response:
         # Save memory in background to avoid blocking streaming finalization
         create_background_task(
-            store_conversation_memory(prompt, agent_name, storage_path, session_id, room_id),
+            store_conversation_memory(prompt, agent_name, storage_path, session_id, config, room_id),
             name=f"memory_save_{agent_name}_{session_id}_stream",
         )

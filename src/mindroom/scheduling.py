@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from .ai import get_model_instance
 from .logging_config import get_logger
 from .matrix.client import send_message
+from .models import Config
 
 logger = get_logger(__name__)
 
@@ -40,7 +41,7 @@ class ScheduleParseError(BaseModel):
 
 
 async def parse_schedule(
-    full_text: str, current_time: datetime | None = None
+    full_text: str, config: Config, current_time: datetime | None = None
 ) -> ScheduledTimeResponse | ScheduleParseError:
     """Use AI with structured output to parse natural language schedule requests."""
     if current_time is None:
@@ -72,7 +73,7 @@ Rules:
 IMPORTANT: Always provide a valid response. If the request is unclear, make a reasonable interpretation."""
 
     # Use default model for simplicity
-    model = get_model_instance("default")
+    model = get_model_instance(config, "default")
 
     agent = Agent(
         name="ScheduleParser",
@@ -121,6 +122,7 @@ async def schedule_task(
     agent_user_id: str,
     scheduled_by: str,
     full_text: str,
+    config: Config,
 ) -> tuple[str | None, str]:
     """Schedule a task from natural language request.
 
@@ -128,7 +130,7 @@ async def schedule_task(
         Tuple of (task_id, response_message)
     """
     # Parse the full request
-    parse_result = await parse_schedule(full_text)
+    parse_result = await parse_schedule(full_text, config)
 
     if isinstance(parse_result, ScheduleParseError):
         error_msg = f"❌ {parse_result.error}"

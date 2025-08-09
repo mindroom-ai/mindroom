@@ -16,7 +16,7 @@ class TestMentionParsing:
         mock_load_config.return_value = mock_config
 
         text = "Hey @calculator can you help with this?"
-        processed, mentions, markdown = parse_mentions_in_text(text)
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", mock_config)
 
         assert processed == "Hey @mindroom_calculator:localhost can you help with this?"
         assert mentions == ["@mindroom_calculator:localhost"]
@@ -29,7 +29,7 @@ class TestMentionParsing:
         mock_load_config.return_value = mock_config
 
         text = "@calculator and @general please work together on this"
-        processed, mentions, markdown = parse_mentions_in_text(text)
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", mock_config)
 
         assert (
             processed == "@mindroom_calculator:localhost and @mindroom_general:localhost please work together on this"
@@ -45,7 +45,7 @@ class TestMentionParsing:
         mock_load_config.return_value = mock_config
 
         text = "Ask @mindroom_calculator for help"
-        processed, mentions, markdown = parse_mentions_in_text(text)
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", mock_config)
 
         assert processed == "Ask @mindroom_calculator:localhost for help"
         assert mentions == ["@mindroom_calculator:localhost"]
@@ -58,7 +58,7 @@ class TestMentionParsing:
         mock_load_config.return_value = mock_config
 
         text = "Ask @mindroom_calculator:matrix.org for help"
-        processed, mentions, markdown = parse_mentions_in_text(text)
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", mock_config)
 
         # Should replace with sender's domain
         assert processed == "Ask @mindroom_calculator:localhost for help"
@@ -85,7 +85,7 @@ class TestMentionParsing:
         mock_load_config.return_value = mock_config
 
         text = "@calculator is real but @unknown is not"
-        processed, mentions, markdown = parse_mentions_in_text(text)
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", mock_config)
 
         assert processed == "@mindroom_calculator:localhost is real but @unknown is not"
         assert mentions == ["@mindroom_calculator:localhost"]
@@ -98,7 +98,7 @@ class TestMentionParsing:
         mock_load_config.return_value = mock_config
 
         text = "@mindroom_user_123 and @calculator"
-        processed, mentions, markdown = parse_mentions_in_text(text)
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", mock_config)
 
         assert processed == "@mindroom_user_123 and @mindroom_calculator:localhost"
         assert mentions == ["@mindroom_calculator:localhost"]
@@ -111,7 +111,7 @@ class TestMentionParsing:
         mock_load_config.return_value = mock_config
 
         text = "@calculator help! @calculator are you there?"
-        processed, mentions, markdown = parse_mentions_in_text(text)
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", mock_config)
 
         assert processed == "@mindroom_calculator:localhost help! @mindroom_calculator:localhost are you there?"
         assert mentions == ["@mindroom_calculator:localhost"]  # Only one entry
@@ -144,7 +144,7 @@ class TestMentionParsing:
         mock_load_config.return_value = mock_config
 
         text = "This has no mentions"
-        processed, mentions, markdown = parse_mentions_in_text(text)
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", mock_config)
 
         assert processed == text
         assert mentions == []
@@ -158,7 +158,7 @@ class TestMentionParsing:
 
         # The regex should require word boundaries
         text = "Use decode@code function"
-        processed, mentions, markdown = parse_mentions_in_text(text)
+        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", mock_config)
 
         # Current implementation might catch this - documenting actual behavior
         # This is a limitation we should be aware of

@@ -44,7 +44,7 @@ async def suggest_agent_for_message(
         # Build agent descriptions
         agent_descriptions = []
         for agent_name in all_agents:
-            description = describe_agent(agent_name)
+            description = describe_agent(agent_name, config)
             agent_descriptions.append(f"{agent_name}:\n  {description}")
 
         agents_info = "\n\n".join(agent_descriptions)
@@ -75,7 +75,7 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         # Get router model from config
         router_model_name = config.router.model
 
-        model = get_model_instance(router_model_name, config)
+        model = get_model_instance(config, router_model_name)
         logger.info(f"Using router model: {router_model_name} -> {model.__class__.__name__}(id={model.id})")
 
         agent = Agent(

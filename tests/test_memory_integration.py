@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.agent_config import load_config
 from mindroom.ai import ai_response
 from mindroom.background_tasks import wait_for_background_tasks
 
@@ -32,8 +33,13 @@ class TestMemoryIntegration:
             mock_build.side_effect = build_side_effect
             yield mock_build, mock_store
 
+    @pytest.fixture
+    def config(self):
+        """Load config for testing."""
+        return load_config()
+
     @pytest.mark.asyncio
-    async def test_ai_response_with_memory(self, mock_agent_run, mock_memory_functions, tmp_path):
+    async def test_ai_response_with_memory(self, mock_agent_run, mock_memory_functions, tmp_path, config):
         """Test that AI response uses memory enhancement."""
         mock_build, mock_store = mock_memory_functions
 
@@ -46,6 +52,7 @@ class TestMemoryIntegration:
                 prompt="What is 2+2?",
                 session_id="test_session",
                 storage_path=tmp_path,
+                config=config,
                 room_id="!test:room",
             )
 

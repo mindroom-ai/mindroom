@@ -256,11 +256,13 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_send_response
 
         # Create streaming response
+        config = Config(router=RouterConfig(model="default"))
         streaming = StreamingResponse(
             room_id="!test:localhost",
             reply_to_event_id="$original_123",
             thread_id=None,
             sender_domain="localhost",
+            config=config,
         )
 
         # Simulate streaming chunks
@@ -316,11 +318,13 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_send_response
 
         # Create streaming response
+        config = Config(router=RouterConfig(model="default"))
         streaming = StreamingResponse(
             room_id="!test:localhost",
             reply_to_event_id="$original_123",
             thread_id=None,
             sender_domain="localhost",
+            config=config,
         )
 
         # Stream some content

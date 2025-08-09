@@ -66,14 +66,14 @@ def load_config(config_path: Path | None = None) -> Config:
     return config
 
 
-def create_agent(agent_name: str, storage_path: Path, config_path: Path | None = None) -> Agent:
+def create_agent(agent_name: str, storage_path: Path, config: Config, config_path: Path | None = None) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
         agent_name: Name of the agent to create
-        model: The AI model to use
         storage_path: Base directory for storing agent data
-        config_path: Optional path to configuration file
+        config: Application configuration
+        config_path: Optional path to configuration file (deprecated, config is now passed)
 
     Returns:
         Configured Agent instance
@@ -83,8 +83,7 @@ def create_agent(agent_name: str, storage_path: Path, config_path: Path | None =
     """
     from .ai import get_model_instance
 
-    # Load config and get agent
-    config = load_config(config_path)
+    # Use passed config (config_path is deprecated)
     agent_config = config.get_agent(agent_name)
     defaults = config.defaults
 
@@ -119,7 +118,7 @@ def create_agent(agent_name: str, storage_path: Path, config_path: Path | None =
         instructions = agent_config.instructions
 
     # Create agent with defaults applied
-    model = get_model_instance(agent_config.model)
+    model = get_model_instance(config, agent_config.model)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
     logger.info(f"Storage path: {storage_path}, DB file: {storage_path / f'{agent_name}.db'}")
 
@@ -143,7 +142,7 @@ def create_agent(agent_name: str, storage_path: Path, config_path: Path | None =
     return agent
 
 
-def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
+def describe_agent(agent_name: str, config: Config) -> str:
     """Generate a description of an agent or team based on its configuration.
 
     Args:
@@ -160,8 +159,6 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
             "  - Route messages to the most appropriate agent based on context and expertise.\n"
             "  - Analyzes incoming messages and determines which agent is best suited to respond."
         )
-
-    config = load_config(config_path)
 
     # Check if it's a team
     if agent_name in config.teams:
@@ -199,10 +196,8 @@ def describe_agent(agent_name: str, config_path: Path | None = None) -> str:
     return "\n  ".join(parts)
 
 
-def get_agent_ids_for_room(room_key: str, config: Config | None = None, homeserver: str | None = None) -> list[str]:
+def get_agent_ids_for_room(room_key: str, config: Config, homeserver: str | None = None) -> list[str]:
     """Get all agent Matrix IDs assigned to a specific room."""
-    if config is None:
-        config = load_config()
 
     from .matrix import MATRIX_HOMESERVER
     from .matrix.identity import MatrixID, extract_server_name_from_homeserver

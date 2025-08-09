@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.agent_config import describe_agent
+from mindroom.agent_config import describe_agent, load_config
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.models import Config, RouterConfig
@@ -201,7 +201,8 @@ class TestAgentDescription:
 
     def test_describe_agent_with_tools(self) -> None:
         """Test describing an agent with tools."""
-        description = describe_agent("calculator")
+        config = load_config()
+        description = describe_agent("calculator", config)
 
         assert "calculator" in description
         assert "Solve mathematical problems" in description
@@ -210,7 +211,8 @@ class TestAgentDescription:
 
     def test_describe_agent_without_tools(self) -> None:
         """Test describing an agent without tools."""
-        description = describe_agent("general")
+        config = load_config()
+        description = describe_agent("general", config)
 
         assert "general" in description
         assert "general-purpose assistant" in description
@@ -219,6 +221,7 @@ class TestAgentDescription:
 
     def test_describe_unknown_agent(self) -> None:
         """Test describing an unknown agent."""
-        description = describe_agent("nonexistent")
+        config = load_config()
+        description = describe_agent("nonexistent", config)
 
         assert description == "nonexistent: Unknown agent or team"

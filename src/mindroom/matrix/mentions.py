@@ -3,7 +3,7 @@
 import re
 from typing import Any
 
-from ..agent_config import load_config
+from ..models import Config
 from .client import markdown_to_html
 from .identity import MatrixID
 
@@ -54,7 +54,7 @@ def create_mention_content(
     return content
 
 
-def parse_mentions_in_text(text: str, sender_domain: str = "localhost") -> tuple[str, list[str], str]:
+def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tuple[str, list[str], str]:
     """Parse text for agent mentions and return processed text with user IDs.
 
     Args:
@@ -64,8 +64,6 @@ def parse_mentions_in_text(text: str, sender_domain: str = "localhost") -> tuple
     Returns:
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
     """
-    config = load_config()
-
     # Pattern to match @agent_name (with optional @mindroom_ prefix or domain)
     # Matches: @calculator, @mindroom_calculator, @mindroom_calculator:localhost
     pattern = r"@(mindroom_)?(\w+)(?::[^\s]+)?"
@@ -135,6 +133,7 @@ def _process_mention(match: re.Match, config: Any, sender_domain: str) -> tuple[
 
 
 def create_mention_content_from_text(
+    config: Config,
     text: str,
     sender_domain: str = "localhost",
     thread_event_id: str | None = None,
@@ -153,7 +152,7 @@ def create_mention_content_from_text(
     Returns:
         Properly formatted content dict for room_send
     """
-    plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(text, sender_domain)
+    plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(text, sender_domain, config)
 
     # Convert markdown (with links) to HTML
     # The markdown converter will properly handle the [@DisplayName](url) format
