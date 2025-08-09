@@ -8,7 +8,7 @@ import nio
 
 from ..logging_config import get_logger
 from .client import create_room, join_room, matrix_client
-from .identity import extract_server_name_from_homeserver
+from .identity import MatrixID, extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
 
 logger = get_logger(__name__)
@@ -211,14 +211,14 @@ async def ensure_user_in_rooms(
         room_ids: Dict mapping room keys to room IDs
     """
     state = MatrixState.load()
-    # Try both possible keys for user account
-    user_account = state.get_account("user") or state.get_account("agent_user")
+    # User account is stored as "agent_user" (treated as a special agent)
+    user_account = state.get_account("agent_user")
     if not user_account:
         logger.warning("No user account found, skipping user room membership")
         return
 
     server_name = extract_server_name_from_homeserver(homeserver)
-    user_id = f"@{user_account.username}:{server_name}"
+    user_id = MatrixID.from_username(user_account.username, server_name).full_id
 
     # Create a client for the user to join rooms
     async with matrix_client(homeserver, user_id) as user_client:

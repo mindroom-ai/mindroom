@@ -10,7 +10,7 @@ import markdown
 import nio
 
 from ..logging_config import get_logger
-from .users import extract_server_name_from_homeserver
+from .identity import MatrixID, extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
 
@@ -121,7 +121,7 @@ async def register_user(
     """
     # Extract server name from homeserver URL
     server_name = extract_server_name_from_homeserver(homeserver)
-    user_id = f"@{username}:{server_name}"
+    user_id = MatrixID.from_username(username, server_name).full_id
 
     async with matrix_client(homeserver) as client:
         # Try to register the user

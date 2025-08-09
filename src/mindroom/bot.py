@@ -14,7 +14,7 @@ import nio
 from watchfiles import awatch
 
 from . import interactive
-from .agent_config import ROUTER_AGENT_NAME, create_agent, load_config
+from .agent_config import ROUTER_AGENT_NAME, create_agent, get_rooms_for_entity, load_config
 from .ai import ai_response, ai_response_streaming
 from .background_tasks import wait_for_background_tasks
 from .commands import (
@@ -1171,20 +1171,7 @@ class MultiAgentOrchestrator:
         # After rooms exist, update each bot's room list to use room IDs instead of aliases
         assert self.current_config is not None
         for bot in bots:
-            # Re-resolve room aliases now that rooms exist
-            if isinstance(bot, TeamBot):
-                # Check TeamBot first since it's a subclass of AgentBot
-                if bot.agent_name in self.current_config.teams:
-                    team_config = self.current_config.teams[bot.agent_name]
-                    bot.rooms = resolve_room_aliases(team_config.rooms)
-            elif isinstance(bot, AgentBot):
-                if bot.agent_name == ROUTER_AGENT_NAME:
-                    # Router needs all rooms
-                    all_room_aliases = self.current_config.get_all_configured_rooms()
-                    bot.rooms = resolve_room_aliases(list(all_room_aliases))
-                elif bot.agent_name in self.current_config.agents:
-                    agent_config = self.current_config.agents[bot.agent_name]
-                    bot.rooms = resolve_room_aliases(agent_config.rooms)
+            bot.rooms = self._get_resolved_rooms_for_bot(bot)
 
         # After rooms exist, ensure room invitations are up to date
         await self._ensure_room_invitations()
@@ -1222,6 +1209,23 @@ class MultiAgentOrchestrator:
         # Store room IDs for later use
         self._created_room_ids = room_ids
 
+    def _get_resolved_rooms_for_bot(self, bot: AgentBot | TeamBot) -> list[str]:
+        """Get the resolved room IDs for a bot based on its configuration.
+
+        Args:
+            bot: The bot to get rooms for
+
+        Returns:
+            List of room IDs (aliases resolved to IDs)
+        """
+        assert self.current_config is not None
+
+        # Get the room aliases for this entity from config
+        room_aliases = get_rooms_for_entity(bot.agent_name, self.current_config)
+
+        # Resolve aliases to IDs
+        return resolve_room_aliases(room_aliases)
+
     async def _ensure_room_invitations(self) -> None:
         """Ensure all agents and the user are invited to their configured rooms.
 
@@ -1254,7 +1258,7 @@ class MultiAgentOrchestrator:
         state = MatrixState.load()
         user_account = state.get_account("agent_user")  # User is stored as "agent_user"
         if user_account:
-            user_id = f"@{user_account.username}:{server_name}"
+            user_id = MatrixID.from_username(user_account.username, server_name).full_id
             for room_id in joined_rooms:
                 room_members = await get_room_members(router_bot.client, room_id)
                 if user_id not in room_members:
@@ -1276,7 +1280,7 @@ class MultiAgentOrchestrator:
 
             # Invite missing bots
             for bot_username in configured_bots:
-                bot_user_id = f"@{bot_username}:{server_name}"
+                bot_user_id = MatrixID.from_username(bot_username, server_name).full_id
 
                 if bot_user_id not in current_members:
                     # Bot should be in room but isn't - invite them
