@@ -9,7 +9,7 @@ from mindroom.models import AgentConfig, Config, ModelConfig
 class TestMatrixID:
     """Test the MatrixID class."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         """Set up test config."""
         self.config = Config(
             agents={
@@ -22,14 +22,14 @@ class TestMatrixID:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
 
-    def test_parse_valid_matrix_id(self):
+    def test_parse_valid_matrix_id(self) -> None:
         """Test parsing a valid Matrix ID."""
         mid = MatrixID.parse("@mindroom_calculator:localhost")
         assert mid.username == "mindroom_calculator"
         assert mid.domain == "localhost"
         assert mid.full_id == "@mindroom_calculator:localhost"
 
-    def test_parse_invalid_matrix_id(self):
+    def test_parse_invalid_matrix_id(self) -> None:
         """Test parsing invalid Matrix IDs."""
         with pytest.raises(ValueError):
             MatrixID.parse("invalid")
@@ -37,14 +37,14 @@ class TestMatrixID:
         with pytest.raises(ValueError):
             MatrixID.parse("@nodomainpart")
 
-    def test_from_agent(self):
+    def test_from_agent(self) -> None:
         """Test creating MatrixID from agent name."""
         mid = MatrixID.from_agent("calculator", "localhost")
         assert mid.username == "mindroom_calculator"
         assert mid.domain == "localhost"
         assert mid.full_id == "@mindroom_calculator:localhost"
 
-    def test_is_agent(self):
+    def test_is_agent(self) -> None:
         """Test agent detection."""
         agent_id = MatrixID.parse("@mindroom_calculator:localhost")
         assert agent_id.is_agent is True
@@ -52,7 +52,7 @@ class TestMatrixID:
         user_id = MatrixID.parse("@user:localhost")
         assert user_id.is_agent is False
 
-    def test_is_mindroom_domain(self):
+    def test_is_mindroom_domain(self) -> None:
         """Test mindroom.space domain detection."""
         mindroom_id = MatrixID.parse("@mindroom_calculator:mindroom.space")
         assert mindroom_id.is_mindroom_domain is True
@@ -60,7 +60,7 @@ class TestMatrixID:
         other_id = MatrixID.parse("@mindroom_calculator:localhost")
         assert other_id.is_mindroom_domain is False
 
-    def test_agent_name_extraction(self):
+    def test_agent_name_extraction(self) -> None:
         """Test extracting agent name."""
         # Valid agent
         mid = MatrixID.parse("@mindroom_calculator:localhost")
@@ -74,7 +74,7 @@ class TestMatrixID:
         mid = MatrixID.parse("@mindroom_unknown:localhost")
         assert mid.agent_name(self.config) is None
 
-    def test_parse_router(self):
+    def test_parse_router(self) -> None:
         """Test parsing a router agent ID."""
         mid = MatrixID.parse("@mindroom_router:localhost")
         assert mid.username == "mindroom_router"
@@ -87,19 +87,19 @@ class TestMatrixID:
 class TestThreadStateKey:
     """Test the ThreadStateKey class."""
 
-    def test_parse_state_key(self):
+    def test_parse_state_key(self) -> None:
         """Test parsing a state key."""
         key = ThreadStateKey.parse("$thread123:calculator")
         assert key.thread_id == "$thread123"
         assert key.agent_name == "calculator"
         assert key.key == "$thread123:calculator"
 
-    def test_parse_invalid_state_key(self):
+    def test_parse_invalid_state_key(self) -> None:
         """Test parsing invalid state keys."""
         with pytest.raises(ValueError):
             ThreadStateKey.parse("invalid")
 
-    def test_create_state_key(self):
+    def test_create_state_key(self) -> None:
         """Test creating a state key."""
         key = ThreadStateKey("$thread456", "general")
         assert key.thread_id == "$thread456"
@@ -110,7 +110,7 @@ class TestThreadStateKey:
 class TestHelperFunctions:
     """Test helper functions."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         """Set up test config."""
         self.config = Config(
             agents={
@@ -122,7 +122,7 @@ class TestHelperFunctions:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
 
-    def test_is_agent_id(self):
+    def test_is_agent_id(self) -> None:
         """Test quick agent ID check."""
         assert is_agent_id("@mindroom_calculator:localhost", self.config) is True
         assert is_agent_id("@mindroom_general:localhost", self.config) is True
@@ -130,14 +130,14 @@ class TestHelperFunctions:
         assert is_agent_id("invalid", self.config) is False
         assert is_agent_id("@mindroom_unknown:localhost", self.config) is False
 
-    def test_extract_agent_name(self):
+    def test_extract_agent_name(self) -> None:
         """Test agent name extraction."""
         assert extract_agent_name("@mindroom_calculator:localhost", self.config) == "calculator"
         assert extract_agent_name("@mindroom_general:localhost", self.config) == "general"
         assert extract_agent_name("@user:localhost", self.config) is None
         assert extract_agent_name("invalid", self.config) is None
 
-    def test_parse_matrix_id_caching(self):
+    def test_parse_matrix_id_caching(self) -> None:
         """Test that parsing is cached."""
         # First call
         mid1 = parse_matrix_id("@mindroom_calculator:localhost")

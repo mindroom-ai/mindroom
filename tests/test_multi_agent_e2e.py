@@ -1,6 +1,7 @@
 """End-to-end tests for the multi-agent bot system."""
 
 import re
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -95,7 +96,7 @@ async def test_agent_processes_direct_mention(
             # Mock the AI response
             with patch("mindroom.bot.ai_response_streaming") as mock_ai:
 
-                async def mock_streaming_response():
+                async def mock_streaming_response() -> AsyncGenerator[str, None]:
                     yield "15% of 200 is 30"
 
                 mock_ai.return_value = mock_streaming_response()
@@ -115,8 +116,8 @@ async def test_agent_processes_direct_mention(
                 )
 
                 # Verify message was sent (streaming makes 2 calls)
-                assert bot.client.room_send.call_count == 2
-                call_args = bot.client.room_send.call_args
+                assert bot.client.room_send.call_count == 2  # type: ignore[union-attr]
+                call_args = bot.client.room_send.call_args  # type: ignore[union-attr]
                 assert call_args[1]["room_id"] == test_room_id
                 # Check the final message content
                 assert call_args[1]["content"]["body"] == "15% of 200 is 30"
@@ -164,7 +165,7 @@ async def test_agent_ignores_other_agents(
 
             # Should not process the message
             mock_ai.assert_not_called()
-            bot.client.room_send.assert_not_called()
+            bot.client.room_send.assert_not_called()  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -265,10 +266,10 @@ async def test_agent_responds_in_threads_based_on_participation(
             # Should process the message as only agent in thread
             mock_ai.assert_called_once()
             # Non-streaming makes 1 call
-            assert bot.client.room_send.call_count == 1
+            assert bot.client.room_send.call_count == 1  # type: ignore[union-attr]
 
         # Test 2: Thread with multiple agents - should form team and respond
-        bot.client.room_send.reset_mock()
+        bot.client.room_send.reset_mock()  # type: ignore[union-attr]
         mock_team_arun.reset_mock()
 
         # Create a new message event with a different ID for Test 2
@@ -319,10 +320,10 @@ async def test_agent_responds_in_threads_based_on_participation(
             # Should form team and send team response when multiple agents in thread
             mock_ai.assert_not_called()
             mock_team_arun.assert_called_once()
-            bot.client.room_send.assert_called_once()  # Team response sent
+            bot.client.room_send.assert_called_once()  # type: ignore[union-attr]  # Team response sent
 
         # Reset mocks for Test 3
-        bot.client.room_send.reset_mock()
+        bot.client.room_send.reset_mock()  # type: ignore[union-attr]
         mock_team_arun.reset_mock()
 
         # Test 3: Thread with multiple agents WITH mention - should respond
@@ -385,8 +386,8 @@ async def test_agent_responds_in_threads_based_on_participation(
             )
 
             # Verify thread response format (non-streaming makes 1 call)
-            assert bot.client.room_send.call_count == 1
-            sent_content = bot.client.room_send.call_args[1]["content"]
+            assert bot.client.room_send.call_count == 1  # type: ignore[union-attr]
+            sent_content = bot.client.room_send.call_args[1]["content"]  # type: ignore[union-attr]
             assert sent_content["m.relates_to"]["rel_type"] == "m.thread"
             assert sent_content["m.relates_to"]["event_id"] == thread_root_id
 
@@ -478,4 +479,4 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         await bot._on_invite(mock_room, mock_event)
 
         # Verify new room was joined (not the initial room)
-        bot.client.join.assert_called_with(invite_room)
+        bot.client.join.assert_called_with(invite_room)  # type: ignore[union-attr]
