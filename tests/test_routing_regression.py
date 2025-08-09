@@ -221,6 +221,7 @@ class TestRoutingRegression:
         mock_agent_bot = MagicMock()
         mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"research": mock_agent_bot, "news": mock_agent_bot}
+        mock_orchestrator.current_config = research_bot.config
         research_bot.orchestrator = mock_orchestrator
 
         news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)

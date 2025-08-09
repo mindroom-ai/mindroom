@@ -244,6 +244,7 @@ class TestAgentBot:
                 prompt="@mindroom_calculator:localhost: What's 2+2?",
                 session_id="!test:localhost:$thread_root_id",
                 storage_path=tmp_path,
+                config=config,
                 thread_history=[],
                 room_id="!test:localhost",
             )
@@ -256,6 +257,7 @@ class TestAgentBot:
                 prompt="@mindroom_calculator:localhost: What's 2+2?",
                 session_id="!test:localhost:$thread_root_id",
                 storage_path=tmp_path,
+                config=config,
                 thread_history=[],
                 room_id="!test:localhost",
             )
@@ -311,6 +313,7 @@ class TestAgentBot:
         mock_agent_bot = MagicMock()
         mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
+        mock_orchestrator.current_config = config
         bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send response

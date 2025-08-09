@@ -110,6 +110,7 @@ async def test_agent_processes_direct_mention(
                     session_id=f"{test_room_id}:$thread_root:example.org",
                     thread_history=[],
                     storage_path=tmp_path,
+                    config=config,
                     room_id=test_room_id,
                 )
 
@@ -179,7 +180,7 @@ async def test_agent_responds_in_threads_based_on_participation(
     thread_root_id = "$thread_root:example.org"
 
     # Mock the config to include both agents
-    from mindroom.models import AgentConfig
+    from mindroom.models import AgentConfig, ModelConfig
 
     mock_config = Config(
         agents={
@@ -188,6 +189,7 @@ async def test_agent_responds_in_threads_based_on_participation(
         },
         teams={},
         room_models={},
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
 
     with (
@@ -209,6 +211,7 @@ async def test_agent_responds_in_threads_based_on_participation(
         mock_agent_bot = MagicMock()
         mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
+        mock_orchestrator.current_config = mock_config
         bot.orchestrator = mock_orchestrator
         mock_team_arun.return_value = "Team response"
 
@@ -378,6 +381,7 @@ async def test_agent_responds_in_threads_based_on_participation(
                 session_id=f"{test_room_id}:{thread_root_id}",
                 thread_history=mock_fetch.return_value,
                 storage_path=tmp_path,
+                config=config,
                 room_id=test_room_id,
             )
 
