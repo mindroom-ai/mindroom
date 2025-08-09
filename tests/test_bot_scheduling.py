@@ -253,7 +253,7 @@ class TestBotTaskRestoration:
 class TestCommandHandling:
     """Test command handling behavior across different agents."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         """Set up test config."""
         self.config = Config(
             agents={
