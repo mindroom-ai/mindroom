@@ -45,7 +45,7 @@ from .matrix import (
     login_agent_user,
     send_message,
 )
-from .matrix.rooms import ensure_all_rooms_exist, resolve_room_aliases
+from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, resolve_room_aliases
 from .matrix.users import create_agent_user
 from .models import Config
 from .response_tracker import ResponseTracker
@@ -966,6 +966,7 @@ class MultiAgentOrchestrator:
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
     current_config: Config | None = field(default=None, init=False)
+    _created_room_ids: dict[str, str] = field(default_factory=dict, init=False)
 
     async def initialize(self) -> None:
         """Initialize all agent bots with self-management.
@@ -1170,6 +1171,10 @@ class MultiAgentOrchestrator:
         # After rooms exist, ensure room invitations are up to date
         await self._ensure_room_invitations()
 
+        # Ensure user joins all rooms after being invited
+        if self._created_room_ids:
+            await ensure_user_in_rooms(MATRIX_HOMESERVER, self._created_room_ids)
+
         # Now have bots join their configured rooms
         join_tasks = [bot.ensure_rooms() for bot in bots]
         await asyncio.gather(*join_tasks)
@@ -1191,10 +1196,13 @@ class MultiAgentOrchestrator:
 
         # Directly create rooms using the router's client
         assert self.current_config is not None
-        await ensure_all_rooms_exist(router_bot.client, self.current_config)
+        room_ids = await ensure_all_rooms_exist(router_bot.client, self.current_config)
+
+        # Store room IDs for later use
+        self._created_room_ids = room_ids
 
     async def _ensure_room_invitations(self) -> None:
-        """Ensure all agents are invited to their configured rooms.
+        """Ensure all agents and the user are invited to their configured rooms.
 
         This uses the router bot's client to manage room invitations,
         as the router has admin privileges in all rooms.
@@ -1220,6 +1228,22 @@ class MultiAgentOrchestrator:
             return
 
         server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+
+        # First, invite the user account to all rooms
+        from .matrix.state import MatrixState
+
+        state = MatrixState.load()
+        user_account = state.get_account("user")
+        if user_account:
+            user_id = f"@{user_account.username}:{server_name}"
+            for room_id in joined_rooms:
+                room_members = await get_room_members(router_bot.client, room_id)
+                if user_id not in room_members:
+                    success = await invite_to_room(router_bot.client, room_id, user_id)
+                    if success:
+                        logger.info(f"Invited user {user_id} to room {room_id}")
+                    else:
+                        logger.warning(f"Failed to invite user {user_id} to room {room_id}")
 
         for room_id in joined_rooms:
             # Get who should be in this room based on configuration
