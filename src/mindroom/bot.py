@@ -1159,6 +1159,26 @@ class MultiAgentOrchestrator:
         # Ensure all configured rooms exist (router creates them if needed)
         await self._ensure_rooms_exist()
 
+        # After rooms exist, update each bot's room list to use room IDs instead of aliases
+        from .matrix.rooms import resolve_room_aliases
+
+        assert self.current_config is not None
+        for bot in bots:
+            # Re-resolve room aliases now that rooms exist
+            if isinstance(bot, TeamBot):
+                # Check TeamBot first since it's a subclass of AgentBot
+                if bot.agent_name in self.current_config.teams:
+                    team_config = self.current_config.teams[bot.agent_name]
+                    bot.rooms = resolve_room_aliases(team_config.rooms)
+            elif isinstance(bot, AgentBot):
+                if bot.agent_name == ROUTER_AGENT_NAME:
+                    # Router needs all rooms
+                    all_room_aliases = self.current_config.get_all_configured_rooms()
+                    bot.rooms = resolve_room_aliases(list(all_room_aliases))
+                elif bot.agent_name in self.current_config.agents:
+                    agent_config = self.current_config.agents[bot.agent_name]
+                    bot.rooms = resolve_room_aliases(agent_config.rooms)
+
         # After rooms exist, ensure room invitations are up to date
         await self._ensure_room_invitations()
 
