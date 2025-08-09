@@ -33,7 +33,6 @@ from .matrix import (
     MatrixID,
     create_mention_content_from_text,
     edit_message,
-    ensure_all_rooms_exist,
     extract_agent_name,
     extract_server_name_from_homeserver,
     extract_thread_info,
@@ -44,9 +43,9 @@ from .matrix import (
     join_room,
     leave_room,
     login_agent_user,
-    resolve_room_aliases,
     send_message,
 )
+from .matrix.rooms import ensure_all_rooms_exist, resolve_room_aliases
 from .matrix.users import create_agent_user
 from .models import Config
 from .response_tracker import ResponseTracker
@@ -176,15 +175,6 @@ class AgentBot:
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
         return create_agent(agent_name=self.agent_name, storage_path=self.storage_path / "agents")
-
-    async def ensure_rooms_exist(self) -> None:
-        """Ensure all configured rooms exist (create if necessary).
-
-        This should only be called by the router agent or during initial setup.
-        """
-        assert self.client is not None
-        config = self.config if self.config else load_config()
-        await ensure_all_rooms_exist(self.client, config)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -1160,8 +1150,6 @@ class MultiAgentOrchestrator:
         await self._ensure_rooms_exist()
 
         # After rooms exist, update each bot's room list to use room IDs instead of aliases
-        from .matrix.rooms import resolve_room_aliases
-
         assert self.current_config is not None
         for bot in bots:
             # Re-resolve room aliases now that rooms exist
@@ -1190,7 +1178,7 @@ class MultiAgentOrchestrator:
     async def _ensure_rooms_exist(self) -> None:
         """Ensure all configured rooms exist, creating them if necessary.
 
-        This uses the router bot to create rooms since it has the necessary permissions.
+        This uses the router bot's client to create rooms since it has the necessary permissions.
         """
         if ROUTER_AGENT_NAME not in self.agent_bots:
             logger.warning("Router not available, cannot ensure rooms exist")
@@ -1201,8 +1189,9 @@ class MultiAgentOrchestrator:
             logger.warning("Router client not available, cannot ensure rooms exist")
             return
 
-        # Router ensures all configured rooms exist
-        await router_bot.ensure_rooms_exist()
+        # Directly create rooms using the router's client
+        assert self.current_config is not None
+        await ensure_all_rooms_exist(router_bot.client, self.current_config)
 
     async def _ensure_room_invitations(self) -> None:
         """Ensure all agents are invited to their configured rooms.
