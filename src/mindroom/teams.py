@@ -11,8 +11,9 @@ from agno.run.response import RunResponse
 from agno.run.team import TeamRunResponse
 from agno.team import Team
 
-from .agent_config import ROUTER_AGENT_NAME, load_config
+from .agent_config import load_config
 from .ai import get_model_instance
+from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
 

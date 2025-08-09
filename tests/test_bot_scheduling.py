@@ -323,7 +323,7 @@ class TestCommandHandling:
             }
         )
 
-        with patch("mindroom.bot.ROUTER_AGENT_NAME", "router"):
+        with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
             await bot._on_message(room, event)
 
         # Verify the command was handled

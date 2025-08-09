@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import ClassVar
 
-from ..agent_config import ROUTER_AGENT_NAME, load_config
+from ..agent_config import load_config
+from ..constants import ROUTER_AGENT_NAME
 
 
 @dataclass(frozen=True)

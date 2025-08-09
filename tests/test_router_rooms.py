@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom.agent_config import ROUTER_AGENT_NAME
 from mindroom.bot import MultiAgentOrchestrator, create_bot_for_entity
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.models import AgentConfig, Config, TeamConfig
 

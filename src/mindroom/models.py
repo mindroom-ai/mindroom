@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .constants import ROUTER_AGENT_NAME
+
 
 class AgentConfig(BaseModel):
     """Configuration for a single agent."""
@@ -135,7 +137,6 @@ class Config(BaseModel):
         Returns:
             Set of bot usernames (without domain) that should be in this room
         """
-        from .agent_config import ROUTER_AGENT_NAME
         from .matrix.rooms import resolve_room_aliases
 
         configured_bots = set()
