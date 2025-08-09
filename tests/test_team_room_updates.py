@@ -14,7 +14,7 @@ class TestTeamRoomUpdates:
     """Test team room configuration updates."""
 
     @pytest.mark.asyncio
-    async def test_team_room_change_triggers_restart(self):
+    async def test_team_room_change_triggers_restart(self) -> None:
         """Test that changing a team's room configuration triggers a restart."""
         # Create initial config
         initial_config_data: dict[str, Any] = {
@@ -87,7 +87,7 @@ class TestTeamRoomUpdates:
                     assert mock_create_bot.call_count == 5
 
     @pytest.mark.asyncio
-    async def test_new_team_gets_created(self):
+    async def test_new_team_gets_created(self) -> None:
         """Test that a new team in config gets created."""
         # Start with no teams
         initial_config_data: dict[str, Any] = {
@@ -147,7 +147,7 @@ class TestTeamRoomUpdates:
                     assert "new_team" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
-    async def test_no_change_no_restart(self):
+    async def test_no_change_no_restart(self) -> None:
         """Test that no changes in team config doesn't trigger restart."""
         config_data: dict[str, Any] = {
             "agents": {},

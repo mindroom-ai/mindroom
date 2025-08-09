@@ -10,6 +10,8 @@ This module comprehensively tests all agent response rules:
 These tests ensure no regressions in the core response logic.
 """
 
+from typing import Any
+
 from mindroom.models import AgentConfig, Config, ModelConfig
 from mindroom.thread_utils import should_agent_respond
 
@@ -17,7 +19,7 @@ from mindroom.thread_utils import should_agent_respond
 class TestAgentResponseLogic:
     """Test the should_agent_respond logic."""
 
-    def setup_method(self):
+    def setup_method(self) -> None:
         """Set up test config."""
         self.config = Config(
             agents={
@@ -30,7 +32,7 @@ class TestAgentResponseLogic:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
 
-    def test_mentioned_agent_always_responds(self):
+    def test_mentioned_agent_always_responds(self) -> None:
         """If an agent is mentioned, it should always respond."""
         should_respond = should_agent_respond(
             agent_name="calculator",
@@ -43,7 +45,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is True
 
-    def test_only_agent_in_thread_continues(self):
+    def test_only_agent_in_thread_continues(self) -> None:
         """If agent is the only one in thread, it continues."""
         thread_history = [
             {"sender": "@mindroom_calculator:localhost", "body": "2+2=4"},
@@ -61,7 +63,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is True
 
-    def test_invited_agent_behaves_like_native_agent(self):
+    def test_invited_agent_behaves_like_native_agent(self) -> None:
         """Invited agents should follow the same rules as native agents."""
         # Test 1: Invited agent with no agents in thread - should use router
         should_respond = should_agent_respond(
@@ -108,7 +110,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_no_agents_in_thread_uses_router(self):
+    def test_no_agents_in_thread_uses_router(self) -> None:
         """If no agents have participated, use router."""
         should_respond = should_agent_respond(
             agent_name="calculator",
@@ -121,7 +123,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_multiple_agents_nobody_responds(self):
+    def test_multiple_agents_nobody_responds(self) -> None:
         """If multiple agents in thread, nobody responds unless mentioned."""
         thread_history = [
             {"sender": "@mindroom_calculator:localhost", "body": "2+2=4"},
@@ -140,7 +142,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_not_in_thread_uses_router(self):
+    def test_not_in_thread_uses_router(self) -> None:
         """If not in a thread, use router to determine response."""
         should_respond = should_agent_respond(
             agent_name="calculator",
@@ -153,7 +155,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_agent_not_in_room_no_response(self):
+    def test_agent_not_in_room_no_response(self) -> None:
         """If agent is not in room (native or invited), don't respond."""
         should_respond = should_agent_respond(
             agent_name="calculator",
@@ -166,7 +168,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_mentioned_outside_thread_responds(self):
+    def test_mentioned_outside_thread_responds(self) -> None:
         """Agents respond when mentioned in room (will create thread)."""
         should_respond = should_agent_respond(
             agent_name="calculator",
@@ -179,10 +181,10 @@ class TestAgentResponseLogic:
         )
         assert should_respond is True
 
-    def test_agent_mentioned_in_thread_history(self):
+    def test_agent_mentioned_in_thread_history(self) -> None:
         """When any agent is mentioned in thread, only mentioned agents respond."""
         # Thread history with agent mentions
-        thread_history: list[dict] = [
+        thread_history: list[dict[str, Any]] = [
             {
                 "sender": "@user:localhost",
                 "body": "@mindroom_calculator help",
@@ -204,7 +206,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_router_selection_scenarios(self):
+    def test_router_selection_scenarios(self) -> None:
         """Test various scenarios where router should be used."""
         # Scenario 1: Empty thread, native agent
         should_respond = should_agent_respond(
@@ -234,7 +236,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_room_message_no_access_no_response(self):
+    def test_room_message_no_access_no_response(self) -> None:
         """Agent without room access doesn't respond to room messages."""
         should_respond = should_agent_respond(
             agent_name="calculator",
@@ -247,7 +249,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_edge_case_empty_configured_rooms(self):
+    def test_edge_case_empty_configured_rooms(self) -> None:
         """Test agent with no configured rooms but invited to thread."""
         # Should behave same as native agent when invited
         should_respond = should_agent_respond(
@@ -261,7 +263,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_mixed_agent_and_user_messages(self):
+    def test_mixed_agent_and_user_messages(self) -> None:
         """Test thread with interleaved agent and user messages."""
         thread_history = [
             {"sender": "@user:localhost", "body": "Help with math"},
@@ -284,7 +286,7 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_router_disabled_when_any_agent_mentioned(self):
+    def test_router_disabled_when_any_agent_mentioned(self) -> None:
         """Test that router is disabled when any agent is mentioned, not just the current one."""
         # Room message scenario - agent1 is NOT mentioned but agent2 IS mentioned
         should_respond = should_agent_respond(

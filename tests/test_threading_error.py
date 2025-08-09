@@ -6,6 +6,8 @@ This test verifies that:
 3. The bot handles various message relation scenarios correctly
 """
 
+from collections.abc import AsyncGenerator
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -21,7 +23,7 @@ class TestThreadingBehavior:
     """Test that agents correctly handle threading in various scenarios."""
 
     @pytest_asyncio.fixture
-    async def bot(self, tmp_path):
+    async def bot(self, tmp_path: Path) -> AsyncGenerator[AgentBot, None]:
         """Create an AgentBot for testing."""
         agent_user = AgentMatrixUser(
             user_id="@mindroom_general:localhost",
@@ -66,7 +68,7 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args, **kwargs):
+        async def mock_arun(*args, **kwargs) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
@@ -77,7 +79,7 @@ class TestThreadingBehavior:
         # No cleanup needed since we're using mocks
 
     @pytest.mark.asyncio
-    async def test_agent_creates_thread_when_mentioned_in_main_room(self, bot):
+    async def test_agent_creates_thread_when_mentioned_in_main_room(self, bot: AgentBot) -> None:
         """Test that agents create threads when mentioned in main room messages."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
@@ -144,7 +146,7 @@ class TestThreadingBehavior:
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$main_msg:localhost"
 
     @pytest.mark.asyncio
-    async def test_agent_responds_in_existing_thread(self, bot):
+    async def test_agent_responds_in_existing_thread(self, bot: AgentBot) -> None:
         """Test that agents respond correctly in existing threads."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
@@ -205,7 +207,7 @@ class TestThreadingBehavior:
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$thread_msg:localhost"
 
     @pytest.mark.asyncio
-    async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path):
+    async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
         """Test that commands sent as replies don't cause threading errors."""
         # Create a router bot to handle commands
         agent_user = AgentMatrixUser(
@@ -251,7 +253,7 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args, **kwargs):
+        async def mock_arun(*args, **kwargs) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
@@ -301,7 +303,7 @@ class TestThreadingBehavior:
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_reply:localhost"
 
     @pytest.mark.asyncio
-    async def test_command_in_thread_works_correctly(self, tmp_path):
+    async def test_command_in_thread_works_correctly(self, tmp_path: Path) -> None:
         """Test that commands in threads work without errors."""
         # Create a router bot to handle commands
         agent_user = AgentMatrixUser(
@@ -346,7 +348,7 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args, **kwargs):
+        async def mock_arun(*args, **kwargs) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
@@ -401,7 +403,7 @@ class TestThreadingBehavior:
         assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_thread:localhost"
 
     @pytest.mark.asyncio
-    async def test_message_with_multiple_relations_handled_correctly(self, bot):
+    async def test_message_with_multiple_relations_handled_correctly(self, bot: AgentBot) -> None:
         """Test that messages with complex relations are handled properly."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
