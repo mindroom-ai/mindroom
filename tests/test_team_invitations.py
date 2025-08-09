@@ -42,7 +42,7 @@ class TestTeamRoomMembership:
     """Test team room membership functionality."""
 
     @pytest.mark.asyncio
-    async def test_team_joins_configured_rooms(self, monkeypatch) -> None:
+    async def test_team_joins_configured_rooms(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that teams join their configured rooms on startup."""
         # Create a mock team user
         team_user = AgentMatrixUser(
@@ -92,7 +92,7 @@ class TestTeamRoomMembership:
         assert "!test_room:localhost" in joined_rooms
 
     @pytest.mark.asyncio
-    async def test_team_leaves_unconfigured_rooms(self, monkeypatch) -> None:
+    async def test_team_leaves_unconfigured_rooms(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that teams leave rooms they're no longer configured for."""
         # Create a mock team user
         team_user = AgentMatrixUser(

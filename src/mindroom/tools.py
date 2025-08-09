@@ -35,133 +35,133 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
 
 # Register all available tools
 @register_tool("calculator")
-def calculator_tools():
+def calculator_tools() -> type:
     from agno.tools.calculator import CalculatorTools
 
     return CalculatorTools
 
 
 @register_tool("file")
-def file_tools():
+def file_tools() -> type:
     from agno.tools.file import FileTools
 
     return FileTools
 
 
 @register_tool("shell")
-def shell_tools():
+def shell_tools() -> type:
     from agno.tools.shell import ShellTools
 
     return ShellTools
 
 
 @register_tool("csv")
-def csv_tools():
+def csv_tools() -> type:
     from agno.tools.csv_toolkit import CsvTools
 
     return CsvTools
 
 
 @register_tool("arxiv")
-def arxiv_tools():
+def arxiv_tools() -> type:
     from agno.tools.arxiv import ArxivTools
 
     return ArxivTools
 
 
 @register_tool("duckduckgo")
-def duckduckgo_tools():
+def duckduckgo_tools() -> type:
     from agno.tools.duckduckgo import DuckDuckGoTools
 
     return DuckDuckGoTools
 
 
 @register_tool("wikipedia")
-def wikipedia_tools():
+def wikipedia_tools() -> type:
     from agno.tools.wikipedia import WikipediaTools
 
     return WikipediaTools
 
 
 @register_tool("newspaper")
-def newspaper_tools():
+def newspaper_tools() -> type:
     from agno.tools.newspaper import NewspaperTools
 
     return NewspaperTools
 
 
 @register_tool("yfinance")
-def yfinance_tools():
+def yfinance_tools() -> type:
     from agno.tools.yfinance import YFinanceTools
 
     return YFinanceTools
 
 
 @register_tool("python")
-def python_tools():
+def python_tools() -> type:
     from agno.tools.python import PythonTools
 
     return PythonTools
 
 
 @register_tool("pandas")
-def pandas_tools():
+def pandas_tools() -> type:
     from agno.tools.pandas import PandasTools
 
     return PandasTools
 
 
 @register_tool("docker")
-def docker_tools():
+def docker_tools() -> type:
     from agno.tools.docker import DockerTools
 
     return DockerTools
 
 
 @register_tool("github")
-def github_tools():
+def github_tools() -> type:
     from agno.tools.github import GithubTools
 
     return GithubTools
 
 
 @register_tool("email")
-def email_tools():
+def email_tools() -> type:
     from agno.tools.email import EmailTools
 
     return EmailTools
 
 
 @register_tool("telegram")
-def telegram_tools():
+def telegram_tools() -> type:
     from agno.tools.telegram import TelegramTools
 
     return TelegramTools
 
 
 @register_tool("tavily")
-def tavily_tools():
+def tavily_tools() -> type:
     from agno.tools.tavily import TavilyTools
 
     return TavilyTools
 
 
 @register_tool("googlesearch")
-def googlesearch_tools():
+def googlesearch_tools() -> type:
     from agno.tools.googlesearch import GoogleSearchTools
 
     return GoogleSearchTools
 
 
 @register_tool("website")
-def website_tools():
+def website_tools() -> type:
     from agno.tools.website import WebsiteTools
 
     return WebsiteTools
 
 
 @register_tool("jina")
-def jina_tools():
+def jina_tools() -> type:
     from agno.tools.jina import JinaReaderTools
 
     return JinaReaderTools

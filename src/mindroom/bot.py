@@ -164,7 +164,7 @@ class AgentBot:
         return self.agent_user.agent_name
 
     @cached_property
-    def logger(self):
+    def logger(self) -> Any:
         """Get a logger with agent context bound."""
         return logger.bind(agent=emoji(self.agent_name))
 
@@ -1405,7 +1405,7 @@ async def main(log_level: str, storage_path: Path) -> None:
         orchestrator_task = asyncio.create_task(orchestrator.start())
 
         # Create task to watch config file for changes
-        async def watch_config():
+        async def watch_config() -> None:
             """Watch config file for changes and reload when modified."""
             async for _changes in awatch(config_path):
                 # The changes set contains tuples of (change_type, path)

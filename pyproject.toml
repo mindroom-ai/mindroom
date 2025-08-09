@@ -115,7 +115,7 @@ exclude_lines = [
 python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
-disallow_untyped_defs = false
+disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true
 disallow_untyped_decorators = false
@@ -123,6 +123,7 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 warn_no_return = true
 strict_equality = true
+files = [ "src", "tests" ]
 
 [[tool.mypy.overrides]]
 module = "nio.*"
@@ -135,6 +136,8 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "diskcache.*"
 ignore_missing_imports = true
+
+# Enable strict typing for tests too - no shortcuts!
 
 [tool.versioningit]
 default-version = "0.0.0"

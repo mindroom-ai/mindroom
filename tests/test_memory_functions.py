@@ -143,8 +143,8 @@ class TestMemoryFunctions:
     def test_format_memories_as_context(self):
         """Test formatting memories into context string."""
         memories: list[MemoryResult] = [
-            {"memory": "First memory", "id": "1"},  # type: ignore
-            {"memory": "Second memory", "id": "2"},  # type: ignore
+            {"memory": "First memory", "id": "1"},
+            {"memory": "Second memory", "id": "2"},
         ]
 
         context = format_memories_as_context(memories, "agent")

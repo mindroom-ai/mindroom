@@ -413,7 +413,9 @@ Just let me know your preference!"""
 
         # Register the question
         event_id = "$q123"
-        interactive.register_interactive_question(event_id, "!room:localhost", "$thread123", option_map, "test_agent")
+        interactive.register_interactive_question(
+            event_id, "!room:localhost", "$thread123", option_map or {}, "test_agent"
+        )
 
         # Verify question was created
         assert event_id in interactive._active_questions
@@ -423,7 +425,7 @@ Just let me know your preference!"""
         assert len(question.options) == 6  # 3 emojis + 3 numbers
 
         # Add reaction buttons
-        await interactive.add_reaction_buttons(mock_client, "!room:localhost", event_id, options)
+        await interactive.add_reaction_buttons(mock_client, "!room:localhost", event_id, options or [])
 
         # Should have added 3 reactions
         assert mock_client.room_send.call_count == 3

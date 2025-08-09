@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -75,7 +76,7 @@ class TestTeamFormation:
         mock_analyst_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test that multiple agents tagged in a message form a team."""
         # Create bots
         config = Config(router=RouterConfig(model="default"))
@@ -94,7 +95,7 @@ class TestTeamFormation:
         analyst_bot.thread_invite_manager = ThreadInviteManager(analyst_bot.client)
 
         # Create message mentioning both agents
-        message_event = {
+        message_event: dict[str, Any] = {
             "type": "m.room.message",
             "content": {
                 "msgtype": "m.text",
@@ -131,7 +132,7 @@ class TestTeamFormation:
         mock_security_agent: AgentMatrixUser,
         team_room_id: str,
         tmp_path: Path,
-    ):
+    ) -> None:
         """Test that multiple agents already in a thread form a team when no one is mentioned."""
         # Mock thread history showing both agents have participated
         thread_history = [

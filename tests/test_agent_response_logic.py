@@ -158,7 +158,7 @@ class TestAgentResponseLogic:
     def test_agent_mentioned_in_thread_history(self):
         """When any agent is mentioned in thread, only mentioned agents respond."""
         # Thread history with agent mentions
-        thread_history = [
+        thread_history: list[dict] = [
             {
                 "sender": "@user:localhost",
                 "body": "@mindroom_calculator help",

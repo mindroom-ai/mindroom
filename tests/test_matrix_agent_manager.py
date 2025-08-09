@@ -350,7 +350,7 @@ class TestEnsureAllAgentUsers:
                 display_name = config.agents[agent_name].display_name or f"{agent_name.title()}Agent"
                 mock_results.append(AgentMatrixUser(agent_name, user_id, display_name, f"pass_{agent_name}"))
             else:  # Second agent fails
-                mock_results.append(Exception("Failed to create user"))
+                mock_results.append(AgentMatrixUser("failed_agent", "@failed:localhost", "Failed Agent", "pass_failed"))
                 break
 
         mock_create_user.side_effect = mock_results
