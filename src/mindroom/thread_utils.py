@@ -4,7 +4,7 @@ from typing import Any
 
 import nio
 
-from .agent_config import ROUTER_AGENT_NAME
+from .constants import ROUTER_AGENT_NAME
 from .matrix.identity import extract_agent_name
 
 

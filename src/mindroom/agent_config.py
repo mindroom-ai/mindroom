@@ -7,14 +7,12 @@ from agno.agent import Agent
 from agno.storage.sqlite import SqliteStorage
 
 from . import agent_prompts
+from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .models import Config
 from .tools import get_tool_by_name
 
 logger = get_logger(__name__)
-
-# Constants
-ROUTER_AGENT_NAME = "router"
 
 # Default path to agents configuration file
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
