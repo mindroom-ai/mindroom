@@ -14,7 +14,7 @@ TOOLS_REQUIRING_CONFIG = {
 }
 
 
-def test_all_tools_can_be_imported():
+def test_all_tools_can_be_imported() -> None:
     """Test that all registered tools can be imported and instantiated."""
     successful = []
     config_required = []

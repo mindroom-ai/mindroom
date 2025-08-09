@@ -1,6 +1,7 @@
 """Tests for CLI functionality."""
 
 from pathlib import Path
+from typing import Any, Tuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -11,7 +12,7 @@ from mindroom.matrix.state import MatrixState
 
 
 @pytest.fixture
-def mock_matrix_client():
+def mock_matrix_client() -> Tuple[MagicMock, AsyncMock]:
     """Create a mock matrix client context manager."""
     mock_client = AsyncMock()
     mock_context = MagicMock()
@@ -24,7 +25,7 @@ class TestUserAccountManagement:
     """Test user account creation and management."""
 
     @pytest.mark.asyncio
-    async def test_register_user_success(self, mock_matrix_client) -> None:
+    async def test_register_user_success(self, mock_matrix_client: Tuple[MagicMock, AsyncMock]) -> None:
         """Test successful user registration."""
         from mindroom.matrix.client import register_user
 
@@ -49,7 +50,7 @@ class TestUserAccountManagement:
             mock_client.set_displayname.assert_called_once_with("Test User")
 
     @pytest.mark.asyncio
-    async def test_register_user_already_exists(self, mock_matrix_client) -> None:
+    async def test_register_user_already_exists(self, mock_matrix_client: Tuple[MagicMock, AsyncMock]) -> None:
         """Test registration when user already exists."""
         from mindroom.matrix.client import register_user
 
@@ -70,7 +71,7 @@ class TestUserAccountManagement:
             mock_client.register.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_creates_new(self, tmp_path: Path, mock_matrix_client) -> None:
+    async def test_ensure_user_account_creates_new(self, tmp_path: Path, mock_matrix_client: Tuple[MagicMock, AsyncMock]) -> None:
         """Test ensuring user account when none exists."""
         mock_context, mock_client = mock_matrix_client
 
@@ -102,7 +103,7 @@ class TestUserAccountManagement:
             mock_client.register.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_uses_existing_valid(self, tmp_path: Path, mock_matrix_client) -> None:
+    async def test_ensure_user_account_uses_existing_valid(self, tmp_path: Path, mock_matrix_client: Tuple[MagicMock, AsyncMock]) -> None:
         """Test ensuring user account when valid credentials exist."""
         mock_context, mock_client = mock_matrix_client
 
@@ -139,7 +140,7 @@ class TestUserAccountManagement:
                 # Login is not called by create_agent_user
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_invalid_credentials(self, tmp_path: Path, mock_matrix_client) -> None:
+    async def test_ensure_user_account_invalid_credentials(self, tmp_path: Path, mock_matrix_client: Tuple[MagicMock, AsyncMock]) -> None:
         """Test ensuring user account when stored credentials are invalid."""
         mock_context, mock_client = mock_matrix_client
 
