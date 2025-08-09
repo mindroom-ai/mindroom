@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from .agent_config import describe_agent, load_config
 from .ai import get_model_instance
 from .logging_config import get_logger
-from .matrix import MatrixID
+from .matrix.identity import MatrixID
 
 logger = get_logger(__name__)
 

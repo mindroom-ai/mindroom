@@ -8,7 +8,8 @@ import nio
 
 from .agent_config import load_config
 from .logging_config import get_logger
-from .matrix import MatrixID, get_joined_rooms, get_room_members
+from .matrix.client import get_joined_rooms, get_room_members
+from .matrix.identity import MatrixID
 from .matrix.state import MatrixState
 from .models import Config
 

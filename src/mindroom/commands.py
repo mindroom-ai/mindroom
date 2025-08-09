@@ -9,7 +9,8 @@ import nio
 
 from .agent_config import load_config
 from .logging_config import get_logger
-from .matrix import MatrixID, get_room_members
+from .matrix.client import get_room_members
+from .matrix.identity import MatrixID
 
 logger = get_logger(__name__)
 
@@ -276,7 +277,7 @@ async def handle_invite_command(
     if isinstance(room_members, set):
         if agent_user_id not in room_members:
             # Invite the agent to the room (regular room invitation)
-            from mindroom.matrix import invite_to_room
+            from mindroom.matrix.client import invite_to_room
 
             success = await invite_to_room(client, room_id, agent_user_id)
             if success:

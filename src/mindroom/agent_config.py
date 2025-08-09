@@ -204,7 +204,8 @@ def get_agent_ids_for_room(room_key: str, config: Config | None = None, homeserv
     if config is None:
         config = load_config()
 
-    from .matrix import MATRIX_HOMESERVER, MatrixID, extract_server_name_from_homeserver
+    from .matrix import MATRIX_HOMESERVER
+    from .matrix.identity import MatrixID, extract_server_name_from_homeserver
 
     # Determine server name
     server_url = homeserver or MATRIX_HOMESERVER

@@ -25,7 +25,7 @@ async def test_streaming_edits_e2e(
     """End-to-end test that agents don't respond to streaming edits from other agents."""
 
     # Mock ensure_all_agent_users to return proper user objects
-    from mindroom.matrix import AgentMatrixUser
+    from mindroom.matrix.users import AgentMatrixUser
 
     mock_agents = {
         "helper": AgentMatrixUser(
@@ -308,7 +308,7 @@ async def test_streaming_edits_e2e(
 @pytest.mark.e2e
 async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
     """Test that agents DO respond to user edits that add mentions."""
-    from mindroom.matrix import AgentMatrixUser
+    from mindroom.matrix.users import AgentMatrixUser
 
     # Create a single bot for this test
     calc_user = AgentMatrixUser(

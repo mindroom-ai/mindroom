@@ -10,7 +10,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.matrix import AgentMatrixUser
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 

@@ -7,7 +7,7 @@ import nio
 import pytest
 
 from mindroom.bot import MultiAgentOrchestrator
-from mindroom.matrix import MatrixState
+from mindroom.matrix.state import MatrixState
 
 
 @pytest.fixture
