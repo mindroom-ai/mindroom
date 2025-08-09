@@ -314,6 +314,8 @@ async def ai_response_streaming(
                 if result_msg:
                     full_response += result_msg
                     yield result_msg
+            else:
+                logger.warning(f"Unhandled event type: {type(event).__name__} - {event}")
 
     except Exception as e:
         logger.exception(f"Error generating streaming AI response: {e}")
