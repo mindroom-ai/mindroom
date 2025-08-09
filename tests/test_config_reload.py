@@ -11,6 +11,16 @@ from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.models import AgentConfig, Config, RouterConfig, TeamConfig
+from mindroom.thread_invites import ThreadInviteManager
+
+
+def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
+    """Helper to setup a test bot with required attributes."""
+    bot.client = mock_client
+    # Initialize thread_invite_manager as would happen in start()
+    bot.thread_invite_manager = ThreadInviteManager(mock_client)
+    # Mock get_agent_threads to return empty list (no thread invitations)
+    bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
 
 
 @pytest.fixture
@@ -172,7 +182,7 @@ async def test_agent_joins_new_rooms_on_config_reload(
     )
     mock_client = AsyncMock()
     mock_client.user_id = "@mindroom_agent1:localhost"
-    agent1_bot.client = mock_client
+    setup_test_bot(agent1_bot, mock_client)
 
     # Update to new config rooms
     agent1_bot.rooms = ["room1", "room4"]  # New rooms: removed room2, added room4
@@ -244,7 +254,7 @@ async def test_router_updates_rooms_on_config_reload(
     )
     mock_client = AsyncMock()
     mock_client.user_id = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
-    router_bot.client = mock_client
+    setup_test_bot(router_bot, mock_client)
 
     # Apply room updates
     await router_bot.join_configured_rooms()
@@ -309,7 +319,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     )
     mock_client = AsyncMock()
     mock_client.user_id = "@mindroom_agent3:localhost"
-    agent3_bot.client = mock_client
+    setup_test_bot(agent3_bot, mock_client)
 
     # Apply room updates for new agent
     await agent3_bot.join_configured_rooms()
@@ -375,7 +385,7 @@ async def test_team_room_changes_on_config_reload(
     )
     mock_client = AsyncMock()
     mock_client.user_id = "@mindroom_team1:localhost"
-    team1_bot.client = mock_client
+    setup_test_bot(team1_bot, mock_client)
 
     # Apply room updates
     await team1_bot.join_configured_rooms()
@@ -445,16 +455,40 @@ async def test_orchestrator_handles_config_reload(
     assert set(orchestrator.agent_bots["team1"].rooms) == {"room3"}
     assert set(orchestrator.agent_bots[ROUTER_AGENT_NAME].rooms) == {"room1", "room2", "room3"}
 
+    # Create a mock start method that initializes thread_invite_manager and client
+    async def mock_start_with_thread_manager(self: Any) -> None:
+        """Mock start that initializes thread_invite_manager and client."""
+        if not hasattr(self, "client") or self.client is None:
+            self.client = AsyncMock()
+            self.client.user_id = self.agent_user.user_id
+        if not hasattr(self, "thread_invite_manager") or self.thread_invite_manager is None:
+            self.thread_invite_manager = ThreadInviteManager(self.client)
+            self.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
+
+    # Patch AgentBot.start and TeamBot.start to use our mock
+    monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start_with_thread_manager)
+    monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start_with_thread_manager)
+
     # Mock bot operations for update
     for bot in orchestrator.agent_bots.values():
+        # Initialize thread_invite_manager as would happen in start()
+        if not hasattr(bot, "thread_invite_manager") or bot.thread_invite_manager is None:
+            bot.thread_invite_manager = ThreadInviteManager(AsyncMock())
+            bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
         monkeypatch.setattr(bot, "stop", AsyncMock())
-        monkeypatch.setattr(bot, "start", AsyncMock())
+        monkeypatch.setattr(bot, "start", mock_start_with_thread_manager)
         monkeypatch.setattr(bot, "ensure_user_account", AsyncMock())
         monkeypatch.setattr(bot, "sync_forever", AsyncMock(side_effect=asyncio.CancelledError()))
 
     # Update config
     updated = await orchestrator.update_config()
     assert updated  # Should return True since config changed
+
+    # Initialize thread_invite_manager for any new bots created during update
+    for bot in orchestrator.agent_bots.values():
+        if not hasattr(bot, "thread_invite_manager") or bot.thread_invite_manager is None:
+            bot.thread_invite_manager = ThreadInviteManager(AsyncMock())
+            bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
 
     # Verify updated state
     assert "agent1" in orchestrator.agent_bots
@@ -576,7 +610,7 @@ async def test_room_membership_state_after_config_update(
             config=config,
             rooms=bot_config["new"],
         )
-        bot.client = mock_client
+        setup_test_bot(bot, mock_client)
 
         await bot.join_configured_rooms()
         await bot.leave_unconfigured_rooms()

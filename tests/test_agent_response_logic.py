@@ -74,6 +74,7 @@ class TestAgentResponseLogic:
             configured_rooms=[],  # Not native to room
             thread_history=[],
             config=self.config,
+            is_invited_to_thread=True,  # Agent is invited
         )
         assert should_respond is False
 
@@ -90,6 +91,7 @@ class TestAgentResponseLogic:
             configured_rooms=[],  # Not native to room
             thread_history=thread_history,
             config=self.config,
+            is_invited_to_thread=True,  # Agent is invited
         )
         assert should_respond is True
 
@@ -107,6 +109,7 @@ class TestAgentResponseLogic:
             configured_rooms=[],  # Not native to room
             thread_history=thread_history,
             config=self.config,
+            is_invited_to_thread=True,  # Agent is invited
         )
         assert should_respond is False
 

@@ -125,19 +125,25 @@ def should_agent_respond(
     configured_rooms: list[str],
     thread_history: list[dict],
     config: Config,
+    is_invited_to_thread: bool = False,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
 
     Team formation is handled elsewhere - this just determines individual responses.
     """
 
+    # Check if agent has access (either native or invited to thread)
+    has_room_access = room_id in configured_rooms
+    has_thread_access = is_thread and is_invited_to_thread
+    has_access = has_room_access or has_thread_access
+
     # For room messages (not in threads)
     if not is_thread:
-        # Only respond if mentioned and have room access
-        return am_i_mentioned and room_id in configured_rooms
+        # Only respond if mentioned and have room access (invites only work in threads)
+        return am_i_mentioned and has_room_access
 
-    # Thread logic
-    if am_i_mentioned:
+    # Thread logic - invited agents behave like native agents
+    if am_i_mentioned and has_access:
         return True
 
     # For threads, check agent participation
@@ -148,8 +154,8 @@ def should_agent_respond(
         # Team will handle the response
         return False
 
-    # Single agent continues conversation
-    return [agent_name] == agents_in_thread
+    # Single agent continues conversation (only if has access)
+    return [agent_name] == agents_in_thread and has_access
 
 
 def get_safe_thread_root(event: nio.RoomMessageText | None) -> str | None:
