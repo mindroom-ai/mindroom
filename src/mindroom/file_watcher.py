@@ -23,8 +23,17 @@ async def watch_file(
     while stop_event is None or not stop_event.is_set():
         await asyncio.sleep(1.0)  # Check every second
 
-        if file_path.exists():
-            current_mtime = file_path.stat().st_mtime
-            if current_mtime != last_mtime:
-                last_mtime = current_mtime
-                await callback()
+        try:
+            if file_path.exists():
+                current_mtime = file_path.stat().st_mtime
+                if current_mtime != last_mtime:
+                    last_mtime = current_mtime
+                    await callback()
+        except (OSError, PermissionError):
+            # File might have been deleted or become unreadable
+            # Reset mtime so we detect when it comes back
+            last_mtime = 0
+        except Exception:
+            # Don't let callback errors stop the watcher
+            # The callback should handle its own errors
+            pass
