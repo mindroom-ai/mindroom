@@ -138,7 +138,7 @@ class TestMemoryIntegration:
             patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
             patch("mindroom.ai._cached_agent_run", AsyncMock(return_value=MagicMock(content="First response"))),
             patch("mindroom.ai.get_model_instance", return_value=MagicMock()),
-            patch("mindroom.agent_config.create_agent", return_value=MagicMock()),
+            patch("mindroom.agents.create_agent", return_value=MagicMock()),
         ):
             # First interaction
             await ai_response(

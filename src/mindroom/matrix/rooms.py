@@ -171,7 +171,7 @@ async def ensure_all_rooms_exist(
     Returns:
         Dict mapping room keys to room IDs
     """
-    from ..agent_config import get_agent_ids_for_room
+    from ..agents import get_agent_ids_for_room
 
     room_ids = {}
 

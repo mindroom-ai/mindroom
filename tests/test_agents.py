@@ -4,11 +4,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from agno.agent import Agent
 
-from mindroom.agent_config import create_agent
+from mindroom.agents import create_agent
 from mindroom.config import Config
 
 
-@patch("mindroom.agent_config.SqliteStorage")
+@patch("mindroom.agents.SqliteStorage")
 def test_get_agent_calculator(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Tests that the calculator agent is created correctly."""
     config = Config.from_yaml()
@@ -18,7 +18,7 @@ def test_get_agent_calculator(mock_storage: MagicMock, tmp_path: Path) -> None:
     mock_storage.assert_called_once_with(table_name="calculator_sessions", db_file=f"{tmp_path}/calculator.db")
 
 
-@patch("mindroom.agent_config.SqliteStorage")
+@patch("mindroom.agents.SqliteStorage")
 def test_get_agent_general(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Tests that the general agent is created correctly."""
     config = Config.from_yaml()
@@ -28,7 +28,7 @@ def test_get_agent_general(mock_storage: MagicMock, tmp_path: Path) -> None:
     mock_storage.assert_called_once_with(table_name="general_sessions", db_file=f"{tmp_path}/general.db")
 
 
-@patch("mindroom.agent_config.SqliteStorage")
+@patch("mindroom.agents.SqliteStorage")
 def test_get_agent_code(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Tests that the code agent is created correctly."""
     config = Config.from_yaml()
@@ -38,7 +38,7 @@ def test_get_agent_code(mock_storage: MagicMock, tmp_path: Path) -> None:
     mock_storage.assert_called_once_with(table_name="code_sessions", db_file=f"{tmp_path}/code.db")
 
 
-@patch("mindroom.agent_config.SqliteStorage")
+@patch("mindroom.agents.SqliteStorage")
 def test_get_agent_shell(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Tests that the shell agent is created correctly."""
     config = Config.from_yaml()
@@ -48,7 +48,7 @@ def test_get_agent_shell(mock_storage: MagicMock, tmp_path: Path) -> None:
     mock_storage.assert_called_once_with(table_name="shell_sessions", db_file=f"{tmp_path}/shell.db")
 
 
-@patch("mindroom.agent_config.SqliteStorage")
+@patch("mindroom.agents.SqliteStorage")
 def test_get_agent_summary(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Tests that the summary agent is created correctly."""
     config = Config.from_yaml()

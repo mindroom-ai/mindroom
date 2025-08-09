@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from . import interactive
-from .agent_config import create_agent, get_rooms_for_entity
+from .agents import create_agent, get_rooms_for_entity
 from .ai import ai_response, ai_response_streaming
 from .background_tasks import wait_for_background_tasks
 from .commands import (
