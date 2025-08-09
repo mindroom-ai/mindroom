@@ -169,8 +169,8 @@ async def test_streaming_edits_e2e(
                 elif entity_name == "router":
                     agent_user.user_id = "@mindroom_router:localhost"
 
-                # Create the actual bot
-                return AgentBot(agent_user, storage_path, rooms=[test_room_id])
+                # Create the actual bot with config
+                return AgentBot(agent_user, storage_path, config, rooms=[test_room_id])
 
             mock_create_bot.side_effect = create_bot_side_effect
             await orchestrator.initialize()

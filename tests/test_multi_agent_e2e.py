@@ -441,61 +441,6 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_invites_agents_to_room(tmp_path: Path) -> None:
-    """Test that the orchestrator can invite all agents to a room."""
-    test_room_id = "!test:example.org"
-
-    with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure:
-        mock_agents = {
-            "calculator": AgentMatrixUser(
-                agent_name="calculator",
-                user_id="@mindroom_calculator:localhost",
-                display_name="CalculatorAgent",
-                password="calc_pass",
-            ),
-            "general": AgentMatrixUser(
-                agent_name="general",
-                user_id="@mindroom_general:localhost",
-                display_name="GeneralAgent",
-                password="gen_pass",
-            ),
-        }
-        mock_ensure.return_value = mock_agents
-
-        # Mock the config loading
-        with patch("mindroom.bot.load_config") as mock_load_config:
-            mock_config = MagicMock()
-            mock_config.agents = {
-                "calculator": MagicMock(display_name="CalculatorAgent", rooms=["room1"]),
-                "general": MagicMock(display_name="GeneralAgent", rooms=["room1"]),
-            }
-            mock_config.teams = {}
-            mock_load_config.return_value = mock_config
-
-            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-            await orchestrator.initialize()
-
-            # Set proper user_ids for the bots after initialization
-            orchestrator.agent_bots["calculator"].agent_user.user_id = "@mindroom_calculator:localhost"
-            orchestrator.agent_bots["general"].agent_user.user_id = "@mindroom_general:localhost"
-            orchestrator.agent_bots["router"].agent_user.user_id = "@mindroom_router:localhost"
-
-            # Test inviting agents
-            mock_inviter_client = AsyncMock()
-            await orchestrator.invite_agents_to_room(test_room_id, mock_inviter_client)
-
-            # Verify invites (2 agents + 1 router)
-            assert mock_inviter_client.room_invite.call_count == 3
-            invite_calls = mock_inviter_client.room_invite.call_args_list
-            invited_users = {call[0][1] for call in invite_calls}
-            assert invited_users == {
-                "@mindroom_calculator:localhost",
-                "@mindroom_general:localhost",
-                "@mindroom_router:localhost",
-            }
-
-
-@pytest.mark.asyncio
 async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser, tmp_path: Path) -> None:
     """Test that agents properly handle room invitations."""
     initial_room = "!initial:example.org"

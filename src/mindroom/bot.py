@@ -186,44 +186,6 @@ class AgentBot:
         config = self.config if self.config else load_config()
         await ensure_all_rooms_exist(self.client, config)
 
-    async def ensure_room_invitations(self) -> None:
-        """Ensure all configured agents are invited to their rooms.
-
-        This is called by the router to handle dynamic config changes where
-        agents are added to existing rooms.
-        """
-        assert self.client is not None
-        config = self.config if self.config else load_config()
-
-        # Get all rooms we (router) are in
-        joined_rooms = await get_joined_rooms(self.client)
-        if not joined_rooms:
-            return
-
-        server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
-
-        for room_id in joined_rooms:
-            # Get who should be in this room
-            configured_bots = config.get_configured_bots_for_room(room_id)
-
-            if not configured_bots:
-                continue
-
-            # Get current members
-            current_members = await get_room_members(self.client, room_id)
-
-            # Invite missing bots
-            for bot_username in configured_bots:
-                bot_user_id = f"@{bot_username}:{server_name}"
-
-                if bot_user_id not in current_members:
-                    # Bot should be in room but isn't - invite them
-                    success = await invite_to_room(self.client, room_id, bot_user_id)
-                    if success:
-                        self.logger.info(f"Invited {bot_username} to room {room_id}")
-                    else:
-                        self.logger.warning(f"Failed to invite {bot_username} to room {room_id}")
-
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
@@ -309,9 +271,6 @@ class AgentBot:
         if self.agent_name == ROUTER_AGENT_NAME:
             # Ensure all configured rooms exist
             await self.ensure_rooms_exist()
-
-            # Note: Room invitations are handled at the orchestrator level
-            # after all bots have started, to ensure consistency
 
             # Clean up any orphaned bots (best effort - don't fail initialization)
             try:
@@ -1185,36 +1144,56 @@ class MultiAgentOrchestrator:
         logger.info("All agent bots stopped")
 
     async def _ensure_room_invitations(self) -> None:
-        """Centralized method to ensure all agents are invited to their configured rooms.
+        """Ensure all agents are invited to their configured rooms.
 
-        This is called from the orchestrator level after bots are started or config is updated,
-        ensuring it's only called in one place and the router is always available.
+        This uses the router bot's client to manage room invitations,
+        as the router has admin privileges in all rooms.
         """
         if ROUTER_AGENT_NAME not in self.agent_bots:
             logger.warning("Router not available, cannot ensure room invitations")
             return
 
         router_bot = self.agent_bots[ROUTER_AGENT_NAME]
-        if not hasattr(router_bot, "client") or not router_bot.client:
+        if router_bot.client is None:
             logger.warning("Router client not available, cannot ensure room invitations")
             return
 
-        await router_bot.ensure_room_invitations()
+        # Get the current configuration
+        config = self.current_config
+        if not config:
+            logger.warning("No configuration available, cannot ensure room invitations")
+            return
+
+        # Get all rooms the router is in
+        joined_rooms = await get_joined_rooms(router_bot.client)
+        if not joined_rooms:
+            return
+
+        server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+
+        for room_id in joined_rooms:
+            # Get who should be in this room based on configuration
+            configured_bots = config.get_configured_bots_for_room(room_id)
+
+            if not configured_bots:
+                continue
+
+            # Get current members of the room
+            current_members = await get_room_members(router_bot.client, room_id)
+
+            # Invite missing bots
+            for bot_username in configured_bots:
+                bot_user_id = f"@{bot_username}:{server_name}"
+
+                if bot_user_id not in current_members:
+                    # Bot should be in room but isn't - invite them
+                    success = await invite_to_room(router_bot.client, room_id, bot_user_id)
+                    if success:
+                        logger.info(f"Invited {bot_username} to room {room_id}")
+                    else:
+                        logger.warning(f"Failed to invite {bot_username} to room {room_id}")
+
         logger.info("Ensured room invitations for all configured agents")
-
-    async def invite_agents_to_room(self, room_id: str, inviter_client: nio.AsyncClient) -> None:
-        """Invite all agent users to a room.
-
-        Args:
-            room_id: The room to invite agents to
-            inviter_client: An authenticated client with invite permissions
-        """
-        for agent_name, bot in self.agent_bots.items():
-            success = await invite_to_room(inviter_client, room_id, bot.agent_user.user_id)
-            if success:
-                logger.info("Invited agent", agent=agent_name, room_id=room_id)
-            else:
-                logger.error("Failed to invite agent", agent=agent_name, user_id=bot.agent_user.user_id)
 
 
 async def _identify_entities_to_restart_simplified(
