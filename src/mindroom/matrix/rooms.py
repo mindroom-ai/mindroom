@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from ..logging_config import get_logger
-from .client import create_room
+from .client import create_room, invite_to_room, join_room, matrix_client
 from .identity import extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
 
@@ -119,8 +119,6 @@ async def ensure_room_exists(
             logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
 
         # Try to join the room
-        from .client import join_room
-
         if await join_room(client, room_id):
             return str(room_id)
         else:
@@ -199,23 +197,38 @@ async def ensure_all_rooms_exist(
         if room_id:
             room_ids[room_key] = room_id
 
-    # Invite the user account to all rooms
-    from .client import invite_to_room
-    from .identity import extract_server_name_from_homeserver
-    from .state import MatrixState
-
+    # Ensure user account is in all rooms
     state = MatrixState.load()
     user_account = state.get_account("user")
     if user_account:
         server_name = extract_server_name_from_homeserver(client.homeserver)
         user_id = f"@{user_account.username}:{server_name}"
 
-        for room_key, room_id in room_ids.items():
-            # Invite user to room
-            success = await invite_to_room(client, room_id, user_id)
-            if success:
-                logger.info(f"Invited user {user_id} to room {room_key}")
+        # Create a client for the user to join rooms
+        async with matrix_client(client.homeserver, user_id) as user_client:
+            # Login as the user
+            login_response = await user_client.login(password=user_account.password)
+            if isinstance(login_response, nio.LoginResponse):
+                logger.info(f"User {user_id} logged in to join rooms")
+
+                for room_key, room_id in room_ids.items():
+                    # First invite the user (router has power to invite)
+                    invite_success = await invite_to_room(client, room_id, user_id)
+                    if invite_success:
+                        logger.debug(f"Invited user {user_id} to room {room_key}")
+
+                        # Then have the user join the room
+                        join_success = await join_room(user_client, room_id)
+                        if join_success:
+                            logger.info(f"User {user_id} joined room {room_key}")
+                        else:
+                            logger.warning(f"User {user_id} failed to join room {room_key}")
+                    else:
+                        # User might already be in the room, try joining anyway
+                        join_success = await join_room(user_client, room_id)
+                        if join_success:
+                            logger.debug(f"User {user_id} already in room {room_key}")
             else:
-                logger.warning(f"Failed to invite user {user_id} to room {room_key}")
+                logger.error(f"Failed to login as user {user_id}: {login_response}")
 
     return room_ids
