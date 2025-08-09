@@ -1171,7 +1171,9 @@ class MultiAgentOrchestrator:
         # After rooms exist, update each bot's room list to use room IDs instead of aliases
         assert self.current_config is not None
         for bot in bots:
-            bot.rooms = self._get_resolved_rooms_for_bot(bot)
+            # Get the room aliases for this entity from config and resolve to IDs
+            room_aliases = get_rooms_for_entity(bot.agent_name, self.current_config)
+            bot.rooms = resolve_room_aliases(room_aliases)
 
         # After rooms exist, ensure room invitations are up to date
         await self._ensure_room_invitations()
@@ -1208,23 +1210,6 @@ class MultiAgentOrchestrator:
 
         # Store room IDs for later use
         self._created_room_ids = room_ids
-
-    def _get_resolved_rooms_for_bot(self, bot: AgentBot | TeamBot) -> list[str]:
-        """Get the resolved room IDs for a bot based on its configuration.
-
-        Args:
-            bot: The bot to get rooms for
-
-        Returns:
-            List of room IDs (aliases resolved to IDs)
-        """
-        assert self.current_config is not None
-
-        # Get the room aliases for this entity from config
-        room_aliases = get_rooms_for_entity(bot.agent_name, self.current_config)
-
-        # Resolve aliases to IDs
-        return resolve_room_aliases(room_aliases)
 
     async def _ensure_room_invitations(self) -> None:
         """Ensure all agents and the user are invited to their configured rooms.
