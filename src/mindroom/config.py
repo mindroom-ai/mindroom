@@ -189,23 +189,17 @@ class Config(BaseModel):
         return configured_bots
 
     def save_to_yaml(self, config_path: Path | None = None) -> None:
-        """Save the config to a YAML file, excluding None values and empty lists.
+        """Save the config to a YAML file, excluding None values.
 
         Args:
             config_path: Path to save the config to. If None, uses DEFAULT_AGENTS_CONFIG.
         """
         path = config_path or DEFAULT_AGENTS_CONFIG
+
+        # Convert to dict excluding None values
         config_dict = self.model_dump(exclude_none=True)
 
-        def remove_empty_lists(obj: Any) -> Any:
-            if isinstance(obj, dict):
-                return {k: remove_empty_lists(v) for k, v in obj.items() if v != []}
-            elif isinstance(obj, list):
-                return [remove_empty_lists(item) for item in obj]
-            else:
-                return obj
-
-        config_dict = remove_empty_lists(config_dict)
+        # Save to YAML with sorted keys
         with open(path, "w") as f:
             yaml.dump(config_dict, f, default_flow_style=False, sort_keys=True)
 
