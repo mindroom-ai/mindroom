@@ -14,7 +14,7 @@ import nio
 from watchfiles import awatch
 
 from . import interactive
-from .agent_config import ROUTER_AGENT_NAME, create_agent, get_rooms_for_entity, load_config
+from .agent_config import create_agent, get_rooms_for_entity, load_config
 from .ai import ai_response, ai_response_streaming
 from .background_tasks import wait_for_background_tasks
 from .commands import (
@@ -26,6 +26,7 @@ from .commands import (
     handle_list_invites_command,
     handle_widget_command,
 )
+from .constants import ROUTER_AGENT_NAME
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import MATRIX_HOMESERVER
 from .matrix.client import (

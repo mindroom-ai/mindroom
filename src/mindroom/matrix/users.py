@@ -5,7 +5,8 @@ from dataclasses import dataclass
 
 import nio
 
-from ..agent_config import ROUTER_AGENT_NAME, load_config
+from ..agent_config import load_config
+from ..constants import ROUTER_AGENT_NAME
 from ..logging_config import get_logger
 from .identity import MatrixID, extract_server_name_from_homeserver, parse_matrix_id
 from .state import MatrixState

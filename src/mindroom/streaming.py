@@ -7,7 +7,7 @@ import nio
 
 from . import interactive
 from .logging_config import get_logger
-from .matrix.client import edit_message
+from .matrix.client import edit_message, send_message
 from .matrix.mentions import create_mention_content_from_text
 
 logger = get_logger(__name__)
@@ -69,8 +69,6 @@ class StreamingResponse:
         if self.event_id is None:
             # First message - send new
             logger.debug("Sending initial streaming message")
-            from mindroom.matrix.client import send_message
-
             response_event_id = await send_message(client, self.room_id, content)
             if response_event_id:
                 self.event_id = response_event_id
