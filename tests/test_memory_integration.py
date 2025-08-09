@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.agent_config import load_config
 from mindroom.ai import ai_response
 from mindroom.background_tasks import wait_for_background_tasks
 
@@ -32,8 +33,13 @@ class TestMemoryIntegration:
             mock_build.side_effect = build_side_effect
             yield mock_build, mock_store
 
+    @pytest.fixture
+    def config(self):
+        """Load config for testing."""
+        return load_config()
+
     @pytest.mark.asyncio
-    async def test_ai_response_with_memory(self, mock_agent_run, mock_memory_functions, tmp_path):
+    async def test_ai_response_with_memory(self, mock_agent_run, mock_memory_functions, tmp_path, config):
         """Test that AI response uses memory enhancement."""
         mock_build, mock_store = mock_memory_functions
 
@@ -46,6 +52,7 @@ class TestMemoryIntegration:
                 prompt="What is 2+2?",
                 session_id="test_session",
                 storage_path=tmp_path,
+                config=config,
                 room_id="!test:room",
             )
 
@@ -53,7 +60,7 @@ class TestMemoryIntegration:
             assert response == "Test response"
 
             # Verify memory enhancement was applied
-            mock_build.assert_called_once_with("What is 2+2?", "calculator", tmp_path, "!test:room")
+            mock_build.assert_called_once_with("What is 2+2?", "calculator", tmp_path, config, "!test:room")
 
             # Verify enhanced prompt was used
             mock_agent_run.assert_called_once()
@@ -63,10 +70,12 @@ class TestMemoryIntegration:
             await wait_for_background_tasks(timeout=1.0)
 
             # Verify conversation was stored
-            mock_store.assert_called_once_with("What is 2+2?", "calculator", tmp_path, "test_session", "!test:room")
+            mock_store.assert_called_once_with(
+                "What is 2+2?", "calculator", tmp_path, "test_session", config, "!test:room"
+            )
 
     @pytest.mark.asyncio
-    async def test_ai_response_without_room_id(self, mock_agent_run, mock_memory_functions, tmp_path):
+    async def test_ai_response_without_room_id(self, mock_agent_run, mock_memory_functions, tmp_path, config):
         """Test AI response without room context."""
         mock_build, mock_store = mock_memory_functions
 
@@ -75,19 +84,24 @@ class TestMemoryIntegration:
             patch("mindroom.ai.get_model_instance", return_value=MagicMock()),
         ):
             await ai_response(
-                agent_name="general", prompt="Hello", session_id="test_session", storage_path=tmp_path, room_id=None
+                agent_name="general",
+                prompt="Hello",
+                session_id="test_session",
+                storage_path=tmp_path,
+                config=config,
+                room_id=None,
             )
 
             # Verify memory enhancement without room_id
-            mock_build.assert_called_once_with("Hello", "general", tmp_path, None)
+            mock_build.assert_called_once_with("Hello", "general", tmp_path, config, None)
 
             await wait_for_background_tasks(timeout=1.0)
 
             # Verify storage without room_id
-            mock_store.assert_called_once_with("Hello", "general", tmp_path, "test_session", None)
+            mock_store.assert_called_once_with("Hello", "general", tmp_path, "test_session", config, None)
 
     @pytest.mark.asyncio
-    async def test_ai_response_error_handling(self, tmp_path):
+    async def test_ai_response_error_handling(self, tmp_path, config):
         """Test error handling in AI response."""
         # Mock memory to prevent real memory instance creation during error handling
         mock_memory = AsyncMock()
@@ -98,7 +112,7 @@ class TestMemoryIntegration:
             patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
         ):
             response = await ai_response(
-                agent_name="general", prompt="Test", session_id="session", storage_path=tmp_path
+                agent_name="general", prompt="Test", session_id="session", storage_path=tmp_path, config=config
             )
 
             # Should return error message
@@ -106,7 +120,7 @@ class TestMemoryIntegration:
             assert "Model error" in response
 
     @pytest.mark.asyncio
-    async def test_memory_persistence_across_calls(self, tmp_path):
+    async def test_memory_persistence_across_calls(self, tmp_path, config):
         """Test that memory persists across multiple AI calls."""
         # This is more of a documentation test showing expected behavior
         mock_memory = AsyncMock()
@@ -122,7 +136,11 @@ class TestMemoryIntegration:
         ):
             # First interaction
             await ai_response(
-                agent_name="general", prompt="Remember this: A=1", session_id="session1", storage_path=tmp_path
+                agent_name="general",
+                prompt="Remember this: A=1",
+                session_id="session1",
+                storage_path=tmp_path,
+                config=config,
             )
 
             await wait_for_background_tasks(timeout=1.0)
@@ -138,7 +156,9 @@ class TestMemoryIntegration:
             # Second call - should find previous memory (only user prompt stored)
             mock_memory.search.return_value = {"results": [{"memory": "Remember this: A=1", "id": "1"}]}
 
-            await ai_response(agent_name="general", prompt="What is A?", session_id="session2", storage_path=tmp_path)
+            await ai_response(
+                agent_name="general", prompt="What is A?", session_id="session2", storage_path=tmp_path, config=config
+            )
 
             # Memory search should have been called
             mock_memory.search.assert_called_with("What is A?", user_id="agent_general", limit=3)

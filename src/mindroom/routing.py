@@ -1,14 +1,17 @@
 """Simple AI routing for multi-agent threads."""
 
+from __future__ import annotations
+
 from typing import Any
 
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from .agent_config import describe_agent, load_config
+from .agent_config import describe_agent
 from .ai import get_model_instance
 from .logging_config import get_logger
 from .matrix.identity import MatrixID
+from .models import Config
 
 logger = get_logger(__name__)
 
@@ -23,6 +26,7 @@ class AgentSuggestion(BaseModel):
 async def suggest_agent_for_message(
     message: str,
     available_agents: list[str],
+    config: Config,
     thread_context: list[dict[str, Any]] | None = None,
     thread_id: str | None = None,
     room_id: str | None = None,
@@ -40,7 +44,7 @@ async def suggest_agent_for_message(
         # Build agent descriptions
         agent_descriptions = []
         for agent_name in all_agents:
-            description = describe_agent(agent_name)
+            description = describe_agent(agent_name, config)
             agent_descriptions.append(f"{agent_name}:\n  {description}")
 
         agents_info = "\n\n".join(agent_descriptions)
@@ -69,10 +73,9 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             prompt = context + "\n" + prompt
 
         # Get router model from config
-        config = load_config()
         router_model_name = config.router.model
 
-        model = get_model_instance(router_model_name)
+        model = get_model_instance(config, router_model_name)
         logger.info(f"Using router model: {router_model_name} -> {model.__class__.__name__}(id={model.id})")
 
         agent = Agent(

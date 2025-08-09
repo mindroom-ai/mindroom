@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config, RouterConfig
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
@@ -56,8 +57,14 @@ class TestRoutingIntegration:
         )
 
         # Set up bots
-        research_bot = AgentBot(research_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True)
-        news_bot = AgentBot(news_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True)
+        config = Config(router=RouterConfig(model="default"))
+
+        research_bot = AgentBot(
+            research_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True, config=config
+        )
+        config = Config(router=RouterConfig(model="default"))
+
+        news_bot = AgentBot(news_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True, config=config)
 
         # Mock clients
         for bot in [research_bot, news_bot]:

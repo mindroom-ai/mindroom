@@ -4,6 +4,8 @@ This module provides a centralized registry for all tools that can be used by ag
 Tools are registered by string name and can be instantiated dynamically when loading agents.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from typing import Any
 

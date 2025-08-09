@@ -14,6 +14,7 @@ import pytest_asyncio
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config, RouterConfig
 
 
 class TestThreadingBehavior:
@@ -29,11 +30,14 @@ class TestThreadingBehavior:
             agent_name="general",
         )
 
+        config = Config(router=RouterConfig(model="default"))
+
         bot = AgentBot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
             enable_streaming=False,  # Disable streaming for simpler testing
+            config=config,
         )
 
         # Mock the orchestrator
@@ -203,11 +207,14 @@ class TestThreadingBehavior:
             agent_name="router",
         )
 
+        config = Config(router=RouterConfig(model="default"))
+
         bot = AgentBot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
             enable_streaming=False,
+            config=config,
         )
 
         # Mock the orchestrator
@@ -288,13 +295,15 @@ class TestThreadingBehavior:
             agent_name="router",
         )
 
+        config = Config(router=RouterConfig(model="default"))
+
         bot = AgentBot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
             enable_streaming=False,
+            config=config,
         )
-
         # Mock the orchestrator
         bot.orchestrator = MagicMock()
 

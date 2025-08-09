@@ -8,6 +8,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config, RouterConfig
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
@@ -16,7 +17,9 @@ def setup_test_bot(
     agent: AgentMatrixUser, storage_path: Path, room_id: str, enable_streaming: bool = False
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
-    bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming)
+    config = Config(router=RouterConfig(model="default"))
+
+    bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()
     bot.response_tracker = ResponseTracker(bot.agent_name, base_path=storage_path)
     bot.thread_invite_manager = ThreadInviteManager(bot.client)

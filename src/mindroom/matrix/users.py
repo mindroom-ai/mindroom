@@ -5,9 +5,9 @@ from dataclasses import dataclass
 
 import nio
 
-from ..agent_config import load_config
 from ..constants import ROUTER_AGENT_NAME
 from ..logging_config import get_logger
+from ..models import Config
 from .identity import MatrixID, extract_server_name_from_homeserver, parse_matrix_id
 from .state import MatrixState
 
@@ -144,7 +144,7 @@ async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.
     return client
 
 
-async def ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
+async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, AgentMatrixUser]:
     """Ensure all configured agents and teams have Matrix user accounts.
 
     This includes user-configured agents, teams, and the built-in router agent.
@@ -168,8 +168,6 @@ async def ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
         logger.info(f"Ensured Matrix user for built-in router agent: {router_user.user_id}")
     except Exception as e:
         logger.error(f"Failed to create Matrix user for built-in router agent: {e}")
-
-    config = load_config()
 
     # Create user-configured agents
     for agent_name, agent_config in config.agents.items():

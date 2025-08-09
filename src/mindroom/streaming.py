@@ -1,5 +1,7 @@
 """Streaming response implementation for real-time message updates."""
 
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass
 
@@ -9,6 +11,7 @@ from . import interactive
 from .logging_config import get_logger
 from .matrix.client import edit_message, send_message
 from .matrix.mentions import create_mention_content_from_text
+from .models import Config
 
 logger = get_logger(__name__)
 
@@ -24,6 +27,7 @@ class StreamingResponse:
     reply_to_event_id: str
     thread_id: str | None
     sender_domain: str
+    config: Config
     accumulated_text: str = ""
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
@@ -60,7 +64,8 @@ class StreamingResponse:
         display_text = response.formatted_text
 
         content = create_mention_content_from_text(
-            display_text,
+            config=self.config,
+            text=display_text,
             sender_domain=self.sender_domain,
             thread_event_id=effective_thread_id,
             reply_to_event_id=self.reply_to_event_id,

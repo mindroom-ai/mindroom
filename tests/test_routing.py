@@ -5,9 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.agent_config import describe_agent
+from mindroom.agent_config import describe_agent, load_config
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config, RouterConfig
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import extract_agent_name, has_any_agent_mentions_in_thread
 
@@ -18,6 +19,8 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_for_message_basic(self) -> None:
         """Test basic agent suggestion functionality."""
+        config = Config(router=RouterConfig(model="default"))
+
         with patch("mindroom.routing.get_model_instance"):
             # Mock the Agent and response
             mock_agent = AsyncMock()
@@ -28,7 +31,7 @@ class TestAIRouting:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
-                result = await suggest_agent_for_message("What is 2 + 2?", ["calculator", "general"], None)
+                result = await suggest_agent_for_message("What is 2 + 2?", ["calculator", "general"], config)
 
                 assert result == "calculator"
                 assert "calculator" in mock_agent.arun.call_args[0][0]
@@ -37,6 +40,7 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_with_thread_context(self) -> None:
         """Test agent suggestion with thread history."""
+        config = Config(router=RouterConfig(model="default"))
         thread_context = [
             {"sender": "@user:localhost", "body": "I need help with my taxes"},
             {"sender": "@mindroom_finance:localhost", "body": "I can help with that"},
@@ -50,7 +54,7 @@ class TestAIRouting:
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
                 result = await suggest_agent_for_message(
-                    "How do I calculate deductions?", ["calculator", "finance", "general"], thread_context
+                    "How do I calculate deductions?", ["calculator", "finance", "general"], config, thread_context
                 )
 
                 assert result == "finance"
@@ -62,6 +66,8 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_unavailable_raises_assertion(self) -> None:
         """Test that suggesting unavailable agent raises assertion error."""
+        config = Config(router=RouterConfig(model="default"))
+
         with patch("mindroom.routing.get_model_instance"):
             mock_agent = AsyncMock()
             mock_response = MagicMock()
@@ -79,16 +85,18 @@ class TestAIRouting:
                 await suggest_agent_for_message(
                     "How do I write a Python function?",
                     ["calculator", "general"],  # code not available
-                    None,
+                    config,
                 )
 
     @pytest.mark.asyncio
     async def test_suggest_agent_error_handling(self) -> None:
         """Test error handling in agent suggestion."""
+        config = Config(router=RouterConfig(model="default"))
+
         with patch("mindroom.routing.get_model_instance") as mock_model:
             mock_model.side_effect = ValueError("Model error")
 
-            result = await suggest_agent_for_message("Test message", ["general"], None)
+            result = await suggest_agent_for_message("Test message", ["general"], config)
 
             assert result is None
 
@@ -104,7 +112,9 @@ class TestAIRouting:
             access_token="token",
         )
 
-        bot = AgentBot(agent, Path("/tmp"))
+        config = Config(router=RouterConfig(model="default"))
+
+        bot = AgentBot(agent, Path("/tmp"), config=config)
 
         mock_room = MagicMock()
         mock_room.users = MagicMock()
@@ -191,7 +201,8 @@ class TestAgentDescription:
 
     def test_describe_agent_with_tools(self) -> None:
         """Test describing an agent with tools."""
-        description = describe_agent("calculator")
+        config = load_config()
+        description = describe_agent("calculator", config)
 
         assert "calculator" in description
         assert "Solve mathematical problems" in description
@@ -200,7 +211,8 @@ class TestAgentDescription:
 
     def test_describe_agent_without_tools(self) -> None:
         """Test describing an agent without tools."""
-        description = describe_agent("general")
+        config = load_config()
+        description = describe_agent("general", config)
 
         assert "general" in description
         assert "general-purpose assistant" in description
@@ -209,6 +221,7 @@ class TestAgentDescription:
 
     def test_describe_unknown_agent(self) -> None:
         """Test describing an unknown agent."""
-        description = describe_agent("nonexistent")
+        config = load_config()
+        description = describe_agent("nonexistent", config)
 
         assert description == "nonexistent: Unknown agent or team"

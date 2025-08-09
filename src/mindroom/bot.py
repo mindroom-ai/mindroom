@@ -147,7 +147,7 @@ class AgentBot:
 
     agent_user: AgentMatrixUser
     storage_path: Path
-    config: Config | None = None  # Optional for backward compatibility
+    config: Config
     rooms: list[str] = field(default_factory=list)
 
     client: nio.AsyncClient | None = field(default=None, init=False)
@@ -176,7 +176,7 @@ class AgentBot:
     @cached_property
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        return create_agent(agent_name=self.agent_name, storage_path=self.storage_path / "agents")
+        return create_agent(agent_name=self.agent_name, storage_path=self.storage_path / "agents", config=self.config)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -259,7 +259,7 @@ class AgentBot:
         # Router bot has additional responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
             try:
-                await cleanup_all_orphaned_bots(self.client)
+                await cleanup_all_orphaned_bots(self.client, self.config)
             except Exception as e:
                 self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
 
@@ -388,12 +388,14 @@ class AgentBot:
                 return
 
             # Create and execute team response
+            model_name = get_team_model(self.agent_name, room.room_id, self.config)
             team_response = await create_team_response(
                 agent_names=form_team.agents,
                 mode=form_team.mode,
                 message=event.body,
                 orchestrator=self.orchestrator,
                 thread_history=context.thread_history,
+                model_name=model_name,
             )
             await self._send_response(room, event.event_id, team_response, context.thread_id)
             # Mark as responded after team response
@@ -525,6 +527,7 @@ class AgentBot:
             prompt=prompt,
             session_id=session_id,
             storage_path=self.storage_path,
+            config=self.config,
             thread_history=thread_history,
             room_id=room.room_id,
         )
@@ -564,6 +567,7 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
             sender_domain=sender_id.domain,
+            config=self.config,
         )
 
         # If we're editing an existing message, set the event_id
@@ -577,6 +581,7 @@ class AgentBot:
                 prompt=prompt,
                 session_id=session_id,
                 storage_path=self.storage_path,
+                config=self.config,
                 thread_history=thread_history,
                 room_id=room.room_id,
             ):
@@ -665,6 +670,7 @@ class AgentBot:
         effective_thread_id = thread_id or get_safe_thread_root(reply_to_event) or reply_to_event_id
 
         content = create_mention_content_from_text(
+            self.config,
             response_text,
             sender_domain=sender_domain,
             thread_event_id=effective_thread_id,
@@ -690,6 +696,7 @@ class AgentBot:
         sender_domain = sender_id.domain
 
         content = create_mention_content_from_text(
+            self.config,
             new_text,
             sender_domain=sender_domain,
             thread_event_id=thread_id,
@@ -722,6 +729,7 @@ class AgentBot:
         suggested_agent = await suggest_agent_for_message(
             event.body,
             available_agents,
+            self.config,
             thread_history,
             thread_event_id,
             room.room_id,
@@ -740,6 +748,7 @@ class AgentBot:
             thread_event_id = event.event_id
 
         content = create_mention_content_from_text(
+            self.config,
             response_text,
             sender_domain=sender_domain,
             thread_event_id=thread_event_id,
@@ -788,6 +797,7 @@ class AgentBot:
                 agent_domain=agent_domain,
                 client=self.client,
                 thread_invite_manager=self.thread_invite_manager,
+                config=self.config,
             )
 
         elif command.type == CommandType.UNINVITE:
@@ -820,6 +830,7 @@ class AgentBot:
                 agent_user_id=self.agent_user.user_id,
                 scheduled_by=event.sender,
                 full_text=full_text,
+                config=self.config,
             )
 
         elif command.type == CommandType.LIST_SCHEDULES:
@@ -932,7 +943,7 @@ class TeamBot(AgentBot):
             return
 
         # Get the appropriate model for this team and room
-        model_name = get_team_model(self.agent_name, room_id)
+        model_name = get_team_model(self.agent_name, room_id, self.config)
 
         # Convert team_mode string to TeamMode enum
         mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE

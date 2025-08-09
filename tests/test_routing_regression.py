@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.agent_config import load_config
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
@@ -21,7 +22,9 @@ def setup_test_bot(
     agent: AgentMatrixUser, storage_path: Path, room_id: str, enable_streaming: bool = False
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
-    bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming)
+    config = load_config()
+
+    bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()
     bot.response_tracker = ResponseTracker(bot.agent_name, base_path=storage_path)
     bot.thread_invite_manager = ThreadInviteManager(bot.client)
@@ -218,6 +221,7 @@ class TestRoutingRegression:
         mock_agent_bot = MagicMock()
         mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"research": mock_agent_bot, "news": mock_agent_bot}
+        mock_orchestrator.current_config = research_bot.config
         research_bot.orchestrator = mock_orchestrator
 
         news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)

@@ -1,124 +1,130 @@
 """Tests for memory configuration."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from mindroom.memory.config import get_memory_config
+from mindroom.models import (
+    Config,
+    EmbedderConfig,
+    MemoryConfig,
+    MemoryEmbedderConfig,
+    MemoryLLMConfig,
+    RouterConfig,
+)
 
 
 class TestMemoryConfig:
     """Test memory configuration."""
 
-    @patch("mindroom.memory.config.load_config")
-    def test_get_memory_config_with_ollama(self, mock_load_config):
+    def test_get_memory_config_with_ollama(self):
         """Test memory config creation with Ollama embedder."""
-        # Mock config with Ollama embedder
-        mock_config = MagicMock()
-        mock_config.memory.embedder.provider = "ollama"
-        mock_config.memory.embedder.config.model = "nomic-embed-text"
-        mock_config.memory.embedder.config.host = "http://localhost:11434"
-
-        # Mock memory LLM config
-        mock_config.memory.llm.provider = "ollama"
-        mock_config.memory.llm.config = {
-            "model": "llama3.2",
-            "host": "http://localhost:11434",
-            "temperature": 0.1,
-            "top_p": 1,
-        }
-
-        mock_load_config.return_value = mock_config
+        # Create config with Ollama embedder
+        embedder_config = MemoryEmbedderConfig(
+            provider="ollama",
+            config=EmbedderConfig(
+                model="nomic-embed-text",
+                host="http://localhost:11434",
+            ),
+        )
+        llm_config = MemoryLLMConfig(
+            provider="ollama",
+            config={
+                "model": "llama3.2",
+                "host": "http://localhost:11434",
+                "temperature": 0.1,
+                "top_p": 1,
+            },
+        )
+        memory = MemoryConfig(embedder=embedder_config, llm=llm_config)
+        config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Test config generation
         storage_path = Path("/tmp/test_memory")
-        config = get_memory_config(storage_path)
+        result = get_memory_config(storage_path, config)
 
         # Verify embedder config
-        assert config["embedder"]["provider"] == "ollama"
-        assert config["embedder"]["config"]["model"] == "nomic-embed-text"
-        assert config["embedder"]["config"]["ollama_base_url"] == "http://localhost:11434"
+        assert result["embedder"]["provider"] == "ollama"
+        assert result["embedder"]["config"]["model"] == "nomic-embed-text"
+        assert result["embedder"]["config"]["ollama_base_url"] == "http://localhost:11434"
 
         # Verify LLM config
-        assert config["llm"]["provider"] == "ollama"
-        assert config["llm"]["config"]["model"] == "llama3.2"
-        assert config["llm"]["config"]["ollama_base_url"] == "http://localhost:11434"
+        assert result["llm"]["provider"] == "ollama"
+        assert result["llm"]["config"]["model"] == "llama3.2"
+        assert result["llm"]["config"]["ollama_base_url"] == "http://localhost:11434"
 
         # Verify vector store config
-        assert config["vector_store"]["provider"] == "chroma"
-        assert config["vector_store"]["config"]["collection_name"] == "mindroom_memories"
-        assert str(storage_path / "chroma") in config["vector_store"]["config"]["path"]
+        assert result["vector_store"]["provider"] == "chroma"
+        assert result["vector_store"]["config"]["collection_name"] == "mindroom_memories"
+        assert str(storage_path / "chroma") in result["vector_store"]["config"]["path"]
 
-    @patch("mindroom.memory.config.load_config")
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
-    def test_get_memory_config_with_openai(self, mock_load_config):
+    def test_get_memory_config_with_openai(self):
         """Test memory config creation with OpenAI embedder."""
-        # Mock config with OpenAI embedder
-        mock_config = MagicMock()
-        mock_config.memory.embedder.provider = "openai"
-        mock_config.memory.embedder.config.model = "text-embedding-ada-002"
-
-        # Mock memory LLM config
-        mock_config.memory.llm.provider = "openai"
-        mock_config.memory.llm.config = {"model": "gpt-4", "temperature": 0.1, "top_p": 1}
-
-        mock_load_config.return_value = mock_config
+        # Create config with OpenAI embedder
+        embedder_config = MemoryEmbedderConfig(
+            provider="openai",
+            config=EmbedderConfig(model="text-embedding-ada-002"),
+        )
+        llm_config = MemoryLLMConfig(
+            provider="openai",
+            config={"model": "gpt-4", "temperature": 0.1, "top_p": 1},
+        )
+        memory = MemoryConfig(embedder=embedder_config, llm=llm_config)
+        config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Test config generation
         storage_path = Path("/tmp/test_memory")
-        config = get_memory_config(storage_path)
+        result = get_memory_config(storage_path, config)
 
         # Verify embedder config
-        assert config["embedder"]["provider"] == "openai"
-        assert config["embedder"]["config"]["model"] == "text-embedding-ada-002"
-        assert config["embedder"]["config"]["api_key"] == "test-key"
+        assert result["embedder"]["provider"] == "openai"
+        assert result["embedder"]["config"]["model"] == "text-embedding-ada-002"
+        assert result["embedder"]["config"]["api_key"] == "test-key"
 
         # Verify LLM config
-        assert config["llm"]["provider"] == "openai"
-        assert config["llm"]["config"]["model"] == "gpt-4"
-        assert config["llm"]["config"]["api_key"] == "test-key"
+        assert result["llm"]["provider"] == "openai"
+        assert result["llm"]["config"]["model"] == "gpt-4"
+        assert result["llm"]["config"]["api_key"] == "test-key"
 
-    @patch("mindroom.memory.config.load_config")
     @patch.dict("os.environ", {}, clear=True)
-    def test_get_memory_config_no_model_fallback(self, mock_load_config):
+    def test_get_memory_config_no_model_fallback(self):
         """Test memory config falls back to Ollama when no model configured."""
-        # Mock config with no models
-        mock_config = MagicMock()
-        mock_config.memory.embedder.provider = "ollama"
-        mock_config.memory.embedder.config.model = "nomic-embed-text"
-        mock_config.memory.embedder.config.host = None
-
+        # Create config with no models
+        embedder_config = MemoryEmbedderConfig(
+            provider="ollama",
+            config=EmbedderConfig(model="nomic-embed-text", host=None),
+        )
         # No memory.llm configured - should trigger fallback
-        mock_config.memory.llm = None
-
-        mock_load_config.return_value = mock_config
+        memory = MemoryConfig(embedder=embedder_config, llm=None)
+        config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Test config generation
         storage_path = Path("/tmp/test_memory")
-        config = get_memory_config(storage_path)
+        result = get_memory_config(storage_path, config)
 
         # Verify LLM fallback config
-        assert config["llm"]["provider"] == "ollama"
-        assert config["llm"]["config"]["model"] == "llama3.2"
-        assert config["llm"]["config"]["ollama_base_url"] == "http://localhost:11434"
+        assert result["llm"]["provider"] == "ollama"
+        assert result["llm"]["config"]["model"] == "llama3.2"
+        assert result["llm"]["config"]["ollama_base_url"] == "http://localhost:11434"
 
     def test_chroma_directory_creation(self, tmp_path):
         """Test that ChromaDB directory is created."""
-        with patch("mindroom.memory.config.load_config") as mock_load_config:
-            # Mock minimal config
-            mock_config = MagicMock()
-            mock_config.memory.embedder.provider = "ollama"
-            mock_config.memory.embedder.config.model = "test"
-            mock_config.memory.embedder.config.host = None
-            mock_config.models.get.return_value = None
-            mock_load_config.return_value = mock_config
+        # Create minimal config
+        embedder_config = MemoryEmbedderConfig(
+            provider="ollama",
+            config=EmbedderConfig(model="test", host=None),
+        )
+        memory = MemoryConfig(embedder=embedder_config, llm=None)
+        config = Config(memory=memory, router=RouterConfig(model="default"))
 
-            # Get config
-            config = get_memory_config(tmp_path)
+        # Get config
+        result = get_memory_config(tmp_path, config)
 
-            # Verify chroma path in config
-            chroma_path = tmp_path / "chroma"
-            assert str(chroma_path) == config["vector_store"]["config"]["path"]
+        # Verify chroma path in config
+        chroma_path = tmp_path / "chroma"
+        assert str(chroma_path) == result["vector_store"]["config"]["path"]
 
-            # Verify directory was created
-            assert chroma_path.exists()
-            assert chroma_path.is_dir()
+        # Verify directory was created
+        assert chroma_path.exists()
+        assert chroma_path.is_dir()

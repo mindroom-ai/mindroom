@@ -12,7 +12,7 @@ import pytest
 
 from mindroom.bot import TeamBot
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.models import AgentConfig, Config, TeamConfig
+from mindroom.models import AgentConfig, Config, RouterConfig, TeamConfig
 
 
 @pytest.fixture
@@ -53,9 +53,11 @@ class TestTeamRoomMembership:
         )
 
         # Create the team bot with configured rooms
+        config = Config(router=RouterConfig(model="default"))
         bot = TeamBot(
             agent_user=team_user,
             storage_path=Path("/tmp/test"),
+            config=config,
             rooms=["!test_room:localhost"],
             team_agents=["agent1"],
             team_mode="round_robin",
@@ -101,9 +103,11 @@ class TestTeamRoomMembership:
         )
 
         # Create the team bot with no configured rooms
+        config = Config(router=RouterConfig(model="default"))
         bot = TeamBot(
             agent_user=team_user,
             storage_path=Path("/tmp/test"),
+            config=config,
             rooms=[],  # No configured rooms
             team_agents=["agent1"],
             team_mode="round_robin",

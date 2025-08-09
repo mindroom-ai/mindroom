@@ -1,5 +1,7 @@
 """Background task management for non-blocking operations."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Callable, Coroutine
 from typing import Any

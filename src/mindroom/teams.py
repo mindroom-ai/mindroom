@@ -11,11 +11,11 @@ from agno.run.response import RunResponse
 from agno.run.team import TeamRunResponse
 from agno.team import Team
 
-from .agent_config import load_config
 from .ai import get_model_instance
 from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
+from .models import Config
 
 if TYPE_CHECKING:
     from .bot import MultiAgentOrchestrator
@@ -182,7 +182,7 @@ def should_form_team(
     )
 
 
-def get_team_model(team_name: str, room_id: str) -> str:
+def get_team_model(team_name: str, room_id: str, config: Config) -> str:
     """Get the appropriate model for a team in a specific room.
 
     Priority:
@@ -193,11 +193,11 @@ def get_team_model(team_name: str, room_id: str) -> str:
     Args:
         team_name: Name of the team
         room_id: Matrix room ID
+        config: Application configuration
 
     Returns:
         Model name to use
     """
-    config = load_config()
 
     # Find room alias from room ID
     room_alias = get_room_alias_from_id(room_id)
@@ -260,7 +260,8 @@ async def create_team_response(
             prompt = f"Thread Context:\n{context}\n\nUser: {message}"
 
     # Use provided model or default
-    model = get_model_instance(model_name or "default")
+    assert orchestrator.current_config is not None
+    model = get_model_instance(orchestrator.current_config, model_name or "default")
 
     # Let Agno Team handle everything - it already knows how to describe members
     team = Team(

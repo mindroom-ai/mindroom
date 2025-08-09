@@ -8,12 +8,13 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config, RouterConfig
 
 
 @pytest.fixture
 def mock_agent_bot():
     """Create a mock agent bot for testing."""
-    from mindroom.models import Config
+    from mindroom.agent_config import load_config
 
     agent_user = AgentMatrixUser(
         agent_name="general",
@@ -22,7 +23,7 @@ def mock_agent_bot():
         password="mock_password",
         access_token="mock_token",
     )
-    config = Config()  # Empty config for testing
+    config = load_config()  # Load actual config for testing
     bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
     bot.thread_invite_manager = AsyncMock()
@@ -66,6 +67,7 @@ class TestBotScheduleCommands:
                 agent_user_id="@mindroom_general:localhost",
                 scheduled_by="@user:server",
                 full_text="in 5 minutes Check deployment",
+                config=mock_agent_bot.config,
             )
 
             # Verify response was sent
@@ -173,8 +175,6 @@ class TestBotTaskRestoration:
         import tempfile
         from pathlib import Path
 
-        from mindroom.models import Config
-
         agent_user = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -216,8 +216,6 @@ class TestBotTaskRestoration:
         """Test that no log is generated when no tasks are restored."""
         import tempfile
         from pathlib import Path
-
-        from mindroom.models import Config
 
         agent_user = AgentMatrixUser(
             agent_name="general",
@@ -267,7 +265,8 @@ class TestCommandHandling:
             access_token="mock_token",
         )
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        config = Config(router=RouterConfig(model="default"))
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
@@ -303,7 +302,8 @@ class TestCommandHandling:
             access_token="mock_token",
         )
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        config = Config(router=RouterConfig(model="default"))
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_command = AsyncMock()
@@ -341,7 +341,8 @@ class TestCommandHandling:
             access_token="mock_token",
         )
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        config = Config(router=RouterConfig(model="default"))
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
@@ -387,7 +388,8 @@ class TestCommandHandling:
             access_token="mock_token",
         )
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        config = Config(router=RouterConfig(model="default"))
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"  # Set the bot's user ID
         bot.logger = MagicMock()
@@ -506,7 +508,8 @@ class TestCommandHandling:
             access_token="mock_token",
         )
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        config = Config(router=RouterConfig(model="default"))
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_news:localhost"
         bot.logger = MagicMock()
@@ -604,7 +607,8 @@ class TestCommandHandling:
             access_token="mock_token",
         )
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        config = Config(router=RouterConfig(model="default"))
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_finance:localhost"
         bot.logger = MagicMock()
@@ -706,7 +710,8 @@ class TestCommandHandling:
             access_token="mock_token",
         )
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), rooms=["!test:server"])
+        config = Config(router=RouterConfig(model="default"))
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"
         bot.logger = MagicMock()

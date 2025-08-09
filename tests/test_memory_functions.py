@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mindroom.agent_config import load_config
 from mindroom.memory.functions import (
     MemoryResult,
     add_agent_memory,
@@ -31,23 +32,31 @@ class TestMemoryFunctions:
         """Create a temporary storage path."""
         return tmp_path
 
+    @pytest.fixture
+    def config(self):
+        """Load config for testing."""
+        return load_config()
+
     @pytest.mark.asyncio
-    async def test_memory_instance_creation(self, mock_memory, storage_path):
+    async def test_memory_instance_creation(self, mock_memory, storage_path, config):
         """Test that memory instances are created correctly."""
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
             # Test add_agent_memory creates instance
-            await add_agent_memory("Test content", "test_agent", storage_path)
-            mock_create.assert_called_with(storage_path)
+            await add_agent_memory("Test content", "test_agent", storage_path, config)
+            # The function now loads config internally, so we check the first arg
+            assert mock_create.call_args[0][0] == storage_path
 
             # Test search_agent_memories creates instance
-            await search_agent_memories("query", "test_agent", storage_path)
-            mock_create.assert_called_with(storage_path)
+            await search_agent_memories("query", "test_agent", storage_path, config)
+            assert mock_create.call_args[0][0] == storage_path
 
     @pytest.mark.asyncio
-    async def test_add_agent_memory(self, mock_memory, storage_path):
+    async def test_add_agent_memory(self, mock_memory, storage_path, config):
         """Test adding agent memory."""
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
-            await add_agent_memory("Test memory content", "test_agent", storage_path, metadata={"test": "value"})
+            await add_agent_memory(
+                "Test memory content", "test_agent", storage_path, config, metadata={"test": "value"}
+            )
 
             # Verify memory.add was called correctly
             mock_memory.add.assert_called_once()
@@ -63,16 +72,16 @@ class TestMemoryFunctions:
             assert call_args[1]["metadata"]["test"] == "value"
 
     @pytest.mark.asyncio
-    async def test_add_agent_memory_error_handling(self, mock_memory, storage_path):
+    async def test_add_agent_memory_error_handling(self, mock_memory, storage_path, config):
         """Test error handling in add_agent_memory."""
         mock_memory.add.side_effect = Exception("Memory error")
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             # Should not raise, just log error
-            await add_agent_memory("Test content", "test_agent", storage_path)
+            await add_agent_memory("Test content", "test_agent", storage_path, config)
 
     @pytest.mark.asyncio
-    async def test_search_agent_memories(self, mock_memory, storage_path):
+    async def test_search_agent_memories(self, mock_memory, storage_path, config):
         """Test searching agent memories."""
         # Mock search results
         mock_results = [
@@ -81,7 +90,7 @@ class TestMemoryFunctions:
         mock_memory.search.return_value = {"results": mock_results}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
-            results = await search_agent_memories("calculation", "calculator", storage_path, limit=5)
+            results = await search_agent_memories("calculation", "calculator", storage_path, config, limit=5)
 
             # Verify search was called correctly
             mock_memory.search.assert_called_once_with("calculation", user_id="agent_calculator", limit=5)
@@ -90,31 +99,36 @@ class TestMemoryFunctions:
             assert results == mock_results
 
     @pytest.mark.asyncio
-    async def test_search_agent_memories_handles_dict_response(self, mock_memory, storage_path):
+    async def test_search_agent_memories_handles_dict_response(self, mock_memory, storage_path, config):
         """Test that search handles dict response with 'results' key."""
         # This tests the bug we found where Mem0 returns dict not list
         mock_memory.search.return_value = {"results": [{"memory": "test"}]}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
-            results = await search_agent_memories("query", "agent", storage_path)
+            results = await search_agent_memories("query", "agent", storage_path, config)
             assert results == [{"memory": "test"}]
 
     @pytest.mark.asyncio
-    async def test_search_agent_memories_handles_list_response(self, mock_memory, storage_path):
+    async def test_search_agent_memories_handles_list_response(self, mock_memory, storage_path, config):
         """Test that search handles direct list response."""
         # In case Mem0 API changes to return list directly
         mock_memory.search.return_value = [{"memory": "test"}]
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
-            results = await search_agent_memories("query", "agent", storage_path)
+            results = await search_agent_memories("query", "agent", storage_path, config)
             assert results == []  # Current implementation expects dict
 
     @pytest.mark.asyncio
-    async def test_add_room_memory(self, mock_memory, storage_path):
+    async def test_add_room_memory(self, mock_memory, storage_path, config):
         """Test adding room memory."""
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             await add_room_memory(
-                "Room discussion content", "!room:server", storage_path, agent_name="helper", metadata={"topic": "math"}
+                "Room discussion content",
+                "!room:server",
+                storage_path,
+                config,
+                agent_name="helper",
+                metadata={"topic": "math"},
             )
 
             # Verify memory.add was called
@@ -144,7 +158,7 @@ class TestMemoryFunctions:
         assert context == ""
 
     @pytest.mark.asyncio
-    async def test_build_memory_enhanced_prompt(self, mock_memory, storage_path):
+    async def test_build_memory_enhanced_prompt(self, mock_memory, storage_path, config):
         """Test building memory-enhanced prompts."""
         # Mock search results
         agent_memories = [{"memory": "I previously calculated 2+2=4", "id": "1"}]
@@ -154,7 +168,7 @@ class TestMemoryFunctions:
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             enhanced = await build_memory_enhanced_prompt(
-                "What is 3+3?", "calculator", storage_path, room_id="!room:server"
+                "What is 3+3?", "calculator", storage_path, config, room_id="!room:server"
             )
 
             # Should include both contexts
@@ -165,22 +179,22 @@ class TestMemoryFunctions:
             assert "What is 3+3?" in enhanced
 
     @pytest.mark.asyncio
-    async def test_build_memory_enhanced_prompt_no_memories(self, mock_memory, storage_path):
+    async def test_build_memory_enhanced_prompt_no_memories(self, mock_memory, storage_path, config):
         """Test prompt enhancement with no memories found."""
         mock_memory.search.return_value = {"results": []}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
-            enhanced = await build_memory_enhanced_prompt("Original prompt", "agent", storage_path)
+            enhanced = await build_memory_enhanced_prompt("Original prompt", "agent", storage_path, config)
 
             # Should return original prompt unchanged
             assert enhanced == "Original prompt"
 
     @pytest.mark.asyncio
-    async def test_store_conversation_memory(self, mock_memory, storage_path):
+    async def test_store_conversation_memory(self, mock_memory, storage_path, config):
         """Test storing conversation memory."""
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory(
-                "What is 2+2?", "calculator", storage_path, "session123", room_id="!room:server"
+                "What is 2+2?", "calculator", storage_path, "session123", config, room_id="!room:server"
             )
 
             # Should be called twice (agent and room)
@@ -201,7 +215,7 @@ class TestMemoryFunctions:
             assert room_call[1]["metadata"]["type"] == "user_input"
 
     @pytest.mark.asyncio
-    async def test_store_conversation_memory_no_prompt(self, mock_memory, storage_path):
+    async def test_store_conversation_memory_no_prompt(self, mock_memory, storage_path, config):
         """Test that empty prompts are not stored."""
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory(
@@ -209,13 +223,14 @@ class TestMemoryFunctions:
                 "agent",
                 storage_path,
                 "session123",
+                config,
             )
 
             # Should not call add when prompt is empty
             mock_memory.add.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_store_conversation_memory_with_empty_response(self, mock_memory, storage_path):
+    async def test_store_conversation_memory_with_empty_response(self, mock_memory, storage_path, config):
         """Test that user prompts are still stored even with empty responses."""
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory(
@@ -223,6 +238,7 @@ class TestMemoryFunctions:
                 "calculator",
                 storage_path,
                 "session123",
+                config,
             )
 
             # Should still store the user prompt

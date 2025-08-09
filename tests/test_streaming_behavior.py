@@ -9,6 +9,7 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config, RouterConfig
 from mindroom.response_tracker import ResponseTracker
 from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse
 from mindroom.thread_invites import ThreadInviteManager
@@ -52,13 +53,21 @@ class TestStreamingBehavior:
     ) -> None:
         """Test complete flow of one agent streaming and mentioning another."""
         # Set up helper bot (the one that will stream)
-        helper_bot = AgentBot(mock_helper_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=True)
+        config = Config(router=RouterConfig(model="default"))
+
+        helper_bot = AgentBot(
+            mock_helper_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=True, config=config
+        )
         helper_bot.client = AsyncMock()
         helper_bot.response_tracker = ResponseTracker(helper_bot.agent_name, base_path=tmp_path)
         helper_bot.thread_invite_manager = ThreadInviteManager(helper_bot.client)
 
         # Set up calculator bot (the one that will be mentioned)
-        calc_bot = AgentBot(mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
+        config = Config(router=RouterConfig(model="default"))
+
+        calc_bot = AgentBot(
+            mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
+        )
         calc_bot.client = AsyncMock()
         calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
         calc_bot.thread_invite_manager = ThreadInviteManager(calc_bot.client)
@@ -169,7 +178,11 @@ class TestStreamingBehavior:
     ) -> None:
         """Test that agents respond to the final complete message, not edits."""
         # Set up calculator bot
-        calc_bot = AgentBot(mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False)
+        config = Config(router=RouterConfig(model="default"))
+
+        calc_bot = AgentBot(
+            mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
+        )
         calc_bot.client = AsyncMock()
         calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
         calc_bot.thread_invite_manager = ThreadInviteManager(calc_bot.client)
@@ -243,11 +256,13 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_send_response
 
         # Create streaming response
+        config = Config(router=RouterConfig(model="default"))
         streaming = StreamingResponse(
             room_id="!test:localhost",
             reply_to_event_id="$original_123",
             thread_id=None,
             sender_domain="localhost",
+            config=config,
         )
 
         # Simulate streaming chunks
@@ -303,11 +318,13 @@ class TestStreamingBehavior:
         mock_client.room_send.return_value = mock_send_response
 
         # Create streaming response
+        config = Config(router=RouterConfig(model="default"))
         streaming = StreamingResponse(
             room_id="!test:localhost",
             reply_to_event_id="$original_123",
             thread_id=None,
             sender_domain="localhost",
+            config=config,
         )
 
         # Stream some content

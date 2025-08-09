@@ -1,5 +1,7 @@
 """Command parsing and handling for user commands."""
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -7,10 +9,10 @@ from typing import Any
 
 import nio
 
-from .agent_config import load_config
 from .logging_config import get_logger
 from .matrix.client import get_room_members, invite_to_room
 from .matrix.identity import MatrixID
+from .models import Config
 
 logger = get_logger(__name__)
 
@@ -261,9 +263,9 @@ async def handle_invite_command(
     agent_domain: str,
     client: nio.AsyncClient,
     thread_invite_manager: Any,
+    config: Config,
 ) -> str:
     """Handle the invite command to invite an agent to a thread."""
-    config = load_config()
     if agent_name not in config.agents:
         return f"❌ Unknown agent: @{agent_name}. Available agents: {', '.join(f'@{name}' for name in sorted(config.agents.keys()))}"
 

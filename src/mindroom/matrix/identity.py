@@ -111,13 +111,6 @@ def parse_matrix_id(matrix_id: str) -> MatrixID:
     return MatrixID.parse(matrix_id)
 
 
-@lru_cache(maxsize=128)
-def get_known_agents() -> set[str]:
-    """Get all configured agent names."""
-    config = load_config()
-    return set(config.agents.keys())
-
-
 def is_agent_id(matrix_id: str) -> bool:
     """Quick check if a Matrix ID is an agent."""
     if not matrix_id.startswith("@") or ":" not in matrix_id:

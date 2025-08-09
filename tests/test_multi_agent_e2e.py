@@ -8,8 +8,10 @@ import nio
 import pytest
 from aioresponses import aioresponses
 
+from mindroom.agent_config import load_config
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.models import Config
 
 
 @pytest.fixture
@@ -54,7 +56,9 @@ async def test_agent_processes_direct_mention(
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id])
+        config = load_config()
+
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
         await bot.start()
 
         # Create a message mentioning the calculator agent
@@ -106,6 +110,7 @@ async def test_agent_processes_direct_mention(
                     session_id=f"{test_room_id}:$thread_root:example.org",
                     thread_history=[],
                     storage_path=tmp_path,
+                    config=config,
                     room_id=test_room_id,
                 )
 
@@ -132,7 +137,9 @@ async def test_agent_ignores_other_agents(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id])
+        config = load_config()
+
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
         await bot.start()
 
         # Create a message from another agent
@@ -173,7 +180,7 @@ async def test_agent_responds_in_threads_based_on_participation(
     thread_root_id = "$thread_root:example.org"
 
     # Mock the config to include both agents
-    from mindroom.models import AgentConfig, Config
+    from mindroom.models import AgentConfig, ModelConfig
 
     mock_config = Config(
         agents={
@@ -182,6 +189,7 @@ async def test_agent_responds_in_threads_based_on_participation(
         },
         teams={},
         room_models={},
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
 
     with (
@@ -194,13 +202,16 @@ async def test_agent_responds_in_threads_based_on_participation(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False)
+        config = load_config()
+
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False, config=config)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
         mock_agent_bot = MagicMock()
         mock_agent_bot.agent = MagicMock()
         mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
+        mock_orchestrator.current_config = mock_config
         bot.orchestrator = mock_orchestrator
         mock_team_arun.return_value = "Team response"
 
@@ -370,6 +381,7 @@ async def test_agent_responds_in_threads_based_on_participation(
                 session_id=f"{test_room_id}:{thread_root_id}",
                 thread_history=mock_fetch.return_value,
                 storage_path=tmp_path,
+                config=config,
                 room_id=test_room_id,
             )
 
@@ -452,7 +464,9 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[initial_room])
+        config = load_config()
+
+        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[initial_room], config=config)
         await bot.start()
 
         # Create invite event for a different room
