@@ -189,15 +189,21 @@ class TestBotTaskRestoration:
 
             # Mock the necessary methods
             with (
-                patch("mindroom.bot.login_agent_user") as mock_login,
-                patch("mindroom.bot.join_room") as mock_join,
-                patch("mindroom.bot.restore_scheduled_tasks") as mock_restore,
+                patch("mindroom.matrix.client.login") as mock_login,
+                patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
-                mock_login.return_value = AsyncMock()
-                mock_join.return_value = True
+                mock_client = AsyncMock()
+                mock_login.return_value = mock_client
+
+                # Mock the client.join method to return JoinResponse
+                mock_join_response = MagicMock(spec=nio.JoinResponse)
+                mock_client.join.return_value = mock_join_response
+
                 mock_restore.return_value = 2  # 2 tasks restored
 
                 await bot.start()
+                # Now have the bot join its configured rooms
+                await bot.join_configured_rooms()
 
                 # Verify restore was called for the room
                 mock_restore.assert_called_once_with(bot.client, "!test:server")
@@ -226,15 +232,21 @@ class TestBotTaskRestoration:
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
 
             with (
-                patch("mindroom.bot.login_agent_user") as mock_login,
-                patch("mindroom.bot.join_room") as mock_join,
-                patch("mindroom.bot.restore_scheduled_tasks") as mock_restore,
+                patch("mindroom.matrix.client.login") as mock_login,
+                patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
-                mock_login.return_value = AsyncMock()
-                mock_join.return_value = True
+                mock_client = AsyncMock()
+                mock_login.return_value = mock_client
+
+                # Mock the client.join method to return JoinResponse
+                mock_join_response = MagicMock(spec=nio.JoinResponse)
+                mock_client.join.return_value = mock_join_response
+
                 mock_restore.return_value = 0  # No tasks restored
 
                 await bot.start()
+                # Now have the bot join its configured rooms
+                await bot.join_configured_rooms()
 
                 # Just verify restore was called with 0 - logger testing is complex with the bind() method
                 assert mock_restore.return_value == 0
