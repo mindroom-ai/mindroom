@@ -57,7 +57,7 @@ def test_create_agent(test_client: TestClient, sample_agent_data, temp_config_fi
     assert result["success"] is True
 
     # Verify it was saved to file
-    with open(temp_config_file) as f:
+    with temp_config_file.open() as f:
         config = yaml.safe_load(f)
     assert result["id"] in config["agents"]
     assert config["agents"][result["id"]]["display_name"] == sample_agent_data["display_name"]
@@ -77,7 +77,7 @@ def test_update_agent(test_client: TestClient, temp_config_file):
     assert result["success"] is True
 
     # Verify file was updated
-    with open(temp_config_file) as f:
+    with temp_config_file.open() as f:
         config = yaml.safe_load(f)
     assert config["agents"]["test_agent"]["display_name"] == "Updated Test Agent"
     assert "file" in config["agents"]["test_agent"]["tools"]
@@ -96,7 +96,7 @@ def test_delete_agent(test_client: TestClient, temp_config_file):
     assert result["success"] is True
 
     # Verify it was removed from file
-    with open(temp_config_file) as f:
+    with temp_config_file.open() as f:
         config = yaml.safe_load(f)
     assert "test_agent" not in config["agents"]
 
@@ -154,7 +154,7 @@ def test_save_config(test_client: TestClient, temp_config_file):
     assert response.status_code == 200
 
     # Verify file was updated
-    with open(temp_config_file) as f:
+    with temp_config_file.open() as f:
         saved_config = yaml.safe_load(f)
 
     assert saved_config["models"]["default"]["id"] == "test-model-2"
@@ -229,7 +229,7 @@ def test_create_team(test_client: TestClient, temp_config_file):
     assert result["success"] is True
 
     # Verify file was updated
-    with open(temp_config_file) as f:
+    with temp_config_file.open() as f:
         saved_config = yaml.safe_load(f)
 
     assert "teams" in saved_config
@@ -297,7 +297,7 @@ def test_update_team(test_client: TestClient, temp_config_file):
     assert response.status_code == 200
 
     # Verify file was updated
-    with open(temp_config_file) as f:
+    with temp_config_file.open() as f:
         saved_config = yaml.safe_load(f)
 
     assert saved_config["teams"]["test_team"]["display_name"] == "Updated Team"
@@ -323,7 +323,7 @@ def test_delete_team(test_client: TestClient, temp_config_file):
     assert response.status_code == 200
 
     # Verify it's deleted from file
-    with open(temp_config_file) as f:
+    with temp_config_file.open() as f:
         saved_config = yaml.safe_load(f)
 
     assert "teams" not in saved_config or "test_team" not in saved_config.get("teams", {})
@@ -392,7 +392,7 @@ def test_update_room_models(test_client: TestClient, temp_config_file):
     assert response.status_code == 200
 
     # Verify file was updated
-    with open(temp_config_file) as f:
+    with temp_config_file.open() as f:
         saved_config = yaml.safe_load(f)
 
     assert "room_models" in saved_config

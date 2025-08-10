@@ -28,7 +28,7 @@ CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config.yaml"
 
 def save_config_to_file(config: dict[str, Any]) -> None:
     """Save config to YAML file with deterministic ordering."""
-    with open(CONFIG_PATH, "w") as f:
+    with CONFIG_PATH.open("w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=True)
 
 
@@ -54,7 +54,7 @@ def load_config_from_file():
     """Load config from YAML file"""
     global config
     try:
-        with open(CONFIG_PATH) as f, config_lock:
+        with CONFIG_PATH.open() as f, config_lock:
             config = yaml.safe_load(f)
         print("Config loaded successfully")
     except Exception as e:
