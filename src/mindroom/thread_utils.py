@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import nio
-
-from .config import Config
 from .constants import ROUTER_AGENT_NAME
 from .matrix.identity import extract_agent_name
+
+if TYPE_CHECKING:
+    import nio
+
+    from .config import Config
 
 
 def check_agent_mentioned(event_source: dict, agent_name: str, config: Config) -> tuple[list[str], bool]:
@@ -41,7 +43,7 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
         if agent_name and agent_name != ROUTER_AGENT_NAME:
             agents.add(agent_name)
 
-    return sorted(list(agents))
+    return sorted(agents)
 
 
 def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[str]:
@@ -67,6 +69,7 @@ def has_user_responded_after_message(thread_history: list[dict], target_event_id
 
     Returns:
         True if the user has responded after the target message
+
     """
     # Find the target message and check for user responses after it
     found_target = False
@@ -78,7 +81,7 @@ def has_user_responded_after_message(thread_history: list[dict], target_event_id
     return False
 
 
-def get_available_agents_in_room(room: Any, config: Config) -> list[str]:
+def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[str]:
     """Get list of available agents in a room.
 
     Note: Router agent is excluded as it's not a regular conversation participant.
@@ -114,7 +117,7 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
         agents = get_mentioned_agents(mentions, config)
         mentioned_agents.update(agents)
 
-    return sorted(list(mentioned_agents))
+    return sorted(mentioned_agents)
 
 
 def should_agent_respond(
@@ -131,7 +134,6 @@ def should_agent_respond(
 
     Team formation is handled elsewhere - this just determines individual responses.
     """
-
     # Check if agent has access (either native or invited to thread)
     has_room_access = room_id in configured_rooms
     has_thread_access = is_thread and is_invited_to_thread
@@ -175,6 +177,7 @@ def get_safe_thread_root(event: nio.RoomMessageText | None) -> str | None:
 
     Returns:
         The event ID to use as thread root, or None to use the event itself
+
     """
     if not event:
         return None

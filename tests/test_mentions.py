@@ -96,7 +96,10 @@ class TestMentionParsing:
         config = Config.from_yaml()
 
         content = create_mention_content_from_text(
-            config, "@calculator and @code please help", sender_domain="matrix.org", thread_event_id="$thread123"
+            config,
+            "@calculator and @code please help",
+            sender_domain="matrix.org",
+            thread_event_id="$thread123",
         )
 
         assert content["msgtype"] == "m.text"

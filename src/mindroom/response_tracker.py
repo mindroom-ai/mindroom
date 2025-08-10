@@ -6,10 +6,12 @@ import fcntl
 import json
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .logging_config import get_logger
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -46,14 +48,14 @@ class ResponseTracker:
         if not self._responses_file.exists():
             return {}
 
-        with open(self._responses_file) as f:
+        with self._responses_file.open() as f:
             data = json.load(f)
             return data.get("events", {})  # type: ignore[no-any-return]
 
     def _save_responded_events(self) -> None:
         """Save the responded event IDs with timestamps to disk using file locking."""
         # Use file locking to prevent concurrent access issues
-        with open(self._responses_file, "w") as f:
+        with self._responses_file.open("w") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
                 json.dump({"events": self._responded_events}, f, indent=2)
@@ -68,6 +70,7 @@ class ResponseTracker:
 
         Returns:
             True if we've already responded to this event
+
         """
         return event_id in self._responded_events
 
@@ -76,6 +79,7 @@ class ResponseTracker:
 
         Args:
             event_id: The Matrix event ID we responded to
+
         """
         self._responded_events[event_id] = time.time()
         self._save_responded_events()
@@ -87,6 +91,7 @@ class ResponseTracker:
         Args:
             max_events: Maximum number of events to track
             max_age_days: Maximum age of events in days
+
         """
         current_time = time.time()
         max_age_seconds = max_age_days * 24 * 60 * 60
@@ -112,6 +117,7 @@ class ResponseTracker:
 
         Returns:
             Dictionary with stats like total count, oldest event age, etc.
+
         """
         if not self._responded_events:
             return {"total": 0, "oldest_age_hours": 0, "newest_age_hours": 0}

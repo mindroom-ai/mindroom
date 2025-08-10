@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from ..logging_config import get_logger
+from mindroom.logging_config import get_logger
+
 from .client import create_room, join_room, matrix_client
 from .identity import MatrixID, extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
@@ -14,7 +15,7 @@ from .state import MatrixRoom, MatrixState
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from ..config import Config
+    from mindroom.config import Config
 
 
 def load_rooms() -> dict[str, MatrixRoom]:
@@ -61,6 +62,7 @@ def resolve_room_aliases(room_list: list[str]) -> list[str]:
 
     Returns:
         List of room IDs (aliases resolved to IDs, IDs passed through)
+
     """
     room_aliases = get_room_aliases()
     return [room_aliases.get(room, room) for room in room_list]
@@ -74,6 +76,7 @@ def get_room_alias_from_id(room_id: str) -> str | None:
 
     Returns:
         Room alias if found, None otherwise
+
     """
     room_aliases = get_room_aliases()
     for alias, rid in room_aliases.items():
@@ -98,6 +101,7 @@ async def ensure_room_exists(
 
     Returns:
         Room ID if room exists or was created, None on failure
+
     """
     existing_rooms = load_rooms()
 
@@ -121,12 +125,11 @@ async def ensure_room_exists(
         # Try to join the room
         if await join_room(client, room_id):
             return str(room_id)
-        else:
-            # Room exists but we can't join - this means the room was created
-            # but this user isn't a member. Return the room ID anyway since
-            # the room does exist and invitations will be handled separately
-            logger.debug(f"Room {room_key} exists but user not a member, returning room ID for invitation handling")
-            return str(room_id)
+        # Room exists but we can't join - this means the room was created
+        # but this user isn't a member. Return the room ID anyway since
+        # the room does exist and invitations will be handled separately
+        logger.debug(f"Room {room_key} exists but user not a member, returning room ID for invitation handling")
+        return str(room_id)
 
     # Room alias doesn't exist on server, so we can create it
     if room_key in existing_rooms:
@@ -153,9 +156,8 @@ async def ensure_room_exists(
         add_room(room_key, created_room_id, full_alias, room_name)
         logger.info(f"Created room {room_key} with ID {created_room_id}")
         return created_room_id
-    else:
-        logger.error(f"Failed to create room {room_key}")
-        return None
+    logger.error(f"Failed to create room {room_key}")
+    return None
 
 
 async def ensure_all_rooms_exist(
@@ -170,8 +172,9 @@ async def ensure_all_rooms_exist(
 
     Returns:
         Dict mapping room keys to room IDs
+
     """
-    from ..agents import get_agent_ids_for_room
+    from mindroom.agents import get_agent_ids_for_room
 
     room_ids = {}
 
@@ -209,6 +212,7 @@ async def ensure_user_in_rooms(
     Args:
         homeserver: Matrix homeserver URL
         room_ids: Dict mapping room keys to room IDs
+
     """
     state = MatrixState.load()
     # User account is stored as "agent_user" (treated as a special agent)

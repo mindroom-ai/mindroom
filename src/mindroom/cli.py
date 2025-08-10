@@ -9,6 +9,9 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from mindroom import __version__
+from mindroom.bot import main as bot_main
+
 app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
 console = Console()
 
@@ -16,8 +19,6 @@ console = Console()
 @app.command()
 def version() -> None:
     """Show the current version of Mindroom."""
-    from mindroom import __version__
-
     console.print(f"Mindroom version: [bold]{__version__}[/bold]")
     console.print("Multi-agent Matrix bot system")
 
@@ -50,20 +51,17 @@ def run(
 
 async def _run(log_level: str, storage_path: Path) -> None:
     """Run the multi-agent system."""
-    from mindroom.bot import main
-
     console.print(f"🚀 Starting Mindroom multi-agent system (log level: {log_level})...")
     console.print("Press Ctrl+C to stop\n")
 
     try:
-        await main(log_level=log_level, storage_path=storage_path)
+        await bot_main(log_level=log_level, storage_path=storage_path)
     except KeyboardInterrupt:
         console.print("\n✋ Stopped")
 
 
 def main() -> None:
     """Main entry point that shows help by default."""
-
     # Handle -h flag by replacing with --help
     for i, arg in enumerate(sys.argv):
         if arg == "-h":

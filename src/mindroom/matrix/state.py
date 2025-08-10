@@ -1,13 +1,12 @@
 """Pydantic models for Matrix state."""
 
-from datetime import datetime
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Self
 
 import yaml
 from pydantic import BaseModel, Field, field_serializer
 
-MATRIX_STATE_FILE = Path("matrix_state.yaml")
+from mindroom.constants import MATRIX_STATE_FILE
 
 
 class MatrixAccount(BaseModel):
@@ -23,7 +22,7 @@ class MatrixRoom(BaseModel):
     room_id: str
     alias: str
     name: str
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @field_serializer("created_at")
     def serialize_datetime(self, dt: datetime) -> str:
@@ -43,7 +42,7 @@ class MatrixState(BaseModel):
         if not MATRIX_STATE_FILE.exists():
             return cls()
 
-        with open(MATRIX_STATE_FILE) as f:
+        with MATRIX_STATE_FILE.open() as f:
             data = yaml.safe_load(f) or {}
 
         return cls.model_validate(data)
@@ -53,7 +52,7 @@ class MatrixState(BaseModel):
         # Use Pydantic's model_dump with custom serializer for datetime
         data = self.model_dump(mode="json")
 
-        with open(MATRIX_STATE_FILE, "w") as f:
+        with MATRIX_STATE_FILE.open("w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     def get_account(self, key: str) -> MatrixAccount | None:
@@ -70,7 +69,7 @@ class MatrixState(BaseModel):
 
     def add_room(self, key: str, room_id: str, alias: str, name: str) -> None:
         """Add or update a room."""
-        self.rooms[key] = MatrixRoom(room_id=room_id, alias=alias, name=name, created_at=datetime.now())
+        self.rooms[key] = MatrixRoom(room_id=room_id, alias=alias, name=name, created_at=datetime.now(tz=UTC))
 
     def get_room_aliases(self) -> dict[str, str]:
         """Get mapping of room aliases to room IDs."""

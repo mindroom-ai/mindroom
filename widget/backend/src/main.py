@@ -1,3 +1,4 @@
+# ruff: noqa: INP001 D100
 import threading
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,7 @@ CONFIG_PATH = Path(__file__).parent.parent.parent.parent / "config.yaml"
 
 def save_config_to_file(config: dict[str, Any]) -> None:
     """Save config to YAML file with deterministic ordering."""
-    with open(CONFIG_PATH, "w") as f:
+    with CONFIG_PATH.open("w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=True)
 
 
@@ -51,23 +52,26 @@ config_lock = threading.Lock()
 
 
 class TestModelRequest(BaseModel):
-    modelId: str
+    """Request model for testing AI model connections."""
+
+    modelId: str  # noqa: N815
 
 
 class ConfigFileHandler(FileSystemEventHandler):
-    """Watch for changes to config.yaml"""
+    """Watch for changes to config.yaml."""
 
-    def on_modified(self, event):
+    def on_modified(self, event: object) -> None:
+        """Handle file modification events."""
         if event.src_path.endswith("config.yaml"):
             print(f"Config file changed: {event.src_path}")
             load_config_from_file()
 
 
-def load_config_from_file():
-    """Load config from YAML file"""
+def load_config_from_file() -> None:
+    """Load config from YAML file."""
     global config
     try:
-        with open(CONFIG_PATH) as f, config_lock:
+        with CONFIG_PATH.open() as f, config_lock:
             config = yaml.safe_load(f)
         print("Config loaded successfully")
     except Exception as e:
@@ -91,28 +95,28 @@ app.include_router(tools_router)
 
 
 @app.on_event("startup")
-async def startup_event():
-    """Initialize the application"""
+async def startup_event() -> None:
+    """Initialize the application."""
     print(f"Loading config from: {CONFIG_PATH}")
     print(f"Config exists: {CONFIG_PATH.exists()}")
 
 
 @app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up on shutdown"""
+async def shutdown_event() -> None:
+    """Clean up on shutdown."""
     observer.stop()
     observer.join()
 
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint"""
+async def health_check() -> dict[str, Any]:
+    """Health check endpoint."""
     return {"status": "healthy", "config_loaded": bool(config)}
 
 
 @app.post("/api/config/load")
-async def load_config():
-    """Load configuration from file"""
+async def load_config() -> dict[str, Any]:
+    """Load configuration from file."""
     with config_lock:
         if not config:
             raise HTTPException(status_code=500, detail="Failed to load configuration")
@@ -120,8 +124,8 @@ async def load_config():
 
 
 @app.put("/api/config/save")
-async def save_config(new_config: Config):
-    """Save configuration to file"""
+async def save_config(new_config: Config) -> dict[str, bool]:
+    """Save configuration to file."""
     try:
         config_dict = new_config.model_dump(exclude_none=True)
         save_config_to_file(config_dict)
@@ -129,15 +133,15 @@ async def save_config(new_config: Config):
         # Update current config
         with config_lock:
             config.update(config_dict)
-
-        return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save configuration: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to save configuration: {e!s}") from e
+    else:
+        return {"success": True}
 
 
 @app.get("/api/config/agents")
-async def get_agents():
-    """Get all agents"""
+async def get_agents() -> list[dict[str, Any]]:
+    """Get all agents."""
     with config_lock:
         agents = config.get("agents", {})
         # Convert to list format with IDs
@@ -149,8 +153,8 @@ async def get_agents():
 
 
 @app.put("/api/config/agents/{agent_id}")
-async def update_agent(agent_id: str, agent_data: dict[str, Any]):
-    """Update a specific agent"""
+async def update_agent(agent_id: str, agent_data: dict[str, Any]) -> dict[str, bool]:
+    """Update a specific agent."""
     with config_lock:
         if "agents" not in config:
             config["agents"] = {}
@@ -164,14 +168,15 @@ async def update_agent(agent_id: str, agent_data: dict[str, Any]):
     # Save to file
     try:
         save_config_to_file(config)
-        return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save agent: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to save agent: {e!s}") from e
+    else:
+        return {"success": True}
 
 
 @app.post("/api/config/agents")
-async def create_agent(agent_data: dict[str, Any]):
-    """Create a new agent"""
+async def create_agent(agent_data: dict[str, Any]) -> dict[str, Any]:
+    """Create a new agent."""
     agent_id = agent_data.get("display_name", "new_agent").lower().replace(" ", "_")
 
     with config_lock:
@@ -195,14 +200,15 @@ async def create_agent(agent_data: dict[str, Any]):
     # Save to file
     try:
         save_config_to_file(config)
-        return {"id": agent_id, "success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to create agent: {e!s}") from e
+    else:
+        return {"id": agent_id, "success": True}
 
 
 @app.delete("/api/config/agents/{agent_id}")
-async def delete_agent(agent_id: str):
-    """Delete an agent"""
+async def delete_agent(agent_id: str) -> dict[str, bool]:
+    """Delete an agent."""
     with config_lock:
         if "agents" not in config or agent_id not in config["agents"]:
             raise HTTPException(status_code=404, detail="Agent not found")
@@ -212,14 +218,15 @@ async def delete_agent(agent_id: str):
     # Save to file
     try:
         save_config_to_file(config)
-        return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to delete agent: {e!s}") from e
+    else:
+        return {"success": True}
 
 
 @app.get("/api/config/teams")
-async def get_teams():
-    """Get all teams"""
+async def get_teams() -> list[dict[str, Any]]:
+    """Get all teams."""
     with config_lock:
         teams = config.get("teams", {})
         # Convert to list format with IDs
@@ -231,8 +238,8 @@ async def get_teams():
 
 
 @app.put("/api/config/teams/{team_id}")
-async def update_team(team_id: str, team_data: dict[str, Any]):
-    """Update a specific team"""
+async def update_team(team_id: str, team_data: dict[str, Any]) -> dict[str, bool]:
+    """Update a specific team."""
     with config_lock:
         if "teams" not in config:
             config["teams"] = {}
@@ -246,14 +253,15 @@ async def update_team(team_id: str, team_data: dict[str, Any]):
     # Save to file
     try:
         save_config_to_file(config)
-        return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save team: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to save team: {e!s}") from e
+    else:
+        return {"success": True}
 
 
 @app.post("/api/config/teams")
-async def create_team(team_data: dict[str, Any]):
-    """Create a new team"""
+async def create_team(team_data: dict[str, Any]) -> dict[str, Any]:
+    """Create a new team."""
     team_id = team_data.get("display_name", "new_team").lower().replace(" ", "_")
 
     with config_lock:
@@ -277,14 +285,15 @@ async def create_team(team_data: dict[str, Any]):
     # Save to file
     try:
         save_config_to_file(config)
-        return {"id": team_id, "success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create team: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to create team: {e!s}") from e
+    else:
+        return {"id": team_id, "success": True}
 
 
 @app.delete("/api/config/teams/{team_id}")
-async def delete_team(team_id: str):
-    """Delete a team"""
+async def delete_team(team_id: str) -> dict[str, bool]:
+    """Delete a team."""
     with config_lock:
         if "teams" not in config or team_id not in config["teams"]:
             raise HTTPException(status_code=404, detail="Team not found")
@@ -294,21 +303,22 @@ async def delete_team(team_id: str):
     # Save to file
     try:
         save_config_to_file(config)
-        return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete team: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to delete team: {e!s}") from e
+    else:
+        return {"success": True}
 
 
 @app.get("/api/config/models")
-async def get_models():
-    """Get all model configurations"""
+async def get_models() -> dict[str, Any]:
+    """Get all model configurations."""
     with config_lock:
         return config.get("models", {})
 
 
 @app.put("/api/config/models/{model_id}")
-async def update_model(model_id: str, model_data: dict[str, Any]):
-    """Update a model configuration"""
+async def update_model(model_id: str, model_data: dict[str, Any]) -> dict[str, bool]:
+    """Update a model configuration."""
     with config_lock:
         if "models" not in config:
             config["models"] = {}
@@ -318,50 +328,51 @@ async def update_model(model_id: str, model_data: dict[str, Any]):
     # Save to file
     try:
         save_config_to_file(config)
-        return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save model: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to save model: {e!s}") from e
+    else:
+        return {"success": True}
 
 
 @app.get("/api/config/room-models")
-async def get_room_models():
-    """Get room-specific model overrides"""
+async def get_room_models() -> dict[str, Any]:
+    """Get room-specific model overrides."""
     with config_lock:
         return config.get("room_models", {})
 
 
 @app.put("/api/config/room-models")
-async def update_room_models(room_models: dict[str, str]):
-    """Update room-specific model overrides"""
+async def update_room_models(room_models: dict[str, str]) -> dict[str, bool]:
+    """Update room-specific model overrides."""
     with config_lock:
         config["room_models"] = room_models
 
     # Save to file
     try:
         save_config_to_file(config)
-        return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save room models: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to save room models: {e!s}") from e
+    else:
+        return {"success": True}
 
 
 @app.post("/api/test/model")
-async def test_model(request: TestModelRequest):
-    """Test a model connection"""
+async def test_model(request: TestModelRequest) -> dict[str, Any]:
+    """Test a model connection."""
     # TODO: Implement actual model testing
     # For now, just return success for demonstration
     model_id = request.modelId
     with config_lock:
         if model_id in config.get("models", {}):
             return {"success": True, "message": f"Model {model_id} is configured"}
-        else:
-            return {"success": False, "message": f"Model {model_id} not found"}
+        return {"success": False, "message": f"Model {model_id} not found"}
 
 
 @app.get("/api/tools")
-async def get_available_tools():
-    """Get list of available tools"""
+async def get_available_tools() -> list[str]:
+    """Get list of available tools."""
     # This should match the tools available in the MindRoom system
-    tools = [
+    return [
         "calculator",
         "file",
         "shell",
@@ -384,12 +395,11 @@ async def get_available_tools():
         "gmail",
         "integrations",
     ]
-    return tools
 
 
 @app.get("/api/rooms")
-async def get_available_rooms():
-    """Get list of available rooms"""
+async def get_available_rooms() -> list[str]:
+    """Get list of available rooms."""
     # Extract unique rooms from all agents
     rooms = set()
     with config_lock:
@@ -397,12 +407,12 @@ async def get_available_rooms():
             agent_rooms = agent_data.get("rooms", [])
             rooms.update(agent_rooms)
 
-    return sorted(list(rooms))
+    return sorted(rooms)
 
 
 @app.post("/api/keys/encrypt")
-async def encrypt_api_key(data: dict[str, str]):
-    """Encrypt an API key for storage"""
+async def encrypt_api_key(data: dict[str, str]) -> dict[str, str]:
+    """Encrypt an API key for storage."""
     # TODO: Implement actual encryption
     # For now, just return a placeholder
     provider = data.get("provider", "")
@@ -417,4 +427,4 @@ async def encrypt_api_key(data: dict[str, str]):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)  # noqa: S104

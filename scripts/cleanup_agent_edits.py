@@ -22,7 +22,7 @@ Usage:
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import psycopg2
 import typer
@@ -42,7 +42,7 @@ class DBConfig:
     port: int = 5432
     database: str = "synapse"
     user: str = "synapse"
-    password: str = "synapse_password"
+    password: str = "synapse_password"  # noqa: S105
 
 
 def get_db_connection(config: DBConfig) -> psycopg2.extensions.connection:
@@ -77,10 +77,10 @@ def find_messages_with_edits(
 ) -> dict:
     """Find messages from agents that have excessive edit history."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cutoff_time = int((datetime.now() - timedelta(hours=older_than_hours)).timestamp() * 1000)
+        cutoff_time = int((datetime.now(UTC) - timedelta(hours=older_than_hours)).timestamp() * 1000)
         agent_ids_str = ",".join(f"'{uid}'" for uid in agent_user_ids)
 
-        query = f"""
+        query = f"""  # noqa: S608
             WITH edit_counts AS (
                 SELECT
                     er.relates_to_id AS original_event_id,
@@ -103,7 +103,7 @@ def find_messages_with_edits(
             FROM edit_counts ec
             LEFT JOIN room_aliases ra ON ec.room_id = ra.room_id
             ORDER BY edit_count DESC
-        """
+        """  # noqa: S608
 
         cur.execute(query)
         return {row["original_event_id"]: row for row in cur.fetchall()}
@@ -162,12 +162,12 @@ def cleanup_edit_events(
     with conn.cursor() as cur:
         for table in tables_to_clean:
             if dry_run:
-                cur.execute(f"SELECT COUNT(*) FROM {table} WHERE event_id = ANY(%s)", (event_ids_to_delete,))
+                cur.execute(f"SELECT COUNT(*) FROM {table} WHERE event_id = ANY(%s)", (event_ids_to_delete,))  # noqa: S608
                 count = cur.fetchone()[0]
                 if count > 0:
                     console.print(f"  [yellow]Would delete {count} rows from {table}[/yellow]")
             else:
-                cur.execute(f"DELETE FROM {table} WHERE event_id = ANY(%s)", (event_ids_to_delete,))
+                cur.execute(f"DELETE FROM {table} WHERE event_id = ANY(%s)", (event_ids_to_delete,))  # noqa: S608
                 if table == "events":
                     deleted_count = cur.rowcount
 
@@ -177,7 +177,7 @@ def cleanup_edit_events(
     return deleted_count
 
 
-def perform_cleanup(
+def perform_cleanup(  # noqa: C901, PLR0912
     conn: psycopg2.extensions.connection,
     dry_run: bool,
     keep_last: int,
@@ -243,14 +243,14 @@ def perform_cleanup(
 
                 if dry_run:
                     console.print(
-                        f"[yellow]Would delete {len(edits_to_delete)} edits for message in {info['room_alias_or_id']}[/yellow]"
+                        f"[yellow]Would delete {len(edits_to_delete)} edits for message in {info['room_alias_or_id']}[/yellow]",
                     )
                 else:
                     deleted = cleanup_edit_events(conn, edits_to_delete, dry_run)
                     total_deleted += deleted
                     if deleted > 0:
                         console.print(
-                            f"[green]Deleted {deleted} edits for message in {info['room_alias_or_id']}[/green]"
+                            f"[green]Deleted {deleted} edits for message in {info['room_alias_or_id']}[/green]",
                         )
 
     # Summary
@@ -279,9 +279,11 @@ def main(
     database: str = typer.Option(os.getenv("SYNAPSE_DB_NAME", "synapse"), "--database", help="Database name"),
     user: str = typer.Option(os.getenv("SYNAPSE_DB_USER", "synapse"), "--user", help="Database user"),
     password: str = typer.Option(
-        os.getenv("SYNAPSE_DB_PASSWORD", "synapse_password"), "--password", help="Database password"
+        os.getenv("SYNAPSE_DB_PASSWORD", "synapse_password"),
+        "--password",
+        help="Database password",
     ),
-):
+) -> None:
     """Clean up excessive edit history from agent messages in Synapse database."""
     db_config = DBConfig(host=host, port=port, database=database, user=user, password=password)
 

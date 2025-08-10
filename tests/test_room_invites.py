@@ -16,11 +16,13 @@ from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+
 
 @pytest.fixture
 def mock_config() -> Config:
     """Create a mock config with agents and teams."""
-    config = Config(
+    return Config(
         agents={
             "agent1": AgentConfig(
                 display_name="Agent 1",
@@ -42,7 +44,6 @@ def mock_config() -> Config:
             ),
         },
     )
-    return config
 
 
 @pytest.mark.asyncio
@@ -53,7 +54,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
         display_name="Agent 1",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Create the agent bot with configured rooms
@@ -61,7 +62,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
 
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["!room1:localhost", "!room2:localhost"],
     )
@@ -73,14 +74,14 @@ async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
     # Track which rooms were joined
     joined_rooms = []
 
-    async def mock_join_room(client: Any, room_id: str) -> bool:
+    async def mock_join_room(_client: Any, room_id: str) -> bool:
         joined_rooms.append(room_id)
         return True
 
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -95,14 +96,14 @@ async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:
+async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:  # noqa: ARG001
     """Test that agents leave rooms they're no longer configured for."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
         display_name="Agent 1",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Create the agent bot with only room1 configured
@@ -110,7 +111,7 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:
 
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["!room1:localhost"],  # Only configured for room1
     )
@@ -156,7 +157,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
         display_name="Agent 1",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Start with agent configured for room1 only
@@ -164,7 +165,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
 
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["!room1:localhost"],
     )
@@ -181,7 +182,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
     joined_rooms = []
     left_rooms = []
 
-    async def mock_join_room(client: Any, room_id: str) -> bool:
+    async def mock_join_room(_client: Any, room_id: str) -> bool:
         joined_rooms.append(room_id)
         return True
 
@@ -195,7 +196,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
     mock_client.room_leave = mock_room_leave
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)

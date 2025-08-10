@@ -149,7 +149,7 @@ async def test_list_scheduled_tasks_tasks_in_other_threads() -> None:
                 "event_id": "$state_task1",
                 "sender": "@system:server",
                 "origin_server_ts": 1234567890,
-            }
+            },
         ],
         room_id="!test:server",
     )

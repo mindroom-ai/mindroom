@@ -161,6 +161,6 @@ class TestResponseTracker:
         assert len(tracker._responded_events) == 100
 
         # Verify file is valid JSON
-        with open(tracker._responses_file) as f:
+        with tracker._responses_file.open() as f:
             data = json.load(f)
             assert len(data["events"]) == 100

@@ -6,10 +6,8 @@ Tools are registered by string name and can be instantiated dynamically when loa
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
 from loguru import logger
 
 from .tools_metadata import (
@@ -18,6 +16,11 @@ from .tools_metadata import (
     ToolStatus,
     register_tool_with_metadata,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from agno.tools import Toolkit
 
 # Registry mapping tool names to their factory functions
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
@@ -31,6 +34,7 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
 
     Returns:
         Decorator function
+
     """
 
     def decorator(func: Callable[[], type[Toolkit]]) -> Callable[[], type[Toolkit]]:
@@ -49,7 +53,8 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
     icon="Calculator",
     docs_url="https://docs.agno.com/tools/toolkits/local/calculator",
 )
-def calculator_tools() -> type:
+def calculator_tools() -> type[Toolkit]:
+    """Return calculator tools for mathematical operations."""
     from agno.tools.calculator import CalculatorTools
 
     return CalculatorTools
@@ -63,7 +68,8 @@ def calculator_tools() -> type:
     icon="Folder",
     docs_url="https://docs.agno.com/tools/toolkits/local/file",
 )
-def file_tools() -> type:
+def file_tools() -> type[Toolkit]:
+    """Return file tools for file system operations."""
     from agno.tools.file import FileTools
 
     return FileTools
@@ -77,7 +83,8 @@ def file_tools() -> type:
     icon="Terminal",
     docs_url="https://docs.agno.com/tools/toolkits/local/shell",
 )
-def shell_tools() -> type:
+def shell_tools() -> type[Toolkit]:
+    """Return shell tools for command execution."""
     from agno.tools.shell import ShellTools
 
     return ShellTools
@@ -91,7 +98,8 @@ def shell_tools() -> type:
     icon="Code",
     docs_url="https://docs.agno.com/tools/toolkits/local/python",
 )
-def python_tools() -> type:
+def python_tools() -> type[Toolkit]:
+    """Return Python tools for code execution."""
     from agno.tools.python import PythonTools
 
     return PythonTools
@@ -106,7 +114,8 @@ def python_tools() -> type:
     dependencies=["docker"],
     docs_url="https://docs.agno.com/tools/toolkits/local/docker",
 )
-def docker_tools() -> type:
+def docker_tools() -> type[Toolkit]:
+    """Return Docker tools for container management."""
     from agno.tools.docker import DockerTools
 
     return DockerTools
@@ -124,7 +133,8 @@ def docker_tools() -> type:
     dependencies=["PyGithub"],
     docs_url="https://docs.agno.com/tools/toolkits/others/github",
 )
-def github_tools() -> type:
+def github_tools() -> type[Toolkit]:
+    """Return GitHub tools for repository management."""
     from agno.tools.github import GithubTools
 
     return GithubTools
@@ -140,7 +150,8 @@ def github_tools() -> type:
     dependencies=["duckdb"],
     docs_url="https://docs.agno.com/tools/toolkits/database/csv",
 )
-def csv_tools() -> type:
+def csv_tools() -> type[Toolkit]:
+    """Return CSV tools for data processing."""
     from agno.tools.csv_toolkit import CsvTools
 
     return CsvTools
@@ -155,7 +166,8 @@ def csv_tools() -> type:
     dependencies=["arxiv", "pypdf"],
     docs_url="https://docs.agno.com/tools/toolkits/search/arxiv",
 )
-def arxiv_tools() -> type:
+def arxiv_tools() -> type[Toolkit]:
+    """Return ArXiv tools for academic paper research."""
     from agno.tools.arxiv import ArxivTools
 
     return ArxivTools
@@ -170,7 +182,8 @@ def arxiv_tools() -> type:
     dependencies=["duckduckgo-search"],
     docs_url="https://docs.agno.com/tools/toolkits/search/duckduckgo",
 )
-def duckduckgo_tools() -> type:
+def duckduckgo_tools() -> type[Toolkit]:
+    """Return DuckDuckGo tools for web search."""
     from agno.tools.duckduckgo import DuckDuckGoTools
 
     return DuckDuckGoTools
@@ -185,7 +198,8 @@ def duckduckgo_tools() -> type:
     dependencies=["wikipedia-api"],
     docs_url="https://docs.agno.com/tools/toolkits/search/wikipedia",
 )
-def wikipedia_tools() -> type:
+def wikipedia_tools() -> type[Toolkit]:
+    """Return Wikipedia tools for encyclopedia research."""
     from agno.tools.wikipedia import WikipediaTools
 
     return WikipediaTools
@@ -200,7 +214,8 @@ def wikipedia_tools() -> type:
     dependencies=["newspaper3k"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/newspaper",
 )
-def newspaper_tools() -> type:
+def newspaper_tools() -> type[Toolkit]:
+    """Return newspaper tools for article extraction."""
     from agno.tools.newspaper import NewspaperTools
 
     return NewspaperTools
@@ -215,7 +230,8 @@ def newspaper_tools() -> type:
     dependencies=["yfinance"],
     docs_url="https://docs.agno.com/tools/toolkits/others/yfinance",
 )
-def yfinance_tools() -> type:
+def yfinance_tools() -> type[Toolkit]:
+    """Return Yahoo Finance tools for financial data."""
     from agno.tools.yfinance import YFinanceTools
 
     return YFinanceTools
@@ -230,7 +246,8 @@ def yfinance_tools() -> type:
     dependencies=["pandas"],
     docs_url="https://docs.agno.com/tools/toolkits/database/pandas",
 )
-def pandas_tools() -> type:
+def pandas_tools() -> type[Toolkit]:
+    """Return Pandas tools for data analysis."""
     from agno.tools.pandas import PandasTools
 
     return PandasTools
@@ -248,7 +265,8 @@ def pandas_tools() -> type:
     dependencies=["tavily-python"],
     docs_url="https://docs.agno.com/tools/toolkits/search/tavily",
 )
-def tavily_tools() -> type:
+def tavily_tools() -> type[Toolkit]:
+    """Return Tavily tools for AI-powered search."""
     from agno.tools.tavily import TavilyTools
 
     return TavilyTools
@@ -263,7 +281,8 @@ def tavily_tools() -> type:
     dependencies=["googlesearch-python", "pycountry"],
     docs_url="https://docs.agno.com/tools/toolkits/search/googlesearch",
 )
-def googlesearch_tools() -> type:
+def googlesearch_tools() -> type[Toolkit]:
+    """Return Google Search tools for web queries."""
     from agno.tools.googlesearch import GoogleSearchTools
 
     return GoogleSearchTools
@@ -277,7 +296,8 @@ def googlesearch_tools() -> type:
     icon="Globe",
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/website",
 )
-def website_tools() -> type:
+def website_tools() -> type[Toolkit]:
+    """Return website tools for web scraping."""
     from agno.tools.website import WebsiteTools
 
     return WebsiteTools
@@ -295,7 +315,8 @@ def website_tools() -> type:
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
 )
-def jina_tools() -> type:
+def jina_tools() -> type[Toolkit]:
+    """Return Jina tools for document reading."""
     from agno.tools.jina import JinaReaderTools
 
     return JinaReaderTools
@@ -313,7 +334,8 @@ def jina_tools() -> type:
     requires_config=["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD"],
     docs_url="https://docs.agno.com/tools/toolkits/social/email",
 )
-def email_tools() -> type:
+def email_tools() -> type[Toolkit]:
+    """Return email tools for message handling."""
     from agno.tools.email import EmailTools
 
     return EmailTools
@@ -331,7 +353,8 @@ def email_tools() -> type:
     dependencies=["httpx"],
     docs_url=None,
 )
-def telegram_tools() -> type:
+def telegram_tools() -> type[Toolkit]:
+    """Return Telegram tools for messaging integration."""
     from agno.tools.telegram import TelegramTools
 
     return TelegramTools
@@ -441,7 +464,7 @@ def youtube_tools() -> type[Toolkit]:
     return YouTubeTools
 
 
-def get_tool_by_name(tool_name: str) -> Any:
+def get_tool_by_name(tool_name: str) -> Toolkit:
     """Get a tool instance by its registered name.
 
     Args:
@@ -452,10 +475,12 @@ def get_tool_by_name(tool_name: str) -> Any:
 
     Raises:
         ValueError: If the tool name is not registered
+
     """
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
-        raise ValueError(f"Unknown tool: {tool_name}. Available tools: {available}")
+        msg = f"Unknown tool: {tool_name}. Available tools: {available}"
+        raise ValueError(msg)
 
     try:
         tool_factory = TOOL_REGISTRY[tool_name]

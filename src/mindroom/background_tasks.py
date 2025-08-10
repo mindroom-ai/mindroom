@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .logging_config import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
 
 logger = get_logger(__name__)
 
@@ -28,6 +30,7 @@ def create_background_task(
 
     Returns:
         The created task
+
     """
     task: asyncio.Task[Any] = asyncio.create_task(coro)
     if name:
@@ -47,22 +50,23 @@ def create_background_task(
             pass
         except Exception as e:
             task_name = task.get_name() if hasattr(task, "get_name") else "unknown"
-            logger.error(f"Background task '{task_name}' failed", error=str(e), exc_info=True)
+            logger.exception("Background task '%s' failed", task_name, error=str(e))
             if error_handler:
                 try:
                     error_handler(e)
                 except Exception as handler_error:
-                    logger.error(f"Error handler for task '{task_name}' failed", error=str(handler_error))
+                    logger.exception(f"Error handler for task '{task_name}' failed", error=str(handler_error))
 
     task.add_done_callback(_task_done_callback)
     return task
 
 
-async def wait_for_background_tasks(timeout: float | None = None) -> None:
+async def wait_for_background_tasks(timeout: float | None = None) -> None:  # noqa: ASYNC109
     """Wait for all background tasks to complete.
 
     Args:
         timeout: Optional timeout in seconds
+
     """
     if not _background_tasks:
         return

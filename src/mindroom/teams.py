@@ -5,23 +5,28 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from agno.agent import Agent
 from agno.models.message import Message
 from agno.run.response import RunResponse
 from agno.run.team import TeamRunResponse
 from agno.team import Team
 
 from .ai import get_model_instance
-from .config import Config
 from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
 
 if TYPE_CHECKING:
+    from agno.agent import Agent
+
     from .bot import MultiAgentOrchestrator
+    from .config import Config
 
 
 logger = get_logger(__name__)
+
+# Message length limits for team context and logging
+MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
+MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
 
 
 class TeamMode(str, Enum):
@@ -41,11 +46,12 @@ def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -
 
     Returns:
         List of formatted contribution strings
+
     """
     return _extract_contributions_recursive(response, indent=0, include_consensus=True)
 
 
-def _extract_contributions_recursive(
+def _extract_contributions_recursive(  # noqa: C901
     response: TeamRunResponse | RunResponse,
     indent: int,
     include_consensus: bool,
@@ -59,6 +65,7 @@ def _extract_contributions_recursive(
 
     Returns:
         List of formatted contribution strings
+
     """
     parts = []
     indent_str = "  " * indent
@@ -112,6 +119,7 @@ def _extract_content(response: TeamRunResponse | RunResponse) -> str:
 
     Returns:
         The extracted content as a string
+
     """
     # Direct content takes priority
     if response.content:
@@ -122,11 +130,12 @@ def _extract_content(response: TeamRunResponse | RunResponse) -> str:
     # multiple turns in a conversation. Consider if you want just the
     # last message or all of them.
     if response.messages:
-        content_parts = []
         messages_list: list[Any] = response.messages
-        for msg in messages_list:
-            if isinstance(msg, Message) and msg.role == "assistant" and msg.content:
-                content_parts.append(str(msg.content))
+        content_parts = [
+            str(msg.content)
+            for msg in messages_list
+            if isinstance(msg, Message) and msg.role == "assistant" and msg.content
+        ]
 
         # Join with newlines to preserve message boundaries
         return "\n\n".join(content_parts) if content_parts else ""
@@ -197,8 +206,8 @@ def get_team_model(team_name: str, room_id: str, config: Config) -> str:
 
     Returns:
         Model name to use
-    """
 
+    """
     # Find room alias from room ID
     room_alias = get_room_alias_from_id(room_id)
 
@@ -220,7 +229,7 @@ def get_team_model(team_name: str, room_id: str, config: Config) -> str:
     return "default"
 
 
-async def create_team_response(
+async def create_team_response(  # noqa: C901
     agent_names: list[str],
     mode: TeamMode,
     message: str,
@@ -229,7 +238,6 @@ async def create_team_response(
     model_name: str | None = None,
 ) -> str:
     """Create a team and execute response."""
-
     # Get existing agent instances from the orchestrator
     agents: list[Agent] = []
     for name in agent_names:
@@ -252,7 +260,7 @@ async def create_team_response(
         for msg in recent_messages:
             sender = msg.get("sender", "Unknown")
             body = msg.get("content", {}).get("body", "")
-            if body and len(body) < 200:
+            if body and len(body) < MAX_CONTEXT_MESSAGE_LENGTH:
                 context_parts.append(f"{sender}: {body}")
 
         if context_parts:
@@ -304,8 +312,8 @@ async def create_team_response(
         team_response = str(response)
 
     # Log the team response
-    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:500]}")
-    if len(team_response) > 500:
+    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:MAX_LOG_MESSAGE_LENGTH]}")
+    if len(team_response) > MAX_LOG_MESSAGE_LENGTH:
         logger.debug(f"TEAM RESPONSE (full): {team_response}")
 
     # Prepend team information to the response

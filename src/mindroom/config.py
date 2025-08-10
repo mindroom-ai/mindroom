@@ -62,7 +62,8 @@ class MemoryConfig(BaseModel):
     """Memory system configuration."""
 
     embedder: MemoryEmbedderConfig = Field(
-        default_factory=MemoryEmbedderConfig, description="Embedder configuration for memory"
+        default_factory=MemoryEmbedderConfig,
+        description="Embedder configuration for memory",
     )
     llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
 
@@ -111,9 +112,10 @@ class Config(BaseModel):
         path = config_path or DEFAULT_AGENTS_CONFIG
 
         if not path.exists():
-            raise FileNotFoundError(f"Agent configuration file not found: {path}")
+            msg = f"Agent configuration file not found: {path}"
+            raise FileNotFoundError(msg)
 
-        with open(path) as f:
+        with path.open() as f:
             data = yaml.safe_load(f)
 
         # Handle None values for optional dictionaries
@@ -138,10 +140,12 @@ class Config(BaseModel):
 
         Raises:
             ValueError: If agent not found
+
         """
         if agent_name not in self.agents:
             available = ", ".join(sorted(self.agents.keys()))
-            raise ValueError(f"Unknown agent: {agent_name}. Available agents: {available}")
+            msg = f"Unknown agent: {agent_name}. Available agents: {available}"
+            raise ValueError(msg)
         return self.agents[agent_name]
 
     def get_all_configured_rooms(self) -> set[str]:
@@ -149,6 +153,7 @@ class Config(BaseModel):
 
         Returns:
             Set of all unique room aliases from agent and team configurations
+
         """
         all_room_aliases = set()
         for agent_config in self.agents.values():
@@ -165,6 +170,7 @@ class Config(BaseModel):
 
         Returns:
             Set of bot usernames (without domain) that should be in this room
+
         """
         from .matrix.rooms import resolve_room_aliases
 
@@ -193,9 +199,10 @@ class Config(BaseModel):
 
         Args:
             config_path: Path to save the config to. If None, uses DEFAULT_AGENTS_CONFIG.
+
         """
         path = config_path or DEFAULT_AGENTS_CONFIG
         config_dict = self.model_dump(exclude_none=True)
-        with open(path, "w") as f:
+        with Path(path).open("w") as f:
             yaml.dump(config_dict, f, default_flow_style=False, sort_keys=True)
         logger.info(f"Saved configuration to {path}")

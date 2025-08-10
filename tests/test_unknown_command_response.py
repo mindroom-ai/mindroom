@@ -15,6 +15,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+
 
 @pytest.mark.asyncio
 async def test_unknown_command_in_main_room() -> None:
@@ -36,14 +38,14 @@ async def test_unknown_command_in_main_room() -> None:
         agent_name="router",
         user_id="@mindroom_router:localhost",
         display_name="Router",
-        password="test",
+        password=TEST_PASSWORD,
     )
 
     # Create router bot
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -51,7 +53,7 @@ async def test_unknown_command_in_main_room() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path("/tmp/test"))
+    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
     bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
     # Create mock room and event
@@ -69,7 +71,7 @@ async def test_unknown_command_in_main_room() -> None:
     sent_messages = []
 
     async def mock_send_message(
-        client: Any,
+        _client: Any,
         room_id: str,
         content: dict,
     ) -> str:
@@ -85,7 +87,7 @@ async def test_unknown_command_in_main_room() -> None:
                 "room_id": room_id,
                 "content": content,
                 "thread_id": thread_id,
-            }
+            },
         )
         return "$response_event"
 
@@ -126,14 +128,14 @@ async def test_unknown_command_in_thread() -> None:
         agent_name="router",
         user_id="@mindroom_router:localhost",
         display_name="Router",
-        password="test",
+        password=TEST_PASSWORD,
     )
 
     # Create router bot
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -141,7 +143,7 @@ async def test_unknown_command_in_thread() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path("/tmp/test"))
+    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
     bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
     # Create mock room and event
@@ -161,7 +163,7 @@ async def test_unknown_command_in_thread() -> None:
                 "rel_type": "m.thread",
                 "event_id": "$thread_root",
             },
-        }
+        },
     }
 
     # Mock send_message to capture what would be sent
@@ -169,7 +171,7 @@ async def test_unknown_command_in_thread() -> None:
     error_messages = []
 
     async def mock_send_message(
-        client: Any,
+        _client: Any,
         room_id: str,
         content: dict,
     ) -> str:
@@ -184,14 +186,15 @@ async def test_unknown_command_in_thread() -> None:
         if thread_id == "$test_event":  # Using the event itself as thread root
             # This would trigger the Matrix error
             error_messages.append("Cannot start threads from an event with a relation")
-            raise nio.SendRetryError("M_UNKNOWN Cannot start threads from an event with a relation")
+            msg = "M_UNKNOWN Cannot start threads from an event with a relation"
+            raise nio.SendRetryError(msg)
 
         sent_messages.append(
             {
                 "room_id": room_id,
                 "content": content,
                 "thread_id": thread_id,
-            }
+            },
         )
         return "$response_event"
 
@@ -237,14 +240,14 @@ async def test_unknown_command_with_reply() -> None:
         agent_name="router",
         user_id="@mindroom_router:localhost",
         display_name="Router",
-        password="test",
+        password=TEST_PASSWORD,
     )
 
     # Create router bot
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -252,7 +255,7 @@ async def test_unknown_command_with_reply() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path("/tmp/test"))
+    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
     bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
     # Create mock room and event
@@ -266,14 +269,14 @@ async def test_unknown_command_with_reply() -> None:
     event.sender = "@user:localhost"
     event.body = "!invalid"
     event.source = {
-        "content": {"body": "!invalid", "m.relates_to": {"m.in_reply_to": {"event_id": "$original_message"}}}
+        "content": {"body": "!invalid", "m.relates_to": {"m.in_reply_to": {"event_id": "$original_message"}}},
     }
 
     # Mock send_message
     sent_messages = []
 
     async def mock_send_message(
-        client: Any,
+        _client: Any,
         room_id: str,
         content: dict,
     ) -> str:
@@ -289,7 +292,7 @@ async def test_unknown_command_with_reply() -> None:
                 "room_id": room_id,
                 "content": content,
                 "thread_id": thread_id,
-            }
+            },
         )
         return "$response_event"
 

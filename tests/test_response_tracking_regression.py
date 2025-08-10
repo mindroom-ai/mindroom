@@ -17,13 +17,15 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD
+
 
 @pytest.fixture
 def mock_router_agent() -> AgentMatrixUser:
     """Create a mock router agent user."""
     return AgentMatrixUser(
         agent_name="router",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="RouterAgent",
         user_id="@mindroom_router:localhost",
     )
@@ -90,7 +92,7 @@ class TestResponseTrackingRegression:
         command_event.source = {
             "content": {
                 "body": "!help",
-            }
+            },
         }
 
         mock_room = MagicMock()
@@ -159,7 +161,7 @@ class TestResponseTrackingRegression:
         unknown_command_event.source = {
             "content": {
                 "body": "!unknowncommand",
-            }
+            },
         }
 
         mock_room = MagicMock()
@@ -242,7 +244,7 @@ class TestResponseTrackingRegression:
         message_event.source = {
             "content": {
                 "body": "What is quantum computing?",
-            }
+            },
         }
 
         mock_room = MagicMock()

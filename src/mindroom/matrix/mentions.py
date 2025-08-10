@@ -3,7 +3,8 @@
 import re
 from typing import Any
 
-from ..config import Config
+from mindroom.config import Config
+
 from .client import markdown_to_html
 from .identity import MatrixID
 
@@ -26,6 +27,7 @@ def create_mention_content(
 
     Returns:
         Properly formatted content dict for room_send
+
     """
     content: dict[str, Any] = {
         "msgtype": "m.text",
@@ -60,9 +62,11 @@ def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tup
     Args:
         text: Text that may contain @agent_name mentions
         sender_domain: Domain part of the sender's user ID (e.g., "localhost" from "@user:localhost")
+        config: Application configuration
 
     Returns:
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
+
     """
     # Pattern to match @agent_name (with optional @mindroom_ prefix or domain)
     # Matches: @calculator, @mindroom_calculator, @mindroom_calculator:localhost
@@ -96,7 +100,7 @@ def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tup
     return plain_text, mentioned_user_ids, markdown_text
 
 
-def _process_mention(match: re.Match, config: Any, sender_domain: str) -> tuple[str, str, str] | None:
+def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tuple[str, str, str] | None:
     """Process a single mention match and return replacement data.
 
     Args:
@@ -106,6 +110,7 @@ def _process_mention(match: re.Match, config: Any, sender_domain: str) -> tuple[
 
     Returns:
         Tuple of (original_text, matrix_user_id, display_name) or None if not a valid agent
+
     """
     original = match.group(0)
     prefix = match.group(1) or ""  # "mindroom_" or empty
@@ -144,6 +149,7 @@ def create_mention_content_from_text(
     This is the universal function that should be used everywhere.
 
     Args:
+        config: Application configuration
         text: Message text that may contain @agent_name mentions
         sender_domain: Domain part of the sender's user ID
         thread_event_id: Optional thread root event ID
@@ -151,6 +157,7 @@ def create_mention_content_from_text(
 
     Returns:
         Properly formatted content dict for room_send
+
     """
     plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(text, sender_domain, config)
 

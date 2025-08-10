@@ -8,7 +8,7 @@ import sys
 
 import structlog
 
-__all__ = ["setup_logging", "emoji", "get_logger"]
+__all__ = ["emoji", "get_logger", "setup_logging"]
 
 
 def emoji(agent_name: str) -> str:
@@ -19,6 +19,7 @@ def emoji(agent_name: str) -> str:
 
     Returns:
         The agent name with a unique emoji prefix
+
     """
     # Emojis for different agents
     emojis = [
@@ -41,7 +42,7 @@ def emoji(agent_name: str) -> str:
     ]
 
     # Use hash to get consistent emoji for each agent
-    hash_value = int(hashlib.md5(agent_name.encode()).hexdigest(), 16)
+    hash_value = int(hashlib.sha256(agent_name.encode()).hexdigest(), 16)
     emoji_index = hash_value % len(emojis)
     emoji = emojis[emoji_index]
 
@@ -49,11 +50,11 @@ def emoji(agent_name: str) -> str:
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """
-    Configure structlog for mindroom.
+    """Configure structlog for mindroom.
 
     Args:
         level: Minimum logging level (e.g., "DEBUG", "INFO", "WARNING", "ERROR")
+
     """
     # Configure structlog with built-in console renderer
     structlog.configure(
@@ -90,5 +91,6 @@ def get_logger(name: str = __name__) -> structlog.BoundLogger:
 
     Returns:
         Configured structlog logger
+
     """
     return structlog.get_logger(name)  # type: ignore[no-any-return]

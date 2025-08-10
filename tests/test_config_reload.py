@@ -13,6 +13,8 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+
 
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
@@ -90,38 +92,41 @@ def mock_agent_users() -> dict[str, AgentMatrixUser]:
             agent_name=ROUTER_AGENT_NAME,
             user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
             display_name="RouterAgent",
-            password="test_password",
+            password=TEST_PASSWORD,
         ),
         "agent1": AgentMatrixUser(
             agent_name="agent1",
             user_id="@mindroom_agent1:localhost",
             display_name="Agent 1",
-            password="test_password",
+            password=TEST_PASSWORD,
         ),
         "agent2": AgentMatrixUser(
             agent_name="agent2",
             user_id="@mindroom_agent2:localhost",
             display_name="Agent 2",
-            password="test_password",
+            password=TEST_PASSWORD,
         ),
         "agent3": AgentMatrixUser(
             agent_name="agent3",
             user_id="@mindroom_agent3:localhost",
             display_name="Agent 3",
-            password="test_password",
+            password=TEST_PASSWORD,
         ),
         "team1": AgentMatrixUser(
             agent_name="team1",
             user_id="@mindroom_team1:localhost",
             display_name="Team 1",
-            password="test_password",
+            password=TEST_PASSWORD,
         ),
     }
 
 
 @pytest.mark.asyncio
-async def test_agent_joins_new_rooms_on_config_reload(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
+    initial_config: Config,  # noqa: ARG001
+    updated_config: Config,  # noqa: ARG001
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that agents join new rooms when their configuration is updated."""
     # Track room operations
@@ -146,7 +151,7 @@ async def test_agent_joins_new_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -162,11 +167,11 @@ async def test_agent_joins_new_rooms_on_config_reload(
         user_id = client.user_id
         if "agent1" in user_id:
             return ["room1", "room2"]  # agent1 is currently in room1 and room2
-        elif "agent2" in user_id:
+        if "agent2" in user_id:
             return ["room1"]  # agent2 is currently in room1
-        elif "team1" in user_id:
+        if "team1" in user_id:
             return ["room3"]  # team1 is currently in room3
-        elif ROUTER_AGENT_NAME in user_id:
+        if ROUTER_AGENT_NAME in user_id:
             return ["room1", "room2", "room3"]  # router is in all initial rooms
         return []
 
@@ -176,7 +181,7 @@ async def test_agent_joins_new_rooms_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     agent1_bot = AgentBot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["room1", "room2"],  # Initial rooms
     )
@@ -199,18 +204,21 @@ async def test_agent_joins_new_rooms_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_router_updates_rooms_on_config_reload(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+    initial_config: Config,
+    updated_config: Config,
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that the router updates its room list when agents/teams change their rooms."""
     # Track room operations
     joined_rooms: list[str] = []
     left_rooms: list[str] = []
 
-    async def mock_join_room(client: Any, room_id: str) -> bool:
+    async def mock_join_room(_client: Any, room_id: str) -> bool:
         joined_rooms.append(room_id)
         return True
 
-    async def mock_leave_room(client: Any, room_id: str) -> bool:
+    async def mock_leave_room(_client: Any, room_id: str) -> bool:
         left_rooms.append(room_id)
         return True
 
@@ -218,7 +226,7 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -230,7 +238,7 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock get_joined_rooms to simulate current room membership
-    async def mock_get_joined_rooms(client: Any) -> list[str]:
+    async def mock_get_joined_rooms(_client: Any) -> list[str]:
         # Router is currently in initial config rooms
         return ["room1", "room2", "room3"]
 
@@ -248,7 +256,7 @@ async def test_router_updates_rooms_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     router_bot = AgentBot(
         agent_user=mock_agent_users[ROUTER_AGENT_NAME],
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=list(updated_router_rooms),
     )
@@ -270,13 +278,16 @@ async def test_router_updates_rooms_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_new_agent_joins_rooms_on_config_reload(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+    initial_config: Config,  # noqa: ARG001
+    updated_config: Config,  # noqa: ARG001
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that new agents are created and join their configured rooms."""
     # Track room operations
     joined_rooms: dict[str, list[str]] = {}
 
-    async def mock_ensure_all_agent_users(homeserver: Any) -> dict[str, AgentMatrixUser]:
+    async def mock_ensure_all_agent_users(_homeserver: Any) -> dict[str, AgentMatrixUser]:
         # Return both existing and new agent users
         return mock_agent_users
 
@@ -292,7 +303,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -304,7 +315,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock get_joined_rooms
-    async def mock_get_joined_rooms(client: Any) -> list[str]:
+    async def mock_get_joined_rooms(_client: Any) -> list[str]:
         return []  # New agent has no rooms initially
 
     monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
@@ -313,7 +324,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     agent3_bot = AgentBot(
         agent_user=mock_agent_users["agent3"],
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["room5"],
     )
@@ -330,7 +341,10 @@ async def test_new_agent_joins_rooms_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_team_room_changes_on_config_reload(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+    initial_config: Config,  # noqa: ARG001
+    updated_config: Config,  # noqa: ARG001
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that teams update their room memberships when configuration changes."""
     # Track room operations
@@ -355,7 +369,7 @@ async def test_team_room_changes_on_config_reload(
     monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -379,7 +393,7 @@ async def test_team_room_changes_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     team1_bot = AgentBot(
         agent_user=mock_agent_users["team1"],
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["room3", "room6"],
     )
@@ -398,22 +412,25 @@ async def test_team_room_changes_on_config_reload(
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_handles_config_reload(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
+    initial_config: Config,
+    updated_config: Config,
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that the orchestrator properly handles config reloads and updates all bots."""
     # Track config loads
     config_loads = [initial_config, updated_config]
     load_count = [0]
 
-    def mock_load_config(config_path: Any = None) -> Config:
+    def mock_load_config(_config_path: Any = None) -> Config:
         result = config_loads[min(load_count[0], len(config_loads) - 1)]
         load_count[0] += 1
         return result
 
     monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
 
-    async def mock_ensure_all_agent_users(homeserver: Any) -> dict[str, AgentMatrixUser]:
+    async def mock_ensure_all_agent_users(_homeserver: Any) -> dict[str, AgentMatrixUser]:
         return mock_agent_users
 
     monkeypatch.setattr("mindroom.matrix.users.ensure_all_agent_users", mock_ensure_all_agent_users)
@@ -437,7 +454,7 @@ async def test_orchestrator_handles_config_reload(
     monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
 
-    orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
+    orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
 
     # Initialize with initial config
     await orchestrator.initialize()
@@ -513,8 +530,11 @@ async def test_orchestrator_handles_config_reload(
 
 
 @pytest.mark.asyncio
-async def test_room_membership_state_after_config_update(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
+    initial_config: Config,  # noqa: ARG001
+    updated_config: Config,  # noqa: ARG001
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that room membership state is correct after config updates."""
     # Simulate room membership state
@@ -551,7 +571,7 @@ async def test_room_membership_state_after_config_update(
     monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -606,7 +626,7 @@ async def test_room_membership_state_after_config_update(
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path("/tmp/test"),
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=bot_config["new"],
         )

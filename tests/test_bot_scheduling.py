@@ -10,17 +10,18 @@ from mindroom.commands import Command, CommandType
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
 
 @pytest.fixture
 def mock_agent_bot() -> AgentBot:
     """Create a mock agent bot for testing."""
-
     agent_user = AgentMatrixUser(
         agent_name="general",
         user_id="@mindroom_general:localhost",
         display_name="General Agent",
-        password="mock_password",
-        access_token="mock_token",
+        password=TEST_PASSWORD,
+        access_token=TEST_ACCESS_TOKEN,
     )
     config = Config.from_yaml()  # Load actual config for testing
     bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
@@ -79,8 +80,8 @@ class TestBotScheduleCommands:
 
     @pytest.mark.asyncio
     async def test_handle_schedule_command_no_message(self, mock_agent_bot: AgentBot) -> None:
-        mock_agent_bot.response_tracker = MagicMock()
         """Test schedule command with no message uses default."""
+        mock_agent_bot.response_tracker = MagicMock()
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -103,8 +104,8 @@ class TestBotScheduleCommands:
 
     @pytest.mark.asyncio
     async def test_handle_list_schedules_command(self, mock_agent_bot: AgentBot) -> None:
-        mock_agent_bot.response_tracker = MagicMock()
         """Test bot handles list schedules command."""
+        mock_agent_bot.response_tracker = MagicMock()
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -121,15 +122,17 @@ class TestBotScheduleCommands:
             await mock_agent_bot._handle_command(room, event, command)
 
             mock_list.assert_called_once_with(
-                client=mock_agent_bot.client, room_id="!test:server", thread_id="$thread123"
+                client=mock_agent_bot.client,
+                room_id="!test:server",
+                thread_id="$thread123",
             )
 
             mock_agent_bot._send_response.assert_called_once()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     async def test_handle_cancel_schedule_command(self, mock_agent_bot: AgentBot) -> None:
-        mock_agent_bot.response_tracker = MagicMock()
         """Test bot handles cancel schedule command."""
+        mock_agent_bot.response_tracker = MagicMock()
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -149,8 +152,8 @@ class TestBotScheduleCommands:
 
     @pytest.mark.asyncio
     async def test_schedule_command_auto_creates_thread(self, mock_agent_bot: AgentBot) -> None:
-        mock_agent_bot.response_tracker = MagicMock()
         """Test that schedule commands auto-create threads when used in main room."""
+        mock_agent_bot.response_tracker = MagicMock()
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -185,8 +188,8 @@ class TestBotTaskRestoration:
             agent_name="general",
             user_id="@mindroom_general:localhost",
             display_name="General Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -195,7 +198,7 @@ class TestBotTaskRestoration:
 
             # Mock the necessary methods
             with (
-                patch("mindroom.matrix.client.login") as mock_login,
+                patch("mindroom.matrix.users.login") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
@@ -227,8 +230,8 @@ class TestBotTaskRestoration:
             agent_name="general",
             user_id="@mindroom_general:localhost",
             display_name="General Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -236,7 +239,7 @@ class TestBotTaskRestoration:
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
 
             with (
-                patch("mindroom.matrix.client.login") as mock_login,
+                patch("mindroom.matrix.users.login") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
@@ -280,8 +283,8 @@ class TestCommandHandling:
             agent_name="calculator",
             user_id="@mindroom_calculator:localhost",
             display_name="Calculator Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -299,7 +302,7 @@ class TestCommandHandling:
                 "sender": "@user:server",
                 "origin_server_ts": 1234567890,
                 "content": {"msgtype": "m.text", "body": "!schedule in 5 minutes test"},
-            }
+            },
         )
 
         # Call _on_message
@@ -317,8 +320,8 @@ class TestCommandHandling:
             agent_name="router",
             user_id="@mindroom_router:localhost",
             display_name="Router Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -339,7 +342,7 @@ class TestCommandHandling:
                     "body": "!schedule in 5 minutes test",
                     "m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"},
                 },
-            }
+            },
         )
 
         with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
@@ -356,8 +359,8 @@ class TestCommandHandling:
             agent_name="calculator",
             user_id="@mindroom_calculator:localhost",
             display_name="Calculator Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -387,7 +390,7 @@ class TestCommandHandling:
                     "sender": "@user:server",
                     "origin_server_ts": 1234567890,
                     "content": {"msgtype": "m.text", "body": "@calculator what is 2+2?"},
-                }
+                },
             )
 
             await bot._on_message(room, event)
@@ -403,8 +406,8 @@ class TestCommandHandling:
             agent_name="general",
             user_id="@mindroom_general:localhost",
             display_name="General Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -437,7 +440,7 @@ class TestCommandHandling:
                     "msgtype": "m.text",
                     "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
                 },
-            }
+            },
         )
 
         # Mock interactive.handle_text_response and extract_agent_name
@@ -525,8 +528,8 @@ class TestCommandHandling:
             agent_name="news",
             user_id="@mindroom_news:localhost",
             display_name="News Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -589,7 +592,7 @@ class TestCommandHandling:
                     "msgtype": "m.text",
                     "body": "❌ Unable to parse the schedule request",
                 },
-            }
+            },
         )
 
         with (
@@ -599,7 +602,7 @@ class TestCommandHandling:
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
-                lambda x, config: "router"
+                lambda x, config: "router"  # noqa: ARG005
                 if "router" in x
                 else ("news" if "news" in x else ("research" if "research" in x else None))
             )
@@ -624,8 +627,8 @@ class TestCommandHandling:
             agent_name="finance",
             user_id="@mindroom_finance:localhost",
             display_name="Finance Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -675,7 +678,8 @@ class TestCommandHandling:
         mock_context.am_i_mentioned = False
         mock_context.is_thread = True
         mock_context.thread_id = "$thread123"
-        mock_context.thread_history = thread_history + [
+        mock_context.thread_history = [
+            *thread_history,
             {
                 "event_id": "$router_error",
                 "sender": "@mindroom_router:localhost",
@@ -684,7 +688,7 @@ class TestCommandHandling:
                     "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
                     "m.mentions": {},
                 },
-            }
+            },
         ]
         mock_context.mentioned_agents = []
         bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
@@ -700,7 +704,7 @@ class TestCommandHandling:
                     "msgtype": "m.text",
                     "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
                 },
-            }
+            },
         )
 
         with (
@@ -709,7 +713,7 @@ class TestCommandHandling:
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
-                lambda x, config: "router" if "router" in x else ("finance" if "finance" in x else None)
+                lambda x, config: "router" if "router" in x else ("finance" if "finance" in x else None)  # noqa: ARG005
             )
 
             await bot._on_message(room, event)
@@ -729,8 +733,8 @@ class TestCommandHandling:
             agent_name="general",
             user_id="@mindroom_general:localhost",
             display_name="General Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -760,7 +764,7 @@ class TestCommandHandling:
                 "sender": "@mindroom_router:localhost",  # From router agent
                 "origin_server_ts": 1234567890,
                 "content": {"msgtype": "m.text", "body": "❌ Unable to parse the schedule request"},
-            }
+            },
         )
 
         # Mock interactive.handle_text_response and extract_agent_name

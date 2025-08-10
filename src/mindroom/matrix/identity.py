@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
-from ..config import Config
-from ..constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME
+
+if TYPE_CHECKING:
+    from mindroom.config import Config
 
 
 @dataclass(frozen=True)
@@ -20,16 +22,19 @@ class MatrixID:
     # Class constants
     AGENT_PREFIX: ClassVar[str] = "mindroom_"
     DEFAULT_DOMAIN: ClassVar[str] = "mindroom.space"
+    MATRIX_ID_PARTS: ClassVar[int] = 2  # Matrix IDs have username:domain
 
     @classmethod
     def parse(cls, matrix_id: str) -> MatrixID:
         """Parse a Matrix ID like @mindroom_calculator:localhost."""
         if not matrix_id.startswith("@"):
-            raise ValueError(f"Invalid Matrix ID: {matrix_id}")
+            msg = f"Invalid Matrix ID: {matrix_id}"
+            raise ValueError(msg)
 
         parts = matrix_id[1:].split(":", 1)
-        if len(parts) != 2:
-            raise ValueError(f"Invalid Matrix ID format: {matrix_id}")
+        if len(parts) != cls.MATRIX_ID_PARTS:
+            msg = f"Invalid Matrix ID format: {matrix_id}"
+            raise ValueError(msg)
 
         return cls(username=parts[0], domain=parts[1])
 
@@ -78,6 +83,7 @@ class MatrixID:
         return name if name in config.agents else None
 
     def __str__(self) -> str:
+        """Return the full Matrix ID string representation."""
         return self.full_id
 
 
@@ -93,7 +99,8 @@ class ThreadStateKey:
         """Parse a state key."""
         parts = state_key.split(":", 1)
         if len(parts) != 2:
-            raise ValueError(f"Invalid state key: {state_key}")
+            msg = f"Invalid state key: {state_key}"
+            raise ValueError(msg)
         return cls(thread_id=parts[0], agent_name=parts[1])
 
     @property
@@ -102,6 +109,7 @@ class ThreadStateKey:
         return f"{self.thread_id}:{self.agent_name}"
 
     def __str__(self) -> str:
+        """Return the state key string representation."""
         return self.key
 
 

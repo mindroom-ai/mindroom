@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-import mindroom.interactive as interactive
+from mindroom import interactive
 from mindroom.config import AgentConfig, Config, ModelConfig
 
 
@@ -37,7 +37,7 @@ class TestInteractiveFunctions:
         assert interactive.should_create_interactive_question("Here's a question:\n```interactive\n{}\n```")
 
         assert interactive.should_create_interactive_question(
-            'Text before\n```interactive\n{"question": "test"}\n```\nText after'
+            'Text before\n```interactive\n{"question": "test"}\n```\nText after',
         )
 
         # Should detect - newline format (agent mistake)
@@ -122,7 +122,7 @@ Based on your choice, I'll proceed accordingly."""
         assert mock_client.room_send.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_handle_interactive_response_invalid_json(self, mock_client: AsyncMock) -> None:
+    async def test_handle_interactive_response_invalid_json(self, mock_client: AsyncMock) -> None:  # noqa: ARG002
         """Test handling invalid JSON in interactive block."""
         interactive._active_questions.clear()
 
@@ -145,7 +145,7 @@ Based on your choice, I'll proceed accordingly."""
         assert len(interactive._active_questions) == 0
 
     @pytest.mark.asyncio
-    async def test_handle_interactive_response_missing_options(self, mock_client: AsyncMock) -> None:
+    async def test_handle_interactive_response_missing_options(self, mock_client: AsyncMock) -> None:  # noqa: ARG002
         """Test handling JSON without options."""
         interactive._active_questions.clear()
 
@@ -195,7 +195,7 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$question123"
         event.key = "🚀"
 
-        result = await interactive.handle_reaction(mock_client, room, event, "test_agent", self.config)
+        result = await interactive.handle_reaction(mock_client, event, "test_agent", self.config)
 
         # Should return the selected value and thread_id
         assert result == ("fast", "$thread123")
@@ -220,7 +220,7 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$unknown123"
         event.key = "👍"
 
-        result = await interactive.handle_reaction(mock_client, room, event, "test_agent", self.config)
+        result = await interactive.handle_reaction(mock_client, event, "test_agent", self.config)
 
         # Should return None for unknown reaction
         assert result is None
@@ -242,13 +242,12 @@ Based on your choice, I'll proceed accordingly."""
         )
 
         # Create reaction event from bot itself
-        room = MagicMock()
         event = MagicMock(spec=nio.ReactionEvent)
         event.sender = "@mindroom_test:localhost"  # Bot's own ID
         event.reacts_to = "$question123"
         event.key = "✅"
 
-        result = await interactive.handle_reaction(mock_client, room, event, "test_agent", self.config)
+        result = await interactive.handle_reaction(mock_client, event, "test_agent", self.config)
 
         # Should return None (ignoring own reaction)
         assert result is None
@@ -426,7 +425,11 @@ Just let me know your preference!"""
         # Register the question
         event_id = "$q123"
         interactive.register_interactive_question(
-            event_id, "!room:localhost", "$thread123", option_map or {}, "test_agent"
+            event_id,
+            "!room:localhost",
+            "$thread123",
+            option_map or {},
+            "test_agent",
         )
 
         # Verify question was created
@@ -451,7 +454,7 @@ Just let me know your preference!"""
         reaction_event.reacts_to = event_id
         reaction_event.key = "🔍"
 
-        result = await interactive.handle_reaction(mock_client, room, reaction_event, "test_agent", self.config)
+        result = await interactive.handle_reaction(mock_client, reaction_event, "test_agent", self.config)
 
         # Verify reaction was processed
         assert result == ("detailed", "$thread123")  # Thread ID from the question

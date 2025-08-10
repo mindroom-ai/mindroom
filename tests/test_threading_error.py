@@ -18,6 +18,8 @@ from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 
+from .conftest import TEST_PASSWORD
+
 
 class TestThreadingBehavior:
     """Test that agents correctly handle threading in various scenarios."""
@@ -27,7 +29,7 @@ class TestThreadingBehavior:
         """Create an AgentBot for testing."""
         agent_user = AgentMatrixUser(
             user_id="@mindroom_general:localhost",
-            password="test_password",
+            password=TEST_PASSWORD,
             display_name="GeneralAgent",
             agent_name="general",
         )
@@ -68,7 +70,7 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args: object, **kwargs: object) -> MagicMock:
+        async def mock_arun(*_args: object, **_kwargs: object) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
@@ -97,19 +99,20 @@ class TestThreadingBehavior:
                 "origin_server_ts": 1234567890,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
-            }
+            },
         )
 
         # The bot should send a response
         bot.client.room_send = AsyncMock(  # type: ignore[union-attr]
-            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost"),
         )
 
         # Mock thread history fetch (returns empty for new thread)
         bot.client.room_messages = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomMessagesResponse.from_dict(
-                {"chunk": [], "start": "s1", "end": "e1"}, room_id="!test:localhost"
-            )
+                {"chunk": [], "start": "s1", "end": "e1"},
+                room_id="!test:localhost",
+            ),
         )
 
         # Initialize the bot (to set up components it needs)
@@ -165,19 +168,20 @@ class TestThreadingBehavior:
                 "origin_server_ts": 1234567890,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
-            }
+            },
         )
 
         # Mock the bot's response
         bot.client.room_send = AsyncMock(  # type: ignore[union-attr]
-            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost"),
         )
 
         # Mock thread history
         bot.client.room_messages = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomMessagesResponse.from_dict(
-                {"chunk": [], "start": "s1", "end": "e1"}, room_id="!test:localhost"
-            )
+                {"chunk": [], "start": "s1", "end": "e1"},
+                room_id="!test:localhost",
+            ),
         )
 
         # Initialize response tracking
@@ -212,7 +216,7 @@ class TestThreadingBehavior:
         # Create a router bot to handle commands
         agent_user = AgentMatrixUser(
             user_id="@mindroom_router:localhost",
-            password="test_password",
+            password=TEST_PASSWORD,
             display_name="Router",
             agent_name="router",
         )
@@ -253,7 +257,7 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args: object, **kwargs: object) -> MagicMock:
+        async def mock_arun(*_args: object, **_kwargs: object) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
@@ -275,12 +279,12 @@ class TestThreadingBehavior:
                 "origin_server_ts": 1234567890,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
-            }
+            },
         )
 
         # Mock the bot's response - it should succeed
         bot.client.room_send = AsyncMock(
-            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost"),
         )
 
         # Process the command
@@ -308,7 +312,7 @@ class TestThreadingBehavior:
         # Create a router bot to handle commands
         agent_user = AgentMatrixUser(
             user_id="@mindroom_router:localhost",
-            password="test_password",
+            password=TEST_PASSWORD,
             display_name="Router",
             agent_name="router",
         )
@@ -348,7 +352,7 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args: object, **kwargs: object) -> MagicMock:
+        async def mock_arun(*_args: object, **_kwargs: object) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
@@ -370,7 +374,7 @@ class TestThreadingBehavior:
                 "origin_server_ts": 1234567890,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
-            }
+            },
         )
 
         # Mock room_get_state for list_schedules command
@@ -378,12 +382,12 @@ class TestThreadingBehavior:
             return_value=nio.RoomGetStateResponse.from_dict(
                 [],  # No scheduled tasks
                 room_id="!test:localhost",
-            )
+            ),
         )
 
         # Mock the bot's response
         bot.client.room_send = AsyncMock(
-            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost"),
         )
 
         # Process the command
@@ -426,19 +430,20 @@ class TestThreadingBehavior:
                 "origin_server_ts": 1234567890,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
-            }
+            },
         )
 
         # Mock the bot's response
         bot.client.room_send = AsyncMock(  # type: ignore[union-attr]
-            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost"),
         )
 
         # Mock thread history
         bot.client.room_messages = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomMessagesResponse.from_dict(
-                {"chunk": [], "start": "s1", "end": "e1"}, room_id="!test:localhost"
-            )
+                {"chunk": [], "start": "s1", "end": "e1"},
+                room_id="!test:localhost",
+            ),
         )
 
         # Initialize response tracking
@@ -459,7 +464,10 @@ class TestThreadingBehavior:
 
             # Now simulate the response being sent
             await bot._send_response(
-                room, event.event_id, "I can help with that complex question!", "$thread_root:localhost"
+                room,
+                event.event_id,
+                "I can help with that complex question!",
+                "$thread_root:localhost",
             )
 
         # Verify the bot sent a response

@@ -13,6 +13,8 @@ from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config
 from mindroom.matrix.users import AgentMatrixUser
 
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
 
 @pytest.fixture
 def mock_calculator_agent() -> AgentMatrixUser:
@@ -21,8 +23,8 @@ def mock_calculator_agent() -> AgentMatrixUser:
         agent_name="calculator",
         user_id="@mindroom_calculator:localhost",
         display_name="CalculatorAgent",
-        password="calc_pass",
-        access_token="calc_token",
+        password=TEST_PASSWORD,
+        access_token=TEST_ACCESS_TOKEN,
     )
 
 
@@ -33,15 +35,17 @@ def mock_general_agent() -> AgentMatrixUser:
         agent_name="general",
         user_id="@mindroom_general:localhost",
         display_name="GeneralAgent",
-        password="gen_pass",
-        access_token="gen_token",
+        password=TEST_PASSWORD,
+        access_token=TEST_ACCESS_TOKEN,
     )
 
 
 @pytest.mark.asyncio
 @patch("mindroom.bot.fetch_thread_history")
 async def test_agent_processes_direct_mention(
-    mock_fetch_history: AsyncMock, mock_calculator_agent: AgentMatrixUser, tmp_path: Path
+    mock_fetch_history: AsyncMock,
+    mock_calculator_agent: AgentMatrixUser,
+    tmp_path: Path,
 ) -> None:
     """Test that an agent processes messages where it's directly mentioned."""
     mock_fetch_history.return_value = []
@@ -169,7 +173,7 @@ async def test_agent_ignores_other_agents(
 
 @pytest.mark.asyncio
 @patch("mindroom.teams.Team.arun")
-async def test_agent_responds_in_threads_based_on_participation(
+async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR0915
     mock_team_arun: AsyncMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
@@ -407,13 +411,13 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
                 agent_name="calculator",
                 user_id="@mindroom_calculator:localhost",
                 display_name="CalculatorAgent",
-                password="calc_pass",
+                password=TEST_PASSWORD,
             ),
             "general": AgentMatrixUser(
                 agent_name="general",
                 user_id="@mindroom_general:localhost",
                 display_name="GeneralAgent",
-                password="gen_pass",
+                password=TEST_PASSWORD,
             ),
         }
         mock_ensure.return_value = mock_agents

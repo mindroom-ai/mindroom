@@ -56,7 +56,11 @@ class TestMemoryFunctions:
         """Test adding agent memory."""
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             await add_agent_memory(
-                "Test memory content", "test_agent", storage_path, config, metadata={"test": "value"}
+                "Test memory content",
+                "test_agent",
+                storage_path,
+                config,
+                metadata={"test": "value"},
             )
 
             # Verify memory.add was called correctly
@@ -74,7 +78,10 @@ class TestMemoryFunctions:
 
     @pytest.mark.asyncio
     async def test_add_agent_memory_error_handling(
-        self, mock_memory: AsyncMock, storage_path: Any, config: Any
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Any,
+        config: Any,
     ) -> None:
         """Test error handling in add_agent_memory."""
         mock_memory.add.side_effect = Exception("Memory error")
@@ -88,7 +95,7 @@ class TestMemoryFunctions:
         """Test searching agent memories."""
         # Mock search results
         mock_results = [
-            {"id": "1", "memory": "Previous calculation: 2+2=4", "score": 0.9, "metadata": {"agent": "calculator"}}
+            {"id": "1", "memory": "Previous calculation: 2+2=4", "score": 0.9, "metadata": {"agent": "calculator"}},
         ]
         mock_memory.search.return_value = {"results": mock_results}
 
@@ -103,7 +110,10 @@ class TestMemoryFunctions:
 
     @pytest.mark.asyncio
     async def test_search_agent_memories_handles_dict_response(
-        self, mock_memory: AsyncMock, storage_path: Any, config: Any
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Any,
+        config: Any,
     ) -> None:
         """Test that search handles dict response with 'results' key."""
         # This tests the bug we found where Mem0 returns dict not list
@@ -115,7 +125,10 @@ class TestMemoryFunctions:
 
     @pytest.mark.asyncio
     async def test_search_agent_memories_handles_list_response(
-        self, mock_memory: AsyncMock, storage_path: Any, config: Any
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Any,
+        config: Any,
     ) -> None:
         """Test that search handles direct list response."""
         # In case Mem0 API changes to return list directly
@@ -175,7 +188,11 @@ class TestMemoryFunctions:
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             enhanced = await build_memory_enhanced_prompt(
-                "What is 3+3?", "calculator", storage_path, config, room_id="!room:server"
+                "What is 3+3?",
+                "calculator",
+                storage_path,
+                config,
+                room_id="!room:server",
             )
 
             # Should include both contexts
@@ -187,7 +204,10 @@ class TestMemoryFunctions:
 
     @pytest.mark.asyncio
     async def test_build_memory_enhanced_prompt_no_memories(
-        self, mock_memory: AsyncMock, storage_path: Any, config: Any
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Any,
+        config: Any,
     ) -> None:
         """Test prompt enhancement with no memories found."""
         mock_memory.search.return_value = {"results": []}
@@ -203,7 +223,12 @@ class TestMemoryFunctions:
         """Test storing conversation memory."""
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             await store_conversation_memory(
-                "What is 2+2?", "calculator", storage_path, "session123", config, room_id="!room:server"
+                "What is 2+2?",
+                "calculator",
+                storage_path,
+                "session123",
+                config,
+                room_id="!room:server",
             )
 
             # Should be called twice (agent and room)
@@ -225,7 +250,10 @@ class TestMemoryFunctions:
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory_no_prompt(
-        self, mock_memory: AsyncMock, storage_path: Any, config: Any
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Any,
+        config: Any,
     ) -> None:
         """Test that empty prompts are not stored."""
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
@@ -242,7 +270,10 @@ class TestMemoryFunctions:
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory_with_empty_response(
-        self, mock_memory: AsyncMock, storage_path: Any, config: Any
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Any,
+        config: Any,
     ) -> None:
         """Test that user prompts are still stored even with empty responses."""
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):

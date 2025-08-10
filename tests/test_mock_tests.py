@@ -65,11 +65,11 @@ class TestMockingStrategy:
 
                 # Should succeed
                 assert isinstance(response, nio.LoginResponse)
-                assert client.access_token == "test_token"
+                assert client.access_token == "test_token"  # noqa: S105
                 assert len(m.requests) == 1
         else:
             # WITHOUT mocking - should fail
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises((ConnectionError, TimeoutError, OSError)) as exc_info:
                 # Can't modify frozen config, just let it fail
                 await asyncio.wait_for(client.login("password"), timeout=TIMEOUT)
 
@@ -87,7 +87,7 @@ class TestMockingStrategy:
         room_id = "!test:example.org"
 
         # Pretend we're logged in
-        client.access_token = "test_token"
+        client.access_token = "test_token"  # noqa: S105
 
         if use_mock:
             # WITH mocking - should succeed
@@ -133,7 +133,7 @@ class TestMockingStrategy:
     @pytest.mark.parametrize("use_mock", [True, False])
     async def test_sync_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that sync actually requires HTTP mocking to succeed."""
-        client.access_token = "test_token"
+        client.access_token = "test_token"  # noqa: S105
 
         if use_mock:
             # WITH mocking - should succeed
@@ -173,7 +173,7 @@ class TestMockingStrategy:
     async def test_join_room_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that join actually requires HTTP mocking to succeed."""
         room_id = "!test:example.org"
-        client.access_token = "test_token"
+        client.access_token = "test_token"  # noqa: S105
 
         if use_mock:
             # WITH mocking - should succeed
@@ -267,13 +267,13 @@ class TestMockingStrategy:
     async def test_request_inspection(self, client: nio.AsyncClient) -> None:
         """Test that we can inspect the actual HTTP requests made."""
         room_id = "!test:example.org"
-        client.access_token = "test_token"
+        client.access_token = "test_token"  # noqa: S105
 
         with aioresponses() as m:
             # Capture the request
             request_data = None
 
-            async def capture_request(url: str, **kwargs: Any) -> CallbackResult:
+            async def capture_request(_url: str, **kwargs: Any) -> CallbackResult:
                 nonlocal request_data
                 request_data = kwargs
 
@@ -331,7 +331,7 @@ class TestMockingStrategyExtended:
     @pytest.mark.parametrize("use_mock", [True, False])
     async def test_set_displayname_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that set_displayname actually requires HTTP mocking to succeed."""
-        client.access_token = "test_token"
+        client.access_token = "test_token"  # noqa: S105
         display_name = "Test Bot"
 
         if use_mock:
@@ -361,7 +361,7 @@ class TestMockingStrategyExtended:
         """Test that room_invite actually requires HTTP mocking to succeed."""
         room_id = "!test:example.org"
         user_id = "@invitee:example.org"
-        client.access_token = "test_token"
+        client.access_token = "test_token"  # noqa: S105
 
         if use_mock:
             # WITH mocking - should succeed
@@ -387,7 +387,7 @@ class TestMockingStrategyExtended:
     async def test_room_messages_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that room_messages actually requires HTTP mocking to succeed."""
         room_id = "!test:example.org"
-        client.access_token = "test_token"
+        client.access_token = "test_token"  # noqa: S105
 
         if use_mock:
             # WITH mocking - should succeed
@@ -433,7 +433,7 @@ class TestMockingStrategyExtended:
     async def test_joined_members_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that joined_members actually requires HTTP mocking to succeed."""
         room_id = "!test:example.org"
-        client.access_token = "test_token"
+        client.access_token = "test_token"  # noqa: S105
 
         if use_mock:
             # WITH mocking - should succeed
@@ -474,7 +474,7 @@ class TestMockingStrategyExtended:
     @pytest.mark.parametrize("use_mock", [True, False])
     async def test_joined_rooms_mocking(self, client: nio.AsyncClient, use_mock: bool) -> None:
         """Test that joined_rooms actually requires HTTP mocking to succeed."""
-        client.access_token = "test_token"
+        client.access_token = "test_token"  # noqa: S105
 
         if use_mock:
             # WITH mocking - should succeed
@@ -514,7 +514,7 @@ class TestMockingStrategyExtended:
         room_id = "!test:example.org"
         event_type = "m.room.name"
         content = {"name": "Test Room"}
-        client.access_token = "test_token"
+        client.access_token = "test_token"  # noqa: S105
 
         if use_mock:
             # WITH mocking - should succeed
