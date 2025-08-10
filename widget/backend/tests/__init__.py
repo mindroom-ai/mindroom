@@ -1,1 +1,1 @@
-# Test package for mindroom widget backend
+"""Test package for mindroom widget backend."""

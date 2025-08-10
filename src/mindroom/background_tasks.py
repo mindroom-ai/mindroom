@@ -50,7 +50,7 @@ def create_background_task(
             pass
         except Exception as e:
             task_name = task.get_name() if hasattr(task, "get_name") else "unknown"
-            logger.error(f"Background task '{task_name}' failed", error=str(e), exc_info=True)
+            logger.exception("Background task '%s' failed", task_name, error=str(e))
             if error_handler:
                 try:
                     error_handler(e)
@@ -61,7 +61,7 @@ def create_background_task(
     return task
 
 
-async def wait_for_background_tasks(timeout: float | None = None) -> None:
+async def wait_for_background_tasks(timeout: float | None = None) -> None:  # noqa: ASYNC109
     """Wait for all background tasks to complete.
 
     Args:

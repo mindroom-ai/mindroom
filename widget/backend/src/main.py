@@ -1,3 +1,4 @@
+# ruff: noqa: INP001 D100
 import threading
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,7 @@ config_lock = threading.Lock()
 class TestModelRequest(BaseModel):
     """Request model for testing AI model connections."""
 
-    modelId: str
+    modelId: str  # noqa: N815
 
 
 class ConfigFileHandler(FileSystemEventHandler):
@@ -49,6 +50,7 @@ class ConfigFileHandler(FileSystemEventHandler):
     def on_modified(self, event: object) -> None:
         """Handle file modification events."""
         if event.src_path.endswith("config.yaml"):
+            print(f"Config file changed: {event.src_path}")
             load_config_from_file()
 
 
@@ -58,8 +60,9 @@ def load_config_from_file() -> None:
     try:
         with CONFIG_PATH.open() as f, config_lock:
             config = yaml.safe_load(f)
-    except Exception:  # noqa: S110
-        pass
+        print("Config loaded successfully")
+    except Exception as e:
+        print(f"Error loading config: {e}")
 
 
 # Load initial config
@@ -74,6 +77,8 @@ observer.start()
 @app.on_event("startup")
 async def startup_event() -> None:
     """Initialize the application."""
+    print(f"Loading config from: {CONFIG_PATH}")
+    print(f"Config exists: {CONFIG_PATH.exists()}")
 
 
 @app.on_event("shutdown")
@@ -400,4 +405,4 @@ async def encrypt_api_key(data: dict[str, str]) -> dict[str, str]:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)  # noqa: S104

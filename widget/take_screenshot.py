@@ -23,6 +23,7 @@ def take_screenshot(port: int = 3003) -> bool:
         "DEMO_URL": f"http://localhost:{port}",
     }
 
+    print(f"Taking screenshot of app at http://localhost:{port}...")
     result = subprocess.run(
         ["pnpm", "run", "screenshot"],
         check=False,
@@ -32,25 +33,39 @@ def take_screenshot(port: int = 3003) -> bool:
         text=True,
     )
 
-    return result.returncode == 0
+    if result.returncode != 0:
+        print(f"Error taking screenshot: {result.stderr}")
+        return False
+
+    print(result.stdout)
+    return True
 
 
 def main() -> None:
     """Main function to take screenshots."""
     if len(sys.argv) != 2:
+        print("Usage: python take_screenshot.py <port>")
+        print("Example: python take_screenshot.py 3003")
+        print("\nNote: The servers must be running first. Use ./run.sh to start them.")
         sys.exit(1)
 
     try:
         port = int(sys.argv[1])
     except ValueError:
+        print(f"Error: '{sys.argv[1]}' is not a valid port number")
         sys.exit(1)
+
+    print(f"Taking screenshot of app on port {port}...")
 
     # Take screenshot
     success = take_screenshot(port)
 
     if success:
-        pass
+        print("\n📸 Screenshots saved to widget/frontend/screenshots/")
+        print("You can now view the MindRoom Configuration Widget appearance!")
     else:
+        print("\n❌ Failed to take screenshots.")
+        print("Make sure the widget is running on the specified port.")
         sys.exit(1)
 
 
