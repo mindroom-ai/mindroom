@@ -409,7 +409,7 @@ def slack_tools() -> type[SlackTools]:
     display_name="Gmail",
     description="Read, search, and manage Gmail emails",
     category=ToolCategory.EMAIL,
-    status=ToolStatus.AVAILABLE,
+    status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
     icon="FaGoogle",
     requires_config=["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_PROJECT_ID", "GOOGLE_REDIRECT_URI"],

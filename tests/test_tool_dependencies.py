@@ -6,19 +6,7 @@ from pathlib import Path
 import pytest
 
 from mindroom.tools import TOOL_REGISTRY, get_tool_by_name
-from mindroom.tools_metadata import TOOL_METADATA
-
-# Tools that require configuration to instantiate
-TOOLS_REQUIRING_CONFIG = {
-    "github": "Requires GITHUB_ACCESS_TOKEN environment variable",
-    "telegram": "Requires chat_id parameter",
-    "email": "Requires SMTP configuration",
-    "googlesearch": "Requires Google API credentials",
-    "tavily": "Requires TAVILY_API_KEY environment variable",
-    "slack": "Requires SLACK_TOKEN environment variable",
-    "reddit": "Requires Reddit API credentials (client_id, client_secret)",
-    "twitter": "Requires Twitter API credentials",
-}
+from mindroom.tools_metadata import TOOL_METADATA, ToolStatus
 
 
 def test_all_tools_can_be_imported() -> None:
@@ -28,6 +16,10 @@ def test_all_tools_can_be_imported() -> None:
     failed = []
 
     for tool_name in TOOL_REGISTRY:
+        # Check if tool requires configuration based on metadata
+        metadata = TOOL_METADATA.get(tool_name)
+        requires_config = metadata and (metadata.status == ToolStatus.REQUIRES_CONFIG or metadata.requires_config)
+
         try:
             tool_instance = get_tool_by_name(tool_name)
             assert tool_instance is not None
@@ -35,9 +27,14 @@ def test_all_tools_can_be_imported() -> None:
             successful.append(tool_name)
             print(f"✓ {tool_name}")
         except Exception as e:
-            if tool_name in TOOLS_REQUIRING_CONFIG:
+            if requires_config:
                 config_required.append(tool_name)
-                print(f"⚠ {tool_name}: {TOOLS_REQUIRING_CONFIG[tool_name]}")
+                # Build a helpful message from metadata
+                if metadata and metadata.requires_config:
+                    config_msg = f"Requires: {', '.join(metadata.requires_config)}"
+                else:
+                    config_msg = "Requires configuration"
+                print(f"⚠ {tool_name}: {config_msg}")
             else:
                 failed.append((tool_name, str(e)))
                 print(f"✗ {tool_name}: {e}")
@@ -246,3 +243,40 @@ def test_no_unused_dependencies() -> None:  # noqa: C901, PLR0912
     print(f"\nTotal dependencies: {len(project_dependencies)}")
     print(f"Tool dependencies: {len(used_packages)}")
     print(f"Core dependencies: {len(core_deps)}")
+
+
+def test_tools_requiring_config_metadata() -> None:
+    """Test that tools requiring configuration are properly marked in metadata."""
+    tools_with_env_vars = []
+    tools_with_status = []
+    inconsistent_tools = []
+
+    for tool_name, metadata in TOOL_METADATA.items():
+        has_requires_config = bool(metadata.requires_config)
+        has_config_status = metadata.status == ToolStatus.REQUIRES_CONFIG
+
+        if has_requires_config:
+            tools_with_env_vars.append((tool_name, metadata.requires_config))
+
+        if has_config_status:
+            tools_with_status.append(tool_name)
+
+        # Check for inconsistencies
+        if has_requires_config and not has_config_status:
+            inconsistent_tools.append((tool_name, "has requires_config but status is not REQUIRES_CONFIG"))
+        elif has_config_status and not has_requires_config:
+            inconsistent_tools.append((tool_name, "status is REQUIRES_CONFIG but no requires_config specified"))
+
+    # Report findings
+    print("\nTools requiring configuration:")
+    for tool_name, env_vars in sorted(tools_with_env_vars):
+        print(f"  {tool_name}: {', '.join(env_vars)}")
+
+    print(f"\nTotal tools with config requirements: {len(tools_with_env_vars)}")
+    print(f"Tools marked with REQUIRES_CONFIG status: {len(tools_with_status)}")
+
+    if inconsistent_tools:
+        error_msg = "\nInconsistent configuration metadata found:\n"
+        for tool_name, issue in inconsistent_tools:
+            error_msg += f"  {tool_name}: {issue}\n"
+        pytest.fail(error_msg)
