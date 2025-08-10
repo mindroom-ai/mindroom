@@ -133,7 +133,7 @@ class InviteE2ETest:
 
         if isinstance(response, nio.RoomSendResponse):
             return response.event_id
-        raise MessageSendError(f"Failed to send message: {response}")
+        raise MessageSendError(response)
 
     async def send_mention(self, room_id: str, agent_name: str, message: str, thread_id: str | None = None) -> str:
         """Send a message with proper Matrix mention."""
@@ -151,7 +151,7 @@ class InviteE2ETest:
 
         if isinstance(response, nio.RoomSendResponse):
             return response.event_id
-        raise MessageSendError(f"Failed to send message: {response}")
+        raise MessageSendError(response)
 
     async def get_thread_messages(self, room_id: str, thread_id: str, limit: int = 20) -> list[dict[str, str | int]]:
         """Fetch messages from a specific thread."""
@@ -160,7 +160,7 @@ class InviteE2ETest:
         response = await self.client.room_messages(room_id, limit=limit)
 
         if not isinstance(response, nio.RoomMessagesResponse):
-            raise MessageFetchError(f"Failed to fetch messages: {response}")
+            raise MessageFetchError(response)
 
         messages = []
         for event in reversed(response.chunk):
@@ -185,7 +185,7 @@ class InviteE2ETest:
         response = await self.client.room_messages(room_id, limit=limit)
 
         if not isinstance(response, nio.RoomMessagesResponse):
-            raise MessageFetchError(f"Failed to fetch messages: {response}")
+            raise MessageFetchError(response)
 
         messages = []
         for event in reversed(response.chunk):
