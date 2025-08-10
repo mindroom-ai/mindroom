@@ -75,6 +75,7 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
     description="Mathematical calculations and expressions",
     category=ToolCategory.DEVELOPMENT,
     icon="Calculator",
+    icon_color=None,  # Default gray
     docs_url="https://docs.agno.com/tools/toolkits/local/calculator",
 )
 def calculator_tools() -> type[CalculatorTools]:
@@ -90,6 +91,7 @@ def calculator_tools() -> type[CalculatorTools]:
     description="Read, write, and manage files",
     category=ToolCategory.DEVELOPMENT,
     icon="Folder",
+    icon_color="text-yellow-600",
     docs_url="https://docs.agno.com/tools/toolkits/local/file",
 )
 def file_tools() -> type[FileTools]:
@@ -105,6 +107,7 @@ def file_tools() -> type[FileTools]:
     description="Execute shell commands and scripts",
     category=ToolCategory.DEVELOPMENT,
     icon="Terminal",
+    icon_color="text-green-500",
     docs_url="https://docs.agno.com/tools/toolkits/local/shell",
 )
 def shell_tools() -> type[ShellTools]:
@@ -120,6 +123,7 @@ def shell_tools() -> type[ShellTools]:
     description="Execute Python code in a sandboxed environment",
     category=ToolCategory.DEVELOPMENT,
     icon="Code",
+    icon_color="text-blue-500",
     docs_url="https://docs.agno.com/tools/toolkits/local/python",
 )
 def python_tools() -> type[PythonTools]:
@@ -135,6 +139,7 @@ def python_tools() -> type[PythonTools]:
     description="Manage Docker containers and images",
     category=ToolCategory.DEVELOPMENT,
     icon="FaDocker",
+    icon_color="text-blue-400",
     dependencies=["docker"],
     docs_url="https://docs.agno.com/tools/toolkits/local/docker",
 )
@@ -153,6 +158,7 @@ def docker_tools() -> type[DockerTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="FaGithub",
+    icon_color=None,  # Default gray/black
     requires_config=["GITHUB_ACCESS_TOKEN"],
     dependencies=["PyGithub"],
     docs_url="https://docs.agno.com/tools/toolkits/others/github",
@@ -171,6 +177,7 @@ def github_tools() -> type[GithubTools]:
     description="Read and analyze CSV data with DuckDB",
     category=ToolCategory.RESEARCH,
     icon="FileText",
+    icon_color="text-blue-600",
     dependencies=["duckdb"],
     docs_url="https://docs.agno.com/tools/toolkits/database/csv",
 )
@@ -187,6 +194,7 @@ def csv_tools() -> type[CsvTools]:
     description="Search and retrieve academic papers",
     category=ToolCategory.RESEARCH,
     icon="Book",
+    icon_color="text-red-600",
     dependencies=["arxiv", "pypdf"],
     docs_url="https://docs.agno.com/tools/toolkits/search/arxiv",
 )
@@ -203,6 +211,7 @@ def arxiv_tools() -> type[ArxivTools]:
     description="Web search without tracking",
     category=ToolCategory.RESEARCH,
     icon="Search",
+    icon_color="text-orange-500",
     dependencies=["duckduckgo-search"],
     docs_url="https://docs.agno.com/tools/toolkits/search/duckduckgo",
 )
@@ -219,6 +228,7 @@ def duckduckgo_tools() -> type[DuckDuckGoTools]:
     description="Search encyclopedia articles",
     category=ToolCategory.RESEARCH,
     icon="Globe",
+    icon_color="text-gray-700",
     dependencies=["wikipedia"],
     docs_url="https://docs.agno.com/tools/toolkits/search/wikipedia",
 )
@@ -235,6 +245,7 @@ def wikipedia_tools() -> type[WikipediaTools]:
     description="Extract and analyze news articles from URLs",
     category=ToolCategory.RESEARCH,
     icon="Newspaper",
+    icon_color="text-gray-600",
     dependencies=["newspaper3k"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/newspaper",
 )
@@ -251,6 +262,7 @@ def newspaper_tools() -> type[NewspaperTools]:
     description="Stock market data and financial information",
     category=ToolCategory.RESEARCH,
     icon="TrendingUp",
+    icon_color="text-green-600",
     dependencies=["yfinance"],
     docs_url="https://docs.agno.com/tools/toolkits/others/yfinance",
 )
@@ -267,6 +279,7 @@ def yfinance_tools() -> type[YFinanceTools]:
     description="Pandas data manipulation and analysis",
     category=ToolCategory.RESEARCH,
     icon="Database",
+    icon_color="text-purple-600",
     dependencies=["pandas"],
     docs_url="https://docs.agno.com/tools/toolkits/database/pandas",
 )
@@ -285,6 +298,7 @@ def pandas_tools() -> type[PandasTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="Search",
+    icon_color="text-purple-500",
     requires_config=["TAVILY_API_KEY"],
     dependencies=["tavily-python"],
     docs_url="https://docs.agno.com/tools/toolkits/search/tavily",
@@ -302,6 +316,7 @@ def tavily_tools() -> type[TavilyTools]:
     description="Search the web using Google",
     category=ToolCategory.RESEARCH,
     icon="Search",
+    icon_color="text-blue-500",
     dependencies=["googlesearch-python", "pycountry"],
     docs_url="https://docs.agno.com/tools/toolkits/search/googlesearch",
 )
@@ -318,6 +333,7 @@ def googlesearch_tools() -> type[GoogleSearchTools]:
     description="Extract and analyze content from websites",
     category=ToolCategory.RESEARCH,
     icon="Globe",
+    icon_color="text-indigo-500",
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/website",
 )
 def website_tools() -> type[WebsiteTools]:
@@ -335,6 +351,7 @@ def website_tools() -> type[WebsiteTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="FileText",
+    icon_color="text-pink-500",
     requires_config=["JINA_API_KEY"],
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
@@ -355,6 +372,7 @@ def jina_tools() -> type[JinaReaderTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="Mail",
+    icon_color="text-blue-600",
     requires_config=["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD"],
     docs_url="https://docs.agno.com/tools/toolkits/social/email",
 )
@@ -373,6 +391,7 @@ def email_tools() -> type[EmailTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="FaTelegram",
+    icon_color="text-blue-500",
     requires_config=["TELEGRAM_TOKEN"],
     dependencies=["httpx"],
     docs_url=None,
@@ -392,6 +411,7 @@ def telegram_tools() -> type[TelegramTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="FaSlack",
+    icon_color="text-purple-600",
     requires_config=["SLACK_TOKEN"],
     dependencies=["slack-sdk"],
     docs_url="https://docs.agno.com/tools/toolkits/social/slack",
@@ -412,6 +432,7 @@ def slack_tools() -> type[SlackTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
     icon="FaGoogle",
+    icon_color="text-red-500",
     requires_config=["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_PROJECT_ID", "GOOGLE_REDIRECT_URI"],
     dependencies=["google-api-python-client", "google-auth", "google-auth-oauthlib", "google-auth-httplib2"],
     docs_url="https://docs.agno.com/tools/toolkits/social/gmail",
@@ -433,6 +454,7 @@ def gmail_tools() -> type[GmailTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="FaReddit",
+    icon_color="text-orange-600",
     requires_config=["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_USERNAME", "REDDIT_PASSWORD"],
     dependencies=["praw"],
     docs_url=None,
@@ -452,6 +474,7 @@ def reddit_tools() -> type[RedditTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="FaTwitter",
+    icon_color="text-blue-400",
     requires_config=[
         "X_BEARER_TOKEN",
         "X_CONSUMER_KEY",
@@ -478,6 +501,7 @@ def twitter_tools() -> type[XTools]:
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     icon="FaYoutube",
+    icon_color="text-red-600",
     dependencies=["youtube-transcript-api"],
     docs_url="https://docs.agno.com/tools/toolkits/others/youtube",
 )

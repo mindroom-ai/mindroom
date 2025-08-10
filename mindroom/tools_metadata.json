@@ -7,6 +7,7 @@
       "display_name": "Email",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/email",
       "icon": "Mail",
+      "icon_color": "text-blue-600",
       "name": "email",
       "requires_config": [
         "SMTP_HOST",
@@ -26,6 +27,7 @@
       "display_name": "Slack",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/slack",
       "icon": "FaSlack",
+      "icon_color": "text-purple-600",
       "name": "slack",
       "requires_config": [
         "SLACK_TOKEN"
@@ -42,6 +44,7 @@
       "display_name": "Telegram",
       "docs_url": null,
       "icon": "FaTelegram",
+      "icon_color": "text-blue-500",
       "name": "telegram",
       "requires_config": [
         "TELEGRAM_TOKEN"
@@ -56,6 +59,7 @@
       "display_name": "Calculator",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/calculator",
       "icon": "Calculator",
+      "icon_color": null,
       "name": "calculator",
       "requires_config": null,
       "setup_type": "none",
@@ -70,6 +74,7 @@
       "display_name": "Docker",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/docker",
       "icon": "FaDocker",
+      "icon_color": "text-blue-400",
       "name": "docker",
       "requires_config": null,
       "setup_type": "none",
@@ -82,6 +87,7 @@
       "display_name": "File Operations",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/file",
       "icon": "Folder",
+      "icon_color": "text-yellow-600",
       "name": "file",
       "requires_config": null,
       "setup_type": "none",
@@ -96,6 +102,7 @@
       "display_name": "GitHub",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/github",
       "icon": "FaGithub",
+      "icon_color": null,
       "name": "github",
       "requires_config": [
         "GITHUB_ACCESS_TOKEN"
@@ -110,6 +117,7 @@
       "display_name": "Python Execution",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/python",
       "icon": "Code",
+      "icon_color": "text-blue-500",
       "name": "python",
       "requires_config": null,
       "setup_type": "none",
@@ -122,6 +130,7 @@
       "display_name": "Shell Commands",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/shell",
       "icon": "Terminal",
+      "icon_color": "text-green-500",
       "name": "shell",
       "requires_config": null,
       "setup_type": "none",
@@ -139,6 +148,7 @@
       "display_name": "Gmail",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/gmail",
       "icon": "FaGoogle",
+      "icon_color": "text-red-500",
       "name": "gmail",
       "requires_config": [
         "GOOGLE_CLIENT_ID",
@@ -158,6 +168,7 @@
       "display_name": "YouTube",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/youtube",
       "icon": "FaYoutube",
+      "icon_color": "text-red-600",
       "name": "youtube",
       "requires_config": null,
       "setup_type": "none",
@@ -173,6 +184,7 @@
       "display_name": "arXiv",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/arxiv",
       "icon": "Book",
+      "icon_color": "text-red-600",
       "name": "arxiv",
       "requires_config": null,
       "setup_type": "none",
@@ -187,6 +199,7 @@
       "display_name": "CSV Files",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/csv",
       "icon": "FileText",
+      "icon_color": "text-blue-600",
       "name": "csv",
       "requires_config": null,
       "setup_type": "none",
@@ -201,6 +214,7 @@
       "display_name": "DuckDuckGo",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/duckduckgo",
       "icon": "Search",
+      "icon_color": "text-orange-500",
       "name": "duckduckgo",
       "requires_config": null,
       "setup_type": "none",
@@ -216,6 +230,7 @@
       "display_name": "Google Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/googlesearch",
       "icon": "Search",
+      "icon_color": "text-blue-500",
       "name": "googlesearch",
       "requires_config": null,
       "setup_type": "none",
@@ -230,6 +245,7 @@
       "display_name": "Jina Reader",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
       "icon": "FileText",
+      "icon_color": "text-pink-500",
       "name": "jina",
       "requires_config": [
         "JINA_API_KEY"
@@ -246,6 +262,7 @@
       "display_name": "News Articles",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper",
       "icon": "Newspaper",
+      "icon_color": "text-gray-600",
       "name": "newspaper",
       "requires_config": null,
       "setup_type": "none",
@@ -260,6 +277,7 @@
       "display_name": "Data Analysis",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/pandas",
       "icon": "Database",
+      "icon_color": "text-purple-600",
       "name": "pandas",
       "requires_config": null,
       "setup_type": "none",
@@ -274,6 +292,7 @@
       "display_name": "Tavily Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/tavily",
       "icon": "Search",
+      "icon_color": "text-purple-500",
       "name": "tavily",
       "requires_config": [
         "TAVILY_API_KEY"
@@ -288,6 +307,7 @@
       "display_name": "Website Reader",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/website",
       "icon": "Globe",
+      "icon_color": "text-indigo-500",
       "name": "website",
       "requires_config": null,
       "setup_type": "none",
@@ -302,6 +322,7 @@
       "display_name": "Wikipedia",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/wikipedia",
       "icon": "Globe",
+      "icon_color": "text-gray-700",
       "name": "wikipedia",
       "requires_config": null,
       "setup_type": "none",
@@ -316,6 +337,7 @@
       "display_name": "Yahoo Finance",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/yfinance",
       "icon": "TrendingUp",
+      "icon_color": "text-green-600",
       "name": "yfinance",
       "requires_config": null,
       "setup_type": "none",
@@ -330,6 +352,7 @@
       "display_name": "Reddit",
       "docs_url": null,
       "icon": "FaReddit",
+      "icon_color": "text-orange-600",
       "name": "reddit",
       "requires_config": [
         "REDDIT_CLIENT_ID",
@@ -349,6 +372,7 @@
       "display_name": "Twitter/X",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/x",
       "icon": "FaTwitter",
+      "icon_color": "text-blue-400",
       "name": "twitter",
       "requires_config": [
         "X_BEARER_TOKEN",

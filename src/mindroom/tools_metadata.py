@@ -53,6 +53,7 @@ class ToolMetadata:
     status: ToolStatus = ToolStatus.AVAILABLE
     setup_type: SetupType = SetupType.NONE
     icon: str | None = None  # Icon identifier for frontend
+    icon_color: str | None = None  # Tailwind color class like "text-blue-500"
     requires_config: list[str] | None = None  # Required env vars or config
     dependencies: list[str] | None = None  # Required pip packages
     docs_url: str | None = None  # Documentation URL
@@ -71,6 +72,7 @@ def register_tool_with_metadata(
     status: ToolStatus = ToolStatus.AVAILABLE,
     setup_type: SetupType = SetupType.NONE,
     icon: str | None = None,
+    icon_color: str | None = None,
     requires_config: list[str] | None = None,
     dependencies: list[str] | None = None,
     docs_url: str | None = None,
@@ -85,6 +87,7 @@ def register_tool_with_metadata(
         status: Availability status
         setup_type: Setup requirements
         icon: Icon identifier
+        icon_color: Tailwind color class for icon
         requires_config: Required configuration
         dependencies: Required pip packages
         docs_url: Documentation URL
@@ -104,6 +107,7 @@ def register_tool_with_metadata(
             status=status,
             setup_type=setup_type,
             icon=icon,
+            icon_color=icon_color,
             requires_config=requires_config,
             dependencies=dependencies,
             docs_url=docs_url,
