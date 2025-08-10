@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Screenshot script for MindRoom Configuration Widget.
+"""Screenshot script for MindRoom Configuration Widget.
 
 Usage:
     python take_screenshot.py <port>
@@ -9,6 +8,7 @@ Example:
     python take_screenshot.py 3003
 
 The servers must be running first. Use ./run.sh to start them.
+
 """
 
 import os

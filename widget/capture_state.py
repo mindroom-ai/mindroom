@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Alternative to screenshot - captures the widget's HTML state for viewing.
-"""
+"""Alternative to screenshot - captures the widget's HTML state for viewing."""
 
 import json
 import urllib.error
@@ -12,7 +10,6 @@ from pathlib import Path
 
 def capture_widget_state():
     """Capture the current state of the widget configuration."""
-
     # Create output directory
     output_dir = Path(__file__).parent / "captures"
     output_dir.mkdir(exist_ok=True)

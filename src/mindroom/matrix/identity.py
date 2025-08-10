@@ -125,8 +125,7 @@ def is_agent_id(matrix_id: str, config: Config) -> bool:
 
 
 def extract_agent_name(sender_id: str, config: Config) -> str | None:
-    """
-    Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
+    """Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
 
     Returns agent name (e.g., 'calculator') or None if not an agent.
     """

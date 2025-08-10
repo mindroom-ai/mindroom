@@ -56,8 +56,8 @@ class TestAgentMatrixUser:
             agent_name="calculator",
             user_id="@mindroom_calculator:localhost",
             display_name="CalculatorAgent",
-            password="secure_pass",
-            access_token="token123",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
         assert user.agent_name == "calculator"
         assert user.user_id == "@mindroom_calculator:localhost"
@@ -259,7 +259,7 @@ class TestAgentLogin:
             agent_name="calculator",
             user_id="@mindroom_calculator:localhost",
             display_name="CalculatorAgent",
-            password="test_pass",
+            password=TEST_PASSWORD,
         )
 
         with patch("mindroom.matrix.client.login") as mock_login:
@@ -280,7 +280,7 @@ class TestAgentLogin:
             agent_name="calculator",
             user_id="@mindroom_calculator:localhost",
             display_name="CalculatorAgent",
-            password="wrong_pass",
+            password=TEST_PASSWORD,
         )
 
         with patch("mindroom.matrix.client.login") as mock_login:

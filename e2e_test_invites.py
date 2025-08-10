@@ -115,7 +115,6 @@ class InviteE2ETest:
 
     async def send_mention(self, room_id: str, agent_name: str, message: str, thread_id: str = None):
         """Send a message with proper Matrix mention."""
-
         user_id = MatrixID.from_agent(agent_name, "localhost").full_id
 
         content = {"msgtype": "m.text", "body": f"{user_id} {message}", "m.mentions": {"user_ids": [user_id]}}

@@ -37,8 +37,7 @@ async def add_agent_memory(
     config: Config,
     metadata: dict | None = None,
 ) -> None:
-    """
-    Add a memory for an agent.
+    """Add a memory for an agent.
 
     Args:
         content: The memory content to store
@@ -71,8 +70,7 @@ async def search_agent_memories(
     config: Config,
     limit: int = 3,
 ) -> list[MemoryResult]:
-    """
-    Search agent memories.
+    """Search agent memories.
 
     Args:
         query: Search query
@@ -101,8 +99,7 @@ async def add_room_memory(
     agent_name: str | None = None,
     metadata: dict | None = None,
 ) -> None:
-    """
-    Add a memory for a room.
+    """Add a memory for a room.
 
     Args:
         content: The memory content to store
@@ -134,8 +131,7 @@ async def search_room_memories(
     config: Config,
     limit: int = 3,
 ) -> list[MemoryResult]:
-    """
-    Search room memories.
+    """Search room memories.
 
     Args:
         query: Search query
@@ -158,8 +154,7 @@ async def search_room_memories(
 
 
 def format_memories_as_context(memories: list[MemoryResult], context_type: str = "agent") -> str:
-    """
-    Format memories into a context string.
+    """Format memories into a context string.
 
     Args:
         memories: List of memory objects from search
@@ -190,8 +185,7 @@ async def build_memory_enhanced_prompt(
     config: Config,
     room_id: str | None = None,
 ) -> str:
-    """
-    Build a prompt enhanced with relevant memories.
+    """Build a prompt enhanced with relevant memories.
 
     Args:
         prompt: The original user prompt
@@ -230,8 +224,7 @@ async def store_conversation_memory(
     config: Config,
     room_id: str | None = None,
 ) -> None:
-    """
-    Store conversation in memory for future recall.
+    """Store conversation in memory for future recall.
 
     Following mem0 best practices, only stores user prompts to allow
     intelligent extraction of relevant facts, preferences, and context.

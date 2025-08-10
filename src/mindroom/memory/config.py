@@ -13,8 +13,7 @@ logger = get_logger(__name__)
 
 
 def get_memory_config(storage_path: Path, config: Config) -> dict:
-    """
-    Get Mem0 configuration with ChromaDB backend.
+    """Get Mem0 configuration with ChromaDB backend.
 
     Args:
         storage_path: Base directory for memory storage
@@ -102,8 +101,7 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
 
 
 async def create_memory_instance(storage_path: Path, config: Config) -> AsyncMemory:
-    """
-    Create a Mem0 memory instance with ChromaDB backend.
+    """Create a Mem0 memory instance with ChromaDB backend.
 
     Args:
         storage_path: Base directory for memory storage

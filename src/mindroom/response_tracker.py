@@ -63,8 +63,7 @@ class ResponseTracker:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def has_responded(self, event_id: str) -> bool:
-        """
-        Check if we've already responded to this event.
+        """Check if we've already responded to this event.
 
         Args:
             event_id: The Matrix event ID
@@ -76,8 +75,7 @@ class ResponseTracker:
         return event_id in self._responded_events
 
     def mark_responded(self, event_id: str) -> None:
-        """
-        Mark an event as responded to with current timestamp.
+        """Mark an event as responded to with current timestamp.
 
         Args:
             event_id: The Matrix event ID we responded to
@@ -88,8 +86,7 @@ class ResponseTracker:
         logger.debug(f"Marked event {event_id} as responded for agent {self.agent_name}")
 
     def cleanup_old_events(self, max_events: int = 10000, max_age_days: int = 30) -> None:
-        """
-        Remove old events based on count and age.
+        """Remove old events based on count and age.
 
         Args:
             max_events: Maximum number of events to track
@@ -116,8 +113,7 @@ class ResponseTracker:
         logger.info(f"Cleaned up old events for {self.agent_name}, keeping {len(self._responded_events)} events")
 
     def get_stats(self) -> dict[str, Any]:
-        """
-        Get statistics about tracked responses.
+        """Get statistics about tracked responses.
 
         Returns:
             Dictionary with stats like total count, oldest event age, etc.

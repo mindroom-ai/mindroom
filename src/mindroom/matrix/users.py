@@ -34,8 +34,7 @@ class AgentMatrixUser:
 
 
 def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
-    """
-    Get credentials for a specific agent from matrix_state.yaml.
+    """Get credentials for a specific agent from matrix_state.yaml.
 
     Args:
         agent_name: The agent name
@@ -53,8 +52,7 @@ def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
 
 
 def save_agent_credentials(agent_name: str, username: str, password: str) -> None:
-    """
-    Save credentials for a specific agent to matrix_state.yaml.
+    """Save credentials for a specific agent to matrix_state.yaml.
 
     Args:
         agent_name: The agent name
@@ -74,8 +72,7 @@ async def create_agent_user(
     agent_name: str,
     agent_display_name: str,
 ) -> AgentMatrixUser:
-    """
-    Create or retrieve a Matrix user account for an agent.
+    """Create or retrieve a Matrix user account for an agent.
 
     Args:
         homeserver: The Matrix homeserver URL
@@ -132,8 +129,7 @@ async def create_agent_user(
 
 
 async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.AsyncClient:
-    """
-    Login an agent user and return the authenticated client.
+    """Login an agent user and return the authenticated client.
 
     Args:
         homeserver: The Matrix homeserver URL
@@ -154,8 +150,7 @@ async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.
 
 
 async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, AgentMatrixUser]:
-    """
-    Ensure all configured agents and teams have Matrix user accounts.
+    """Ensure all configured agents and teams have Matrix user accounts.
 
     This includes user-configured agents, teams, and the built-in router agent.
 
@@ -177,8 +172,8 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
         )
         agent_users[ROUTER_AGENT_NAME] = router_user
         logger.info(f"Ensured Matrix user for built-in router agent: {router_user.user_id}")
-    except Exception as e:
-        logger.exception(f"Failed to create Matrix user for built-in router agent: {e}")
+    except Exception:
+        logger.exception("Failed to create Matrix user for built-in router agent")
 
     # Create user-configured agents
     for agent_name, agent_config in config.agents.items():
@@ -190,9 +185,9 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
             )
             agent_users[agent_name] = agent_user
             logger.info(f"Ensured Matrix user for agent: {agent_name} -> {agent_user.user_id}")
-        except Exception as e:
+        except Exception:
             # Continue with other agents even if one fails
-            logger.exception(f"Failed to create Matrix user for agent {agent_name}: {e}")
+            logger.exception("Failed to create Matrix user for agent %s", agent_name)
 
     # Create team users
     for team_name, team_config in config.teams.items():
@@ -204,8 +199,8 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
             )
             agent_users[team_name] = team_user
             logger.info(f"Ensured Matrix user for team: {team_name} -> {team_user.user_id}")
-        except Exception as e:
+        except Exception:
             # Continue with other teams even if one fails
-            logger.exception(f"Failed to create Matrix user for team {team_name}: {e}")
+            logger.exception("Failed to create Matrix user for team %s", team_name)
 
     return agent_users

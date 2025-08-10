@@ -128,8 +128,7 @@ async def schedule_task(
     full_text: str,
     config: Config,
 ) -> tuple[str | None, str]:
-    """
-    Schedule a task from natural language request.
+    """Schedule a task from natural language request.
 
     Returns:
         Tuple of (task_id, response_message)
@@ -251,8 +250,8 @@ async def _execute_scheduled_task(
     except asyncio.CancelledError:
         logger.info(f"Scheduled task {task_id} was cancelled")
         raise
-    except Exception as e:
-        logger.exception(f"Failed to execute scheduled task {task_id}: {e}")
+    except Exception:
+        logger.exception("Failed to execute scheduled task %s", task_id)
 
 
 async def list_scheduled_tasks(
@@ -377,8 +376,7 @@ async def cancel_scheduled_task(
 
 
 async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str) -> int:
-    """
-    Restore scheduled tasks from Matrix state after bot restart.
+    """Restore scheduled tasks from Matrix state after bot restart.
 
     Returns:
         Number of tasks restored
@@ -413,8 +411,8 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str) -> int:
                         _running_tasks[task_id] = task
                         restored_count += 1
 
-                except (KeyError, ValueError) as e:
-                    logger.exception(f"Failed to restore task: {e}")
+                except (KeyError, ValueError):
+                    logger.exception("Failed to restore task")
                     continue
 
     if restored_count > 0:

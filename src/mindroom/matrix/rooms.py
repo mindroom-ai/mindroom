@@ -55,8 +55,7 @@ def remove_room(room_key: str) -> bool:
 
 
 def resolve_room_aliases(room_list: list[str]) -> list[str]:
-    """
-    Resolve room aliases to room IDs.
+    """Resolve room aliases to room IDs.
 
     Args:
         room_list: List of room aliases or IDs
@@ -70,8 +69,7 @@ def resolve_room_aliases(room_list: list[str]) -> list[str]:
 
 
 def get_room_alias_from_id(room_id: str) -> str | None:
-    """
-    Get room alias from room ID (reverse lookup).
+    """Get room alias from room ID (reverse lookup).
 
     Args:
         room_id: Matrix room ID
@@ -93,8 +91,7 @@ async def ensure_room_exists(
     room_name: str | None = None,
     power_users: list[str] | None = None,
 ) -> str | None:
-    """
-    Ensure a room exists, creating it if necessary.
+    """Ensure a room exists, creating it if necessary.
 
     Args:
         client: Matrix client to use for room creation
@@ -167,8 +164,7 @@ async def ensure_all_rooms_exist(
     client: nio.AsyncClient,
     config: Config,
 ) -> dict[str, str]:
-    """
-    Ensure all configured rooms exist and invite user account.
+    """Ensure all configured rooms exist and invite user account.
 
     Args:
         client: Matrix client to use for room creation
@@ -211,8 +207,7 @@ async def ensure_user_in_rooms(
     homeserver: str,
     room_ids: dict[str, str],
 ) -> None:
-    """
-    Ensure the user account is a member of all specified rooms.
+    """Ensure the user account is a member of all specified rooms.
 
     Args:
         homeserver: Matrix homeserver URL

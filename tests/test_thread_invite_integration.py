@@ -1,5 +1,4 @@
-"""
-Integration tests for thread invitation behavior.
+"""Integration tests for thread invitation behavior.
 
 These tests ensure that invited agents behave correctly in threads,
 including the race condition fix where invited agents take ownership
@@ -52,7 +51,7 @@ async def test_invited_agent_responds_in_unconfigured_room() -> None:
         agent_name="calculator",
         user_id="@mindroom_calculator:localhost",
         display_name="Calculator",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Create config where calculator is NOT configured for automation room
@@ -70,7 +69,7 @@ async def test_invited_agent_responds_in_unconfigured_room() -> None:
     # Create bot
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["#math:localhost"],  # Bot only knows about math room
     )
@@ -232,14 +231,14 @@ async def test_bot_leaves_room_preserves_thread_invitations() -> None:
         agent_name="calculator",
         user_id="@mindroom_calculator:localhost",
         display_name="Calculator",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Create bot not configured for any rooms
     config = Config(router=RouterConfig(model="default"))
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=[],  # Not configured for any rooms
     )

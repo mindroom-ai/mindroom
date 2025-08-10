@@ -37,7 +37,7 @@ def mock_agent_user() -> AgentMatrixUser:
     """Create a mock agent user."""
     return AgentMatrixUser(
         agent_name="calculator",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="CalculatorAgent",
         user_id="@mindroom_calculator:localhost",
     )
@@ -49,13 +49,13 @@ def mock_agent_users() -> dict[str, AgentMatrixUser]:
     return {
         "calculator": AgentMatrixUser(
             agent_name="calculator",
-            password="test_password1",
+            password=TEST_PASSWORD,
             display_name="CalculatorAgent",
             user_id="@mindroom_calculator:localhost",
         ),
         "general": AgentMatrixUser(
             agent_name="general",
-            password="test_password2",
+            password=TEST_PASSWORD,
             display_name="GeneralAgent",
             user_id="@mindroom_general:localhost",
         ),

@@ -863,7 +863,8 @@ class AgentBot:
 
             if self.client is None:
                 raise RuntimeError("Client is not initialized")
-            assert self.thread_invite_manager is not None
+            if self.thread_invite_manager is None:
+                raise RuntimeError("Thread invite manager is not initialized")
             response_text = await handle_invite_command(
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
@@ -877,7 +878,8 @@ class AgentBot:
 
         elif command.type == CommandType.UNINVITE:
             agent_name = command.args["agent_name"]
-            assert self.thread_invite_manager is not None
+            if self.thread_invite_manager is None:
+                raise RuntimeError("Thread invite manager is not initialized")
             removed = await self.thread_invite_manager.remove_invite(effective_thread_id, room.room_id, agent_name)
             if removed:
                 response_text = f"✅ Removed @{agent_name} from this thread."
@@ -885,7 +887,8 @@ class AgentBot:
                 response_text = f"❌ @{agent_name} was not invited to this thread."
 
         elif command.type == CommandType.LIST_INVITES:
-            assert self.thread_invite_manager is not None
+            if self.thread_invite_manager is None:
+                raise RuntimeError("Thread invite manager is not initialized")
             response_text = await handle_list_invites_command(
                 room.room_id,
                 effective_thread_id,
@@ -951,7 +954,8 @@ class AgentBot:
                 total_removed = 0
                 for room_id in joined_rooms:
                     try:
-                        assert self.thread_invite_manager is not None
+                        if self.thread_invite_manager is None:
+                raise RuntimeError("Thread invite manager is not initialized")
                         removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
                             room_id,
                             timeout_hours=self.invitation_timeout_hours,

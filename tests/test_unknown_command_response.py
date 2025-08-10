@@ -36,14 +36,14 @@ async def test_unknown_command_in_main_room() -> None:
         agent_name="router",
         user_id="@mindroom_router:localhost",
         display_name="Router",
-        password="test",
+        password=TEST_PASSWORD,
     )
 
     # Create router bot
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -51,7 +51,7 @@ async def test_unknown_command_in_main_room() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path("/tmp/test"))
+    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
     bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
     # Create mock room and event
@@ -126,14 +126,14 @@ async def test_unknown_command_in_thread() -> None:
         agent_name="router",
         user_id="@mindroom_router:localhost",
         display_name="Router",
-        password="test",
+        password=TEST_PASSWORD,
     )
 
     # Create router bot
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -141,7 +141,7 @@ async def test_unknown_command_in_thread() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path("/tmp/test"))
+    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
     bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
     # Create mock room and event
@@ -238,14 +238,14 @@ async def test_unknown_command_with_reply() -> None:
         agent_name="router",
         user_id="@mindroom_router:localhost",
         display_name="Router",
-        password="test",
+        password=TEST_PASSWORD,
     )
 
     # Create router bot
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -253,7 +253,7 @@ async def test_unknown_command_with_reply() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path("/tmp/test"))
+    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
     bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
     # Create mock room and event

@@ -132,8 +132,7 @@ class Config(BaseModel):
         return config
 
     def get_agent(self, agent_name: str) -> AgentConfig:
-        """
-        Get an agent configuration by name.
+        """Get an agent configuration by name.
 
         Args:
             agent_name: Name of the agent
@@ -152,8 +151,7 @@ class Config(BaseModel):
         return self.agents[agent_name]
 
     def get_all_configured_rooms(self) -> set[str]:
-        """
-        Extract all room aliases configured for agents and teams.
+        """Extract all room aliases configured for agents and teams.
 
         Returns:
             Set of all unique room aliases from agent and team configurations
@@ -167,8 +165,7 @@ class Config(BaseModel):
         return all_room_aliases
 
     def get_configured_bots_for_room(self, room_id: str) -> set[str]:
-        """
-        Get the set of bot usernames that should be in a specific room.
+        """Get the set of bot usernames that should be in a specific room.
 
         Args:
             room_id: The Matrix room ID
@@ -200,8 +197,7 @@ class Config(BaseModel):
         return configured_bots
 
     def save_to_yaml(self, config_path: Path | None = None) -> None:
-        """
-        Save the config to a YAML file, excluding None values.
+        """Save the config to a YAML file, excluding None values.
 
         Args:
             config_path: Path to save the config to. If None, uses DEFAULT_AGENTS_CONFIG.

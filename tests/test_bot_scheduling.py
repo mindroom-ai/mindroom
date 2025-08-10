@@ -10,6 +10,8 @@ from mindroom.commands import Command, CommandType
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
 
 @pytest.fixture
 def mock_agent_bot() -> AgentBot:
@@ -18,8 +20,8 @@ def mock_agent_bot() -> AgentBot:
         agent_name="general",
         user_id="@mindroom_general:localhost",
         display_name="General Agent",
-        password="mock_password",
-        access_token="mock_token",
+        password=TEST_PASSWORD,
+        access_token=TEST_ACCESS_TOKEN,
     )
     config = Config.from_yaml()  # Load actual config for testing
     bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
@@ -186,8 +188,8 @@ class TestBotTaskRestoration:
             agent_name="general",
             user_id="@mindroom_general:localhost",
             display_name="General Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -228,8 +230,8 @@ class TestBotTaskRestoration:
             agent_name="general",
             user_id="@mindroom_general:localhost",
             display_name="General Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -281,8 +283,8 @@ class TestCommandHandling:
             agent_name="calculator",
             user_id="@mindroom_calculator:localhost",
             display_name="Calculator Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -318,8 +320,8 @@ class TestCommandHandling:
             agent_name="router",
             user_id="@mindroom_router:localhost",
             display_name="Router Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -357,8 +359,8 @@ class TestCommandHandling:
             agent_name="calculator",
             user_id="@mindroom_calculator:localhost",
             display_name="Calculator Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -404,8 +406,8 @@ class TestCommandHandling:
             agent_name="general",
             user_id="@mindroom_general:localhost",
             display_name="General Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -526,8 +528,8 @@ class TestCommandHandling:
             agent_name="news",
             user_id="@mindroom_news:localhost",
             display_name="News Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -625,8 +627,8 @@ class TestCommandHandling:
             agent_name="finance",
             user_id="@mindroom_finance:localhost",
             display_name="Finance Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
@@ -731,8 +733,8 @@ class TestCommandHandling:
             agent_name="general",
             user_id="@mindroom_general:localhost",
             display_name="General Agent",
-            password="mock_password",
-            access_token="mock_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))

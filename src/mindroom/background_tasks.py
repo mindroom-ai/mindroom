@@ -21,8 +21,7 @@ def create_background_task(
     name: str | None = None,
     error_handler: Callable[[Exception], None] | None = None,
 ) -> asyncio.Task[Any]:
-    """
-    Create a background task that won't block the main execution.
+    """Create a background task that won't block the main execution.
 
     Args:
         coro: The coroutine to run in the background
@@ -63,8 +62,7 @@ def create_background_task(
 
 
 async def wait_for_background_tasks(timeout: float | None = None) -> None:
-    """
-    Wait for all background tasks to complete.
+    """Wait for all background tasks to complete.
 
     Args:
         timeout: Optional timeout in seconds

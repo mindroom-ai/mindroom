@@ -33,8 +33,7 @@ class TeamMode(str, Enum):
 
 
 def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -> list[str]:
-    """
-    Extract and format member contributions from a team response.
+    """Extract and format member contributions from a team response.
 
     Handles nested teams recursively with proper indentation.
 
@@ -53,8 +52,7 @@ def _extract_contributions_recursive(
     indent: int,
     include_consensus: bool,
 ) -> list[str]:
-    """
-    Internal recursive function for extracting contributions.
+    """Internal recursive function for extracting contributions.
 
     Args:
         response: The response to extract from
@@ -110,8 +108,7 @@ def _extract_contributions_recursive(
 
 
 def _extract_content(response: TeamRunResponse | RunResponse) -> str:
-    """
-    Extract content from a response object.
+    """Extract content from a response object.
 
     Args:
         response: The response to extract content from
@@ -190,8 +187,7 @@ def should_form_team(
 
 
 def get_team_model(team_name: str, room_id: str, config: Config) -> str:
-    """
-    Get the appropriate model for a team in a specific room.
+    """Get the appropriate model for a team in a specific room.
 
     Priority:
     1. Room-specific model from room_models
@@ -267,7 +263,9 @@ async def create_team_response(
             prompt = f"Thread Context:\n{context}\n\nUser: {message}"
 
     # Use provided model or default
-    assert orchestrator.config is not None
+    if orchestrator.config is None:
+        error_msg = "No config"
+        raise RuntimeError(error_msg)
     model = get_model_instance(orchestrator.config, model_name or "default")
 
     # Let Agno Team handle everything - it already knows how to describe members
