@@ -1,5 +1,6 @@
 """Test configuration and fixtures for MindRoom tests."""
 
+import tempfile
 from collections.abc import AsyncGenerator
 
 import pytest_asyncio
@@ -12,7 +13,6 @@ TEST_PASSWORD = "mock_test_password"  # noqa: S105
 TEST_ACCESS_TOKEN = "mock_test_token"  # noqa: S105
 
 # Test directory constants - safe temporary directories for testing
-import tempfile  # noqa: E402
 
 TEST_TMP_DIR = tempfile.gettempdir() + "/mindroom_test"
 TEST_MEMORY_DIR = tempfile.gettempdir() + "/mindroom_test_memory"
