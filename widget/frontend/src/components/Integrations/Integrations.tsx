@@ -9,41 +9,22 @@ import {
   Key,
   ExternalLink,
   Star,
-  Calculator,
-  Folder,
-  Terminal,
-  Code,
-  Book,
-  Globe,
-  Search,
-  Newspaper,
-  TrendingUp,
-  FileText,
-  Database,
-  Mail,
 } from 'lucide-react';
 // Brand icons from react-icons
 import {
   FaGoogle,
   FaFacebook,
-  FaTwitter,
   FaInstagram,
   FaLinkedin,
-  FaReddit,
-  FaTelegram,
-  FaGithub,
   FaGitlab,
   FaDropbox,
   FaAmazon,
   FaEbay,
   FaSpotify,
-  FaYoutube,
   FaGoodreads,
   FaApple,
   FaMicrosoft,
   FaYahoo,
-  FaDocker,
-  FaSlack,
 } from 'react-icons/fa';
 import { SiNetflix, SiWalmart, SiTarget, SiHbo } from 'react-icons/si';
 import { Button } from '@/components/ui/button';
@@ -79,9 +60,10 @@ interface UnifiedIntegration {
   details?: any;
 }
 
-// Services organized by category - working ones marked as available, rest as coming soon
-const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
-  // Email & Calendar
+// Frontend-only integrations that don't exist in backend yet
+// These are aspirational integrations that we show as "coming soon"
+const FRONTEND_ONLY_INTEGRATIONS: UnifiedIntegration[] = [
+  // Email & Calendar (Coming Soon)
   {
     id: 'google',
     name: 'Google Services',
@@ -119,7 +101,7 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
     setup_type: 'coming_soon',
   },
 
-  // Shopping
+  // Shopping (Coming Soon)
   {
     id: 'amazon',
     name: 'Amazon',
@@ -157,7 +139,7 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
     setup_type: 'coming_soon',
   },
 
-  // Entertainment
+  // Entertainment (Coming Soon - except IMDb and Spotify which are handled separately)
   {
     id: 'imdb',
     name: 'Movies & TV (IMDb)',
@@ -186,15 +168,6 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
     setup_type: 'coming_soon',
   },
   {
-    id: 'youtube',
-    name: 'YouTube',
-    description: 'Search videos and get transcripts (tool: youtube)',
-    category: 'entertainment',
-    icon: <FaYoutube className="h-5 w-5 text-red-600" />,
-    status: 'available',
-    setup_type: 'api_key',
-  },
-  {
     id: 'apple_music',
     name: 'Apple Music',
     description: 'Library and playlist management',
@@ -213,16 +186,7 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
     setup_type: 'coming_soon',
   },
 
-  // Social Networks
-  {
-    id: 'twitter',
-    name: 'Twitter/X',
-    description: 'Post tweets and search (tool: twitter)',
-    category: 'social',
-    icon: <FaTwitter className="h-5 w-5 text-blue-400" />,
-    status: 'available',
-    setup_type: 'api_key',
-  },
+  // Social Networks (Coming Soon)
   {
     id: 'facebook',
     name: 'Facebook',
@@ -242,15 +206,6 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
     setup_type: 'coming_soon',
   },
   {
-    id: 'reddit',
-    name: 'Reddit',
-    description: 'Browse subreddits and search posts (tool: reddit)',
-    category: 'social',
-    icon: <FaReddit className="h-5 w-5 text-orange-600" />,
-    status: 'available',
-    setup_type: 'api_key',
-  },
-  {
     id: 'linkedin',
     name: 'LinkedIn',
     description: 'Professional network access',
@@ -259,71 +214,8 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
     status: 'coming_soon',
     setup_type: 'coming_soon',
   },
-  {
-    id: 'telegram',
-    name: 'Telegram',
-    description: 'Send and receive messages (tool: telegram)',
-    category: 'communication',
-    icon: <FaTelegram className="h-5 w-5 text-blue-500" />,
-    status: 'available',
-    setup_type: 'api_key',
-  },
 
-  // Development & Tools
-  {
-    id: 'github',
-    name: 'GitHub',
-    description: 'Repository and issue management (tool: github)',
-    category: 'development',
-    icon: <FaGithub className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'api_key',
-  },
-  {
-    id: 'calculator',
-    name: 'Calculator',
-    description: 'Mathematical calculations (tool: calculator)',
-    category: 'development',
-    icon: <Calculator className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'file',
-    name: 'File Operations',
-    description: 'Read and write files (tool: file)',
-    category: 'development',
-    icon: <Folder className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'shell',
-    name: 'Shell Commands',
-    description: 'Execute shell commands (tool: shell)',
-    category: 'development',
-    icon: <Terminal className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'python',
-    name: 'Python Execution',
-    description: 'Execute Python code (tool: python)',
-    category: 'development',
-    icon: <Code className="h-5 w-5 text-blue-500" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'docker',
-    name: 'Docker',
-    description: 'Manage Docker containers (tool: docker)',
-    category: 'development',
-    icon: <FaDocker className="h-5 w-5 text-blue-400" />,
-    status: 'available',
-    setup_type: 'special',
-  },
+  // Development & Tools (Coming Soon)
   {
     id: 'gitlab',
     name: 'GitLab',
@@ -343,7 +235,7 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
     setup_type: 'coming_soon',
   },
 
-  // Information
+  // Information (Coming Soon)
   {
     id: 'goodreads',
     name: 'Goodreads',
@@ -352,129 +244,6 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
     icon: <FaGoodreads className="h-5 w-5 text-amber-700" />,
     status: 'coming_soon',
     setup_type: 'coming_soon',
-  },
-
-  // Research & Data Tools (Available Now!)
-  {
-    id: 'arxiv',
-    name: 'arXiv',
-    description: 'Search academic papers (tool: arxiv)',
-    category: 'research',
-    icon: <Book className="h-5 w-5 text-red-600" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'wikipedia',
-    name: 'Wikipedia',
-    description: 'Search encyclopedia articles (tool: wikipedia)',
-    category: 'research',
-    icon: <Globe className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'duckduckgo',
-    name: 'DuckDuckGo',
-    description: 'Web search (tool: duckduckgo)',
-    category: 'research',
-    icon: <Search className="h-5 w-5 text-orange-500" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'newspaper',
-    name: 'News Articles',
-    description: 'Extract articles from URLs (tool: newspaper)',
-    category: 'research',
-    icon: <Newspaper className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'yfinance',
-    name: 'Yahoo Finance',
-    description: 'Stock market data (tool: yfinance)',
-    category: 'research',
-    icon: <TrendingUp className="h-5 w-5 text-green-600" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'csv',
-    name: 'CSV Files',
-    description: 'Read and analyze CSV data (tool: csv)',
-    category: 'research',
-    icon: <FileText className="h-5 w-5 text-blue-600" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'pandas',
-    name: 'Data Analysis',
-    description: 'Pandas data manipulation (tool: pandas)',
-    category: 'research',
-    icon: <Database className="h-5 w-5 text-purple-600" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-
-  // Additional Research Tools
-  {
-    id: 'tavily',
-    name: 'Tavily Search',
-    description: 'Advanced AI-powered web search (tool: tavily)',
-    category: 'research',
-    icon: <Search className="h-5 w-5 text-indigo-600" />,
-    status: 'available',
-    setup_type: 'api_key',
-  },
-  {
-    id: 'googlesearch',
-    name: 'Google Search',
-    description: 'Search the web using Google (tool: googlesearch)',
-    category: 'research',
-    icon: <FaGoogle className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'api_key',
-  },
-  {
-    id: 'website',
-    name: 'Website Reader',
-    description: 'Extract and analyze website content (tool: website)',
-    category: 'research',
-    icon: <Globe className="h-5 w-5 text-blue-600" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  {
-    id: 'jina',
-    name: 'Jina Reader',
-    description: 'Advanced content extraction (tool: jina)',
-    category: 'research',
-    icon: <FileText className="h-5 w-5 text-purple-500" />,
-    status: 'available',
-    setup_type: 'api_key',
-  },
-
-  // Communication Tools
-  {
-    id: 'email',
-    name: 'Email (SMTP)',
-    description: 'Send emails via SMTP (tool: email)',
-    category: 'communication',
-    icon: <Mail className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'api_key',
-  },
-  {
-    id: 'slack',
-    name: 'Slack',
-    description: 'Send messages and manage channels (tool: slack)',
-    category: 'communication',
-    icon: <FaSlack className="h-5 w-5 text-purple-600" />,
-    status: 'available',
-    setup_type: 'api_key',
   },
 ];
 
@@ -501,8 +270,8 @@ export function Integrations() {
   // Update integrations when tools are loaded
   useEffect(() => {
     if (toolIntegrations.length > 0) {
-      // For now, keep some frontend-only integrations that don't exist in backend
-      const frontendOnlyIntegrations = UNIFIED_INTEGRATIONS.filter(
+      // Combine backend tools with frontend-only aspirational integrations
+      const frontendOnlyIntegrations = FRONTEND_ONLY_INTEGRATIONS.filter(
         fi => !toolIntegrations.find(ti => ti.id === fi.id)
       );
       setIntegrations([...toolIntegrations, ...frontendOnlyIntegrations]);

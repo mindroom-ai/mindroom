@@ -24,32 +24,37 @@ import {
   FaYoutube,
 } from 'react-icons/fa';
 
-// Map icon names from backend to React components
+// Map icon names from backend to React components with their brand colors
 export const iconMap: Record<string, React.ReactNode> = {
-  // Lucide icons
+  // Lucide icons with appropriate colors
   Calculator: <Calculator className="h-5 w-5" />,
   Folder: <Folder className="h-5 w-5" />,
   Terminal: <Terminal className="h-5 w-5" />,
-  Code: <Code className="h-5 w-5" />,
-  Book: <Book className="h-5 w-5" />,
-  Globe: <Globe className="h-5 w-5" />,
-  Search: <Search className="h-5 w-5" />,
+  Code: <Code className="h-5 w-5 text-blue-500" />,
+  Book: <Book className="h-5 w-5 text-red-600" />, // arXiv
+  Globe: <Globe className="h-5 w-5" />, // Wikipedia and general web
+  Search: <Search className="h-5 w-5 text-orange-500" />, // DuckDuckGo
   Newspaper: <Newspaper className="h-5 w-5" />,
-  TrendingUp: <TrendingUp className="h-5 w-5" />,
-  FileText: <FileText className="h-5 w-5" />,
-  Database: <Database className="h-5 w-5" />,
-  Mail: <Mail className="h-5 w-5" />,
-  Film: <Film className="h-5 w-5" />,
+  TrendingUp: <TrendingUp className="h-5 w-5 text-green-600" />, // Yahoo Finance
+  FileText: <FileText className="h-5 w-5 text-blue-600" />, // CSV
+  Database: <Database className="h-5 w-5 text-purple-600" />, // Pandas
+  Mail: <Mail className="h-5 w-5" />, // Email SMTP
+  Film: <Film className="h-5 w-5 text-yellow-500" />, // IMDb
 
-  // Font Awesome icons
-  FaGoogle: <FaGoogle className="h-5 w-5" />,
+  // Font Awesome icons with brand colors
+  FaGoogle: <FaGoogle className="h-5 w-5" />, // Google Search and Gmail
   FaTwitter: <FaTwitter className="h-5 w-5 text-blue-400" />,
   FaReddit: <FaReddit className="h-5 w-5 text-orange-600" />,
   FaTelegram: <FaTelegram className="h-5 w-5 text-blue-500" />,
   FaGithub: <FaGithub className="h-5 w-5" />,
   FaDocker: <FaDocker className="h-5 w-5 text-blue-400" />,
-  FaSlack: <FaSlack className="h-5 w-5" />,
+  FaSlack: <FaSlack className="h-5 w-5 text-purple-600" />,
   FaYoutube: <FaYoutube className="h-5 w-5 text-red-600" />,
+
+  // Additional mappings for tools that might use different icon names
+  'Search-indigo': <Search className="h-5 w-5 text-indigo-600" />, // Tavily
+  'FileText-purple': <FileText className="h-5 w-5 text-purple-500" />, // Jina
+  'Globe-blue': <Globe className="h-5 w-5 text-blue-600" />, // Website reader
 };
 
 export function getIconForTool(iconName: string | null): React.ReactNode {
