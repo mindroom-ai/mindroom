@@ -269,7 +269,7 @@ async def create_team_response(
     # Use provided model or default
     if orchestrator.config is None:
         error_msg = "No config"
-        raise RuntimeError(error_msg)
+        raise AssertionError(error_msg)
     model = get_model_instance(orchestrator.config, model_name or "default")
 
     # Let Agno Team handle everything - it already knows how to describe members

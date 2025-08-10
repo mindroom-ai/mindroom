@@ -154,7 +154,7 @@ def _build_full_prompt(prompt: str, thread_history: list[dict[str, Any]] | None 
 def _build_cache_key(agent: Agent, full_prompt: str, session_id: str) -> str:
     model = agent.model
     if model is None:
-        raise RuntimeError("Agent should always have a model in our implementation")
+        raise AssertionError("Agent should always have a model in our implementation")
     return f"{agent.name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
 
 
@@ -172,7 +172,7 @@ async def _cached_agent_run(
 
     model = agent.model
     if model is None:
-        raise RuntimeError("Agent should always have a model in our implementation")
+        raise AssertionError("Agent should always have a model in our implementation")
     cache_key = _build_cache_key(agent, full_prompt, session_id)
     cached_result = cache.get(cache_key)
     if cached_result is not None:
@@ -305,7 +305,7 @@ async def ai_response_streaming(
     if cache is not None:
         model = agent.model
         if model is None:
-            raise RuntimeError("Agent should always have a model in our implementation")
+            raise AssertionError("Agent should always have a model in our implementation")
         cache_key = _build_cache_key(agent, full_prompt, session_id)
         cached_result = cache.get(cache_key)
         if cached_result is not None:

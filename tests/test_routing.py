@@ -70,8 +70,8 @@ class TestAIRouting:
                 assert "Previous messages:" in prompt
 
     @pytest.mark.asyncio
-    async def test_suggest_agent_unavailable_raises_assertion(self) -> None:
-        """Test that suggesting unavailable agent raises assertion error."""
+    async def test_suggest_agent_unavailable_returns_none(self) -> None:
+        """Test that suggesting unavailable agent returns None."""
         config = Config(router=RouterConfig(model="default"))
 
         with patch("mindroom.routing.get_model_instance"):
@@ -84,15 +84,14 @@ class TestAIRouting:
             )
             mock_agent.arun.return_value = mock_response
 
-            with (
-                patch("mindroom.routing.Agent", return_value=mock_agent),
-                pytest.raises(AssertionError, match="AI suggested code but available agents are"),
-            ):
-                await suggest_agent_for_message(
+            with patch("mindroom.routing.Agent", return_value=mock_agent):
+                result = await suggest_agent_for_message(
                     "How do I write a Python function?",
                     ["calculator", "general"],  # code not available
                     config,
                 )
+                # Should return None when agent is not available
+                assert result is None
 
     @pytest.mark.asyncio
     async def test_suggest_agent_error_handling(self) -> None:

@@ -13,6 +13,8 @@ from mindroom.config import (
 )
 from mindroom.memory.config import get_memory_config
 
+from .conftest import TEST_MEMORY_DIR
+
 
 class TestMemoryConfig:
     """Test memory configuration."""

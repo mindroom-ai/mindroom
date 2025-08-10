@@ -89,8 +89,10 @@ lint.ignore = [
   "COM812",   # Missing trailing comma
   "D105",     # Missing docstring in magic method - less critical
   "D401",     # First line imperative mood - less critical for some cases
+  "D417",     # Missing argument description - less critical
   "DTZ005",   # Use of datetime.now() without timezone
   "E501",     # Line too long
+  "EM101",    # Exception must not use string literal
   "EM102",    # Exception must not use f-string literal
   "ERA001",   # Commented out code
   "EXE001",   # Shebang present but file not executable
@@ -123,8 +125,12 @@ lint.ignore = [
   # These are acceptable in tests but were fixed in production code
   "S101",   # Use of assert - OK in tests, fixed in src/
   "SLF001", # Private member accessed - OK in tests
+  "TC002",  # Move third-party import into type-checking - not always needed
   "TD002",  # Missing TODO author
   "TD003",  # Missing TODO issue link
+  "TRY003", # Avoid long messages outside exception class - OK for assertions
+  "TRY300", # Consider else block - not always needed
+  "TRY301", # Abstract raise to inner function - not needed for assertions
 ]
 
 [tool.pytest.ini_options]
