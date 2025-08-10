@@ -18,6 +18,8 @@ from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 
+from .conftest import TEST_PASSWORD
+
 
 class TestThreadingBehavior:
     """Test that agents correctly handle threading in various scenarios."""

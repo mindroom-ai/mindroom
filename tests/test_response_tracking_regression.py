@@ -17,6 +17,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD
+
 
 @pytest.fixture
 def mock_router_agent() -> AgentMatrixUser:

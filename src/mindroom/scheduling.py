@@ -340,7 +340,9 @@ async def list_scheduled_tasks(
     lines = ["**Scheduled Tasks:**"]
     for task in tasks:
         time_str = task["time"].strftime("%Y-%m-%d %H:%M UTC")
-        msg_preview = task["message"][:MESSAGE_PREVIEW_LENGTH] + ("..." if len(task["message"]) > MESSAGE_PREVIEW_LENGTH else "")
+        msg_preview = task["message"][:MESSAGE_PREVIEW_LENGTH] + (
+            "..." if len(task["message"]) > MESSAGE_PREVIEW_LENGTH else ""
+        )
         lines.append(f'• `{task["id"]}` - {time_str}: "{msg_preview}"')
 
     return "\n".join(lines)

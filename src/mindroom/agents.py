@@ -58,7 +58,7 @@ def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
     defaults = config.defaults
 
     # Create tools
-    tools = []
+    tools: list = []  # Use list type to satisfy Agent's parameter type
     for tool_name in agent_config.tools:
         try:
             tool = get_tool_by_name(tool_name)

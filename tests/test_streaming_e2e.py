@@ -12,6 +12,8 @@ import pytest
 from mindroom.bot import MultiAgentOrchestrator
 from mindroom.config import Config, RouterConfig
 
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
 
 @pytest.mark.asyncio
 @pytest.mark.e2e  # Mark as end-to-end test

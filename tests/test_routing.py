@@ -12,6 +12,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import extract_agent_name, has_any_agent_mentions_in_thread
 
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, TEST_TMP_DIR
+
 
 class TestAIRouting:
     """Tests for AI routing in multi-agent threads."""

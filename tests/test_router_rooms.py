@@ -12,6 +12,8 @@ from mindroom.config import AgentConfig, Config, TeamConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 
+from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+
 
 @pytest.fixture
 def config_with_rooms() -> Config:

@@ -92,7 +92,7 @@ class ThreadStateKey:
 
     thread_id: str
     agent_name: str
-    
+
     # Number of parts in a thread state key (thread_id:agent_name)
     STATE_KEY_PARTS: ClassVar[int] = 2
 

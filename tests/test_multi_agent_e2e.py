@@ -13,6 +13,8 @@ from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config
 from mindroom.matrix.users import AgentMatrixUser
 
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
 
 @pytest.fixture
 def mock_calculator_agent() -> AgentMatrixUser:

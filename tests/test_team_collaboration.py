@@ -13,6 +13,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import get_agents_in_thread
 
+from .conftest import TEST_PASSWORD
+
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path

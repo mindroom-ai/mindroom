@@ -15,6 +15,8 @@ from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+
 
 @pytest.fixture
 def mock_config_with_teams() -> Config:

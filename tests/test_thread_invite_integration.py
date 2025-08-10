@@ -21,6 +21,8 @@ from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import should_agent_respond
 
+from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+
 
 @pytest.fixture
 def mock_config() -> Config:

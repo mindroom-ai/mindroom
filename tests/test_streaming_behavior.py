@@ -15,6 +15,8 @@ from mindroom.response_tracker import ResponseTracker
 from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD
+
 
 @pytest.fixture
 def mock_helper_agent() -> AgentMatrixUser:
