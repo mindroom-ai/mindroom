@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Maximum length for instruction descriptions to include in agent summary
+MAX_INSTRUCTION_LENGTH = 100
+
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
 RICH_PROMPTS = {
     "code": agent_prompts.CODE_AGENT_PROMPT,
@@ -159,7 +162,7 @@ def describe_agent(agent_name: str, config: Config) -> str:
     if agent_config.instructions:
         # Take first instruction as it's usually the most descriptive
         first_instruction = agent_config.instructions[0]
-        if len(first_instruction) < 100:  # Only include if reasonably short
+        if len(first_instruction) < MAX_INSTRUCTION_LENGTH:  # Only include if reasonably short
             parts.append(f"- {first_instruction}")
 
     return "\n  ".join(parts)

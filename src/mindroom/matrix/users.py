@@ -9,6 +9,7 @@ from mindroom.config import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
+from .client import login, register_user
 from .identity import MatrixID, extract_server_name_from_homeserver, parse_matrix_id
 from .state import MatrixState
 
@@ -105,8 +106,6 @@ async def create_agent_user(
 
     # Try to register/verify the user
     try:
-        from .client import register_user
-
         await register_user(
             homeserver=homeserver,
             username=username,
@@ -142,8 +141,6 @@ async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.
         ValueError: If login fails
 
     """
-    from .client import login
-
     client = await login(homeserver, agent_user.user_id, agent_user.password)
     agent_user.access_token = client.access_token
     return client

@@ -955,7 +955,7 @@ class AgentBot:
                 for room_id in joined_rooms:
                     try:
                         if self.thread_invite_manager is None:
-                raise RuntimeError("Thread invite manager is not initialized")
+                            raise RuntimeError("Thread invite manager is not initialized")
                         removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
                             room_id,
                             timeout_hours=self.invitation_timeout_hours,
@@ -1266,7 +1266,8 @@ class MultiAgentOrchestrator:
         await self._ensure_rooms_exist()
 
         # After rooms exist, update each bot's room list to use room IDs instead of aliases
-        assert self.config is not None
+        if self.config is None:
+            raise RuntimeError("Config is not initialized")
         for bot in bots:
             # Get the room aliases for this entity from config and resolve to IDs
             room_aliases = get_rooms_for_entity(bot.agent_name, self.config)
@@ -1302,7 +1303,8 @@ class MultiAgentOrchestrator:
             return
 
         # Directly create rooms using the router's client
-        assert self.config is not None
+        if self.config is None:
+            raise RuntimeError("Config is not initialized")
         room_ids = await ensure_all_rooms_exist(router_bot.client, self.config)
 
         # Store room IDs for later use

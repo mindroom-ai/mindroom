@@ -24,6 +24,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Message length limits for team context and logging
+MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
+MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
+
 
 class TeamMode(str, Enum):
     """Team collaboration modes."""
@@ -255,7 +259,7 @@ async def create_team_response(
         for msg in recent_messages:
             sender = msg.get("sender", "Unknown")
             body = msg.get("content", {}).get("body", "")
-            if body and len(body) < 200:
+            if body and len(body) < MAX_CONTEXT_MESSAGE_LENGTH:
                 context_parts.append(f"{sender}: {body}")
 
         if context_parts:
@@ -309,8 +313,8 @@ async def create_team_response(
         team_response = str(response)
 
     # Log the team response
-    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:500]}")
-    if len(team_response) > 500:
+    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:MAX_LOG_MESSAGE_LENGTH]}")
+    if len(team_response) > MAX_LOG_MESSAGE_LENGTH:
         logger.debug(f"TEAM RESPONSE (full): {team_response}")
 
     # Prepend team information to the response

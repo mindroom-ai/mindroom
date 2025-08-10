@@ -13,7 +13,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_invites import ThreadInviteManager
 
-from .conftest import TEST_PASSWORD
+from .conftest import TEST_PASSWORD, TEST_TMP_DIR
 
 
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:

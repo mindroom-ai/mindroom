@@ -22,6 +22,7 @@ class MatrixID:
     # Class constants
     AGENT_PREFIX: ClassVar[str] = "mindroom_"
     DEFAULT_DOMAIN: ClassVar[str] = "mindroom.space"
+    MATRIX_ID_PARTS: ClassVar[int] = 2  # Matrix IDs have username:domain
 
     @classmethod
     def parse(cls, matrix_id: str) -> MatrixID:
@@ -31,7 +32,7 @@ class MatrixID:
             raise ValueError(msg)
 
         parts = matrix_id[1:].split(":", 1)
-        if len(parts) != 2:
+        if len(parts) != cls.MATRIX_ID_PARTS:
             msg = f"Invalid Matrix ID format: {matrix_id}"
             raise ValueError(msg)
 
@@ -91,12 +92,15 @@ class ThreadStateKey:
 
     thread_id: str
     agent_name: str
+    
+    # Number of parts in a thread state key (thread_id:agent_name)
+    STATE_KEY_PARTS: ClassVar[int] = 2
 
     @classmethod
     def parse(cls, state_key: str) -> ThreadStateKey:
         """Parse a state key."""
         parts = state_key.split(":", 1)
-        if len(parts) != 2:
+        if len(parts) != cls.STATE_KEY_PARTS:
             msg = f"Invalid state key: {state_key}"
             raise ValueError(msg)
         return cls(thread_id=parts[0], agent_name=parts[1])

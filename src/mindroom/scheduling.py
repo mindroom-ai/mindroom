@@ -23,6 +23,9 @@ logger = get_logger(__name__)
 # Event type for scheduled tasks in Matrix state
 SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 
+# Maximum length for message preview in task listings
+MESSAGE_PREVIEW_LENGTH = 50
+
 # Global task storage for running asyncio tasks
 _running_tasks: dict[str, asyncio.Task] = {}
 
@@ -211,7 +214,7 @@ async def _execute_scheduled_task(
     task_id: str,
     room_id: str,
     thread_id: str | None,
-    agent_user_id: str,
+    _agent_user_id: str,
     execute_at: datetime,
     message: str,
 ) -> None:
@@ -337,7 +340,7 @@ async def list_scheduled_tasks(
     lines = ["**Scheduled Tasks:**"]
     for task in tasks:
         time_str = task["time"].strftime("%Y-%m-%d %H:%M UTC")
-        msg_preview = task["message"][:50] + ("..." if len(task["message"]) > 50 else "")
+        msg_preview = task["message"][:MESSAGE_PREVIEW_LENGTH] + ("..." if len(task["message"]) > MESSAGE_PREVIEW_LENGTH else "")
         lines.append(f'• `{task["id"]}` - {time_str}: "{msg_preview}"')
 
     return "\n".join(lines)
