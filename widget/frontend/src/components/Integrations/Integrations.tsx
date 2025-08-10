@@ -172,11 +172,11 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
   {
     id: 'youtube',
     name: 'YouTube',
-    description: 'Access subscriptions and watch history',
+    description: 'Search videos and get transcripts (tool: youtube)',
     category: 'entertainment',
     icon: <FaYoutube className="h-5 w-5 text-red-600" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
+    status: 'available',
+    setup_type: 'api_key',
   },
   {
     id: 'apple_music',
@@ -201,11 +201,11 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
   {
     id: 'twitter',
     name: 'Twitter/X',
-    description: 'Post tweets and read timeline',
+    description: 'Post tweets and search (tool: twitter)',
     category: 'social',
     icon: <FaTwitter className="h-5 w-5 text-blue-400" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
+    status: 'available',
+    setup_type: 'api_key',
   },
   {
     id: 'facebook',
@@ -228,11 +228,11 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
   {
     id: 'reddit',
     name: 'Reddit',
-    description: 'Browse subreddits and posts',
+    description: 'Browse subreddits and search posts (tool: reddit)',
     category: 'social',
     icon: <FaReddit className="h-5 w-5 text-orange-600" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
+    status: 'available',
+    setup_type: 'api_key',
   },
   {
     id: 'linkedin',
