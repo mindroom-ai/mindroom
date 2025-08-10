@@ -19,16 +19,37 @@ from mindroom.matrix import MATRIX_HOMESERVER
 from mindroom.matrix.client import markdown_to_html
 
 
+class LoginError(Exception):
+    """Exception raised when login fails."""
+
+    def __init__(self, response: object) -> None:
+        super().__init__(f"Failed to login: {response}")
+
+
+class MessageSendError(Exception):
+    """Exception raised when sending a message fails."""
+
+    def __init__(self, response: object) -> None:
+        super().__init__(f"Failed to send message: {response}")
+
+
+class MessageFetchError(Exception):
+    """Exception raised when fetching messages fails."""
+
+    def __init__(self, response: object) -> None:
+        super().__init__(f"Failed to fetch messages: {response}")
+
+
 class MindRoomE2ETest:
     """End-to-end test runner for Mindroom."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.client = None
         self.room_id = None
         self.username = None
         self.password = None
 
-    async def setup(self):
+    async def setup(self) -> None:
         """Load credentials and setup client."""
         # Load user credentials
         with Path("matrix_state.yaml").open() as f:
@@ -42,15 +63,15 @@ class MindRoomE2ETest:
         # Create client
         self.client = nio.AsyncClient(MATRIX_HOMESERVER, f"@{self.username}:localhost")
 
-    async def login(self):
+    async def login(self) -> None:
         """Login to Matrix."""
         print(f"🔑 Logging in as {self.username}...")
         response = await self.client.login(self.password, device_name="e2e_test")
         if not isinstance(response, nio.LoginResponse):
-            raise Exception(f"Failed to login: {response}")
+            raise LoginError(response)
         print("✓ Logged in successfully")
 
-    async def send_mention(self, agent_name: str, message: str):
+    async def send_mention(self, agent_name: str, message: str) -> str:
         """Send a message with proper Matrix mention."""
         from mindroom.matrix.mentions import parse_mentions_in_text
 
@@ -81,14 +102,14 @@ class MindRoomE2ETest:
 
         if isinstance(response, nio.RoomSendResponse):
             return response.event_id
-        raise Exception(f"Failed to send message: {response}")
+        raise MessageSendError(response)
 
-    async def get_recent_messages(self, limit=20):
+    async def get_recent_messages(self, limit: int = 20) -> list[dict[str, str | int]]:
         """Fetch recent messages from the room."""
         response = await self.client.room_messages(self.room_id, limit=limit)
 
         if not isinstance(response, nio.RoomMessagesResponse):
-            raise Exception(f"Failed to fetch messages: {response}")
+            raise MessageFetchError(response)
 
         messages = []
         for event in reversed(response.chunk):
@@ -97,12 +118,12 @@ class MindRoomE2ETest:
                 messages.append({"sender": sender, "body": event.body, "timestamp": event.server_timestamp})
         return messages
 
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         """Close client connection."""
         if self.client:
             await self.client.close()
 
-    def check_memory_storage(self, storage_path):
+    def check_memory_storage(self, storage_path: Path) -> tuple[bool, int]:
         """Check if memory storage was created."""
         chroma_path = storage_path / "chroma"
         if chroma_path.exists():
@@ -111,7 +132,7 @@ class MindRoomE2ETest:
         return False, 0
 
 
-async def run_test_sequence(storage_path):
+async def run_test_sequence(storage_path: Path) -> None:
     """Run a complete test sequence."""
     test = MindRoomE2ETest()
 
@@ -188,7 +209,7 @@ async def run_test_sequence(storage_path):
         await test.cleanup()
 
 
-async def main():
+async def main() -> None:
     """Main entry point."""
     print("=" * 60)
     print("MINDROOM END-TO-END TEST")

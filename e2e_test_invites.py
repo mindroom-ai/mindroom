@@ -18,17 +18,38 @@ from mindroom.matrix import MATRIX_HOMESERVER
 from mindroom.matrix.identity import MatrixID
 
 
+class LoginError(Exception):
+    """Exception raised when login fails."""
+
+    def __init__(self, response: object) -> None:
+        super().__init__(f"Failed to login: {response}")
+
+
+class MessageSendError(Exception):
+    """Exception raised when sending a message fails."""
+
+    def __init__(self, response: object) -> None:
+        super().__init__(f"Failed to send message: {response}")
+
+
+class MessageFetchError(Exception):
+    """Exception raised when fetching messages fails."""
+
+    def __init__(self, response: object) -> None:
+        super().__init__(f"Failed to fetch messages: {response}")
+
+
 class InviteE2ETest:
     """End-to-end test for invitation features."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.client = None
         self.lobby_room_id = None
         self.science_room_id = None
         self.username = None
         self.password = None
 
-    async def setup(self):
+    async def setup(self) -> None:
         """Load credentials and setup client."""
         # Create a test user with consistent credentials
         self.username = "e2e_test_user"
@@ -61,19 +82,19 @@ class InviteE2ETest:
         self.lobby_room_id = None
         self.science_room_id = None
 
-    async def login(self):
+    async def login(self) -> None:
         """Login to Matrix."""
         # Skip login if we already have access token from registration
         if not self.client.access_token:
             print(f"🔑 Logging in as {self.username}...")
             response = await self.client.login(self.password, device_name="e2e_invite_test")
             if not isinstance(response, nio.LoginResponse):
-                raise Exception(f"Failed to login: {response}")
+                raise LoginError(response)
             print("✓ Logged in successfully")
         else:
             print("✓ Already authenticated from registration")
 
-    async def discover_rooms(self):
+    async def discover_rooms(self) -> None:
         """Discover room IDs by joining public rooms."""
         print("🔍 Discovering rooms...")
 
@@ -95,7 +116,7 @@ class InviteE2ETest:
         else:
             print(f"⚠️  Failed to join science: {response}")
 
-    async def send_message(self, room_id: str, message: str, thread_id: str = None):
+    async def send_message(self, room_id: str, message: str, thread_id: str | None = None) -> str:
         """Send a plain message or thread reply."""
         content = {
             "msgtype": "m.text",
@@ -112,9 +133,9 @@ class InviteE2ETest:
 
         if isinstance(response, nio.RoomSendResponse):
             return response.event_id
-        raise Exception(f"Failed to send message: {response}")
+        raise MessageSendError(f"Failed to send message: {response}")
 
-    async def send_mention(self, room_id: str, agent_name: str, message: str, thread_id: str = None):
+    async def send_mention(self, room_id: str, agent_name: str, message: str, thread_id: str | None = None) -> str:
         """Send a message with proper Matrix mention."""
         user_id = MatrixID.from_agent(agent_name, "localhost").full_id
 
@@ -130,16 +151,16 @@ class InviteE2ETest:
 
         if isinstance(response, nio.RoomSendResponse):
             return response.event_id
-        raise Exception(f"Failed to send message: {response}")
+        raise MessageSendError(f"Failed to send message: {response}")
 
-    async def get_thread_messages(self, room_id: str, thread_id: str, limit=20):
+    async def get_thread_messages(self, room_id: str, thread_id: str, limit: int = 20) -> list[dict[str, str | int]]:
         """Fetch messages from a specific thread."""
         # Note: In a real implementation, we'd filter by thread relation
         # For now, we'll get recent messages and filter in post-processing
         response = await self.client.room_messages(room_id, limit=limit)
 
         if not isinstance(response, nio.RoomMessagesResponse):
-            raise Exception(f"Failed to fetch messages: {response}")
+            raise MessageFetchError(f"Failed to fetch messages: {response}")
 
         messages = []
         for event in reversed(response.chunk):
@@ -159,12 +180,12 @@ class InviteE2ETest:
                     )
         return messages
 
-    async def get_recent_messages(self, room_id: str, limit=20):
+    async def get_recent_messages(self, room_id: str, limit: int = 20) -> list[dict[str, str | int]]:
         """Fetch recent messages from a room."""
         response = await self.client.room_messages(room_id, limit=limit)
 
         if not isinstance(response, nio.RoomMessagesResponse):
-            raise Exception(f"Failed to fetch messages: {response}")
+            raise MessageFetchError(f"Failed to fetch messages: {response}")
 
         messages = []
         for event in reversed(response.chunk):
@@ -181,13 +202,13 @@ class InviteE2ETest:
                 )
         return messages
 
-    async def cleanup(self):
+    async def cleanup(self) -> None:
         """Close client connection."""
         if self.client:
             await self.client.close()
 
 
-async def test_thread_invitations(test):
+async def test_thread_invitations(test: InviteE2ETest) -> None:
     """Test thread-specific agent invitations."""
     print("\n🧪 Testing Thread Invitations")
     print("=" * 40)
@@ -235,7 +256,7 @@ async def test_thread_invitations(test):
     return thread_id
 
 
-async def test_no_response_outside_threads(test):
+async def test_no_response_outside_threads(test: InviteE2ETest) -> None:
     """Test that agents don't respond outside threads."""
     print("\n\n🧪 Testing No Response Outside Threads")
     print("=" * 40)
@@ -272,7 +293,7 @@ async def test_no_response_outside_threads(test):
         print("   ❌ ERROR: No error message about thread requirement")
 
 
-async def test_help_command(test):
+async def test_help_command(test: InviteE2ETest) -> None:
     """Test help command."""
     print("\n\n🧪 Testing Help Command")
     print("=" * 40)
@@ -295,7 +316,7 @@ async def test_help_command(test):
         print(f"      {msg['body'][:200]}...")
 
 
-async def run_test_sequence():
+async def run_test_sequence() -> None:
     """Run complete invitation test sequence."""
     test = InviteE2ETest()
 
@@ -324,7 +345,7 @@ async def run_test_sequence():
         await test.cleanup()
 
 
-async def main():
+async def main() -> None:
     """Main entry point."""
     print("=" * 60)
     print("MINDROOM INVITATION FEATURE E2E TEST")

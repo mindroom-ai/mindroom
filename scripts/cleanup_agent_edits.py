@@ -283,7 +283,7 @@ def main(
         "--password",
         help="Database password",
     ),
-):
+) -> None:
     """Clean up excessive edit history from agent messages in Synapse database."""
     db_config = DBConfig(host=host, port=port, database=database, user=user, password=password)
 

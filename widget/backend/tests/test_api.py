@@ -1,5 +1,8 @@
 """Tests for the widget backend API endpoints."""
 
+from pathlib import Path
+from typing import Any
+
 import yaml
 from fastapi.testclient import TestClient
 
@@ -44,7 +47,7 @@ def test_get_agents(test_client: TestClient) -> None:
     assert "rooms" in agent
 
 
-def test_create_agent(test_client: TestClient, sample_agent_data, temp_config_file) -> None:
+def test_create_agent(test_client: TestClient, sample_agent_data: dict[str, Any], temp_config_file: Path) -> None:
     """Test creating a new agent."""
     # Load config first
     test_client.post("/api/config/load")
@@ -63,7 +66,7 @@ def test_create_agent(test_client: TestClient, sample_agent_data, temp_config_fi
     assert config["agents"][result["id"]]["display_name"] == sample_agent_data["display_name"]
 
 
-def test_update_agent(test_client: TestClient, temp_config_file) -> None:
+def test_update_agent(test_client: TestClient, temp_config_file: Path) -> None:
     """Test updating an existing agent."""
     # Load config first
     test_client.post("/api/config/load")
@@ -84,7 +87,7 @@ def test_update_agent(test_client: TestClient, temp_config_file) -> None:
     assert "updated_room" in config["agents"]["test_agent"]["rooms"]
 
 
-def test_delete_agent(test_client: TestClient, temp_config_file) -> None:
+def test_delete_agent(test_client: TestClient, temp_config_file: Path) -> None:
     """Test deleting an agent."""
     # Load config first
     test_client.post("/api/config/load")
@@ -126,7 +129,7 @@ def test_get_rooms(test_client: TestClient) -> None:
     assert "test_room" in rooms
 
 
-def test_save_config(test_client: TestClient, temp_config_file) -> None:
+def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
     """Test saving entire configuration."""
     new_config = {
         "memory": {
@@ -207,7 +210,7 @@ def test_get_teams_empty(test_client: TestClient) -> None:
     assert len(teams) == 0
 
 
-def test_create_team(test_client: TestClient, temp_config_file) -> None:
+def test_create_team(test_client: TestClient, temp_config_file: Path) -> None:
     """Test creating a new team."""
     test_client.post("/api/config/load")
 
@@ -268,7 +271,7 @@ def test_get_teams_with_data(test_client: TestClient) -> None:
     assert team["mode"] == "coordinate"
 
 
-def test_update_team(test_client: TestClient, temp_config_file) -> None:
+def test_update_team(test_client: TestClient, temp_config_file: Path) -> None:
     """Test updating an existing team."""
     test_client.post("/api/config/load")
 
@@ -305,7 +308,7 @@ def test_update_team(test_client: TestClient, temp_config_file) -> None:
     assert saved_config["teams"]["test_team"]["mode"] == "collaborate"
 
 
-def test_delete_team(test_client: TestClient, temp_config_file) -> None:
+def test_delete_team(test_client: TestClient, temp_config_file: Path) -> None:
     """Test deleting a team."""
     test_client.post("/api/config/load")
 
@@ -382,7 +385,7 @@ def test_get_room_models(test_client: TestClient) -> None:
     assert isinstance(room_models, dict)
 
 
-def test_update_room_models(test_client: TestClient, temp_config_file) -> None:
+def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> None:
     """Test updating room-specific model overrides."""
     test_client.post("/api/config/load")
 

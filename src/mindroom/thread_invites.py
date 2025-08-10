@@ -17,6 +17,8 @@ DEFAULT_TIMEOUT_HOURS = 24
 
 
 class ThreadInviteManager:
+    """Manages thread-specific agent invitations using Matrix state events."""
+
     def __init__(self, client: nio.AsyncClient) -> None:
         self.client = client
 

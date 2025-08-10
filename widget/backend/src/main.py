@@ -38,13 +38,15 @@ config_lock = threading.Lock()
 
 
 class TestModelRequest(BaseModel):
+    """Request model for testing AI model connections."""
+
     modelId: str
 
 
 class ConfigFileHandler(FileSystemEventHandler):
     """Watch for changes to config.yaml."""
 
-    def on_modified(self, event) -> None:
+    def on_modified(self, event: object) -> None:
         if event.src_path.endswith("config.yaml"):
             load_config_from_file()
 
