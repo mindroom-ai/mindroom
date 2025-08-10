@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from agno.tools import Toolkit
 
 # Base path for credentials
 CREDS_PATH = Path(__file__).parent.parent.parent
@@ -174,3 +175,50 @@ def search_github_repos(query: str, limit: int = 5) -> str:
 def get_facebook_page(page_id: str) -> str:
     """Facebook is not yet implemented."""
     return "Facebook integration is not yet implemented. This feature is coming soon."
+
+
+class IntegrationsTools(Toolkit):
+    """Toolkit for external service integrations."""
+
+    def __init__(self) -> None:
+        super().__init__(name="integrations")
+
+    def search_amazon(self, query: str, max_results: int = 5) -> str:
+        """Search Amazon for products."""
+        return search_amazon(query, max_results)
+
+    def search_imdb(self, query: str, type: str = "movie") -> str:
+        """Search IMDb for movies or TV shows."""
+        return search_imdb(query, type)
+
+    def get_imdb_details(self, title: str) -> str:
+        """Get detailed information about a movie or show."""
+        return get_imdb_details(title)
+
+    def get_spotify_current(self) -> str:
+        """Get currently playing track on Spotify."""
+        return get_spotify_current()
+
+    def search_walmart(self, query: str, max_results: int = 5) -> str:
+        """Search Walmart for products."""
+        return search_walmart(query, max_results)
+
+    def send_telegram(self, chat_id: str, message: str) -> str:
+        """Send a message via Telegram bot."""
+        return send_telegram(chat_id, message)
+
+    def search_reddit(self, query: str, subreddit: str | None = None, limit: int = 5) -> str:
+        """Search Reddit for posts."""
+        return search_reddit(query, subreddit, limit)
+
+    def list_dropbox_files(self, path: str = "/") -> str:
+        """List files in Dropbox folder."""
+        return list_dropbox_files(path)
+
+    def search_github_repos(self, query: str, limit: int = 5) -> str:
+        """Search GitHub repositories."""
+        return search_github_repos(query, limit)
+
+    def get_facebook_page(self, page_id: str) -> str:
+        """Get information about a Facebook page."""
+        return get_facebook_page(page_id)
