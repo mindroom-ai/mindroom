@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -1487,6 +1487,7 @@ dependencies = [
     { name = "arxiv" },
     { name = "chromadb" },
     { name = "diskcache" },
+    { name = "fastapi" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
@@ -1505,10 +1506,13 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
     { name = "slack-sdk" },
+    { name = "spotipy" },
     { name = "structlog" },
     { name = "tavily-python" },
     { name = "tweepy" },
     { name = "typer" },
+    { name = "uvicorn" },
+    { name = "watchdog" },
     { name = "wikipedia" },
     { name = "youtube-transcript-api" },
 ]
@@ -1519,6 +1523,7 @@ requires-dist = [
     { name = "arxiv" },
     { name = "chromadb", specifier = ">=1.0.15" },
     { name = "diskcache", specifier = ">=5.6.3" },
+    { name = "fastapi", specifier = ">=0.116.1" },
     { name = "google-api-python-client", specifier = ">=2.178" },
     { name = "google-auth", specifier = ">=2.40.3" },
     { name = "google-auth-httplib2", specifier = ">=0.2" },
@@ -1537,10 +1542,13 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6" },
     { name = "rich", specifier = ">=13.10.5" },
     { name = "slack-sdk" },
+    { name = "spotipy", specifier = ">=2.25.1" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "tavily-python" },
     { name = "tweepy" },
     { name = "typer", specifier = ">=0.16" },
+    { name = "uvicorn", specifier = ">=0.35" },
+    { name = "watchdog", specifier = ">=6" },
     { name = "wikipedia" },
     { name = "youtube-transcript-api" },
 ]
