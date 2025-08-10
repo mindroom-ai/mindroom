@@ -1,5 +1,7 @@
 """Comprehensive unit tests for streaming behavior with agent edits."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path

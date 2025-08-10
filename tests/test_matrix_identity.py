@@ -1,5 +1,7 @@
 """Tests for unified Matrix ID handling."""
 
+from __future__ import annotations
+
 import pytest
 
 from mindroom.config import AgentConfig, Config, ModelConfig

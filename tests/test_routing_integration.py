@@ -4,6 +4,8 @@ These tests simulate real-world scenarios to ensure agents behave correctly
 when multiple agents are in a room and routing decisions need to be made.
 """
 
+from __future__ import annotations
+
 from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch

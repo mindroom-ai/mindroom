@@ -4,6 +4,8 @@ With the new self-managing agent pattern, teams handle their own room
 memberships just like agents do.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 

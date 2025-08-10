@@ -1,5 +1,7 @@
 """Test streaming edit handling to prevent duplicate responses."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 

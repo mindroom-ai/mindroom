@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -71,7 +70,7 @@ async def test_unknown_command_in_main_room() -> None:
     sent_messages = []
 
     async def mock_send_message(
-        _client: Any,
+        _client: AsyncMock,
         room_id: str,
         content: dict,
     ) -> str:
@@ -171,7 +170,7 @@ async def test_unknown_command_in_thread() -> None:
     error_messages = []
 
     async def mock_send_message(
-        _client: Any,
+        _client: AsyncMock,
         room_id: str,
         content: dict,
     ) -> str:
@@ -276,7 +275,7 @@ async def test_unknown_command_with_reply() -> None:
     sent_messages = []
 
     async def mock_send_message(
-        _client: Any,
+        _client: AsyncMock,
         room_id: str,
         content: dict,
     ) -> str:

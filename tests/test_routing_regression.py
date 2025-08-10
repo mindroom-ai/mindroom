@@ -5,6 +5,8 @@ These tests ensure that fixed bugs don't resurface, particularly:
 2. Only mentioned agents should respond
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 

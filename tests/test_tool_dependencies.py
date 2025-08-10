@@ -1,5 +1,7 @@
 """Test that all registered tools can be instantiated and have their dependencies available."""
 
+from __future__ import annotations
+
 import pytest
 
 from mindroom.tools import TOOL_REGISTRY, get_tool_by_name

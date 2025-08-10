@@ -10,6 +10,8 @@ This module comprehensively tests all agent response rules:
 These tests ensure no regressions in the core response logic.
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 from mindroom.config import AgentConfig, Config, ModelConfig

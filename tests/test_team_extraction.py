@@ -1,5 +1,7 @@
 """Tests for team response extraction functions."""
 
+from __future__ import annotations
+
 from unittest.mock import MagicMock
 
 from agno.models.message import Message

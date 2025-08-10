@@ -1,7 +1,9 @@
 """Integration tests for memory-enhanced AI responses."""
 
+from __future__ import annotations
+
 from collections.abc import Generator
-from typing import Any
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -29,14 +31,14 @@ class TestMemoryIntegration:
             patch("mindroom.ai.store_conversation_memory", new_callable=AsyncMock) as mock_store,
         ):
             # Set up async side effects
-            async def build_side_effect(prompt: str, *_args: Any, **_kwargs: Any) -> str:
+            async def build_side_effect(prompt: str, *_args: object, **_kwargs: dict[str, object]) -> str:
                 return f"[Enhanced] {prompt}"
 
             mock_build.side_effect = build_side_effect
             yield mock_build, mock_store
 
     @pytest.fixture
-    def config(self) -> Any:
+    def config(self) -> Config:
         """Load config for testing."""
         return Config.from_yaml()
 
@@ -45,8 +47,8 @@ class TestMemoryIntegration:
         self,
         mock_agent_run: AsyncMock,
         mock_memory_functions: tuple[AsyncMock, AsyncMock],
-        tmp_path: Any,
-        config: Any,
+        tmp_path: Path,
+        config: Config,
     ) -> None:
         """Test that AI response uses memory enhancement."""
         mock_build, mock_store = mock_memory_functions
@@ -92,8 +94,8 @@ class TestMemoryIntegration:
         self,
         mock_agent_run: AsyncMock,
         mock_memory_functions: tuple[AsyncMock, AsyncMock],
-        tmp_path: Any,
-        config: Any,
+        tmp_path: Path,
+        config: Config,
     ) -> None:
         """Test AI response without room context."""
         mock_build, mock_store = mock_memory_functions
@@ -120,7 +122,7 @@ class TestMemoryIntegration:
             mock_store.assert_called_once_with("Hello", "general", tmp_path, "test_session", config, None)
 
     @pytest.mark.asyncio
-    async def test_ai_response_error_handling(self, tmp_path: Any, config: Any) -> None:
+    async def test_ai_response_error_handling(self, tmp_path: Path, config: Config) -> None:
         """Test error handling in AI response."""
         # Mock memory to prevent real memory instance creation during error handling
         mock_memory = AsyncMock()
@@ -143,7 +145,7 @@ class TestMemoryIntegration:
             assert "Model error" in response
 
     @pytest.mark.asyncio
-    async def test_memory_persistence_across_calls(self, tmp_path: Any, config: Any) -> None:
+    async def test_memory_persistence_across_calls(self, tmp_path: Path, config: Config) -> None:
         """Test that memory persists across multiple AI calls."""
         # This is more of a documentation test showing expected behavior
         mock_memory = AsyncMock()

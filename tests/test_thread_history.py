@@ -1,5 +1,7 @@
 """Tests for thread history fetching, especially including thread root messages."""
 
+from __future__ import annotations
+
 from unittest.mock import AsyncMock, MagicMock
 
 import nio

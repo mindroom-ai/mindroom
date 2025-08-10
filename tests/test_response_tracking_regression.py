@@ -4,6 +4,8 @@ These tests ensure that commands, unknown commands, and router messages
 are properly tracked to prevent re-processing after restart.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 

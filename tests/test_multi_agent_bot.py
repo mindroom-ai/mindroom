@@ -1,5 +1,7 @@
 """Tests for the multi-agent bot system."""
 
+from __future__ import annotations
+
 import asyncio
 import os
 from collections.abc import AsyncGenerator

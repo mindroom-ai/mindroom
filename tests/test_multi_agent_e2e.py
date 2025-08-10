@@ -1,5 +1,7 @@
 """End-to-end tests for the multi-agent bot system."""
 
+from __future__ import annotations
+
 import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
