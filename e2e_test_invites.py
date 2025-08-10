@@ -73,7 +73,7 @@ class InviteE2ETest:
             and hasattr(response, "status_code")
             and response.status_code == "M_USER_IN_USE"
         ):
-            print("i️  Test user already exists, will try to login")
+            print("ℹ️  Test user already exists, will try to login")  # noqa: RUF001
         else:
             print(f"⚠️  Registration response: {response}")
 

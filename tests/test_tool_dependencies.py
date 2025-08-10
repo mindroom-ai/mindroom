@@ -26,13 +26,20 @@ def test_all_tools_can_be_imported() -> None:
             assert tool_instance is not None
             assert hasattr(tool_instance, "name")
             successful.append(tool_name)
+            print(f"✓ {tool_name}")
         except Exception as e:
             if tool_name in TOOLS_REQUIRING_CONFIG:
                 config_required.append(tool_name)
+                print(f"⚠ {tool_name}: {TOOLS_REQUIRING_CONFIG[tool_name]}")
             else:
                 failed.append((tool_name, str(e)))
+                print(f"✗ {tool_name}: {e}")
 
     # Summary
+    print("\nSummary:")
+    print(f"  Successful: {len(successful)}")
+    print(f"  Config required: {len(config_required)}")
+    print(f"  Failed: {len(failed)}")
 
     # Fail the test if any tools failed (excluding config-required ones)
     if failed:
