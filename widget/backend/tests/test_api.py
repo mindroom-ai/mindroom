@@ -106,14 +106,28 @@ def test_delete_agent(test_client: TestClient, temp_config_file: Path) -> None:
 
 def test_get_tools(test_client: TestClient) -> None:
     """Test getting available tools."""
-    response = test_client.get("/api/tools")
+    # First test the new endpoint that returns full tool metadata
+    response = test_client.get("/api/tools/")
     assert response.status_code == 200
 
-    tools = response.json()
-    assert isinstance(tools, list)
-    assert "calculator" in tools
-    assert "file" in tools
-    assert "shell" in tools
+    data = response.json()
+    assert "tools" in data
+    assert isinstance(data["tools"], list)
+    assert len(data["tools"]) > 0
+
+    # Check that some expected tools are present
+    tool_names = {tool["name"] for tool in data["tools"]}
+    assert "calculator" in tool_names
+    assert "file" in tool_names
+    assert "shell" in tool_names
+
+    # Check that tools have the expected structure
+    first_tool = data["tools"][0]
+    assert "name" in first_tool
+    assert "display_name" in first_tool
+    assert "description" in first_tool
+    assert "category" in first_tool
+    assert "icon_color" in first_tool  # New field we added
 
 
 def test_get_rooms(test_client: TestClient) -> None:
