@@ -243,14 +243,14 @@ def perform_cleanup(
 
                 if dry_run:
                     console.print(
-                        f"[yellow]Would delete {len(edits_to_delete)} edits for message in {info['room_alias_or_id']}[/yellow]"
+                        f"[yellow]Would delete {len(edits_to_delete)} edits for message in {info['room_alias_or_id']}[/yellow]",
                     )
                 else:
                     deleted = cleanup_edit_events(conn, edits_to_delete, dry_run)
                     total_deleted += deleted
                     if deleted > 0:
                         console.print(
-                            f"[green]Deleted {deleted} edits for message in {info['room_alias_or_id']}[/green]"
+                            f"[green]Deleted {deleted} edits for message in {info['room_alias_or_id']}[/green]",
                         )
 
     # Summary
@@ -279,7 +279,9 @@ def main(
     database: str = typer.Option(os.getenv("SYNAPSE_DB_NAME", "synapse"), "--database", help="Database name"),
     user: str = typer.Option(os.getenv("SYNAPSE_DB_USER", "synapse"), "--user", help="Database user"),
     password: str = typer.Option(
-        os.getenv("SYNAPSE_DB_PASSWORD", "synapse_password"), "--password", help="Database password"
+        os.getenv("SYNAPSE_DB_PASSWORD", "synapse_password"),
+        "--password",
+        help="Database password",
     ),
 ):
     """Clean up excessive edit history from agent messages in Synapse database."""

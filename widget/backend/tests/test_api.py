@@ -133,7 +133,7 @@ def test_save_config(test_client: TestClient, temp_config_file):
             "embedder": {
                 "provider": "ollama",
                 "config": {"model": "nomic-embed-text", "host": "http://localhost:11434"},
-            }
+            },
         },
         "models": {"default": {"provider": "test", "id": "test-model-2"}},
         "agents": {
@@ -144,7 +144,7 @@ def test_save_config(test_client: TestClient, temp_config_file):
                 "instructions": [],
                 "rooms": ["new_room"],
                 "num_history_runs": 10,
-            }
+            },
         },
         "defaults": {"num_history_runs": 10},
         "router": {"model": "ollama"},

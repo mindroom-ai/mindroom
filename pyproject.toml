@@ -76,62 +76,25 @@ lint.select = [
   "ALL",
 ]
 lint.ignore = [
-  "ANN401", # Use of Any - OK in test mocks
-  "ARG001", # Unused function argument - OK in test mocks
-  "ARG002", # Unused method argument - OK in test mocks
-  # Temporarily ignoring remaining errors - to be fixed incrementally
-  "ASYNC109", # Async function with no await
-  "ASYNC221", # Yield in async function
-  "ASYNC230", # Blocking IO in async function
-  "BLE001",   # Blind except
-  "C414",     # Unnecessary list/tuple call
-  "C901",     # Function is too complex
-  "COM812",   # Missing trailing comma
-  "D105",     # Missing docstring in magic method - less critical
-  "D401",     # First line imperative mood - less critical for some cases
-  "D417",     # Missing argument description - less critical
-  "DTZ005",   # Use of datetime.now() without timezone
-  "E501",     # Line too long
-  "EM101",    # Exception must not use string literal
-  "EM102",    # Exception must not use f-string literal
-  "ERA001",   # Commented out code
-  "EXE001",   # Shebang present but file not executable
-  "FBT001",   # Boolean positional argument
-  "FBT002",   # Boolean default value
-  "FBT003",   # Boolean positional value in call
-  "FIX002",   # Line contains TODO
-  "G004",     # Logging uses f-string
-  "G201",     # Logging uses .format()
-  "INP001",   # Implicit namespace package
-  "N815",     # Variable in class scope should not be mixedCase
-  "PERF401",  # Use list comprehension
-  "PLC0415",  # Import outside top-level - sometimes needed
-  # PLC0415,  # Import outside top-level - FIXED by Agent 6
-  "PLR0911", # Too many return statements
-  "PLR0912", # Too many branches
-  "PLR0913", # Too many arguments
-  "PLR0915", # Too many statements
-  "PLR2004", # Magic value used in comparison - OK in tests
-  "PLW0603", # Using global statement
-  "PLW1510", # subprocess.run without check
-  "PT011",   # pytest.raises too broad
-  "PTH123",  # Use Path.open()
-  "RET504",  # Unnecessary assignment before return
-  "RET505",  # Unnecessary else after return
-  "RUF001",  # String contains ambiguous character
-  "RUF006",  # Store async context manager
-  "RUF010",  # Use explicit conversion
-  "RUF013",  # PEP 484 prohibits implicit Optional
-  # These are acceptable in tests but were fixed in production code
-  "S101",   # Use of assert - OK in tests, fixed in src/
-  "S105",
-  "SLF001", # Private member accessed - OK in tests
-  "TC002",  # Move third-party import into type-checking - not always needed
-  "TD002",  # Missing TODO author
-  "TD003",  # Missing TODO issue link
-  "TRY003", # Avoid long messages outside exception class - OK for assertions
-  "TRY300", # Consider else block - not always needed
-  "TRY301", # Abstract raise to inner function - not needed for assertions
+  "ANN401",  # Dynamically typed expressions (typing.Any) are disallowed in {name}
+  "B905",    # `zip()` without an explicit `strict=` parameter
+  "D107",    # Missing docstring in `__init__`
+  "D401",    # First line of docstring should be in imperative mood
+  "D402",    # First line should not be the function's signature
+  "E501",    # Line too long
+  "FBT001",  # Boolean-typed positional argument in function definition
+  "FIX002",  # Line contains TODO"
+  "PD901",   # df is a bad variable name. Be kinder to your future self.
+  "PLC0415", # `import` should be at the top-level of a file
+  "PLR0913", # Too many arguments to function call (N > 5)
+  "PLW0603", # Using the global statement to update `X` is discouraged
+  "S101",    # Use of assert detected
+  "S603",    # `subprocess` call: check for execution of untrusted input
+  "S607",    # Starting a process with a partial executable path
+  "SLF001",  # Private member accessed
+  "T20",     # flake8-print
+  "TD002",   # Missing author in TODO; try: `# TODO(<author_name>): ...`
+  "TD003",   # Missing issue link on the line following this TODO
 ]
 
 [tool.pytest.ini_options]

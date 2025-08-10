@@ -19,7 +19,9 @@ def capture_widget_state():
     try:
         # Get the current configuration
         req = urllib.request.Request(
-            "http://localhost:8000/api/config/load", method="POST", headers={"Content-Type": "application/json"}
+            "http://localhost:8000/api/config/load",
+            method="POST",
+            headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req) as response:
             config = json.loads(response.read().decode())

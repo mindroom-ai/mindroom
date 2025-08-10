@@ -256,7 +256,7 @@ async def ai_response(
         logger.exception("Error generating AI response for agent %s", agent_name)
         logger.exception(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
         logger.exception(
-            f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}"
+            f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}",
         )
         logger.exception(f"Traceback:\n{traceback.format_exc()}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"

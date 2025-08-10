@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
-import structlog
 
 from . import interactive
 from .agents import create_agent, get_rooms_for_entity
@@ -75,6 +74,7 @@ from .thread_utils import (
 )
 
 if TYPE_CHECKING:
+    import structlog
     from agno.agent import Agent
 
 logger = get_logger(__name__)

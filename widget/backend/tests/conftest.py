@@ -27,7 +27,7 @@ def temp_config_file() -> Generator[Path, None, None]:
                     "instructions": ["Test instruction"],
                     "rooms": ["test_room"],
                     "num_history_runs": 5,
-                }
+                },
             },
             "defaults": {"num_history_runs": 5, "markdown": True},
         }

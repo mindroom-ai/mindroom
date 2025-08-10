@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
 from loguru import logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from agno.tools import Toolkit
 
 # Registry mapping tool names to their factory functions
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}

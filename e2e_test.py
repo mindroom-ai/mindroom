@@ -81,8 +81,7 @@ class MindRoomE2ETest:
 
         if isinstance(response, nio.RoomSendResponse):
             return response.event_id
-        else:
-            raise Exception(f"Failed to send message: {response}")
+        raise Exception(f"Failed to send message: {response}")
 
     async def get_recent_messages(self, limit=20):
         """Fetch recent messages from the room."""
@@ -197,7 +196,7 @@ async def main():
 
     # Kill any existing mindroom processes
     print("\n🧹 Cleaning up old processes...")
-    subprocess.run(["pkill", "-f", "mindroom run"], capture_output=True)
+    subprocess.run(["pkill", "-f", "mindroom run"], check=False, capture_output=True)
     await asyncio.sleep(2)
 
     # Start mindroom
@@ -227,7 +226,7 @@ async def main():
         with contextlib.suppress(asyncio.CancelledError):
             await bot_task
 
-        subprocess.run(["pkill", "-f", "mindroom run"], capture_output=True)
+        subprocess.run(["pkill", "-f", "mindroom run"], check=False, capture_output=True)
 
         # Clean up temp directory
         import shutil

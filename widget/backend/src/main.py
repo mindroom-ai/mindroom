@@ -112,7 +112,7 @@ async def save_config(new_config: Config):
 
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save configuration: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to save configuration: {e!s}") from e
 
 
 @app.get("/api/config/agents")
@@ -146,7 +146,7 @@ async def update_agent(agent_id: str, agent_data: dict[str, Any]):
         save_config_to_file(config)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save agent: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to save agent: {e!s}") from e
 
 
 @app.post("/api/config/agents")
@@ -177,7 +177,7 @@ async def create_agent(agent_data: dict[str, Any]):
         save_config_to_file(config)
         return {"id": agent_id, "success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to create agent: {e!s}") from e
 
 
 @app.delete("/api/config/agents/{agent_id}")
@@ -194,7 +194,7 @@ async def delete_agent(agent_id: str):
         save_config_to_file(config)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to delete agent: {e!s}") from e
 
 
 @app.get("/api/config/teams")
@@ -228,7 +228,7 @@ async def update_team(team_id: str, team_data: dict[str, Any]):
         save_config_to_file(config)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save team: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to save team: {e!s}") from e
 
 
 @app.post("/api/config/teams")
@@ -259,7 +259,7 @@ async def create_team(team_data: dict[str, Any]):
         save_config_to_file(config)
         return {"id": team_id, "success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create team: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to create team: {e!s}") from e
 
 
 @app.delete("/api/config/teams/{team_id}")
@@ -276,7 +276,7 @@ async def delete_team(team_id: str):
         save_config_to_file(config)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete team: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to delete team: {e!s}") from e
 
 
 @app.get("/api/config/models")
@@ -300,7 +300,7 @@ async def update_model(model_id: str, model_data: dict[str, Any]):
         save_config_to_file(config)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save model: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to save model: {e!s}") from e
 
 
 @app.get("/api/config/room-models")
@@ -321,7 +321,7 @@ async def update_room_models(room_models: dict[str, str]):
         save_config_to_file(config)
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save room models: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to save room models: {e!s}") from e
 
 
 @app.post("/api/test/model")
@@ -333,8 +333,7 @@ async def test_model(request: TestModelRequest):
     with config_lock:
         if model_id in config.get("models", {}):
             return {"success": True, "message": f"Model {model_id} is configured"}
-        else:
-            return {"success": False, "message": f"Model {model_id} not found"}
+        return {"success": False, "message": f"Model {model_id} not found"}
 
 
 @app.get("/api/tools")

@@ -26,6 +26,7 @@ def take_screenshot(port: int = 3003) -> bool:
     print(f"Taking screenshot of app at http://localhost:{port}...")
     result = subprocess.run(
         ["pnpm", "run", "screenshot"],
+        check=False,
         cwd=Path(__file__).parent / "frontend",
         env={**os.environ, **env},
         capture_output=True,

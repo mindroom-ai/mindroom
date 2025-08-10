@@ -94,7 +94,9 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         # With response_model, we should always get the correct type
         if not isinstance(suggestion, AgentSuggestion):
             logger.error(
-                "Unexpected response type from AI routing", expected="AgentSuggestion", actual=type(suggestion).__name__
+                "Unexpected response type from AI routing",
+                expected="AgentSuggestion",
+                actual=type(suggestion).__name__,
             )
             return None
 
