@@ -114,7 +114,8 @@ def register_tool_with_metadata(
         TOOL_METADATA[name] = metadata
 
         # Also register in TOOL_REGISTRY for actual tool loading
-        from mindroom.tools import TOOL_REGISTRY
+        # Import here to avoid circular dependency
+        from mindroom.tools import TOOL_REGISTRY  # noqa: PLC0415
 
         TOOL_REGISTRY[name] = func
 

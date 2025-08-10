@@ -4,7 +4,9 @@ import json
 import os
 from pathlib import Path
 
+import jwt
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import RedirectResponse
 from google_auth_oauthlib.flow import Flow
 from pydantic import BaseModel
 
@@ -43,11 +45,11 @@ class GmailStatus(BaseModel):
     configured: bool
     method: str | None = None
     email: str | None = None
-    hasCredentials: bool
+    has_credentials: bool
 
 
 @router.get("/status")
-async def get_gmail_status():
+async def get_gmail_status() -> GmailStatus:
     """Check if Gmail is configured for agents."""
     # Check environment variables
     client_id = os.getenv("GOOGLE_CLIENT_ID")
@@ -68,18 +70,16 @@ async def get_gmail_status():
     email = None
     if has_token and configured:
         try:
-            with open(TOKEN_PATH) as f:
+            with TOKEN_PATH.open() as f:
                 token_data = json.load(f)
                 # Try to get email from token data
                 if "_id_token" in token_data:
-                    import jwt
-
                     try:
                         decoded = jwt.decode(token_data["_id_token"], options={"verify_signature": False})
                         email = decoded.get("email")
-                    except Exception:
+                    except Exception:  # noqa: S110
                         pass
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
     return GmailStatus(
@@ -91,12 +91,12 @@ async def get_gmail_status():
 
 
 @router.post("/configure")
-async def configure_gmail(request: GmailConfigRequest):
+async def configure_gmail(request: GmailConfigRequest) -> dict[str, bool | str]:
     """Save Gmail credentials for agents to use."""
     # Load existing .env file
     env_lines = []
     if ENV_PATH.exists():
-        with open(ENV_PATH) as f:
+        with ENV_PATH.open() as f:
             env_lines = f.readlines()
 
     # Update or add credentials
@@ -118,7 +118,7 @@ async def configure_gmail(request: GmailConfigRequest):
             env_lines.append(f"{key}={value}\n")
 
     # Write back to .env file
-    with open(ENV_PATH, "w") as f:
+    with ENV_PATH.open("w") as f:
         f.writelines(env_lines)
 
     # Also set in current environment
@@ -166,7 +166,7 @@ async def start_oauth_flow() -> dict[str, str | bool | None]:
         # Store flow in session or cache for callback
         # For simplicity, we'll recreate it in callback
 
-        return {"auth_url": auth_url}
+        return {"auth_url": auth_url}  # noqa: TRY300
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start OAuth: {e!s}") from e
 
@@ -222,7 +222,6 @@ async def oauth_callback(code: str) -> dict[str, str]:
         await configure_gmail(GmailConfigRequest(client_id=client_id, client_secret=client_secret, method="oauth"))
 
         # Redirect back to widget with success
-        from fastapi.responses import RedirectResponse
 
         return RedirectResponse(url="http://localhost:5173/?gmail=configured")
 
