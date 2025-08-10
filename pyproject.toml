@@ -124,6 +124,7 @@ lint.ignore = [
   "RUF013",  # PEP 484 prohibits implicit Optional
   # These are acceptable in tests but were fixed in production code
   "S101",   # Use of assert - OK in tests, fixed in src/
+  "S105",
   "SLF001", # Private member accessed - OK in tests
   "TC002",  # Move third-party import into type-checking - not always needed
   "TD002",  # Missing TODO author

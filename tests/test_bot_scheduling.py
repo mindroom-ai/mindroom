@@ -198,7 +198,7 @@ class TestBotTaskRestoration:
 
             # Mock the necessary methods
             with (
-                patch("mindroom.matrix.client.login") as mock_login,
+                patch("mindroom.matrix.users.login") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
@@ -239,7 +239,7 @@ class TestBotTaskRestoration:
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
 
             with (
-                patch("mindroom.matrix.client.login") as mock_login,
+                patch("mindroom.matrix.users.login") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
