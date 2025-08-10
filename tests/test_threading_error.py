@@ -70,7 +70,7 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args: object, **kwargs: object) -> MagicMock:
+        async def mock_arun(*_args: object, **_kwargs: object) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
@@ -257,7 +257,7 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args: object, **kwargs: object) -> MagicMock:
+        async def mock_arun(*_args: object, **_kwargs: object) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun
@@ -352,7 +352,7 @@ class TestThreadingBehavior:
         mock_response.content = "I can help you with that!"
 
         # Make the agent's arun method return the response
-        async def mock_arun(*args: object, **kwargs: object) -> MagicMock:
+        async def mock_arun(*_args: object, **_kwargs: object) -> MagicMock:
             return mock_response
 
         mock_agent.arun = mock_arun

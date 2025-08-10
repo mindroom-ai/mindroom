@@ -74,14 +74,14 @@ async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
     # Track which rooms were joined
     joined_rooms = []
 
-    async def mock_join_room(client: Any, room_id: str) -> bool:
+    async def mock_join_room(_client: Any, room_id: str) -> bool:
         joined_rooms.append(room_id)
         return True
 
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -96,7 +96,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:
+async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:  # noqa: ARG001
     """Test that agents leave rooms they're no longer configured for."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -182,7 +182,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
     joined_rooms = []
     left_rooms = []
 
-    async def mock_join_room(client: Any, room_id: str) -> bool:
+    async def mock_join_room(_client: Any, room_id: str) -> bool:
         joined_rooms.append(room_id)
         return True
 
@@ -196,7 +196,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
     mock_client.room_leave = mock_room_leave
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)

@@ -97,7 +97,7 @@ async def test_streaming_edits_e2e(
     calc_client = AsyncMock()
 
     # Configure login to return appropriate clients
-    def login_side_effect(homeserver: str, agent_user: object) -> object:
+    def login_side_effect(_homeserver: str, agent_user: object) -> object:
         if hasattr(agent_user, "agent_name"):
             if agent_user.agent_name == "helper":
                 return helper_client
@@ -220,12 +220,12 @@ async def test_streaming_edits_e2e(
         with patch("mindroom.bot.ai_response_streaming") as mock_streaming:
 
             async def stream_response(
-                agent_name: str,
-                prompt: str,
-                session_id: str,
-                storage_path: object,
-                thread_history: list[object],
-                room_id: str,
+                _agent_name: str,
+                _prompt: str,
+                _session_id: str,
+                _storage_path: object,
+                _thread_history: list[object],
+                _room_id: str,
             ) -> AsyncGenerator[str, None]:
                 yield "I can help! Let me ask "
                 yield "@mindroom_calculator:localhost what's 2+2?"
@@ -353,7 +353,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         # Track events
         events_sent: list[dict[str, object]] = []
 
-        async def mock_room_send(room_id: str, message_type: str, content: dict[str, object]) -> object:
+        async def mock_room_send(room_id: str, message_type: str, content: dict[str, object]) -> object:  # noqa: ARG001
             event_id = f"$calc_{len(events_sent)}"
             events_sent.append(
                 {

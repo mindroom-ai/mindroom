@@ -273,7 +273,7 @@ class TestMockingStrategy:
             # Capture the request
             request_data = None
 
-            async def capture_request(url: str, **kwargs: Any) -> CallbackResult:
+            async def capture_request(_url: str, **kwargs: Any) -> CallbackResult:
                 nonlocal request_data
                 request_data = kwargs
 

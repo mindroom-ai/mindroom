@@ -74,14 +74,14 @@ class TestTeamRoomMembership:
         # Track which rooms were joined
         joined_rooms = []
 
-        async def mock_join_room(client: object, room_id: str) -> bool:
+        async def mock_join_room(_client: object, room_id: str) -> bool:
             joined_rooms.append(room_id)
             return True
 
         monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
         # Mock restore_scheduled_tasks
-        async def mock_restore_scheduled_tasks(client: object, room_id: str) -> int:
+        async def mock_restore_scheduled_tasks(_client: object, _room_id: str) -> int:
             return 0
 
         monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -94,7 +94,7 @@ class TestTeamRoomMembership:
         assert "!test_room:localhost" in joined_rooms
 
     @pytest.mark.asyncio
-    async def test_team_leaves_unconfigured_rooms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_team_leaves_unconfigured_rooms(self) -> None:
         """Test that teams leave rooms they're no longer configured for."""
         # Create a mock team user
         team_user = AgentMatrixUser(

@@ -75,14 +75,14 @@ async def test_router_joins_rooms_on_start(config_with_rooms: Config, monkeypatc
     # Track which rooms were joined
     joined_rooms: list[str] = []
 
-    async def mock_join_room(client: Any, room_id: str) -> bool:
+    async def mock_join_room(_client: Any, room_id: str) -> bool:
         joined_rooms.append(room_id)
         return True
 
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(client: Any, room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -122,7 +122,7 @@ async def test_orchestrator_creates_router_with_all_rooms(config_with_rooms: Con
     """Test that the orchestrator properly initializes the router with all rooms."""
 
     # Mock various async operations
-    async def mock_ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
+    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
         return {
             ROUTER_AGENT_NAME: AgentMatrixUser(
                 agent_name=ROUTER_AGENT_NAME,
@@ -159,7 +159,7 @@ async def test_orchestrator_creates_router_with_all_rooms(config_with_rooms: Con
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock load_config to return our test config
-    def mock_load_config(config_path: Any = None) -> Config:
+    def mock_load_config(_config_path: Any = None) -> Config:
         return config_with_rooms
 
     monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
@@ -209,7 +209,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: Any) -> None:
     )
 
     # Mock various operations
-    async def mock_ensure_all_agent_users(homeserver: str) -> dict[str, AgentMatrixUser]:
+    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
         return {
             ROUTER_AGENT_NAME: AgentMatrixUser(
                 agent_name=ROUTER_AGENT_NAME,
@@ -236,7 +236,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: Any) -> None:
     load_config_returns = [initial_config, updated_config]
     load_config_counter = [0]
 
-    def mock_load_config(config_path: Any = None) -> Config:
+    def mock_load_config(_config_path: Any = None) -> Config:
         result = load_config_returns[min(load_config_counter[0], len(load_config_returns) - 1)]
         load_config_counter[0] += 1
         return result

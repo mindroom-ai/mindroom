@@ -29,7 +29,7 @@ class TestMemoryIntegration:
             patch("mindroom.ai.store_conversation_memory", new_callable=AsyncMock) as mock_store,
         ):
             # Set up async side effects
-            async def build_side_effect(prompt: str, *args: Any, **kwargs: Any) -> str:
+            async def build_side_effect(prompt: str, *_args: Any, **_kwargs: Any) -> str:
                 return f"[Enhanced] {prompt}"
 
             mock_build.side_effect = build_side_effect

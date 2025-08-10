@@ -71,7 +71,7 @@ async def test_unknown_command_in_main_room() -> None:
     sent_messages = []
 
     async def mock_send_message(
-        client: Any,
+        _client: Any,
         room_id: str,
         content: dict,
     ) -> str:
@@ -171,7 +171,7 @@ async def test_unknown_command_in_thread() -> None:
     error_messages = []
 
     async def mock_send_message(
-        client: Any,
+        _client: Any,
         room_id: str,
         content: dict,
     ) -> str:
@@ -276,7 +276,7 @@ async def test_unknown_command_with_reply() -> None:
     sent_messages = []
 
     async def mock_send_message(
-        client: Any,
+        _client: Any,
         room_id: str,
         content: dict,
     ) -> str:
