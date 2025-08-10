@@ -4,10 +4,10 @@
 You are one of 6 parallel agents working to enable ALL ruff rules in the mindroom-2 codebase. Your goal is to fix specific error categories to make the code compliant with all ruff rules.
 
 ## First Steps (MANDATORY)
-1. Read the coordination file: `RUFF_MIGRATION_COORDINATION.md`
-2. Claim your agent number (1-6) by editing the file
-3. Select an UNCLAIMED error category from the list
-4. Mark your selected category with your agent number
+1. Identify yourself as Agent [1-6] based on when you were started
+2. Read the coordination file: `RUFF_MIGRATION_COORDINATION.md`
+3. Find your pre-assigned work in the Agent Registry section
+4. Mark your checkbox to indicate you've started working
 
 ## Your Workflow
 1. **Focus on your assigned error codes only** - do not fix errors outside your category

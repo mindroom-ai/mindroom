@@ -6,20 +6,20 @@
 - **Strategy**: Fix errors by category in parallel sessions
 - **Start Time**: [TO BE FILLED]
 
-## Agent Registry
-Each agent should claim their ID by marking the checkbox and adding timestamp:
-- [ ] Agent 1: [unclaimed]
-- [ ] Agent 2: [unclaimed]
-- [ ] Agent 3: [unclaimed]
-- [ ] Agent 4: [unclaimed]
-- [ ] Agent 5: [unclaimed]
-- [ ] Agent 6: [unclaimed]
+## Agent Registry & Pre-Assigned Work
+Each agent has been pre-assigned specific error categories:
+- [ ] Agent 1: S101 (assert statements, 964 errors)
+- [ ] Agent 2: SLF001 + other S*** (private member access + security, 319 errors)
+- [ ] Agent 3: ANN*** (type annotations, 199 errors)
+- [ ] Agent 4: D*** (documentation, 130 errors)
+- [ ] Agent 5: T201 + TRY*** (print/exception handling, 153 errors)
+- [ ] Agent 6: ARG*** + PLR2004 + PLC0415 (arguments & magic values, 259 errors)
 
 ## Instructions for Each Agent
 
-1. **Claim your agent number** by editing this file first
-2. **Select your error category** from the unclaimed ones below
-3. **Work on fixing** all instances of your selected error codes
+1. **Find your pre-assigned work** in the Agent Registry above
+2. **Mark your checkbox** when you start working
+3. **Work on fixing** all instances of your assigned error codes
 4. **Update progress** in the Progress Log section
 5. **Mark complete** when done with your category
 
