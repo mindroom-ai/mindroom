@@ -67,7 +67,7 @@ MINDROOM_OAUTH_CONFIG = {
 }
 
 
-def get_oauth_credentials():
+def get_oauth_credentials() -> dict[str, str] | None:
     """Get OAuth credentials - uses MindRoom's app credentials.
 
     Users don't need to set up anything - they just authorize MindRoom's app
@@ -111,7 +111,7 @@ def get_google_credentials() -> Credentials | None:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(GoogleRequest())
             # Save refreshed credentials
-            with open(TOKEN_PATH, "w") as token:
+            with TOKEN_PATH.open("w") as token:
                 token.write(creds.to_json())
 
         return creds if creds and creds.valid else None
@@ -155,8 +155,8 @@ async def get_google_status():
         return GoogleAuthStatus(connected=False, error=str(e))
 
 
-@router.post("/connect", response_model=GoogleAuthUrl)
-async def connect_google():
+@router.post("/connect")
+async def connect_google() -> GoogleAuthUrl:
     """Start Google OAuth flow with a simple 'Login with Google' experience."""
     # Check if credentials are available from environment
     client_id = os.getenv("GOOGLE_CLIENT_ID")
@@ -199,7 +199,7 @@ async def connect_google():
 
 
 @router.get("/callback")
-async def google_callback(request: Request):
+async def google_callback(request: Request) -> RedirectResponse:
     """Handle Google OAuth callback."""
     # Get the authorization code from the callback
     code = request.query_params.get("code")

@@ -57,12 +57,11 @@ async def get_gmail_status():
     has_token = TOKEN_PATH.exists()
 
     # Check if we have valid credentials (not test credentials)
-    is_test_credentials = (
-        client_id == "test-client.apps.googleusercontent.com"
-        or client_secret == "test-secret-xyz"
-        or client_secret == "test-secret"
-        or client_secret == "test-secret-123"
-    )
+    is_test_credentials = client_id == "test-client.apps.googleusercontent.com" or client_secret in {
+        "test-secret-xyz",
+        "test-secret",
+        "test-secret-123",
+    }
 
     configured = bool(client_id and client_secret and not is_test_credentials)
 

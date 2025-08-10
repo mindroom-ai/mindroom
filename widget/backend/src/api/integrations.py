@@ -270,7 +270,7 @@ async def configure_imdb(request: ApiKeyRequest) -> dict[str, str]:
 
 
 @router.get("/imdb/search")
-async def search_imdb(query: str, type: str = "movie"):
+async def search_imdb(query: str, type: str = "movie") -> dict[str, Any]:  # noqa: A002
     """Search IMDb for movies/shows."""
     creds = get_service_credentials("imdb")
     if not creds or "api_key" not in creds:
@@ -285,6 +285,7 @@ async def search_imdb(query: str, type: str = "movie"):
                 "s": query,
                 "type": type,
             },
+            timeout=10,  # Add timeout
         )
         data = response.json()
 
@@ -308,7 +309,7 @@ async def search_imdb(query: str, type: str = "movie"):
 
 
 @router.get("/imdb/details/{imdb_id}")
-async def get_imdb_details(imdb_id: str):
+async def get_imdb_details(imdb_id: str) -> dict[str, Any]:
     """Get detailed information about a movie/show."""
     creds = get_service_credentials("imdb")
     if not creds or "api_key" not in creds:
@@ -322,13 +323,14 @@ async def get_imdb_details(imdb_id: str):
                 "i": imdb_id,
                 "plot": "full",
             },
+            timeout=10,  # Add timeout
         )
         data = response.json()
 
         if data.get("Response") == "False":
-            raise HTTPException(status_code=404, detail=data.get("Error"))
+            raise HTTPException(status_code=404, detail=data.get("Error"))  # noqa: TRY301
 
-        return data
+        return data  # noqa: TRY300
     except HTTPException:
         raise
     except Exception as e:
@@ -337,7 +339,7 @@ async def get_imdb_details(imdb_id: str):
 
 # Spotify
 @router.post("/spotify/connect")
-async def connect_spotify():
+async def connect_spotify() -> dict[str, str]:
     """Start Spotify OAuth flow."""
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -444,9 +446,10 @@ async def get_spotify_top_tracks(limit: int = 10) -> dict[str, Any]:
             for track in results["items"]
         ]
 
-        return {"tracks": tracks}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get top tracks: {e!s}") from e
+    else:
+        return {"tracks": tracks}
 
 
 # Walmart
@@ -471,7 +474,6 @@ async def search_walmart(query: str, max_results: int = 5) -> dict[str, Any]:
     try:
         # Note: This is a simplified example
         # In production, use the actual Walmart Open API
-        # headers = {"WM_SEC.ACCESS_TOKEN": creds["api_key"]}
 
         # For demo purposes, return mock data
         products = [
@@ -484,9 +486,10 @@ async def search_walmart(query: str, max_results: int = 5) -> dict[str, Any]:
             for i in range(min(max_results, 5))
         ]
 
-        return {"query": query, "results": products}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {e!s}") from e
+    else:
+        return {"query": query, "results": products}
 
 
 @router.post("/{service}/disconnect")

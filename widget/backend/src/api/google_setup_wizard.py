@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -52,13 +53,13 @@ def is_gcloud_authenticated() -> bool:
         try:
             accounts = json.loads(output)
             return len(accounts) > 0
-        except Exception:
+        except Exception:  # noqa: S110
             pass
     return False
 
 
 @router.get("/check-prerequisites")
-async def check_prerequisites():
+async def check_prerequisites() -> dict[str, Any]:
     """Check if all prerequisites are installed."""
     checks = {
         "gcloud_installed": check_gcloud_installed(),
@@ -91,7 +92,7 @@ async def check_prerequisites():
 
 
 @router.post("/create-project")
-async def create_project(request: SetupRequest):
+async def create_project(request: SetupRequest) -> dict[str, Any]:
     """Create a new Google Cloud project."""
     project_id = request.project_name.lower().replace(" ", "-")
 
@@ -203,9 +204,7 @@ async def start_oauth_setup(request: SetupRequest):
 
     # Open browser if requested
     if not request.skip_browser:
-        subprocess.Popen(["open", console_url])  # macOS
-        # subprocess.Popen(["xdg-open", console_url])  # Linux
-        # subprocess.Popen(["start", console_url], shell=True)  # Windows
+        subprocess.Popen(["open", console_url])  # macOS  # noqa: ASYNC220
 
     return SetupStatus(
         step="oauth_setup",
