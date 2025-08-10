@@ -16,8 +16,7 @@ def create_mention_content(
     reply_to_event_id: str | None = None,
     formatted_body: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Create a properly formatted Matrix message with mentions.
+    """Create a properly formatted Matrix message with mentions.
 
     Args:
         body: The message body text (plain text version)
@@ -58,8 +57,7 @@ def create_mention_content(
 
 
 def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tuple[str, list[str], str]:
-    """
-    Parse text for agent mentions and return processed text with user IDs.
+    """Parse text for agent mentions and return processed text with user IDs.
 
     Args:
         text: Text that may contain @agent_name mentions
@@ -101,9 +99,8 @@ def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tup
     return plain_text, mentioned_user_ids, markdown_text
 
 
-def _process_mention(match: re.Match, config: Any, sender_domain: str) -> tuple[str, str, str] | None:
-    """
-    Process a single mention match and return replacement data.
+def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tuple[str, str, str] | None:
+    """Process a single mention match and return replacement data.
 
     Args:
         match: The regex match object
@@ -146,8 +143,7 @@ def create_mention_content_from_text(
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Parse text for mentions and create properly formatted Matrix message.
+    """Parse text for mentions and create properly formatted Matrix message.
 
     This is the universal function that should be used everywhere.
 

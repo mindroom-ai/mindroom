@@ -1,5 +1,4 @@
-"""
-Tests for room cleanup behavior with thread invitations.
+"""Tests for room cleanup behavior with thread invitations.
 
 These tests ensure that invited agents are not kicked from rooms
 when they have active thread invitations, even if they're not

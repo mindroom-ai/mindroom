@@ -21,8 +21,8 @@ def mock_calculator_agent() -> AgentMatrixUser:
         agent_name="calculator",
         user_id="@mindroom_calculator:localhost",
         display_name="CalculatorAgent",
-        password="calc_pass",
-        access_token="calc_token",
+        password=TEST_PASSWORD,
+        access_token=TEST_ACCESS_TOKEN,
     )
 
 
@@ -33,8 +33,8 @@ def mock_general_agent() -> AgentMatrixUser:
         agent_name="general",
         user_id="@mindroom_general:localhost",
         display_name="GeneralAgent",
-        password="gen_pass",
-        access_token="gen_token",
+        password=TEST_PASSWORD,
+        access_token=TEST_ACCESS_TOKEN,
     )
 
 
@@ -409,13 +409,13 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
                 agent_name="calculator",
                 user_id="@mindroom_calculator:localhost",
                 display_name="CalculatorAgent",
-                password="calc_pass",
+                password=TEST_PASSWORD,
             ),
             "general": AgentMatrixUser(
                 agent_name="general",
                 user_id="@mindroom_general:localhost",
                 display_name="GeneralAgent",
-                password="gen_pass",
+                password=TEST_PASSWORD,
             ),
         }
         mock_ensure.return_value = mock_agents

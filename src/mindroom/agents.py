@@ -33,15 +33,13 @@ RICH_PROMPTS = {
 }
 
 
-def create_agent(agent_name: str, storage_path: Path, config: Config, config_path: Path | None = None) -> Agent:
-    """
-    Create an agent instance from configuration.
+def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
+    """Create an agent instance from configuration.
 
     Args:
         agent_name: Name of the agent to create
         storage_path: Base directory for storing agent data
         config: Application configuration
-        config_path: Optional path to configuration file (deprecated, config is now passed)
 
     Returns:
         Configured Agent instance
@@ -113,12 +111,11 @@ def create_agent(agent_name: str, storage_path: Path, config: Config, config_pat
 
 
 def describe_agent(agent_name: str, config: Config) -> str:
-    """
-    Generate a description of an agent or team based on its configuration.
+    """Generate a description of an agent or team based on its configuration.
 
     Args:
         agent_name: Name of the agent or team to describe
-        config_path: Optional path to configuration file
+        config: Application configuration
 
     Returns:
         Human-readable description of the agent or team
@@ -189,8 +186,7 @@ def get_agent_ids_for_room(room_key: str, config: Config, homeserver: str | None
 
 
 def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
-    """
-    Get the list of room aliases that an entity (agent/team) should be in.
+    """Get the list of room aliases that an entity (agent/team) should be in.
 
     Args:
         entity_name: Name of the agent or team

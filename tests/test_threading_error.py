@@ -1,5 +1,4 @@
-"""
-Test threading behavior to reproduce and fix the threading error.
+"""Test threading behavior to reproduce and fix the threading error.
 
 This test verifies that:
 1. Agents always respond in threads (never in main room)
@@ -28,7 +27,7 @@ class TestThreadingBehavior:
         """Create an AgentBot for testing."""
         agent_user = AgentMatrixUser(
             user_id="@mindroom_general:localhost",
-            password="test_password",
+            password=TEST_PASSWORD,
             display_name="GeneralAgent",
             agent_name="general",
         )
@@ -215,7 +214,7 @@ class TestThreadingBehavior:
         # Create a router bot to handle commands
         agent_user = AgentMatrixUser(
             user_id="@mindroom_router:localhost",
-            password="test_password",
+            password=TEST_PASSWORD,
             display_name="Router",
             agent_name="router",
         )
@@ -311,7 +310,7 @@ class TestThreadingBehavior:
         # Create a router bot to handle commands
         agent_user = AgentMatrixUser(
             user_id="@mindroom_router:localhost",
-            password="test_password",
+            password=TEST_PASSWORD,
             display_name="Router",
             agent_name="router",
         )

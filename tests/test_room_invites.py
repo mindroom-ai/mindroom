@@ -1,5 +1,4 @@
-"""
-Tests for agent self-managed room membership.
+"""Tests for agent self-managed room membership.
 
 With the new self-managing agent pattern, agents handle their own room
 memberships. This test module verifies that behavior.
@@ -53,7 +52,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
         display_name="Agent 1",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Create the agent bot with configured rooms
@@ -61,7 +60,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
 
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["!room1:localhost", "!room2:localhost"],
     )
@@ -102,7 +101,7 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
         display_name="Agent 1",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Create the agent bot with only room1 configured
@@ -110,7 +109,7 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:
 
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["!room1:localhost"],  # Only configured for room1
     )
@@ -156,7 +155,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
         agent_name="agent1",
         user_id="@mindroom_agent1:localhost",
         display_name="Agent 1",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Start with agent configured for room1 only
@@ -164,7 +163,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
 
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["!room1:localhost"],
     )

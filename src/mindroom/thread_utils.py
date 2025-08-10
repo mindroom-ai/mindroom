@@ -14,8 +14,7 @@ if TYPE_CHECKING:
 
 
 def check_agent_mentioned(event_source: dict, agent_name: str, config: Config) -> tuple[list[str], bool]:
-    """
-    Check if an agent is mentioned in a message.
+    """Check if an agent is mentioned in a message.
 
     Returns (mentioned_agents, am_i_mentioned).
     """
@@ -31,8 +30,7 @@ def create_session_id(room_id: str, thread_id: str | None) -> str:
 
 
 def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[str]:
-    """
-    Get list of unique agents that have participated in thread.
+    """Get list of unique agents that have participated in thread.
 
     Note: Router agent is excluded from the participant list as it's not
     a conversation participant.
@@ -62,8 +60,7 @@ def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[str]:
 
 
 def has_user_responded_after_message(thread_history: list[dict], target_event_id: str, user_id: str) -> bool:
-    """
-    Check if a user has sent any messages after a specific message in the thread.
+    """Check if a user has sent any messages after a specific message in the thread.
 
     Args:
         thread_history: List of messages in the thread
@@ -84,9 +81,8 @@ def has_user_responded_after_message(thread_history: list[dict], target_event_id
     return False
 
 
-def get_available_agents_in_room(room: Any, config: Config) -> list[str]:
-    """
-    Get list of available agents in a room.
+def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[str]:
+    """Get list of available agents in a room.
 
     Note: Router agent is excluded as it's not a regular conversation participant.
     """
@@ -134,8 +130,7 @@ def should_agent_respond(
     config: Config,
     is_invited_to_thread: bool = False,
 ) -> bool:
-    """
-    Determine if an agent should respond to a message individually.
+    """Determine if an agent should respond to a message individually.
 
     Team formation is handled elsewhere - this just determines individual responses.
     """
@@ -171,8 +166,7 @@ def should_agent_respond(
 
 
 def get_safe_thread_root(event: nio.RoomMessageText | None) -> str | None:
-    """
-    Get a safe thread root for a message.
+    """Get a safe thread root for a message.
 
     If the message is a reply to another message (has m.in_reply_to relation),
     we can't create a thread from it. Instead, return the message it's replying to

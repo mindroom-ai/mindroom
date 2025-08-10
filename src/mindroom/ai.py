@@ -1,3 +1,5 @@
+"""AI integration module for MindRoom agents and memory management."""
+
 from __future__ import annotations
 
 import functools
@@ -99,8 +101,7 @@ def get_cache(storage_path: Path) -> diskcache.Cache | None:
 
 
 def get_model_instance(config: Config, model_name: str = "default") -> Model:
-    """
-    Get a model instance from config.yaml.
+    """Get a model instance from config.yaml.
 
     Args:
         config: Application configuration
@@ -152,7 +153,8 @@ def _build_full_prompt(prompt: str, thread_history: list[dict[str, Any]] | None 
 
 def _build_cache_key(agent: Agent, full_prompt: str, session_id: str) -> str:
     model = agent.model
-    assert model is not None, "Agent should always have a model in our implementation"
+    if model is None:
+        raise RuntimeError("Agent should always have a model in our implementation")
     return f"{agent.name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
 
 
@@ -169,7 +171,8 @@ async def _cached_agent_run(
         return await agent.arun(full_prompt, session_id=session_id)  # type: ignore[no-any-return]
 
     model = agent.model
-    assert model is not None, "Agent should always have a model in our implementation"
+    if model is None:
+        raise RuntimeError("Agent should always have a model in our implementation")
     cache_key = _build_cache_key(agent, full_prompt, session_id)
     cached_result = cache.get(cache_key)
     if cached_result is not None:
@@ -192,8 +195,7 @@ async def _prepare_agent_and_prompt(
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
 ) -> tuple[Agent, str]:
-    """
-    Prepare agent and full prompt for AI processing.
+    """Prepare agent and full prompt for AI processing.
 
     Returns:
         Tuple of (agent, full_prompt, session_id)
@@ -215,8 +217,7 @@ async def ai_response(
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
 ) -> str:
-    """
-    Generates a response using the specified agno Agent with memory integration.
+    """Generates a response using the specified agno Agent with memory integration.
 
     Args:
         agent_name: Name of the agent to use
@@ -254,7 +255,7 @@ async def ai_response(
         return response_text
     except Exception as e:
         # AI models can fail for various reasons (network, API limits, etc)
-        logger.exception(f"Error generating AI response for agent {agent_name}: {e}")
+        logger.exception("Error generating AI response for agent %s", agent_name)
         logger.exception(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
         logger.exception(
             f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}"
@@ -272,8 +273,7 @@ async def ai_response_streaming(
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
 ) -> AsyncIterator[str]:
-    """
-    Generate streaming AI response using Agno's streaming API.
+    """Generate streaming AI response using Agno's streaming API.
 
     Checks cache first - if found, yields the cached response immediately.
     Otherwise streams the new response and caches it.
@@ -304,7 +304,8 @@ async def ai_response_streaming(
     cache = get_cache(storage_path)
     if cache is not None:
         model = agent.model
-        assert model is not None, "Agent should always have a model in our implementation"
+        if model is None:
+            raise RuntimeError("Agent should always have a model in our implementation")
         cache_key = _build_cache_key(agent, full_prompt, session_id)
         cached_result = cache.get(cache_key)
         if cached_result is not None:
@@ -341,7 +342,7 @@ async def ai_response_streaming(
                 logger.warning(f"Unhandled event type: {type(event).__name__} - {event}")
 
     except Exception as e:
-        logger.exception(f"Error generating streaming AI response: {e}")
+        logger.exception("Error generating streaming AI response")
         error_message = f"Sorry, I encountered an error trying to generate a response: {e}"
         yield error_message
         return

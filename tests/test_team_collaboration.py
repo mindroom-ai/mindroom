@@ -26,7 +26,7 @@ def mock_research_agent() -> AgentMatrixUser:
         agent_name="research",
         user_id="@mindroom_research:localhost",
         display_name="ResearchAgent",
-        password="test_pass",
+        password=TEST_PASSWORD,
     )
 
 
@@ -37,7 +37,7 @@ def mock_analyst_agent() -> AgentMatrixUser:
         agent_name="analyst",
         user_id="@mindroom_analyst:localhost",
         display_name="AnalystAgent",
-        password="test_pass",
+        password=TEST_PASSWORD,
     )
 
 
@@ -48,7 +48,7 @@ def mock_code_agent() -> AgentMatrixUser:
         agent_name="code",
         user_id="@mindroom_code:localhost",
         display_name="CodeAgent",
-        password="test_pass",
+        password=TEST_PASSWORD,
     )
 
 
@@ -59,7 +59,7 @@ def mock_security_agent() -> AgentMatrixUser:
         agent_name="security",
         user_id="@mindroom_security:localhost",
         display_name="SecurityAgent",
-        password="test_pass",
+        password=TEST_PASSWORD,
     )
 
 

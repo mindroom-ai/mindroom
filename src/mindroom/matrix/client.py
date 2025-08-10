@@ -17,8 +17,7 @@ logger = get_logger(__name__)
 
 
 def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
-    """
-    Extract thread information from a Matrix event.
+    """Extract thread information from a Matrix event.
 
     Returns (is_thread, thread_id).
     """
@@ -28,7 +27,7 @@ def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
     return is_thread, thread_id
 
 
-def _maybe_ssl_context(homeserver: str) -> Any:
+def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
     if homeserver.startswith("https://"):
         if os.getenv("MATRIX_SSL_VERIFY", "true").lower() == "false":
             # Create context that disables verification for dev/self-signed certs
@@ -48,8 +47,7 @@ async def matrix_client(
     user_id: str | None = None,
     access_token: str | None = None,
 ) -> AsyncGenerator[nio.AsyncClient, None]:
-    """
-    Context manager for Matrix client that ensures proper cleanup.
+    """Context manager for Matrix client that ensures proper cleanup.
 
     Args:
         homeserver: The Matrix homeserver URL
@@ -78,8 +76,7 @@ async def matrix_client(
 
 
 async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient:
-    """
-    Login to Matrix and return authenticated client.
+    """Login to Matrix and return authenticated client.
 
     Args:
         homeserver: The Matrix homeserver URL
@@ -111,8 +108,7 @@ async def register_user(
     password: str,
     display_name: str,
 ) -> str:
-    """
-    Register a new Matrix user account.
+    """Register a new Matrix user account.
 
     Args:
         homeserver: The Matrix homeserver URL
@@ -168,8 +164,7 @@ async def invite_to_room(
     room_id: str,
     user_id: str,
 ) -> bool:
-    """
-    Invite a user to a room.
+    """Invite a user to a room.
 
     Args:
         client: Authenticated Matrix client
@@ -195,8 +190,7 @@ async def create_room(
     topic: str | None = None,
     power_users: list[str] | None = None,
 ) -> str | None:
-    """
-    Create a new Matrix room.
+    """Create a new Matrix room.
 
     Args:
         client: Authenticated Matrix client
@@ -243,8 +237,7 @@ async def create_room(
 
 
 async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
-    """
-    Join a Matrix room.
+    """Join a Matrix room.
 
     Args:
         client: Authenticated Matrix client
@@ -263,8 +256,7 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
 
 
 async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
-    """
-    Get the current members of a room.
+    """Get the current members of a room.
 
     Args:
         client: Authenticated Matrix client
@@ -282,8 +274,7 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
 
 
 async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
-    """
-    Get all rooms the client has joined.
+    """Get all rooms the client has joined.
 
     Args:
         client: Authenticated Matrix client
@@ -300,8 +291,7 @@ async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
 
 
 async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
-    """
-    Leave a Matrix room.
+    """Leave a Matrix room.
 
     Args:
         client: Authenticated Matrix client
@@ -320,8 +310,7 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
 
 
 async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
-    """
-    Send a message to a Matrix room.
+    """Send a message to a Matrix room.
 
     Args:
         client: Authenticated Matrix client
@@ -360,8 +349,7 @@ async def fetch_thread_history(
     room_id: str,
     thread_id: str,
 ) -> list[dict[str, Any]]:
-    """
-    Fetch all messages in a thread.
+    """Fetch all messages in a thread.
 
     Args:
         client: The Matrix client instance
@@ -414,8 +402,7 @@ async def fetch_thread_history(
 
 
 def markdown_to_html(text: str) -> str:
-    """
-    Convert markdown text to HTML for Matrix formatted messages.
+    """Convert markdown text to HTML for Matrix formatted messages.
 
     Args:
         text: The markdown text to convert
@@ -450,8 +437,7 @@ async def edit_message(
     new_content: dict[str, Any],
     new_text: str,
 ) -> str | None:
-    """
-    Edit an existing Matrix message.
+    """Edit an existing Matrix message.
 
     Args:
         client: The Matrix client

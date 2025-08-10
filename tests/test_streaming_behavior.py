@@ -21,7 +21,7 @@ def mock_helper_agent() -> AgentMatrixUser:
     """Create a mock helper agent user."""
     return AgentMatrixUser(
         agent_name="helper",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="HelperAgent",
         user_id="@mindroom_helper:localhost",
     )
@@ -32,7 +32,7 @@ def mock_calculator_agent() -> AgentMatrixUser:
     """Create a mock calculator agent user."""
     return AgentMatrixUser(
         agent_name="calculator",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="CalculatorAgent",
         user_id="@mindroom_calculator:localhost",
     )

@@ -55,11 +55,11 @@ async def test_router_gets_all_configured_rooms(config_with_rooms: Config, monke
         agent_name=ROUTER_AGENT_NAME,
         user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
         display_name="RouterAgent",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Create the router bot
-    router_bot = create_bot_for_entity(ROUTER_AGENT_NAME, router_user, config_with_rooms, Path("/tmp/test"))
+    router_bot = create_bot_for_entity(ROUTER_AGENT_NAME, router_user, config_with_rooms, Path(TEST_TMP_DIR))
 
     # Check that the router has all rooms
     expected_rooms = {"room1", "room2", "room3", "room4"}
@@ -96,11 +96,11 @@ async def test_router_joins_rooms_on_start(config_with_rooms: Config, monkeypatc
         agent_name=ROUTER_AGENT_NAME,
         user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
         display_name="RouterAgent",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Create and configure the router bot
-    router_bot = create_bot_for_entity(ROUTER_AGENT_NAME, router_user, config_with_rooms, Path("/tmp/test"))
+    router_bot = create_bot_for_entity(ROUTER_AGENT_NAME, router_user, config_with_rooms, Path(TEST_TMP_DIR))
 
     # Mock the client
     mock_client = AsyncMock()
@@ -126,25 +126,25 @@ async def test_orchestrator_creates_router_with_all_rooms(config_with_rooms: Con
                 agent_name=ROUTER_AGENT_NAME,
                 user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
                 display_name="RouterAgent",
-                password="test_password",
+                password=TEST_PASSWORD,
             ),
             "agent1": AgentMatrixUser(
                 agent_name="agent1",
                 user_id="@mindroom_agent1:localhost",
                 display_name="Agent 1",
-                password="test_password",
+                password=TEST_PASSWORD,
             ),
             "agent2": AgentMatrixUser(
                 agent_name="agent2",
                 user_id="@mindroom_agent2:localhost",
                 display_name="Agent 2",
-                password="test_password",
+                password=TEST_PASSWORD,
             ),
             "team1": AgentMatrixUser(
                 agent_name="team1",
                 user_id="@mindroom_team1:localhost",
                 display_name="Team 1",
-                password="test_password",
+                password=TEST_PASSWORD,
             ),
         }
 
@@ -163,7 +163,7 @@ async def test_orchestrator_creates_router_with_all_rooms(config_with_rooms: Con
     monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
 
     # Create orchestrator
-    orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
+    orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
 
     # Initialize (creates all bots)
     await orchestrator.initialize()
@@ -213,13 +213,13 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: Any) -> None:
                 agent_name=ROUTER_AGENT_NAME,
                 user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
                 display_name="RouterAgent",
-                password="test_password",
+                password=TEST_PASSWORD,
             ),
             "agent1": AgentMatrixUser(
                 agent_name="agent1",
                 user_id="@mindroom_agent1:localhost",
                 display_name="Agent 1",
-                password="test_password",
+                password=TEST_PASSWORD,
             ),
         }
 
@@ -252,7 +252,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: Any) -> None:
     monkeypatch.setattr("mindroom.bot.TeamBot.join_configured_rooms", AsyncMock())
     monkeypatch.setattr("mindroom.bot.TeamBot.leave_unconfigured_rooms", AsyncMock())
 
-    orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
+    orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
 
     await orchestrator.initialize()
 

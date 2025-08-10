@@ -1,5 +1,4 @@
-"""
-Tests for team room membership functionality.
+"""Tests for team room membership functionality.
 
 With the new self-managing agent pattern, teams handle their own room
 memberships just like agents do.
@@ -50,14 +49,14 @@ class TestTeamRoomMembership:
             agent_name="team1",
             user_id="@mindroom_team1:localhost",
             display_name="Team 1",
-            password="test_password",
+            password=TEST_PASSWORD,
         )
 
         # Create the team bot with configured rooms
         config = Config(router=RouterConfig(model="default"))
         bot = TeamBot(
             agent_user=team_user,
-            storage_path=Path("/tmp/test"),
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=["!test_room:localhost"],
             team_agents=["agent1"],
@@ -100,14 +99,14 @@ class TestTeamRoomMembership:
             agent_name="team1",
             user_id="@mindroom_team1:localhost",
             display_name="Team 1",
-            password="test_password",
+            password=TEST_PASSWORD,
         )
 
         # Create the team bot with no configured rooms
         config = Config(router=RouterConfig(model="default"))
         bot = TeamBot(
             agent_user=team_user,
-            storage_path=Path("/tmp/test"),
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=[],  # No configured rooms
             team_agents=["agent1"],

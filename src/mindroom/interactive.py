@@ -48,8 +48,7 @@ INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
 
 
 def should_create_interactive_question(response_text: str) -> bool:
-    """
-    Check if the response contains an interactive question in JSON format.
+    """Check if the response contains an interactive question in JSON format.
 
     Args:
         response_text: The AI's response text
@@ -63,17 +62,16 @@ def should_create_interactive_question(response_text: str) -> bool:
 
 async def handle_reaction(
     client: nio.AsyncClient,
-    room: nio.MatrixRoom,
+    _room: nio.MatrixRoom,
     event: nio.ReactionEvent,
     agent_name: str,
     config: Config,
 ) -> tuple[str, str | None] | None:
-    """
-    Handle a reaction event that might be an answer to a question.
+    """Handle a reaction event that might be an answer to a question.
 
     Args:
         client: The Matrix client
-        room: The room the reaction occurred in
+        _room: The room the reaction occurred in (unused but required for interface consistency)
         event: The reaction event
         agent_name: The name of the agent handling this
 
@@ -141,8 +139,7 @@ async def handle_text_response(
     event: nio.RoomMessageText,
     agent_name: str,
 ) -> tuple[str, str | None] | None:
-    """
-    Handle text responses to interactive questions (e.g., "1", "2", "3").
+    """Handle text responses to interactive questions (e.g., "1", "2", "3").
 
     Args:
         client: The Matrix client
@@ -194,8 +191,7 @@ async def handle_text_response(
 
 
 def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> InteractiveResponse:
-    """
-    Parse and format interactive content from response text.
+    """Parse and format interactive content from response text.
 
     Args:
         response_text: The response text containing interactive JSON
@@ -260,8 +256,7 @@ def register_interactive_question(
     option_map: dict[str, str],
     agent_name: str,
 ) -> None:
-    """
-    Register an interactive question for tracking.
+    """Register an interactive question for tracking.
 
     Args:
         event_id: The event ID of the message with the question
@@ -286,8 +281,7 @@ async def add_reaction_buttons(
     event_id: str,
     options: list[dict[str, str]],
 ) -> None:
-    """
-    Add reaction buttons to a message.
+    """Add reaction buttons to a message.
 
     Args:
         client: The Matrix client

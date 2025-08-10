@@ -1,5 +1,4 @@
-"""
-Regression tests for routing behavior.
+"""Regression tests for routing behavior.
 
 These tests ensure that fixed bugs don't resurface, particularly:
 1. Router should NOT respond when any agent is mentioned
@@ -40,7 +39,7 @@ def mock_research_agent() -> AgentMatrixUser:
     """Create a mock research agent user."""
     return AgentMatrixUser(
         agent_name="research",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="MindRoomResearch",
         user_id="@mindroom_research:localhost",
     )
@@ -51,7 +50,7 @@ def mock_news_agent() -> AgentMatrixUser:
     """Create a mock news agent user."""
     return AgentMatrixUser(
         agent_name="news",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="MindRoomNews",
         user_id="@mindroom_news:localhost",
     )
@@ -71,8 +70,7 @@ class TestRoutingRegression:
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """
-        Test that router doesn't activate when an agent is directly mentioned.
+        """Test that router doesn't activate when an agent is directly mentioned.
 
         Regression test for issue where both mentioned agent AND router-selected
         agent would respond to the same message.
@@ -144,7 +142,7 @@ class TestRoutingRegression:
         # Create router agent
         router_agent = AgentMatrixUser(
             agent_name="router",
-            password="test_password",
+            password=TEST_PASSWORD,
             display_name="RouterAgent",
             user_id="@mindroom_router:localhost",
         )
@@ -304,8 +302,7 @@ class TestRoutingRegression:
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """
-        Test that router messages trigger responses from mentioned agents.
+        """Test that router messages trigger responses from mentioned agents.
 
         Regression test for potential issue where router mentions an agent but
         that agent ignores it.
@@ -315,7 +312,7 @@ class TestRoutingRegression:
         # Create router agent
         router_agent = AgentMatrixUser(
             agent_name="router",
-            password="test_password",
+            password=TEST_PASSWORD,
             display_name="RouterAgent",
             user_id="@mindroom_router:localhost",
         )

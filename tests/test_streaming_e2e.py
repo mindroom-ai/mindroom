@@ -33,22 +33,22 @@ async def test_streaming_edits_e2e(
             agent_name="helper",
             user_id="@mindroom_helper:localhost",
             display_name="HelperAgent",
-            password="helper_pass",
-            access_token="helper_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         ),
         "calculator": AgentMatrixUser(
             agent_name="calculator",
             user_id="@mindroom_calculator:localhost",
             display_name="CalculatorAgent",
-            password="calc_pass",
-            access_token="calc_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         ),
         "router": AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
             display_name="RouterAgent",
-            password="router_pass",
-            access_token="router_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         ),
     }
     mock_ensure_all.return_value = mock_agents
@@ -339,8 +339,8 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         agent_name="calculator",
         user_id="@mindroom_calculator:localhost",
         display_name="CalculatorAgent",
-        password="test_pass",
-        access_token="calc_token",
+        password=TEST_PASSWORD,
+        access_token=TEST_ACCESS_TOKEN,
     )
 
     # Mock login

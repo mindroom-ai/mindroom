@@ -57,7 +57,7 @@ class TestTeamRoomUpdates:
                     "router": mock_router_user,
                 }
 
-                orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
+                orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
 
                 with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
                     mock_bot = AsyncMock()
@@ -106,7 +106,7 @@ class TestTeamRoomUpdates:
                 mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
                 mock_ensure_users.return_value = {"router": mock_router_user}
 
-                orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
+                orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
 
                 with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
                     mock_bot = AsyncMock()
@@ -175,7 +175,7 @@ class TestTeamRoomUpdates:
                 mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
                 mock_ensure_users.return_value = {"team1": mock_team_user, "router": mock_router_user}
 
-                orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
+                orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
 
                 with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
                     mock_bot = AsyncMock()

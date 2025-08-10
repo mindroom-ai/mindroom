@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
+import structlog
 
 from . import interactive
 from .agents import create_agent, get_rooms_for_entity
@@ -89,8 +90,7 @@ def create_bot_for_entity(
     config: Config,
     storage_path: Path,
 ) -> AgentBot | TeamBot | None:
-    """
-    Create appropriate bot instance for an entity (agent, team, or router).
+    """Create appropriate bot instance for an entity (agent, team, or router).
 
     Args:
         entity_name: Name of the entity to create a bot for
@@ -166,7 +166,7 @@ class AgentBot:
         return self.agent_user.agent_name
 
     @cached_property
-    def logger(self) -> Any:
+    def logger(self) -> structlog.BoundLogger:
         """Get a logger with agent context bound."""
         return logger.bind(agent=emoji(self.agent_name))
 
@@ -182,7 +182,8 @@ class AgentBot:
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         for room_id in self.rooms:
             if await join_room(self.client, room_id):
                 self.logger.info("Joined room", room_id=room_id)
@@ -194,14 +195,15 @@ class AgentBot:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
-        """
-        Leave any rooms this agent is no longer configured for.
+        """Leave any rooms this agent is no longer configured for.
 
         Note: Agents will stay in rooms where they have thread invitations,
         even if not configured for the room.
         """
-        assert self.client is not None
-        assert self.thread_invite_manager is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
+        if self.thread_invite_manager is None:
+            raise RuntimeError("Thread invite manager is not initialized")
 
         # Get all rooms we're currently in
         joined_rooms = await get_joined_rooms(self.client)
@@ -225,8 +227,7 @@ class AgentBot:
                 self.logger.error(f"Failed to leave unconfigured room {room_id}")
 
     async def ensure_user_account(self) -> None:
-        """
-        Ensure this agent has a Matrix user account.
+        """Ensure this agent has a Matrix user account.
 
         This method makes the agent responsible for its own user account creation,
         moving this responsibility from the orchestrator to the agent itself.
@@ -243,8 +244,7 @@ class AgentBot:
         self.logger.info(f"Ensured Matrix user account: {self.agent_user.user_id}")
 
     async def ensure_rooms(self) -> None:
-        """
-        Ensure agent is in the correct rooms based on configuration.
+        """Ensure agent is in the correct rooms based on configuration.
 
         This consolidates room management into a single method that:
         1. Joins configured rooms
@@ -285,12 +285,12 @@ class AgentBot:
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
 
     async def cleanup(self) -> None:
-        """
-        Clean up the agent by leaving all rooms and stopping.
+        """Clean up the agent by leaving all rooms and stopping.
 
         This method ensures clean shutdown when an agent is removed from config.
         """
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         # Leave all rooms
         try:
             joined_rooms = await get_joined_rooms(self.client)
@@ -301,8 +301,8 @@ class AgentBot:
                         self.logger.info(f"Left room {room_id} during cleanup")
                     else:
                         self.logger.error(f"Failed to leave room {room_id} during cleanup")
-        except Exception as e:
-            self.logger.exception(f"Error leaving rooms during cleanup: {e}")
+        except Exception:
+            self.logger.exception("Error leaving rooms during cleanup")
 
         # Stop the bot
         await self.stop()
@@ -318,17 +318,20 @@ class AgentBot:
         except Exception as e:
             self.logger.warning(f"Some background tasks did not complete: {e}")
 
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         await self.client.close()
         self.logger.info("Stopped agent bot")
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
         if await join_room(self.client, room.room_id):
             self.logger.info("Joined room", room_id=room.room_id)
@@ -336,7 +339,8 @@ class AgentBot:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
             return
 
@@ -346,7 +350,8 @@ class AgentBot:
         # Check if we should process messages in this room
         # Process if: configured for room OR invited to threads in room
         if room.room_id not in self.rooms:
-            assert self.thread_invite_manager is not None
+            if self.thread_invite_manager is None:
+                raise RuntimeError("Thread invite manager is not initialized")
             agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
             if not agent_threads:
                 # Not configured for room and no thread invitations
@@ -355,10 +360,12 @@ class AgentBot:
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
         sender_id = MatrixID.parse(event.sender)
-        assert self.config is not None
+        if self.config is None:
+            raise RuntimeError("Config is not initialized")
         sender_agent_name = sender_id.agent_name(self.config)
         if sender_id.is_agent and sender_agent_name:
-            assert self.thread_invite_manager is not None
+            if self.thread_invite_manager is None:
+                raise RuntimeError("Thread invite manager is not initialized")
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
         is_command = event.body.strip().startswith("!")
@@ -461,7 +468,8 @@ class AgentBot:
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         result = await interactive.handle_reaction(self.client, room, event, self.agent_name, self.config)
 
         if result:
@@ -510,8 +518,10 @@ class AgentBot:
             self.response_tracker.mark_responded(event.reacts_to)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
-        assert self.client is not None
-        assert self.thread_invite_manager is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
+        if self.thread_invite_manager is None:
+            raise RuntimeError("Thread invite manager is not initialized")
         mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name, self.config)
 
         if am_i_mentioned:
@@ -590,7 +600,8 @@ class AgentBot:
         existing_event_id: str | None = None,
     ) -> None:
         """Process a message and send a response (streaming)."""
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         if not prompt.strip():
             return
 
@@ -658,8 +669,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
     ) -> None:
-        """
-        Generate and send/edit a response using AI.
+        """Generate and send/edit a response using AI.
 
         Args:
             room_id: The room to send the response to
@@ -673,7 +683,8 @@ class AgentBot:
         if not prompt.strip():
             return
 
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
         # Dispatch to appropriate method
@@ -704,8 +715,7 @@ class AgentBot:
         thread_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
     ) -> str | None:
-        """
-        Send a response message to a room.
+        """Send a response message to a room.
 
         Args:
             room: The room to send to
@@ -733,7 +743,8 @@ class AgentBot:
             reply_to_event_id=reply_to_event_id,
         )
 
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         event_id = await send_message(self.client, room.room_id, content)
         if event_id:
             self.logger.info("Sent response", event_id=event_id, room_name=room.name)
@@ -742,8 +753,7 @@ class AgentBot:
         return None
 
     async def _edit_message(self, room_id: str, event_id: str, new_text: str, thread_id: str | None) -> bool:
-        """
-        Edit an existing message.
+        """Edit an existing message.
 
         Returns:
             True if edit was successful, False otherwise.
@@ -759,7 +769,8 @@ class AgentBot:
             thread_event_id=thread_id,
         )
 
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         response = await edit_message(self.client, room_id, event_id, content, new_text)
 
         if isinstance(response, nio.RoomSendResponse):
@@ -775,7 +786,8 @@ class AgentBot:
         thread_history: list[dict],
     ) -> None:
         # Only router agent should handle routing
-        assert self.agent_name == ROUTER_AGENT_NAME
+        if self.agent_name != ROUTER_AGENT_NAME:
+            raise RuntimeError("Only router agent should handle routing")
 
         available_agents = get_available_agents_in_room(room, self.config)
         if not available_agents:
@@ -814,7 +826,8 @@ class AgentBot:
             reply_to_event_id=event.event_id,
         )
 
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         event_id = await send_message(self.client, room.room_id, content)
         if event_id:
             self.logger.info("Routed to agent", suggested_agent=suggested_agent)
@@ -829,7 +842,8 @@ class AgentBot:
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
-            assert self.client is not None
+            if self.client is None:
+                raise RuntimeError("Client is not initialized")
             url = command.args.get("url")
             response_text = await handle_widget_command(client=self.client, room_id=room.room_id, url=url)
             # Send response in thread if in thread, otherwise in main room
@@ -847,7 +861,8 @@ class AgentBot:
             agent_name = command.args["agent_name"]
             agent_domain = self.matrix_id.domain
 
-            assert self.client is not None
+            if self.client is None:
+                raise RuntimeError("Client is not initialized")
             assert self.thread_invite_manager is not None
             response_text = await handle_invite_command(
                 room_id=room.room_id,
@@ -884,7 +899,8 @@ class AgentBot:
         elif command.type == CommandType.SCHEDULE:
             full_text = command.args["full_text"]
 
-            assert self.client is not None
+            if self.client is None:
+                raise RuntimeError("Client is not initialized")
             task_id, response_text = await schedule_task(
                 client=self.client,
                 room_id=room.room_id,
@@ -896,7 +912,8 @@ class AgentBot:
             )
 
         elif command.type == CommandType.LIST_SCHEDULES:
-            assert self.client is not None
+            if self.client is None:
+                raise RuntimeError("Client is not initialized")
             response_text = await list_scheduled_tasks(
                 client=self.client,
                 room_id=room.room_id,
@@ -905,7 +922,8 @@ class AgentBot:
 
         elif command.type == CommandType.CANCEL_SCHEDULE:
             task_id = command.args["task_id"]
-            assert self.client is not None
+            if self.client is None:
+                raise RuntimeError("Client is not initialized")
             response_text = await cancel_scheduled_task(
                 client=self.client,
                 room_id=room.room_id,
@@ -924,7 +942,8 @@ class AgentBot:
                 await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
                 # Get all rooms the bot is in
-                assert self.client is not None
+                if self.client is None:
+                    raise RuntimeError("Client is not initialized")
                 joined_rooms = await get_joined_rooms(self.client)
                 if joined_rooms is None:
                     continue
@@ -950,8 +969,7 @@ class AgentBot:
                 self.logger.exception("Error in periodic cleanup", error=str(e))
 
     def _should_skip_duplicate_response(self, event: nio.RoomMessageText) -> bool:
-        """
-        Check if we should skip responding to avoid duplicates.
+        """Check if we should skip responding to avoid duplicates.
 
         This handles two cases:
         1. We've already responded to this exact event
@@ -1024,7 +1042,8 @@ class TeamBot(AgentBot):
         )
 
         # Send the response (reuse parent's method for consistency)
-        assert self.client is not None
+        if self.client is None:
+            raise RuntimeError("Client is not initialized")
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
         if existing_event_id:
@@ -1045,8 +1064,7 @@ class MultiAgentOrchestrator:
     _created_room_ids: dict[str, str] = field(default_factory=dict, init=False)
 
     async def _ensure_user_account(self) -> None:
-        """
-        Ensure a user account exists, creating one if necessary.
+        """Ensure a user account exists, creating one if necessary.
 
         This reuses the same create_agent_user function that agents use,
         treating the user as a special "agent" named "user".
@@ -1060,8 +1078,7 @@ class MultiAgentOrchestrator:
         logger.info(f"User account ready: {user_account.user_id}")
 
     async def initialize(self) -> None:
-        """
-        Initialize all agent bots with self-management.
+        """Initialize all agent bots with self-management.
 
         Each agent is now responsible for ensuring its own user account and rooms.
         """
@@ -1125,7 +1142,7 @@ class MultiAgentOrchestrator:
         logger.info("All agent bots started successfully")
 
         # Setup rooms and have all bots join them
-        await self._setup_rooms_and_memberships(self.agent_bots.values())
+        await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
 
         # Create sync tasks for each bot
         sync_tasks = []
@@ -1138,8 +1155,7 @@ class MultiAgentOrchestrator:
         await asyncio.gather(*sync_tasks)
 
     async def update_config(self) -> bool:
-        """
-        Update configuration with simplified self-managing agents.
+        """Update configuration with simplified self-managing agents.
 
         Each agent handles its own user account creation and room management.
 
@@ -1232,9 +1248,8 @@ class MultiAgentOrchestrator:
         await asyncio.gather(*stop_tasks)
         logger.info("All agent bots stopped")
 
-    async def _setup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot] | Any) -> None:
-        """
-        Setup rooms and ensure all bots have correct memberships.
+    async def _setup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
+        """Setup rooms and ensure all bots have correct memberships.
 
         This shared method handles the common room setup flow for both
         initial startup and configuration updates.
@@ -1269,8 +1284,7 @@ class MultiAgentOrchestrator:
         logger.info("All agents have joined their configured rooms")
 
     async def _ensure_rooms_exist(self) -> None:
-        """
-        Ensure all configured rooms exist, creating them if necessary.
+        """Ensure all configured rooms exist, creating them if necessary.
 
         This uses the router bot's client to create rooms since it has the necessary permissions.
         """
@@ -1291,8 +1305,7 @@ class MultiAgentOrchestrator:
         self._created_room_ids = room_ids
 
     async def _ensure_room_invitations(self) -> None:
-        """
-        Ensure all agents and the user are invited to their configured rooms.
+        """Ensure all agents and the user are invited to their configured rooms.
 
         This uses the router bot's client to manage room invitations,
         as the router has admin privileges in all rooms.
@@ -1474,8 +1487,7 @@ async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestr
 
 
 async def main(log_level: str, storage_path: Path) -> None:
-    """
-    Main entry point for the multi-agent bot system.
+    """Main entry point for the multi-agent bot system.
 
     Args:
         log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
@@ -1513,8 +1525,8 @@ async def main(log_level: str, storage_path: Path) -> None:
 
     except KeyboardInterrupt:
         logger.info("Multi-agent bot system stopped by user")
-    except Exception as e:
-        logger.exception(f"Error in orchestrator: {e}")
+    except Exception:
+        logger.exception("Error in orchestrator")
     finally:
         # Final cleanup
         if orchestrator is not None:

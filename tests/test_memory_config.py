@@ -40,7 +40,7 @@ class TestMemoryConfig:
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Test config generation
-        storage_path = Path("/tmp/test_memory")
+        storage_path = Path(TEST_MEMORY_DIR)
         result = get_memory_config(storage_path, config)
 
         # Verify embedder config
@@ -74,7 +74,7 @@ class TestMemoryConfig:
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Test config generation
-        storage_path = Path("/tmp/test_memory")
+        storage_path = Path(TEST_MEMORY_DIR)
         result = get_memory_config(storage_path, config)
 
         # Verify embedder config
@@ -100,7 +100,7 @@ class TestMemoryConfig:
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Test config generation
-        storage_path = Path("/tmp/test_memory")
+        storage_path = Path(TEST_MEMORY_DIR)
         result = get_memory_config(storage_path, config)
 
         # Verify LLM fallback config

@@ -77,13 +77,9 @@ lint.select = [
 ]
 lint.ignore = [
   # Temporarily ignoring all errors found - to be fixed incrementally by parallel agents
-  "ANN001",   # Missing function argument type
-  "ANN201",   # Missing return type annotation
-  "ANN204",   # Missing return type for special methods
-  "ANN401",   # Use of Any type
-  "ARG001",   # Unused function argument
-  "ARG002",   # Unused method argument
-  "ARG005",   # Unused lambda argument
+  # ARG001,   # Unused function argument - FIXED by Agent 6
+  # ARG002,   # Unused method argument - FIXED by Agent 6
+  # ARG005,   # Unused lambda argument - FIXED by Agent 6
   "ASYNC109", # Async function with no await
   "ASYNC221", # Yield in async function
   "ASYNC230", # Blocking IO in async function
@@ -91,21 +87,6 @@ lint.ignore = [
   "C414",     # Unnecessary list/tuple call
   "C901",     # Function is too complex
   "COM812",   # Missing trailing comma
-  "D100",     # Missing docstring in public module
-  "D101",     # Missing docstring in public class
-  "D102",     # Missing docstring in public method
-  "D103",     # Missing docstring in public function
-  "D104",     # Missing docstring in public package
-  "D105",     # Missing docstring in magic method
-  "D107",     # Missing docstring in __init__
-  "D200",     # One-line docstring should fit on one line
-  "D202",     # No blank lines allowed after function docstring
-  "D212",     # Multi-line docstring summary should start at first line
-  "D400",     # First line should end with period
-  "D401",     # First line should be in imperative mood
-  "D413",     # Missing blank line after last section
-  "D415",     # First line should end with period, question, or exclamation
-  "D417",     # Missing argument descriptions in docstring
   "DTZ005",   # Use of datetime.now() without timezone
   "E501",     # Line too long
   "EM102",    # Exception must not use f-string literal
@@ -120,41 +101,24 @@ lint.ignore = [
   "INP001",   # Implicit namespace package
   "N815",     # Variable in class scope should not be mixedCase
   "PERF401",  # Use list comprehension
-  "PLC0415",  # Import outside top-level
-  "PLR0911",  # Too many return statements
-  "PLR0912",  # Too many branches
-  "PLR0913",  # Too many arguments
-  "PLR0915",  # Too many statements
-  "PLR2004",  # Magic value used in comparison
-  "PLW0603",  # Using global statement
-  "PLW1510",  # subprocess.run without check
-  "PT011",    # pytest.raises too broad
-  "PTH123",   # Use Path.open()
-  "RET504",   # Unnecessary assignment before return
-  "RET505",   # Unnecessary else after return
-  "RUF001",   # String contains ambiguous character
-  "RUF006",   # Store async context manager
-  "RUF010",   # Use explicit conversion
-  "RUF013",   # PEP 484 prohibits implicit Optional
-  "S101",     # Use of assert
-  "S104",     # Possible binding to all interfaces
-  "S105",     # Hardcoded password string
-  "S106",     # Hardcoded password default
-  "S108",     # Probable insecure temp file/directory
-  "S110",     # Try/except without logging
-  "S310",     # URL open for untrusted URL
-  "S324",     # Probable use of insecure hash function
-  "S607",     # Starting process with partial path
-  "S608",     # SQL injection possible
-  "SLF001",   # Private member accessed
-  "T201",     # Print found
-  "TD002",    # Missing TODO author
-  "TD003",    # Missing TODO issue link
-  "TRY002",   # Create own exception
-  "TRY003",   # Avoid specifying long messages outside exception class
-  "TRY004",   # Prefer TypeError for type checks
-  "TRY300",   # Consider else block
-  "TRY401",   # Redundant exception in logging
+  # PLC0415,  # Import outside top-level - FIXED by Agent 6
+  "PLR0911", # Too many return statements
+  "PLR0912", # Too many branches
+  "PLR0913", # Too many arguments
+  "PLR0915", # Too many statements
+  # PLR2004,  # Magic value used in comparison - FIXED by Agent 6
+  "PLW0603", # Using global statement
+  "PLW1510", # subprocess.run without check
+  "PT011",   # pytest.raises too broad
+  "PTH123",  # Use Path.open()
+  "RET504",  # Unnecessary assignment before return
+  "RET505",  # Unnecessary else after return
+  "RUF001",  # String contains ambiguous character
+  "RUF006",  # Store async context manager
+  "RUF010",  # Use explicit conversion
+  "RUF013",  # PEP 484 prohibits implicit Optional
+  "TD002",   # Missing TODO author
+  "TD003",   # Missing TODO issue link
 ]
 
 [tool.pytest.ini_options]

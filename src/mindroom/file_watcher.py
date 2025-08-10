@@ -6,8 +6,12 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+logger = structlog.get_logger(__name__)
 
 
 async def watch_file(
@@ -15,8 +19,7 @@ async def watch_file(
     callback: Callable[[], Awaitable[None]],
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    """
-    Watch a file for changes and call callback when modified.
+    """Watch a file for changes and call callback when modified.
 
     Args:
         file_path: Path to the file to watch
@@ -43,4 +46,4 @@ async def watch_file(
         except Exception:
             # Don't let callback errors stop the watcher
             # The callback should handle its own errors
-            pass
+            logger.exception("Exception during file watcher callback - continuing to watch")

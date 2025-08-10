@@ -9,6 +9,8 @@ import pytest
 from mindroom.bot import MultiAgentOrchestrator
 from mindroom.matrix.state import MatrixState
 
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
 
 @pytest.fixture
 def mock_matrix_client() -> tuple[MagicMock, AsyncMock]:
@@ -34,19 +36,19 @@ class TestUserAccountManagement:
         mock_client.register.return_value = nio.RegisterResponse(
             user_id="@test_user:localhost",
             device_id="TEST_DEVICE",
-            access_token="test_token",
+            access_token=TEST_ACCESS_TOKEN,
         )
         mock_client.set_displayname.return_value = AsyncMock()
 
         with patch("mindroom.matrix.client.matrix_client", return_value=mock_context):
-            user_id = await register_user("http://localhost:8008", "test_user", "test_password", "Test User")
+            user_id = await register_user("http://localhost:8008", "test_user", TEST_PASSWORD, "Test User")
 
             assert user_id == "@test_user:localhost"
 
             # Verify registration was called
             mock_client.register.assert_called_once_with(
                 username="test_user",
-                password="test_password",
+                password=TEST_PASSWORD,
                 device_name="mindroom_agent",
             )
             # Verify display name was set
@@ -87,12 +89,12 @@ class TestUserAccountManagement:
         mock_client.register.return_value = nio.RegisterResponse(
             user_id="@mindroom_user_test:localhost",
             device_id="TEST_DEVICE",
-            access_token="test_token",
+            access_token=TEST_ACCESS_TOKEN,
         )
         mock_client.login.return_value = nio.LoginResponse(
             user_id="@mindroom_user_test:localhost",
             device_id="TEST_DEVICE",
-            access_token="test_token",
+            access_token=TEST_ACCESS_TOKEN,
         )
         mock_client.set_displayname.return_value = AsyncMock()
 
@@ -139,7 +141,7 @@ class TestUserAccountManagement:
             mock_client.login.return_value = nio.LoginResponse(
                 user_id="@mindroom_user:localhost",
                 device_id="TEST_DEVICE",
-                access_token="test_token",
+                access_token=TEST_ACCESS_TOKEN,
             )
 
             with (
@@ -185,7 +187,7 @@ class TestUserAccountManagement:
             mock_client.register.return_value = nio.RegisterResponse(
                 user_id="@mindroom_user:localhost",
                 device_id="TEST_DEVICE",
-                access_token="test_token",
+                access_token=TEST_ACCESS_TOKEN,
             )
             mock_client.set_displayname.return_value = AsyncMock()
 

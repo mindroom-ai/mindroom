@@ -13,6 +13,8 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD
+
 
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
@@ -90,31 +92,31 @@ def mock_agent_users() -> dict[str, AgentMatrixUser]:
             agent_name=ROUTER_AGENT_NAME,
             user_id=f"@mindroom_{ROUTER_AGENT_NAME}:localhost",
             display_name="RouterAgent",
-            password="test_password",
+            password=TEST_PASSWORD,
         ),
         "agent1": AgentMatrixUser(
             agent_name="agent1",
             user_id="@mindroom_agent1:localhost",
             display_name="Agent 1",
-            password="test_password",
+            password=TEST_PASSWORD,
         ),
         "agent2": AgentMatrixUser(
             agent_name="agent2",
             user_id="@mindroom_agent2:localhost",
             display_name="Agent 2",
-            password="test_password",
+            password=TEST_PASSWORD,
         ),
         "agent3": AgentMatrixUser(
             agent_name="agent3",
             user_id="@mindroom_agent3:localhost",
             display_name="Agent 3",
-            password="test_password",
+            password=TEST_PASSWORD,
         ),
         "team1": AgentMatrixUser(
             agent_name="team1",
             user_id="@mindroom_team1:localhost",
             display_name="Team 1",
-            password="test_password",
+            password=TEST_PASSWORD,
         ),
     }
 
@@ -179,7 +181,7 @@ async def test_agent_joins_new_rooms_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     agent1_bot = AgentBot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["room1", "room2"],  # Initial rooms
     )
@@ -254,7 +256,7 @@ async def test_router_updates_rooms_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     router_bot = AgentBot(
         agent_user=mock_agent_users[ROUTER_AGENT_NAME],
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=list(updated_router_rooms),
     )
@@ -322,7 +324,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     agent3_bot = AgentBot(
         agent_user=mock_agent_users["agent3"],
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["room5"],
     )
@@ -391,7 +393,7 @@ async def test_team_room_changes_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     team1_bot = AgentBot(
         agent_user=mock_agent_users["team1"],
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["room3", "room6"],
     )
@@ -452,7 +454,7 @@ async def test_orchestrator_handles_config_reload(
     monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
 
-    orchestrator = MultiAgentOrchestrator(storage_path=Path("/tmp/test"))
+    orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
 
     # Initialize with initial config
     await orchestrator.initialize()
@@ -624,7 +626,7 @@ async def test_room_membership_state_after_config_update(
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path("/tmp/test"),
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=bot_config["new"],
         )

@@ -112,13 +112,13 @@ class TestAIRouting:
             agent_name="general",
             user_id="@mindroom_general:localhost",
             display_name="GeneralAgent",
-            password="test",
-            access_token="token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
 
-        bot = AgentBot(agent, Path("/tmp"), config=config)
+        bot = AgentBot(agent, Path(TEST_TMP_DIR), config=config)
 
         mock_room = MagicMock()
         mock_room.users = MagicMock()

@@ -1,5 +1,4 @@
-"""
-Regression tests for response tracking bugs.
+"""Regression tests for response tracking bugs.
 
 These tests ensure that commands, unknown commands, and router messages
 are properly tracked to prevent re-processing after restart.
@@ -24,7 +23,7 @@ def mock_router_agent() -> AgentMatrixUser:
     """Create a mock router agent user."""
     return AgentMatrixUser(
         agent_name="router",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="RouterAgent",
         user_id="@mindroom_router:localhost",
     )
@@ -54,8 +53,7 @@ class TestResponseTrackingRegression:
         mock_config: Config,
         tmp_path: Path,
     ) -> None:
-        """
-        Test that commands are tracked in response tracker.
+        """Test that commands are tracked in response tracker.
 
         Regression test for issue where commands like !schedule would be
         re-processed after bot restart.
@@ -127,8 +125,7 @@ class TestResponseTrackingRegression:
         mock_config: Config,
         tmp_path: Path,
     ) -> None:
-        """
-        Test that unknown commands are tracked in response tracker.
+        """Test that unknown commands are tracked in response tracker.
 
         Regression test for issue where unknown commands would trigger
         error messages repeatedly after restart.
@@ -208,8 +205,7 @@ class TestResponseTrackingRegression:
         mock_config: Config,
         tmp_path: Path,
     ) -> None:
-        """
-        Test that router AI routing is tracked in response tracker.
+        """Test that router AI routing is tracked in response tracker.
 
         Regression test for issue where router would re-route messages
         after restart.

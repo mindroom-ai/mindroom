@@ -15,6 +15,7 @@ from .matrix.identity import MatrixID
 
 if TYPE_CHECKING:
     from .config import Config
+    from .thread_invites import ThreadInviteManager
 
 logger = get_logger(__name__)
 
@@ -59,8 +60,7 @@ class CommandParser:
     WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
 
     def parse(self, message: str) -> Command | None:
-        """
-        Parse a message for commands.
+        """Parse a message for commands.
 
         Args:
             message: The message text to parse
@@ -161,8 +161,7 @@ class CommandParser:
 
 
 def get_command_help(topic: str | None = None) -> str:
-    """
-    Get help text for commands.
+    """Get help text for commands.
 
     Args:
         topic: Specific topic to get help for (optional)
@@ -267,7 +266,7 @@ async def handle_invite_command(
     sender: str,
     agent_domain: str,
     client: nio.AsyncClient,
-    thread_invite_manager: Any,
+    thread_invite_manager: ThreadInviteManager,
     config: Config,
 ) -> str:
     """Handle the invite command to invite an agent to a thread."""
@@ -300,7 +299,7 @@ async def handle_invite_command(
 async def handle_list_invites_command(
     room_id: str,
     thread_id: str,
-    thread_invite_manager: Any,
+    thread_invite_manager: ThreadInviteManager,
 ) -> str:
     """Handle the list invites command."""
     thread_invites = await thread_invite_manager.get_thread_agents(thread_id, room_id)
@@ -316,8 +315,7 @@ async def handle_widget_command(
     room_id: str,
     url: str | None = None,
 ) -> str:
-    """
-    Handle the widget command to add configuration widget to room.
+    """Handle the widget command to add configuration widget to room.
 
     Args:
         client: The Matrix client
@@ -356,7 +354,10 @@ async def handle_widget_command(
             return f"❌ Failed to add widget: {response.message}"
 
         logger.info(f"Successfully added widget to room {room_id}")
-
+    except Exception as e:
+        logger.exception("Error adding widget to room %s", room_id)
+        return f"❌ Error adding widget: {e!s}"
+    else:
         return (
             "✅ **MindRoom Configuration widget added!**\n\n"
             "• Pin the widget to keep it visible\n"
@@ -366,10 +367,6 @@ async def handle_widget_command(
             "**Note:** Widgets require Element Desktop or self-hosted Element Web.\n"
             "Alternatively, you can use: `/addwidget {url}` in Element."
         )
-
-    except Exception as e:
-        logger.exception(f"Error adding widget to room {room_id}: {e}")
-        return f"❌ Error adding widget: {e!s}"
 
 
 # Global parser instance

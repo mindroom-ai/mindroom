@@ -12,8 +12,7 @@ __all__ = ["emoji", "get_logger", "setup_logging"]
 
 
 def emoji(agent_name: str) -> str:
-    """
-    Get an emoji-prefixed agent name string with consistent emoji based on the name.
+    """Get an emoji-prefixed agent name string with consistent emoji based on the name.
 
     Args:
         agent_name: The agent name to add emoji to
@@ -43,7 +42,7 @@ def emoji(agent_name: str) -> str:
     ]
 
     # Use hash to get consistent emoji for each agent
-    hash_value = int(hashlib.md5(agent_name.encode()).hexdigest(), 16)
+    hash_value = int(hashlib.sha256(agent_name.encode()).hexdigest(), 16)
     emoji_index = hash_value % len(emojis)
     emoji = emojis[emoji_index]
 
@@ -51,8 +50,7 @@ def emoji(agent_name: str) -> str:
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """
-    Configure structlog for mindroom.
+    """Configure structlog for mindroom.
 
     Args:
         level: Minimum logging level (e.g., "DEBUG", "INFO", "WARNING", "ERROR")
@@ -86,8 +84,7 @@ def setup_logging(level: str = "INFO") -> None:
 
 
 def get_logger(name: str = __name__) -> structlog.BoundLogger:
-    """
-    Get a structlog logger instance.
+    """Get a structlog logger instance.
 
     Args:
         name: Logger name (typically __name__)
