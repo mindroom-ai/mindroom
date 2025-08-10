@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-import requests
+import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
@@ -240,7 +240,7 @@ async def search_amazon(query: str, max_results: int = 5) -> dict[str, Any]:
             }
             for i in range(min(max_results, 5))
         ]
-        return {"query": query, "results": products}
+        return {"query": query, "results": products}  # noqa: TRY300
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {e!s}") from e
 
@@ -254,14 +254,15 @@ async def configure_imdb(request: ApiKeyRequest) -> dict[str, str]:
 
     # Test the API key
     try:
-        response = requests.get(
-            f"http://www.omdbapi.com/?apikey={request.api_key}&t=Inception",
-            timeout=10,  # Add timeout for security
-        )
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"http://www.omdbapi.com/?apikey={request.api_key}&t=Inception",
+                timeout=10,  # Add timeout for security
+            )
         data = response.json()
         if data.get("Response") == "False":
             raise HTTPException(status_code=400, detail="Invalid API key")
-    except requests.RequestException as e:
+    except httpx.RequestError as e:
         raise HTTPException(status_code=400, detail=f"Failed to validate API key: {e!s}") from e
 
     credentials = {"api_key": request.api_key}
@@ -278,15 +279,16 @@ async def search_imdb(query: str, type: str = "movie") -> dict[str, Any]:  # noq
 
     try:
         # Use OMDB API for IMDb data
-        response = requests.get(
-            "http://www.omdbapi.com/",
-            params={
-                "apikey": creds["api_key"],
-                "s": query,
-                "type": type,
-            },
-            timeout=10,  # Add timeout
-        )
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "http://www.omdbapi.com/",
+                params={
+                    "apikey": creds["api_key"],
+                    "s": query,
+                    "type": type,
+                },
+                timeout=10,  # Add timeout
+            )
         data = response.json()
 
         if data.get("Response") == "False":
@@ -303,7 +305,7 @@ async def search_imdb(query: str, type: str = "movie") -> dict[str, Any]:  # noq
             for item in data.get("Search", [])
         ]
 
-        return {"query": query, "results": results}
+        return {"query": query, "results": results}  # noqa: TRY300
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {e!s}") from e
 
@@ -316,15 +318,16 @@ async def get_imdb_details(imdb_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="IMDb not configured")
 
     try:
-        response = requests.get(
-            "http://www.omdbapi.com/",
-            params={
-                "apikey": creds["api_key"],
-                "i": imdb_id,
-                "plot": "full",
-            },
-            timeout=10,  # Add timeout
-        )
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "http://www.omdbapi.com/",
+                params={
+                    "apikey": creds["api_key"],
+                    "i": imdb_id,
+                    "plot": "full",
+                },
+                timeout=10,  # Add timeout
+            )
         data = response.json()
 
         if data.get("Response") == "False":

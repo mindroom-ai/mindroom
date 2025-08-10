@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 
+import jwt
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request as GoogleRequest
@@ -114,13 +115,13 @@ def get_google_credentials() -> Credentials | None:
             with TOKEN_PATH.open("w") as token:
                 token.write(creds.to_json())
 
-        return creds if creds and creds.valid else None
+        return creds if creds and creds.valid else None  # noqa: TRY300
     except Exception:
         return None
 
 
-@router.get("/status", response_model=GoogleAuthStatus)
-async def get_google_status():
+@router.get("/status")
+async def get_google_status() -> GoogleAuthStatus:
     """Check Google services connection status."""
     creds = get_google_credentials()
 
@@ -138,7 +139,6 @@ async def get_google_status():
             services.append("Google Drive")
 
         # Get user email from token
-        import jwt
 
         try:
             # Decode the ID token to get user info
@@ -233,7 +233,7 @@ async def google_callback(request: Request) -> RedirectResponse:
         if hasattr(creds, "_id_token") and creds._id_token:
             token_data["_id_token"] = creds._id_token
 
-        with open(TOKEN_PATH, "w") as token:
+        with TOKEN_PATH.open("w") as token:
             json.dump(token_data, token, indent=2)
 
         # Redirect back to widget with success message
@@ -243,11 +243,11 @@ async def google_callback(request: Request) -> RedirectResponse:
 
 
 @router.post("/disconnect")
-async def disconnect_google():
+async def disconnect_google() -> dict[str, str]:
     """Disconnect Google services by removing stored token."""
     try:
         if TOKEN_PATH.exists():
             TOKEN_PATH.unlink()
-        return {"status": "disconnected"}
+        return {"status": "disconnected"}  # noqa: TRY300
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e

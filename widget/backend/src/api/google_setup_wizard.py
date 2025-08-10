@@ -127,7 +127,7 @@ async def create_project(request: SetupRequest) -> dict[str, Any]:
 
 
 @router.post("/enable-apis")
-async def enable_apis(request: SetupRequest):
+async def enable_apis(request: SetupRequest) -> SetupStatus:
     """Enable required Google APIs."""
     project_id = request.project_name.lower().replace(" ", "-")
 
@@ -163,7 +163,7 @@ async def enable_apis(request: SetupRequest):
 
 
 @router.post("/start-oauth-setup")
-async def start_oauth_setup(request: SetupRequest):
+async def start_oauth_setup(request: SetupRequest) -> SetupStatus:
     """Generate OAuth setup instructions since it can't be fully automated."""
     project_id = request.project_name.lower().replace(" ", "-")
 
@@ -215,7 +215,7 @@ async def start_oauth_setup(request: SetupRequest):
 
 
 @router.post("/complete-setup")
-async def complete_setup(credentials: dict):
+async def complete_setup(credentials: dict) -> SetupStatus:
     """Save the OAuth credentials to environment."""
     client_id = credentials.get("client_id")
     client_secret = credentials.get("client_secret")
@@ -229,7 +229,7 @@ async def complete_setup(credentials: dict):
 
     env_lines = []
     if env_path.exists():
-        with open(env_path) as f:
+        with env_path.open() as f:
             env_lines = f.readlines()
 
     # Update or add credentials
@@ -250,7 +250,7 @@ async def complete_setup(credentials: dict):
         if not found:
             env_lines.append(f"{key}={value}\n")
 
-    with open(env_path, "w") as f:
+    with env_path.open("w") as f:
         f.writelines(env_lines)
 
     # Also set in current environment
@@ -266,7 +266,7 @@ async def complete_setup(credentials: dict):
 
 
 @router.get("/quick-setup-script")
-async def get_quick_setup_script():
+async def get_quick_setup_script() -> dict[str, str]:
     """Generate a bash script that does everything possible automatically."""
     script = """#!/bin/bash
 # MindRoom Google Setup Script
