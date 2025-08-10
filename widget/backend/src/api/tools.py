@@ -1,5 +1,7 @@
 """API endpoints for tools information."""
 
+from dataclasses import asdict
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -9,49 +11,38 @@ from mindroom.tools_metadata import TOOL_METADATA
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 
 
-class ToolInfo(BaseModel):
-    """Information about a registered tool."""
-
-    name: str
-    display_name: str
-    description: str
-    category: str
-    status: str
-    setup_type: str
-    icon: str | None
-    requires_config: list[str] | None
-    dependencies: list[str] | None
-
-
 class ToolsResponse(BaseModel):
     """Response containing all registered tools."""
 
-    tools: list[ToolInfo]
+    tools: list[dict]  # We'll convert ToolMetadata to dict for JSON serialization
 
 
 @router.get("")
 async def get_registered_tools() -> ToolsResponse:
-    """Get all registered tools from mindroom with full metadata."""
+    """Get all registered tools from mindroom with full metadata.
+
+    This uses the ToolMetadata dataclass directly from the main library,
+    converting it to a dict for JSON serialization.
+    """
     tools = []
 
-    # Only return tools that have proper metadata
-    for tool_name, metadata in TOOL_METADATA.items():
-        tools.append(
-            ToolInfo(
-                name=tool_name,
-                display_name=metadata.display_name,
-                description=metadata.description,
-                category=metadata.category.value,
-                status=metadata.status.value,
-                setup_type=metadata.setup_type.value,
-                icon=metadata.icon,
-                requires_config=metadata.requires_config,
-                dependencies=metadata.dependencies,
-            ),
-        )
+    # Use dataclasses.asdict to convert metadata to dict
+    for metadata in TOOL_METADATA.values():
+        # Convert dataclass to dict
+        tool_dict = asdict(metadata)
+
+        # Convert enums to their string values for JSON serialization
+        tool_dict["category"] = metadata.category.value
+        tool_dict["status"] = metadata.status.value
+        tool_dict["setup_type"] = metadata.setup_type.value
+
+        # Remove non-serializable fields
+        tool_dict.pop("factory", None)  # Callable is not JSON serializable
+
+        tools.append(tool_dict)
 
     # Sort by category, then by name
-    tools.sort(key=lambda t: (t.category, t.name))
+    tools.sort(key=lambda t: (t["category"], t["name"]))
 
     return ToolsResponse(tools=tools)
 
