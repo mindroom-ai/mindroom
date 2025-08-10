@@ -176,16 +176,132 @@ def gmail_tools() -> type[Toolkit]:
     return GmailTools
 
 
-@register_tool("integrations")
-def integrations_tools() -> type[Toolkit]:
-    """Tools for various external service integrations."""
-    from .integrations_tool import IntegrationsTools
+@register_tool("reddit")
+def reddit_tools() -> type[Toolkit]:
+    """Reddit tools for browsing and searching Reddit."""
+    from agno.tools.reddit import RedditTools
 
-    return IntegrationsTools
+    return RedditTools
 
 
-# Simple tools removed - functionality moved to proper API integrations
-# @register_tool("simple") - Removed as mocked implementations have been cleaned up
+@register_tool("youtube")
+def youtube_tools() -> type[Toolkit]:
+    """YouTube tools for searching and getting video information."""
+    from agno.tools.youtube import YouTubeTools
+
+    return YouTubeTools
+
+
+@register_tool("x")
+def x_tools() -> type[Toolkit]:
+    """X (Twitter) tools for posting and searching tweets."""
+    from agno.tools.x import XTools
+
+    return XTools
+
+
+@register_tool("twitter")
+def twitter_tools() -> type[Toolkit]:
+    """Twitter tools (alias for X)."""
+    from agno.tools.x import XTools
+
+    return XTools
+
+
+@register_tool("slack")
+def slack_tools() -> type[Toolkit]:
+    """Slack tools for messaging and channel management."""
+    from agno.tools.slack import SlackTools
+
+    return SlackTools
+
+
+@register_tool("discord")
+def discord_tools() -> type[Toolkit]:
+    """Discord tools for messaging and server management."""
+    from agno.tools.discord import DiscordTools
+
+    return DiscordTools
+
+
+@register_tool("whatsapp")
+def whatsapp_tools() -> type[Toolkit]:
+    """WhatsApp tools for messaging."""
+    from agno.tools.whatsapp import WhatsAppTools
+
+    return WhatsAppTools
+
+
+@register_tool("zoom")
+def zoom_tools() -> type[Toolkit]:
+    """Zoom tools for meeting management."""
+    from agno.tools.zoom import ZoomTools
+
+    return ZoomTools
+
+
+@register_tool("googlecalendar")
+def googlecalendar_tools() -> type[Toolkit]:
+    """Google Calendar tools for event management."""
+    from agno.tools.googlecalendar import GoogleCalendarTools
+
+    return GoogleCalendarTools
+
+
+@register_tool("googlesheets")
+def googlesheets_tools() -> type[Toolkit]:
+    """Google Sheets tools for spreadsheet operations."""
+    from agno.tools.googlesheets import GoogleSheetsTools
+
+    return GoogleSheetsTools
+
+
+@register_tool("todoist")
+def todoist_tools() -> type[Toolkit]:
+    """Todoist tools for task management."""
+    from agno.tools.todoist import TodoistTools
+
+    return TodoistTools
+
+
+@register_tool("linear")
+def linear_tools() -> type[Toolkit]:
+    """Linear tools for project management."""
+    from agno.tools.linear import LinearTools
+
+    return LinearTools
+
+
+@register_tool("clickup")
+def clickup_tools() -> type[Toolkit]:
+    """ClickUp tools for project management."""
+    from agno.tools.clickup_tool import ClickUpTools
+
+    return ClickUpTools
+
+
+@register_tool("confluence")
+def confluence_tools() -> type[Toolkit]:
+    """Confluence tools for documentation."""
+    from agno.tools.confluence import ConfluenceTools
+
+    return ConfluenceTools
+
+
+@register_tool("jira")
+def jira_tools() -> type[Toolkit]:
+    """Jira tools for issue tracking."""
+    from agno.tools.jira import JiraTools
+
+    return JiraTools
+
+
+@register_tool("trello")
+def trello_tools() -> type[Toolkit]:
+    """Trello tools for board management."""
+    from agno.tools.trello import TrelloTools
+
+    return TrelloTools
 
 
 def get_tool_by_name(tool_name: str) -> Any:
