@@ -1,4 +1,5 @@
-"""Tools registry for all available Agno tools.
+"""
+Tools registry for all available Agno tools.
 
 This module provides a centralized registry for all tools that can be used by agents.
 Tools are registered by string name and can be instantiated dynamically when loading agents.
@@ -6,24 +7,29 @@ Tools are registered by string name and can be instantiated dynamically when loa
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from agno.tools import Toolkit
 from loguru import logger
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from agno.tools import Toolkit
 
 # Registry mapping tool names to their factory functions
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 
 
 def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
-    """Decorator to register a tool factory function.
+    """
+    Decorator to register a tool factory function.
 
     Args:
         name: The name to register the tool under
 
     Returns:
         Decorator function
+
     """
 
     def decorator(func: Callable[[], type[Toolkit]]) -> Callable[[], type[Toolkit]]:
@@ -168,7 +174,8 @@ def jina_tools() -> type:
 
 
 def get_tool_by_name(tool_name: str) -> Any:
-    """Get a tool instance by its registered name.
+    """
+    Get a tool instance by its registered name.
 
     Args:
         tool_name: The registered name of the tool
@@ -178,10 +185,12 @@ def get_tool_by_name(tool_name: str) -> Any:
 
     Raises:
         ValueError: If the tool name is not registered
+
     """
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
-        raise ValueError(f"Unknown tool: {tool_name}. Available tools: {available}")
+        msg = f"Unknown tool: {tool_name}. Available tools: {available}"
+        raise ValueError(msg)
 
     try:
         tool_factory = TOOL_REGISTRY[tool_name]

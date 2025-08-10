@@ -6,10 +6,12 @@ import fcntl
 import json
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .logging_config import get_logger
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -61,32 +63,38 @@ class ResponseTracker:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def has_responded(self, event_id: str) -> bool:
-        """Check if we've already responded to this event.
+        """
+        Check if we've already responded to this event.
 
         Args:
             event_id: The Matrix event ID
 
         Returns:
             True if we've already responded to this event
+
         """
         return event_id in self._responded_events
 
     def mark_responded(self, event_id: str) -> None:
-        """Mark an event as responded to with current timestamp.
+        """
+        Mark an event as responded to with current timestamp.
 
         Args:
             event_id: The Matrix event ID we responded to
+
         """
         self._responded_events[event_id] = time.time()
         self._save_responded_events()
         logger.debug(f"Marked event {event_id} as responded for agent {self.agent_name}")
 
     def cleanup_old_events(self, max_events: int = 10000, max_age_days: int = 30) -> None:
-        """Remove old events based on count and age.
+        """
+        Remove old events based on count and age.
 
         Args:
             max_events: Maximum number of events to track
             max_age_days: Maximum age of events in days
+
         """
         current_time = time.time()
         max_age_seconds = max_age_days * 24 * 60 * 60
@@ -108,10 +116,12 @@ class ResponseTracker:
         logger.info(f"Cleaned up old events for {self.agent_name}, keeping {len(self._responded_events)} events")
 
     def get_stats(self) -> dict[str, Any]:
-        """Get statistics about tracked responses.
+        """
+        Get statistics about tracked responses.
 
         Returns:
             Dictionary with stats like total count, oldest event age, etc.
+
         """
         if not self._responded_events:
             return {"total": 0, "oldest_age_hours": 0, "newest_age_hours": 0}

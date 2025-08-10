@@ -85,7 +85,7 @@ async def test_unknown_command_in_main_room() -> None:
                 "room_id": room_id,
                 "content": content,
                 "thread_id": thread_id,
-            }
+            },
         )
         return "$response_event"
 
@@ -161,7 +161,7 @@ async def test_unknown_command_in_thread() -> None:
                 "rel_type": "m.thread",
                 "event_id": "$thread_root",
             },
-        }
+        },
     }
 
     # Mock send_message to capture what would be sent
@@ -184,14 +184,15 @@ async def test_unknown_command_in_thread() -> None:
         if thread_id == "$test_event":  # Using the event itself as thread root
             # This would trigger the Matrix error
             error_messages.append("Cannot start threads from an event with a relation")
-            raise nio.SendRetryError("M_UNKNOWN Cannot start threads from an event with a relation")
+            msg = "M_UNKNOWN Cannot start threads from an event with a relation"
+            raise nio.SendRetryError(msg)
 
         sent_messages.append(
             {
                 "room_id": room_id,
                 "content": content,
                 "thread_id": thread_id,
-            }
+            },
         )
         return "$response_event"
 
@@ -266,7 +267,7 @@ async def test_unknown_command_with_reply() -> None:
     event.sender = "@user:localhost"
     event.body = "!invalid"
     event.source = {
-        "content": {"body": "!invalid", "m.relates_to": {"m.in_reply_to": {"event_id": "$original_message"}}}
+        "content": {"body": "!invalid", "m.relates_to": {"m.in_reply_to": {"event_id": "$original_message"}}},
     }
 
     # Mock send_message
@@ -289,7 +290,7 @@ async def test_unknown_command_with_reply() -> None:
                 "room_id": room_id,
                 "content": content,
                 "thread_id": thread_id,
-            }
+            },
         )
         return "$response_event"
 

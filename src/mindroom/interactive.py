@@ -5,14 +5,16 @@ from __future__ import annotations
 import json
 import re
 from contextlib import suppress
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import nio
 
-from .config import Config
 from .logging_config import get_logger
 from .matrix.client import extract_thread_info
 from .matrix.identity import is_agent_id
+
+if TYPE_CHECKING:
+    from .config import Config
 
 logger = get_logger(__name__)
 
@@ -46,13 +48,15 @@ INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
 
 
 def should_create_interactive_question(response_text: str) -> bool:
-    """Check if the response contains an interactive question in JSON format.
+    """
+    Check if the response contains an interactive question in JSON format.
 
     Args:
         response_text: The AI's response text
 
     Returns:
         True if an interactive code block is found
+
     """
     return bool(re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL))
 
@@ -64,7 +68,8 @@ async def handle_reaction(
     agent_name: str,
     config: Config,
 ) -> tuple[str, str | None] | None:
-    """Handle a reaction event that might be an answer to a question.
+    """
+    Handle a reaction event that might be an answer to a question.
 
     Args:
         client: The Matrix client
@@ -74,6 +79,7 @@ async def handle_reaction(
 
     Returns:
         Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
+
     """
     question = _active_questions.get(event.reacts_to)
     if not question:
@@ -135,7 +141,8 @@ async def handle_text_response(
     event: nio.RoomMessageText,
     agent_name: str,
 ) -> tuple[str, str | None] | None:
-    """Handle text responses to interactive questions (e.g., "1", "2", "3").
+    """
+    Handle text responses to interactive questions (e.g., "1", "2", "3").
 
     Args:
         client: The Matrix client
@@ -145,6 +152,7 @@ async def handle_text_response(
 
     Returns:
         Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
+
     """
     message_text = event.body.strip()
 
@@ -186,7 +194,8 @@ async def handle_text_response(
 
 
 def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> InteractiveResponse:
-    """Parse and format interactive content from response text.
+    """
+    Parse and format interactive content from response text.
 
     Args:
         response_text: The response text containing interactive JSON
@@ -194,6 +203,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
 
     Returns:
         InteractiveResponse with formatted_text, option_map, and options_list
+
     """
     match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
 
@@ -250,7 +260,8 @@ def register_interactive_question(
     option_map: dict[str, str],
     agent_name: str,
 ) -> None:
-    """Register an interactive question for tracking.
+    """
+    Register an interactive question for tracking.
 
     Args:
         event_id: The event ID of the message with the question
@@ -258,6 +269,7 @@ def register_interactive_question(
         thread_id: Thread ID if in a thread
         option_map: Mapping of emoji/number to values
         agent_name: The agent that created the question
+
     """
     _active_questions[event_id] = InteractiveQuestion(
         room_id=room_id,
@@ -274,13 +286,15 @@ async def add_reaction_buttons(
     event_id: str,
     options: list[dict[str, str]],
 ) -> None:
-    """Add reaction buttons to a message.
+    """
+    Add reaction buttons to a message.
 
     Args:
         client: The Matrix client
         room_id: The room ID
         event_id: The event ID of the message to add reactions to
         options: List of option dictionaries with 'emoji' keys
+
     """
     for opt in options:
         emoji_char = opt.get("emoji", "❓")
@@ -292,7 +306,7 @@ async def add_reaction_buttons(
                     "rel_type": "m.annotation",
                     "event_id": event_id,
                     "key": emoji_char,
-                }
+                },
             },
         )
         if not isinstance(reaction_response, nio.RoomSendResponse):

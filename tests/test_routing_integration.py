@@ -1,4 +1,5 @@
-"""Integration tests for multi-agent routing scenarios.
+"""
+Integration tests for multi-agent routing scenarios.
 
 These tests simulate real-world scenarios to ensure agents behave correctly
 when multiple agents are in a room and routing decisions need to be made.
@@ -30,7 +31,8 @@ class TestRoutingIntegration:
         mock_ai_response_streaming: AsyncMock,
         tmp_path: Path,
     ) -> None:
-        """Test the exact scenario reported: MindRoomResearch mentioned in research channel.
+        """
+        Test the exact scenario reported: MindRoomResearch mentioned in research channel.
 
         When a user mentions @MindRoomResearch, only that agent should respond.
         MindRoomNews should NOT respond or route.
@@ -70,7 +72,11 @@ class TestRoutingIntegration:
         )
 
         research_bot = AgentBot(
-            research_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True, config=config
+            research_agent,
+            tmp_path,
+            rooms=["!research:localhost"],
+            enable_streaming=True,
+            config=config,
         )
 
         news_bot = AgentBot(news_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True, config=config)
@@ -110,7 +116,7 @@ class TestRoutingIntegration:
             "content": {
                 "body": "@mindroom_research:localhost what can you do?",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
-            }
+            },
         }
 
         # Process message with both bots

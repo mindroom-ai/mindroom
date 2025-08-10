@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 
 class TestTeamCoordination:

@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
 from .agents import describe_agent
 from .ai import get_model_instance
-from .config import Config
 from .logging_config import get_logger
 from .matrix.identity import MatrixID
+
+if TYPE_CHECKING:
+    from .config import Config
 
 logger = get_logger(__name__)
 
@@ -101,5 +103,5 @@ Choose the most appropriate agent based on their role, tools, and instructions."
 
     except (KeyError, ValueError) as e:
         # Only catch specific errors that we expect from AI response parsing
-        logger.error("Routing failed", error=str(e))
+        logger.exception("Routing failed", error=str(e))
         return None

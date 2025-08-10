@@ -1,4 +1,5 @@
-"""Tests for team room membership functionality.
+"""
+Tests for team room membership functionality.
 
 With the new self-managing agent pattern, teams handle their own room
 memberships just like agents do.
@@ -19,7 +20,7 @@ from mindroom.thread_invites import ThreadInviteManager
 @pytest.fixture
 def mock_config_with_teams() -> Config:
     """Create a mock config with agents and teams."""
-    config = Config(
+    return Config(
         agents={
             "agent1": AgentConfig(
                 display_name="Agent 1",
@@ -36,7 +37,6 @@ def mock_config_with_teams() -> Config:
             ),
         },
     )
-    return config
 
 
 class TestTeamRoomMembership:

@@ -26,7 +26,7 @@ class TestTeamRoomUpdates:
                     "instructions": [],
                     "rooms": ["room1"],
                     "model": "default",
-                }
+                },
             },
             "teams": {
                 "team1": {
@@ -36,7 +36,7 @@ class TestTeamRoomUpdates:
                     "rooms": ["room1", "room2"],
                     "model": "default",
                     "mode": "coordinate",
-                }
+                },
             },
             "defaults": {"num_history_runs": 5, "markdown": True, "add_history_to_messages": True},
             "models": {"default": {"provider": "ollama", "id": "test-model", "host": None, "api_key": None}},
@@ -159,7 +159,7 @@ class TestTeamRoomUpdates:
                     "rooms": ["room1"],
                     "model": "default",
                     "mode": "coordinate",
-                }
+                },
             },
             "defaults": {"num_history_runs": 5, "markdown": True, "add_history_to_messages": True},
             "models": {"default": {"provider": "ollama", "id": "test-model", "host": None, "api_key": None}},

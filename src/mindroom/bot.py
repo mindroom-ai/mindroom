@@ -89,7 +89,8 @@ def create_bot_for_entity(
     config: Config,
     storage_path: Path,
 ) -> AgentBot | TeamBot | None:
-    """Create appropriate bot instance for an entity (agent, team, or router).
+    """
+    Create appropriate bot instance for an entity (agent, team, or router).
 
     Args:
         entity_name: Name of the entity to create a bot for
@@ -99,6 +100,7 @@ def create_bot_for_entity(
 
     Returns:
         Bot instance or None if entity not found in config
+
     """
     enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
 
@@ -107,7 +109,7 @@ def create_bot_for_entity(
         rooms = resolve_room_aliases(list(all_room_aliases))
         return AgentBot(agent_user, storage_path, config, rooms, enable_streaming=enable_streaming)
 
-    elif entity_name in config.teams:
+    if entity_name in config.teams:
         team_config = config.teams[entity_name]
         rooms = resolve_room_aliases(team_config.rooms)
         return TeamBot(
@@ -121,7 +123,7 @@ def create_bot_for_entity(
             enable_streaming=False,
         )
 
-    elif entity_name in config.agents:
+    if entity_name in config.agents:
         agent_config = config.agents[entity_name]
         rooms = resolve_room_aliases(agent_config.rooms)
         return AgentBot(agent_user, storage_path, config, rooms, enable_streaming=enable_streaming)
@@ -192,7 +194,8 @@ class AgentBot:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
-        """Leave any rooms this agent is no longer configured for.
+        """
+        Leave any rooms this agent is no longer configured for.
 
         Note: Agents will stay in rooms where they have thread invitations,
         even if not configured for the room.
@@ -222,7 +225,8 @@ class AgentBot:
                 self.logger.error(f"Failed to leave unconfigured room {room_id}")
 
     async def ensure_user_account(self) -> None:
-        """Ensure this agent has a Matrix user account.
+        """
+        Ensure this agent has a Matrix user account.
 
         This method makes the agent responsible for its own user account creation,
         moving this responsibility from the orchestrator to the agent itself.
@@ -239,7 +243,8 @@ class AgentBot:
         self.logger.info(f"Ensured Matrix user account: {self.agent_user.user_id}")
 
     async def ensure_rooms(self) -> None:
-        """Ensure agent is in the correct rooms based on configuration.
+        """
+        Ensure agent is in the correct rooms based on configuration.
 
         This consolidates room management into a single method that:
         1. Joins configured rooms
@@ -280,7 +285,8 @@ class AgentBot:
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
 
     async def cleanup(self) -> None:
-        """Clean up the agent by leaving all rooms and stopping.
+        """
+        Clean up the agent by leaving all rooms and stopping.
 
         This method ensures clean shutdown when an agent is removed from config.
         """
@@ -296,7 +302,7 @@ class AgentBot:
                     else:
                         self.logger.error(f"Failed to leave room {room_id} during cleanup")
         except Exception as e:
-            self.logger.error(f"Error leaving rooms during cleanup: {e}")
+            self.logger.exception(f"Error leaving rooms during cleanup: {e}")
 
         # Stop the bot
         await self.stop()
@@ -518,7 +524,9 @@ class AgentBot:
         if thread_id:
             thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
             is_invited_to_thread = await self.thread_invite_manager.is_agent_invited_to_thread(
-                thread_id, room.room_id, self.agent_name
+                thread_id,
+                room.room_id,
+                self.agent_name,
             )
 
         return MessageContext(
@@ -564,7 +572,11 @@ class AgentBot:
         event_id = await self._send_response(room, reply_to_event_id, response.formatted_text, thread_id)
         if event_id and response.option_map and response.options_list:
             interactive.register_interactive_question(
-                event_id, room.room_id, thread_id, response.option_map, self.agent_name
+                event_id,
+                room.room_id,
+                thread_id,
+                response.option_map,
+                self.agent_name,
             )
             await interactive.add_reaction_buttons(self.client, room.room_id, event_id, response.options_list)
 
@@ -624,10 +636,17 @@ class AgentBot:
             response = interactive.parse_and_format_interactive(streaming.accumulated_text, extract_mapping=True)
             if response.option_map and response.options_list:
                 interactive.register_interactive_question(
-                    streaming.event_id, room.room_id, thread_id, response.option_map, self.agent_name
+                    streaming.event_id,
+                    room.room_id,
+                    thread_id,
+                    response.option_map,
+                    self.agent_name,
                 )
                 await interactive.add_reaction_buttons(
-                    self.client, room.room_id, streaming.event_id, response.options_list
+                    self.client,
+                    room.room_id,
+                    streaming.event_id,
+                    response.options_list,
                 )
 
     async def _generate_response(
@@ -639,7 +658,8 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
     ) -> None:
-        """Generate and send/edit a response using AI.
+        """
+        Generate and send/edit a response using AI.
 
         Args:
             room_id: The room to send the response to
@@ -648,6 +668,7 @@ class AgentBot:
             thread_id: Thread ID if in a thread
             thread_history: Thread history for context
             existing_event_id: If provided, edit this message instead of sending a new one
+
         """
         if not prompt.strip():
             return
@@ -658,11 +679,21 @@ class AgentBot:
         # Dispatch to appropriate method
         if self.enable_streaming:
             await self._process_and_respond_streaming(
-                room, prompt, reply_to_event_id, thread_id, thread_history, existing_event_id
+                room,
+                prompt,
+                reply_to_event_id,
+                thread_id,
+                thread_history,
+                existing_event_id,
             )
         else:
             await self._process_and_respond(
-                room, prompt, reply_to_event_id, thread_id, thread_history, existing_event_id
+                room,
+                prompt,
+                reply_to_event_id,
+                thread_id,
+                thread_history,
+                existing_event_id,
             )
 
     async def _send_response(
@@ -673,7 +704,8 @@ class AgentBot:
         thread_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
     ) -> str | None:
-        """Send a response message to a room.
+        """
+        Send a response message to a room.
 
         Args:
             room: The room to send to
@@ -684,6 +716,7 @@ class AgentBot:
 
         Returns:
             Event ID if message was sent successfully, None otherwise.
+
         """
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
@@ -705,15 +738,16 @@ class AgentBot:
         if event_id:
             self.logger.info("Sent response", event_id=event_id, room_name=room.name)
             return event_id
-        else:
-            self.logger.error("Failed to send response to room", room_id=room.room_id)
-            return None
+        self.logger.error("Failed to send response to room", room_id=room.room_id)
+        return None
 
     async def _edit_message(self, room_id: str, event_id: str, new_text: str, thread_id: str | None) -> bool:
-        """Edit an existing message.
+        """
+        Edit an existing message.
 
         Returns:
             True if edit was successful, False otherwise.
+
         """
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
@@ -731,12 +765,14 @@ class AgentBot:
         if isinstance(response, nio.RoomSendResponse):
             self.logger.info("Edited message", event_id=event_id)
             return True
-        else:
-            self.logger.error("Failed to edit message", event_id=event_id, error=str(response))
-            return False
+        self.logger.error("Failed to edit message", event_id=event_id, error=str(response))
+        return False
 
     async def _handle_ai_routing(
-        self, room: nio.MatrixRoom, event: nio.RoomMessageText, thread_history: list[dict]
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        thread_history: list[dict],
     ) -> None:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
@@ -836,7 +872,9 @@ class AgentBot:
         elif command.type == CommandType.LIST_INVITES:
             assert self.thread_invite_manager is not None
             response_text = await handle_list_invites_command(
-                room.room_id, effective_thread_id, self.thread_invite_manager
+                room.room_id,
+                effective_thread_id,
+                self.thread_invite_manager,
             )
 
         elif command.type == CommandType.HELP:
@@ -896,11 +934,12 @@ class AgentBot:
                     try:
                         assert self.thread_invite_manager is not None
                         removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
-                            room_id, timeout_hours=self.invitation_timeout_hours
+                            room_id,
+                            timeout_hours=self.invitation_timeout_hours,
                         )
                         total_removed += removed_count
                     except Exception as e:
-                        self.logger.error("Failed to cleanup room", room_id=room_id, error=str(e))
+                        self.logger.exception("Failed to cleanup room", room_id=room_id, error=str(e))
 
                 if total_removed > 0:
                     self.logger.info(f"Periodic cleanup removed {total_removed} expired agents")
@@ -908,10 +947,11 @@ class AgentBot:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error("Error in periodic cleanup", error=str(e))
+                self.logger.exception("Error in periodic cleanup", error=str(e))
 
     def _should_skip_duplicate_response(self, event: nio.RoomMessageText) -> bool:
-        """Check if we should skip responding to avoid duplicates.
+        """
+        Check if we should skip responding to avoid duplicates.
 
         This handles two cases:
         1. We've already responded to this exact event
@@ -925,6 +965,7 @@ class AgentBot:
 
         Returns:
             True if we should skip processing this message
+
         """
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
         is_edit = relates_to.get("rel_type") == "m.replace"
@@ -934,9 +975,8 @@ class AgentBot:
             if original_event_id and self.response_tracker.has_responded(original_event_id):
                 self.logger.debug("Ignoring edit of already-responded message", original_event_id=original_event_id)
                 return True
-        else:
-            if self.response_tracker.has_responded(event.event_id):
-                return True
+        elif self.response_tracker.has_responded(event.event_id):
+            return True
 
         return False
 
@@ -1005,7 +1045,8 @@ class MultiAgentOrchestrator:
     _created_room_ids: dict[str, str] = field(default_factory=dict, init=False)
 
     async def _ensure_user_account(self) -> None:
-        """Ensure a user account exists, creating one if necessary.
+        """
+        Ensure a user account exists, creating one if necessary.
 
         This reuses the same create_agent_user function that agents use,
         treating the user as a special "agent" named "user".
@@ -1019,7 +1060,8 @@ class MultiAgentOrchestrator:
         logger.info(f"User account ready: {user_account.user_id}")
 
     async def initialize(self) -> None:
-        """Initialize all agent bots with self-management.
+        """
+        Initialize all agent bots with self-management.
 
         Each agent is now responsible for ensuring its own user account and rooms.
         """
@@ -1033,7 +1075,7 @@ class MultiAgentOrchestrator:
 
         # Create bots for all configured entities
         # Make Router the first so that it can manage room invitations
-        all_entities = [ROUTER_AGENT_NAME] + list(config.agents.keys()) + list(config.teams.keys())
+        all_entities = [ROUTER_AGENT_NAME, *list(config.agents.keys()), *list(config.teams.keys())]
 
         for entity_name in all_entities:
             # Create a temporary agent user object (will be updated by ensure_user_account)
@@ -1096,12 +1138,14 @@ class MultiAgentOrchestrator:
         await asyncio.gather(*sync_tasks)
 
     async def update_config(self) -> bool:
-        """Update configuration with simplified self-managing agents.
+        """
+        Update configuration with simplified self-managing agents.
 
         Each agent handles its own user account creation and room management.
 
         Returns:
             True if any agents were updated, False otherwise.
+
         """
         new_config = Config.from_yaml()
 
@@ -1141,10 +1185,9 @@ class MultiAgentOrchestrator:
                     await bot.start()
                     # Start sync loop
                     asyncio.create_task(bot.sync_forever())
-            else:
-                # Entity was removed from config
-                if entity_name in self.agent_bots:
-                    del self.agent_bots[entity_name]
+            # Entity was removed from config
+            elif entity_name in self.agent_bots:
+                del self.agent_bots[entity_name]
 
         # Create new entities
         for entity_name in new_entities:
@@ -1190,13 +1233,15 @@ class MultiAgentOrchestrator:
         logger.info("All agent bots stopped")
 
     async def _setup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot] | Any) -> None:
-        """Setup rooms and ensure all bots have correct memberships.
+        """
+        Setup rooms and ensure all bots have correct memberships.
 
         This shared method handles the common room setup flow for both
         initial startup and configuration updates.
 
         Args:
             bots: Collection of bots to setup room memberships for
+
         """
         # Ensure all configured rooms exist (router creates them if needed)
         await self._ensure_rooms_exist()
@@ -1224,7 +1269,8 @@ class MultiAgentOrchestrator:
         logger.info("All agents have joined their configured rooms")
 
     async def _ensure_rooms_exist(self) -> None:
-        """Ensure all configured rooms exist, creating them if necessary.
+        """
+        Ensure all configured rooms exist, creating them if necessary.
 
         This uses the router bot's client to create rooms since it has the necessary permissions.
         """
@@ -1245,7 +1291,8 @@ class MultiAgentOrchestrator:
         self._created_room_ids = room_ids
 
     async def _ensure_room_invitations(self) -> None:
-        """Ensure all agents and the user are invited to their configured rooms.
+        """
+        Ensure all agents and the user are invited to their configured rooms.
 
         This uses the router bot's client to manage room invitations,
         as the router has admin privileges in all rooms.
@@ -1427,11 +1474,13 @@ async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestr
 
 
 async def main(log_level: str, storage_path: Path) -> None:
-    """Main entry point for the multi-agent bot system.
+    """
+    Main entry point for the multi-agent bot system.
 
     Args:
         log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
         storage_path: The base directory for storing agent data
+
     """
     # Set up logging with the specified level
     setup_logging(level=log_level)
@@ -1465,7 +1514,7 @@ async def main(log_level: str, storage_path: Path) -> None:
     except KeyboardInterrupt:
         logger.info("Multi-agent bot system stopped by user")
     except Exception as e:
-        logger.error(f"Error in orchestrator: {e}")
+        logger.exception(f"Error in orchestrator: {e}")
     finally:
         # Final cleanup
         if orchestrator is not None:

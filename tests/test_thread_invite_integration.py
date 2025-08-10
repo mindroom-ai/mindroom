@@ -1,4 +1,5 @@
-"""Integration tests for thread invitation behavior.
+"""
+Integration tests for thread invitation behavior.
 
 These tests ensure that invited agents behave correctly in threads,
 including the race condition fix where invited agents take ownership
@@ -106,7 +107,7 @@ async def test_invited_agent_responds_in_unconfigured_room() -> None:
                 "rel_type": "m.thread",
                 "event_id": "$thread1",
             },
-        }
+        },
     }
 
     # Mock interactive.handle_text_response to track if it's called

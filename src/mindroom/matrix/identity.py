@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
-from ..config import Config
-from ..constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME
+
+if TYPE_CHECKING:
+    from mindroom.config import Config
 
 
 @dataclass(frozen=True)
@@ -25,11 +27,13 @@ class MatrixID:
     def parse(cls, matrix_id: str) -> MatrixID:
         """Parse a Matrix ID like @mindroom_calculator:localhost."""
         if not matrix_id.startswith("@"):
-            raise ValueError(f"Invalid Matrix ID: {matrix_id}")
+            msg = f"Invalid Matrix ID: {matrix_id}"
+            raise ValueError(msg)
 
         parts = matrix_id[1:].split(":", 1)
         if len(parts) != 2:
-            raise ValueError(f"Invalid Matrix ID format: {matrix_id}")
+            msg = f"Invalid Matrix ID format: {matrix_id}"
+            raise ValueError(msg)
 
         return cls(username=parts[0], domain=parts[1])
 
@@ -93,7 +97,8 @@ class ThreadStateKey:
         """Parse a state key."""
         parts = state_key.split(":", 1)
         if len(parts) != 2:
-            raise ValueError(f"Invalid state key: {state_key}")
+            msg = f"Invalid state key: {state_key}"
+            raise ValueError(msg)
         return cls(thread_id=parts[0], agent_name=parts[1])
 
     @property
@@ -120,7 +125,8 @@ def is_agent_id(matrix_id: str, config: Config) -> bool:
 
 
 def extract_agent_name(sender_id: str, config: Config) -> str | None:
-    """Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
+    """
+    Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
 
     Returns agent name (e.g., 'calculator') or None if not an agent.
     """

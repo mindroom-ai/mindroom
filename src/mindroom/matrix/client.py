@@ -9,14 +9,16 @@ from typing import Any
 import markdown
 import nio
 
-from ..logging_config import get_logger
+from mindroom.logging_config import get_logger
+
 from .identity import MatrixID, extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
 
 
 def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
-    """Extract thread information from a Matrix event.
+    """
+    Extract thread information from a Matrix event.
 
     Returns (is_thread, thread_id).
     """
@@ -46,7 +48,8 @@ async def matrix_client(
     user_id: str | None = None,
     access_token: str | None = None,
 ) -> AsyncGenerator[nio.AsyncClient, None]:
-    """Context manager for Matrix client that ensures proper cleanup.
+    """
+    Context manager for Matrix client that ensures proper cleanup.
 
     Args:
         homeserver: The Matrix homeserver URL
@@ -59,6 +62,7 @@ async def matrix_client(
     Example:
         async with matrix_client("http://localhost:8008") as client:
             response = await client.login(password="secret")
+
     """
     ssl_context = _maybe_ssl_context(homeserver)
     if access_token:
@@ -74,7 +78,8 @@ async def matrix_client(
 
 
 async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient:
-    """Login to Matrix and return authenticated client.
+    """
+    Login to Matrix and return authenticated client.
 
     Args:
         homeserver: The Matrix homeserver URL
@@ -86,6 +91,7 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
 
     Raises:
         ValueError: If login fails
+
     """
     ssl_context = _maybe_ssl_context(homeserver)
     client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
@@ -94,9 +100,9 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
     if isinstance(response, nio.LoginResponse):
         logger.info(f"Successfully logged in: {user_id}")
         return client
-    else:
-        await client.close()
-        raise ValueError(f"Failed to login {user_id}: {response}")
+    await client.close()
+    msg = f"Failed to login {user_id}: {response}"
+    raise ValueError(msg)
 
 
 async def register_user(
@@ -105,7 +111,8 @@ async def register_user(
     password: str,
     display_name: str,
 ) -> str:
-    """Register a new Matrix user account.
+    """
+    Register a new Matrix user account.
 
     Args:
         homeserver: The Matrix homeserver URL
@@ -118,6 +125,7 @@ async def register_user(
 
     Raises:
         ValueError: If registration fails
+
     """
     # Extract server name from homeserver URL
     server_name = extract_server_name_from_homeserver(homeserver)
@@ -144,15 +152,15 @@ async def register_user(
                 logger.warning(f"Failed to set display name: {display_response}")
 
             return user_id
-        elif (
+        if (
             isinstance(response, nio.ErrorResponse)
             and hasattr(response, "status_code")
             and response.status_code == "M_USER_IN_USE"
         ):
             logger.info(f"User {user_id} already exists")
             return user_id
-        else:
-            raise ValueError(f"Failed to register user {username}: {response}")
+        msg = f"Failed to register user {username}: {response}"
+        raise ValueError(msg)
 
 
 async def invite_to_room(
@@ -160,7 +168,8 @@ async def invite_to_room(
     room_id: str,
     user_id: str,
 ) -> bool:
-    """Invite a user to a room.
+    """
+    Invite a user to a room.
 
     Args:
         client: Authenticated Matrix client
@@ -169,14 +178,14 @@ async def invite_to_room(
 
     Returns:
         True if successful, False otherwise
+
     """
     response = await client.room_invite(room_id, user_id)
     if isinstance(response, nio.RoomInviteResponse):
         logger.info(f"Invited {user_id} to room {room_id}")
         return True
-    else:
-        logger.error(f"Failed to invite {user_id} to room {room_id}: {response}")
-        return False
+    logger.error(f"Failed to invite {user_id} to room {room_id}: {response}")
+    return False
 
 
 async def create_room(
@@ -186,7 +195,8 @@ async def create_room(
     topic: str | None = None,
     power_users: list[str] | None = None,
 ) -> str | None:
-    """Create a new Matrix room.
+    """
+    Create a new Matrix room.
 
     Args:
         client: Authenticated Matrix client
@@ -197,6 +207,7 @@ async def create_room(
 
     Returns:
         Room ID if successful, None otherwise
+
     """
     room_config: dict[str, Any] = {"name": name}
     if alias:
@@ -206,7 +217,7 @@ async def create_room(
 
     if power_users:
         power_level_content: dict[str, Any] = {
-            "users": {user_id: 50 for user_id in power_users},
+            "users": dict.fromkeys(power_users, 50),
             "state_default": 50,  # Set default required power for state events
         }
         # Ensure the creator is an admin
@@ -227,13 +238,13 @@ async def create_room(
                     await invite_to_room(client, room_id, user_id)
 
         return room_id
-    else:
-        logger.error(f"Failed to create room {name}: {response}")
-        return None
+    logger.error(f"Failed to create room {name}: {response}")
+    return None
 
 
 async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
-    """Join a Matrix room.
+    """
+    Join a Matrix room.
 
     Args:
         client: Authenticated Matrix client
@@ -241,18 +252,19 @@ async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
 
     Returns:
         True if successful, False otherwise
+
     """
     response = await client.join(room_id)
     if isinstance(response, nio.JoinResponse):
         logger.info(f"Joined room: {room_id}")
         return True
-    else:
-        logger.warning(f"Could not join room {room_id}: {response}")
-        return False
+    logger.warning(f"Could not join room {room_id}: {response}")
+    return False
 
 
 async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
-    """Get the current members of a room.
+    """
+    Get the current members of a room.
 
     Args:
         client: Authenticated Matrix client
@@ -260,34 +272,36 @@ async def get_room_members(client: nio.AsyncClient, room_id: str) -> set[str]:
 
     Returns:
         Set of user IDs in the room
+
     """
     response = await client.joined_members(room_id)
     if isinstance(response, nio.JoinedMembersResponse):
         return {member.user_id for member in response.members}
-    else:
-        logger.warning(f"⚠️ Could not check members for room {room_id}")
-        return set()
+    logger.warning(f"⚠️ Could not check members for room {room_id}")
+    return set()
 
 
 async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
-    """Get all rooms the client has joined.
+    """
+    Get all rooms the client has joined.
 
     Args:
         client: Authenticated Matrix client
 
     Returns:
         List of room IDs the client has joined, or None if the request failed
+
     """
     response = await client.joined_rooms()
     if isinstance(response, nio.JoinedRoomsResponse):
         return list(response.rooms)
-    else:
-        logger.error(f"Failed to get joined rooms: {response}")
-        return None
+    logger.error(f"Failed to get joined rooms: {response}")
+    return None
 
 
 async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
-    """Leave a Matrix room.
+    """
+    Leave a Matrix room.
 
     Args:
         client: Authenticated Matrix client
@@ -295,18 +309,19 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
 
     Returns:
         True if successfully left the room, False otherwise
+
     """
     response = await client.room_leave(room_id)
     if isinstance(response, nio.RoomLeaveResponse):
         logger.info(f"Left room {room_id}")
         return True
-    else:
-        logger.error(f"Failed to leave room {room_id}: {response}")
-        return False
+    logger.error(f"Failed to leave room {room_id}: {response}")
+    return False
 
 
 async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
-    """Send a message to a Matrix room.
+    """
+    Send a message to a Matrix room.
 
     Args:
         client: Authenticated Matrix client
@@ -315,6 +330,7 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
 
     Returns:
         The event ID of the sent message, or None if sending failed
+
     """
     response = await client.room_send(
         room_id=room_id,
@@ -324,9 +340,8 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
     if isinstance(response, nio.RoomSendResponse):
         logger.debug(f"Sent message to {room_id}: {response.event_id}")
         return str(response.event_id)
-    else:
-        logger.error(f"Failed to send message to {room_id}: {response}")
-        return None
+    logger.error(f"Failed to send message to {room_id}: {response}")
+    return None
 
 
 def _extract_message_data(event: nio.RoomMessageText) -> dict[str, Any]:
@@ -345,7 +360,8 @@ async def fetch_thread_history(
     room_id: str,
     thread_id: str,
 ) -> list[dict[str, Any]]:
-    """Fetch all messages in a thread.
+    """
+    Fetch all messages in a thread.
 
     Args:
         client: The Matrix client instance
@@ -354,6 +370,7 @@ async def fetch_thread_history(
 
     Returns:
         List of messages in chronological order, each containing sender, body, timestamp, and event_id
+
     """
     messages = []
     from_token = None
@@ -397,13 +414,15 @@ async def fetch_thread_history(
 
 
 def markdown_to_html(text: str) -> str:
-    """Convert markdown text to HTML for Matrix formatted messages.
+    """
+    Convert markdown text to HTML for Matrix formatted messages.
 
     Args:
         text: The markdown text to convert
 
     Returns:
         HTML formatted text
+
     """
     # Configure markdown with common extensions
     md = markdown.Markdown(
@@ -417,7 +436,7 @@ def markdown_to_html(text: str) -> str:
             "markdown.extensions.codehilite": {
                 "use_pygments": True,  # Don't use pygments for syntax highlighting
                 "noclasses": True,  # Use inline styles instead of CSS classes
-            }
+            },
         },
     )
     html_text: str = md.convert(text)
@@ -431,7 +450,8 @@ async def edit_message(
     new_content: dict[str, Any],
     new_text: str,
 ) -> str | None:
-    """Edit an existing Matrix message.
+    """
+    Edit an existing Matrix message.
 
     Args:
         client: The Matrix client
@@ -442,6 +462,7 @@ async def edit_message(
 
     Returns:
         The event ID of the edit message, or None if editing failed
+
     """
     edit_content = {
         "msgtype": "m.text",

@@ -3,14 +3,10 @@ from __future__ import annotations
 import functools
 import os
 import traceback
-from collections.abc import AsyncIterator
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import diskcache
-from agno.agent import Agent
 from agno.models.anthropic import Claude
-from agno.models.base import Model
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
@@ -24,12 +20,20 @@ from dotenv import load_dotenv
 
 from .agents import create_agent
 from .background_tasks import create_background_task
-from .config import Config
 from .logging_config import get_logger
 from .memory import (
     build_memory_enhanced_prompt,
     store_conversation_memory,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+    from agno.agent import Agent
+    from agno.models.base import Model
+
+    from .config import Config
 
 logger = get_logger(__name__)
 
@@ -95,7 +99,8 @@ def get_cache(storage_path: Path) -> diskcache.Cache | None:
 
 
 def get_model_instance(config: Config, model_name: str = "default") -> Model:
-    """Get a model instance from config.yaml.
+    """
+    Get a model instance from config.yaml.
 
     Args:
         config: Application configuration
@@ -106,8 +111,8 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
 
     Raises:
         ValueError: If model not found or provider not supported
-    """
 
+    """
     if model_name not in config.models:
         available = ", ".join(sorted(config.models.keys()))
         msg = f"Unknown model: {model_name}. Available models: {available}"
@@ -187,10 +192,12 @@ async def _prepare_agent_and_prompt(
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
 ) -> tuple[Agent, str]:
-    """Prepare agent and full prompt for AI processing.
+    """
+    Prepare agent and full prompt for AI processing.
 
     Returns:
         Tuple of (agent, full_prompt, session_id)
+
     """
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
@@ -208,7 +215,8 @@ async def ai_response(
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
 ) -> str:
-    """Generates a response using the specified agno Agent with memory integration.
+    """
+    Generates a response using the specified agno Agent with memory integration.
 
     Args:
         agent_name: Name of the agent to use
@@ -221,11 +229,17 @@ async def ai_response(
 
     Returns:
         Agent response string
+
     """
     logger.info("AI request", agent=agent_name)
     try:
         agent, full_prompt = await _prepare_agent_and_prompt(
-            agent_name, prompt, storage_path, room_id, config, thread_history
+            agent_name,
+            prompt,
+            storage_path,
+            room_id,
+            config,
+            thread_history,
         )
 
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
@@ -241,9 +255,11 @@ async def ai_response(
     except Exception as e:
         # AI models can fail for various reasons (network, API limits, etc)
         logger.exception(f"Error generating AI response for agent {agent_name}: {e}")
-        logger.error(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
-        logger.error(f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}")
-        logger.error(f"Traceback:\n{traceback.format_exc()}")
+        logger.exception(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
+        logger.exception(
+            f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}"
+        )
+        logger.exception(f"Traceback:\n{traceback.format_exc()}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"
 
 
@@ -256,7 +272,8 @@ async def ai_response_streaming(
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
 ) -> AsyncIterator[str]:
-    """Generate streaming AI response using Agno's streaming API.
+    """
+    Generate streaming AI response using Agno's streaming API.
 
     Checks cache first - if found, yields the cached response immediately.
     Otherwise streams the new response and caches it.
@@ -271,11 +288,17 @@ async def ai_response_streaming(
 
     Yields:
         Chunks of the AI response as they become available
+
     """
     logger.info("AI streaming request", agent=agent_name)
 
     agent, full_prompt = await _prepare_agent_and_prompt(
-        agent_name, prompt, storage_path, room_id, config, thread_history
+        agent_name,
+        prompt,
+        storage_path,
+        room_id,
+        config,
+        thread_history,
     )
 
     cache = get_cache(storage_path)

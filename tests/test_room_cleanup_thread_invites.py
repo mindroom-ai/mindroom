@@ -1,4 +1,5 @@
-"""Tests for room cleanup behavior with thread invitations.
+"""
+Tests for room cleanup behavior with thread invitations.
 
 These tests ensure that invited agents are not kicked from rooms
 when they have active thread invitations, even if they're not
@@ -160,11 +161,11 @@ async def test_cleanup_all_preserves_invited_agents() -> None:
                 "@mindroom_calculator:localhost",  # Has thread invitation here
                 "@mindroom_general:localhost",  # No invitations
             ]
-        else:  # room2
-            return [
-                "@mindroom_calculator:localhost",  # No thread invitation in room2
-                "@mindroom_code:localhost",  # No invitations
-            ]
+        # room2
+        return [
+            "@mindroom_calculator:localhost",  # No thread invitation in room2
+            "@mindroom_code:localhost",  # No invitations
+        ]
 
     # Track kicked bots per room
     kicked_bots_by_room: dict[str, list[str]] = {}

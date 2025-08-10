@@ -98,7 +98,7 @@ class TestStreamingEdits:
             "content": {
                 "body": "@mindroom_calculator:localhost: What's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            }
+            },
         }
 
         # Process initial message - bot should respond
@@ -127,7 +127,7 @@ class TestStreamingEdits:
                     "body": "@mindroom_calculator:localhost: What's 2+2? Can you show the work?",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
-            }
+            },
         }
 
         # Process edit - bot should NOT respond again
@@ -152,7 +152,7 @@ class TestStreamingEdits:
                     "body": "@mindroom_calculator:localhost: What's 2+2? Can you show the work step by step?",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
-            }
+            },
         }
 
         # Process second edit - bot should still NOT respond
@@ -196,7 +196,7 @@ class TestStreamingEdits:
             "content": {
                 "body": "@mindroom_calculator:localhost: What's 5+5?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            }
+            },
         }
 
         # Process new message - bot SHOULD respond
@@ -236,7 +236,7 @@ class TestStreamingEdits:
         initial_event.source = {
             "content": {
                 "body": "Let me calculate something...",
-            }
+            },
         }
 
         # Process initial message - calculator should NOT respond (not mentioned)
@@ -261,7 +261,7 @@ class TestStreamingEdits:
                     "body": "Let me calculate something... @mindroom_calculator:localhost can you help? ⋯",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
-            }
+            },
         }
 
         # Process edit - calculator should STILL NOT respond (it's an edit from an agent)
@@ -304,7 +304,7 @@ class TestStreamingEdits:
         initial_event.source = {
             "content": {
                 "body": "I need some help...",
-            }
+            },
         }
 
         # Process initial message - calculator should NOT respond (not mentioned)
@@ -329,7 +329,7 @@ class TestStreamingEdits:
                     "body": "I need some help... @mindroom_calculator:localhost what's 2+2?",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
-            }
+            },
         }
 
         # Process edit - calculator SHOULD respond (it's a user edit with new mention)

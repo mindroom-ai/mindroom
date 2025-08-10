@@ -70,7 +70,11 @@ class TestStreamingBehavior:
         config = self.config
 
         helper_bot = AgentBot(
-            mock_helper_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=True, config=config
+            mock_helper_agent,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=True,
+            config=config,
         )
         helper_bot.client = AsyncMock()
         helper_bot.response_tracker = ResponseTracker(helper_bot.agent_name, base_path=tmp_path)
@@ -85,7 +89,11 @@ class TestStreamingBehavior:
         config = self.config
 
         calc_bot = AgentBot(
-            mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
+            mock_calculator_agent,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=False,
+            config=config,
         )
         calc_bot.client = AsyncMock()
         calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
@@ -126,7 +134,7 @@ class TestStreamingBehavior:
             "content": {
                 "body": "@mindroom_helper:localhost can you help me with math?",
                 "m.mentions": {"user_ids": ["@mindroom_helper:localhost"]},
-            }
+            },
         }
 
         # Mock that we're mentioned
@@ -148,7 +156,7 @@ class TestStreamingBehavior:
             "content": {
                 "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ⋯",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            }
+            },
         }
 
         # Process initial message - calculator should NOT respond (has in-progress marker)
@@ -177,7 +185,7 @@ class TestStreamingBehavior:
             "content": {
                 "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            }
+            },
         }
 
         # Process final message - calculator SHOULD respond now
@@ -205,7 +213,11 @@ class TestStreamingBehavior:
         config = self.config
 
         calc_bot = AgentBot(
-            mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
+            mock_calculator_agent,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=False,
+            config=config,
         )
         calc_bot.client = AsyncMock()
         calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
@@ -237,7 +249,7 @@ class TestStreamingBehavior:
             "content": {
                 "body": "Hey @mindroom_calculator:localhost, what's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            }
+            },
         }
 
         # Process initial message - calculator SHOULD respond
@@ -262,7 +274,7 @@ class TestStreamingBehavior:
                     "rel_type": "m.replace",
                     "event_id": "$helper_msg_123",
                 },
-            }
+            },
         }
 
         # Process edit - calculator should NOT respond again

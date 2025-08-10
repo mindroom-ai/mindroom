@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import BaseModel, Field
 
 from .constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME
 from .logging_config import get_logger
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -62,7 +64,8 @@ class MemoryConfig(BaseModel):
     """Memory system configuration."""
 
     embedder: MemoryEmbedderConfig = Field(
-        default_factory=MemoryEmbedderConfig, description="Embedder configuration for memory"
+        default_factory=MemoryEmbedderConfig,
+        description="Embedder configuration for memory",
     )
     llm: MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
 
@@ -111,7 +114,8 @@ class Config(BaseModel):
         path = config_path or DEFAULT_AGENTS_CONFIG
 
         if not path.exists():
-            raise FileNotFoundError(f"Agent configuration file not found: {path}")
+            msg = f"Agent configuration file not found: {path}"
+            raise FileNotFoundError(msg)
 
         with open(path) as f:
             data = yaml.safe_load(f)
@@ -128,7 +132,8 @@ class Config(BaseModel):
         return config
 
     def get_agent(self, agent_name: str) -> AgentConfig:
-        """Get an agent configuration by name.
+        """
+        Get an agent configuration by name.
 
         Args:
             agent_name: Name of the agent
@@ -138,17 +143,21 @@ class Config(BaseModel):
 
         Raises:
             ValueError: If agent not found
+
         """
         if agent_name not in self.agents:
             available = ", ".join(sorted(self.agents.keys()))
-            raise ValueError(f"Unknown agent: {agent_name}. Available agents: {available}")
+            msg = f"Unknown agent: {agent_name}. Available agents: {available}"
+            raise ValueError(msg)
         return self.agents[agent_name]
 
     def get_all_configured_rooms(self) -> set[str]:
-        """Extract all room aliases configured for agents and teams.
+        """
+        Extract all room aliases configured for agents and teams.
 
         Returns:
             Set of all unique room aliases from agent and team configurations
+
         """
         all_room_aliases = set()
         for agent_config in self.agents.values():
@@ -158,13 +167,15 @@ class Config(BaseModel):
         return all_room_aliases
 
     def get_configured_bots_for_room(self, room_id: str) -> set[str]:
-        """Get the set of bot usernames that should be in a specific room.
+        """
+        Get the set of bot usernames that should be in a specific room.
 
         Args:
             room_id: The Matrix room ID
 
         Returns:
             Set of bot usernames (without domain) that should be in this room
+
         """
         from .matrix.rooms import resolve_room_aliases
 
@@ -189,10 +200,12 @@ class Config(BaseModel):
         return configured_bots
 
     def save_to_yaml(self, config_path: Path | None = None) -> None:
-        """Save the config to a YAML file, excluding None values.
+        """
+        Save the config to a YAML file, excluding None values.
 
         Args:
             config_path: Path to save the config to. If None, uses DEFAULT_AGENTS_CONFIG.
+
         """
         path = config_path or DEFAULT_AGENTS_CONFIG
         config_dict = self.model_dump(exclude_none=True)

@@ -5,20 +5,21 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from agno.agent import Agent
 from agno.models.message import Message
 from agno.run.response import RunResponse
 from agno.run.team import TeamRunResponse
 from agno.team import Team
 
 from .ai import get_model_instance
-from .config import Config
 from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
 
 if TYPE_CHECKING:
+    from agno.agent import Agent
+
     from .bot import MultiAgentOrchestrator
+    from .config import Config
 
 
 logger = get_logger(__name__)
@@ -32,7 +33,8 @@ class TeamMode(str, Enum):
 
 
 def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -> list[str]:
-    """Extract and format member contributions from a team response.
+    """
+    Extract and format member contributions from a team response.
 
     Handles nested teams recursively with proper indentation.
 
@@ -41,6 +43,7 @@ def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -
 
     Returns:
         List of formatted contribution strings
+
     """
     return _extract_contributions_recursive(response, indent=0, include_consensus=True)
 
@@ -50,7 +53,8 @@ def _extract_contributions_recursive(
     indent: int,
     include_consensus: bool,
 ) -> list[str]:
-    """Internal recursive function for extracting contributions.
+    """
+    Internal recursive function for extracting contributions.
 
     Args:
         response: The response to extract from
@@ -59,6 +63,7 @@ def _extract_contributions_recursive(
 
     Returns:
         List of formatted contribution strings
+
     """
     parts = []
     indent_str = "  " * indent
@@ -105,13 +110,15 @@ def _extract_contributions_recursive(
 
 
 def _extract_content(response: TeamRunResponse | RunResponse) -> str:
-    """Extract content from a response object.
+    """
+    Extract content from a response object.
 
     Args:
         response: The response to extract content from
 
     Returns:
         The extracted content as a string
+
     """
     # Direct content takes priority
     if response.content:
@@ -183,7 +190,8 @@ def should_form_team(
 
 
 def get_team_model(team_name: str, room_id: str, config: Config) -> str:
-    """Get the appropriate model for a team in a specific room.
+    """
+    Get the appropriate model for a team in a specific room.
 
     Priority:
     1. Room-specific model from room_models
@@ -197,8 +205,8 @@ def get_team_model(team_name: str, room_id: str, config: Config) -> str:
 
     Returns:
         Model name to use
-    """
 
+    """
     # Find room alias from room ID
     room_alias = get_room_alias_from_id(room_id)
 
@@ -229,7 +237,6 @@ async def create_team_response(
     model_name: str | None = None,
 ) -> str:
     """Create a team and execute response."""
-
     # Get existing agent instances from the orchestrator
     agents: list[Agent] = []
     for name in agent_names:

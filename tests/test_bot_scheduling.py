@@ -14,7 +14,6 @@ from mindroom.matrix.users import AgentMatrixUser
 @pytest.fixture
 def mock_agent_bot() -> AgentBot:
     """Create a mock agent bot for testing."""
-
     agent_user = AgentMatrixUser(
         agent_name="general",
         user_id="@mindroom_general:localhost",
@@ -121,7 +120,9 @@ class TestBotScheduleCommands:
             await mock_agent_bot._handle_command(room, event, command)
 
             mock_list.assert_called_once_with(
-                client=mock_agent_bot.client, room_id="!test:server", thread_id="$thread123"
+                client=mock_agent_bot.client,
+                room_id="!test:server",
+                thread_id="$thread123",
             )
 
             mock_agent_bot._send_response.assert_called_once()  # type: ignore[attr-defined]
@@ -299,7 +300,7 @@ class TestCommandHandling:
                 "sender": "@user:server",
                 "origin_server_ts": 1234567890,
                 "content": {"msgtype": "m.text", "body": "!schedule in 5 minutes test"},
-            }
+            },
         )
 
         # Call _on_message
@@ -339,7 +340,7 @@ class TestCommandHandling:
                     "body": "!schedule in 5 minutes test",
                     "m.relates_to": {"event_id": "$thread123", "rel_type": "m.thread"},
                 },
-            }
+            },
         )
 
         with patch("mindroom.constants.ROUTER_AGENT_NAME", "router"):
@@ -387,7 +388,7 @@ class TestCommandHandling:
                     "sender": "@user:server",
                     "origin_server_ts": 1234567890,
                     "content": {"msgtype": "m.text", "body": "@calculator what is 2+2?"},
-                }
+                },
             )
 
             await bot._on_message(room, event)
@@ -437,7 +438,7 @@ class TestCommandHandling:
                     "msgtype": "m.text",
                     "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
                 },
-            }
+            },
         )
 
         # Mock interactive.handle_text_response and extract_agent_name
@@ -589,7 +590,7 @@ class TestCommandHandling:
                     "msgtype": "m.text",
                     "body": "❌ Unable to parse the schedule request",
                 },
-            }
+            },
         )
 
         with (
@@ -675,7 +676,8 @@ class TestCommandHandling:
         mock_context.am_i_mentioned = False
         mock_context.is_thread = True
         mock_context.thread_id = "$thread123"
-        mock_context.thread_history = thread_history + [
+        mock_context.thread_history = [
+            *thread_history,
             {
                 "event_id": "$router_error",
                 "sender": "@mindroom_router:localhost",
@@ -684,7 +686,7 @@ class TestCommandHandling:
                     "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
                     "m.mentions": {},
                 },
-            }
+            },
         ]
         mock_context.mentioned_agents = []
         bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
@@ -700,7 +702,7 @@ class TestCommandHandling:
                     "msgtype": "m.text",
                     "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
                 },
-            }
+            },
         )
 
         with (
@@ -760,7 +762,7 @@ class TestCommandHandling:
                 "sender": "@mindroom_router:localhost",  # From router agent
                 "origin_server_ts": 1234567890,
                 "content": {"msgtype": "m.text", "body": "❌ Unable to parse the schedule request"},
-            }
+            },
         )
 
         # Mock interactive.handle_text_response and extract_agent_name

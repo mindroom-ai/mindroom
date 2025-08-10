@@ -8,17 +8,19 @@ import sys
 
 import structlog
 
-__all__ = ["setup_logging", "emoji", "get_logger"]
+__all__ = ["emoji", "get_logger", "setup_logging"]
 
 
 def emoji(agent_name: str) -> str:
-    """Get an emoji-prefixed agent name string with consistent emoji based on the name.
+    """
+    Get an emoji-prefixed agent name string with consistent emoji based on the name.
 
     Args:
         agent_name: The agent name to add emoji to
 
     Returns:
         The agent name with a unique emoji prefix
+
     """
     # Emojis for different agents
     emojis = [
@@ -54,6 +56,7 @@ def setup_logging(level: str = "INFO") -> None:
 
     Args:
         level: Minimum logging level (e.g., "DEBUG", "INFO", "WARNING", "ERROR")
+
     """
     # Configure structlog with built-in console renderer
     structlog.configure(
@@ -83,12 +86,14 @@ def setup_logging(level: str = "INFO") -> None:
 
 
 def get_logger(name: str = __name__) -> structlog.BoundLogger:
-    """Get a structlog logger instance.
+    """
+    Get a structlog logger instance.
 
     Args:
         name: Logger name (typically __name__)
 
     Returns:
         Configured structlog logger
+
     """
     return structlog.get_logger(name)  # type: ignore[no-any-return]

@@ -1,4 +1,5 @@
-"""Tests for agent self-managed room membership.
+"""
+Tests for agent self-managed room membership.
 
 With the new self-managing agent pattern, agents handle their own room
 memberships. This test module verifies that behavior.
@@ -20,7 +21,7 @@ from mindroom.thread_invites import ThreadInviteManager
 @pytest.fixture
 def mock_config() -> Config:
     """Create a mock config with agents and teams."""
-    config = Config(
+    return Config(
         agents={
             "agent1": AgentConfig(
                 display_name="Agent 1",
@@ -42,7 +43,6 @@ def mock_config() -> Config:
             ),
         },
     )
-    return config
 
 
 @pytest.mark.asyncio

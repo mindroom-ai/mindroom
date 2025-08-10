@@ -1,4 +1,5 @@
-"""Test threading behavior to reproduce and fix the threading error.
+"""
+Test threading behavior to reproduce and fix the threading error.
 
 This test verifies that:
 1. Agents always respond in threads (never in main room)
@@ -97,19 +98,20 @@ class TestThreadingBehavior:
                 "origin_server_ts": 1234567890,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
-            }
+            },
         )
 
         # The bot should send a response
         bot.client.room_send = AsyncMock(  # type: ignore[union-attr]
-            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost"),
         )
 
         # Mock thread history fetch (returns empty for new thread)
         bot.client.room_messages = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomMessagesResponse.from_dict(
-                {"chunk": [], "start": "s1", "end": "e1"}, room_id="!test:localhost"
-            )
+                {"chunk": [], "start": "s1", "end": "e1"},
+                room_id="!test:localhost",
+            ),
         )
 
         # Initialize the bot (to set up components it needs)
@@ -165,19 +167,20 @@ class TestThreadingBehavior:
                 "origin_server_ts": 1234567890,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
-            }
+            },
         )
 
         # Mock the bot's response
         bot.client.room_send = AsyncMock(  # type: ignore[union-attr]
-            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost"),
         )
 
         # Mock thread history
         bot.client.room_messages = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomMessagesResponse.from_dict(
-                {"chunk": [], "start": "s1", "end": "e1"}, room_id="!test:localhost"
-            )
+                {"chunk": [], "start": "s1", "end": "e1"},
+                room_id="!test:localhost",
+            ),
         )
 
         # Initialize response tracking
@@ -275,12 +278,12 @@ class TestThreadingBehavior:
                 "origin_server_ts": 1234567890,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
-            }
+            },
         )
 
         # Mock the bot's response - it should succeed
         bot.client.room_send = AsyncMock(
-            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost"),
         )
 
         # Process the command
@@ -370,7 +373,7 @@ class TestThreadingBehavior:
                 "origin_server_ts": 1234567890,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
-            }
+            },
         )
 
         # Mock room_get_state for list_schedules command
@@ -378,12 +381,12 @@ class TestThreadingBehavior:
             return_value=nio.RoomGetStateResponse.from_dict(
                 [],  # No scheduled tasks
                 room_id="!test:localhost",
-            )
+            ),
         )
 
         # Mock the bot's response
         bot.client.room_send = AsyncMock(
-            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost"),
         )
 
         # Process the command
@@ -426,19 +429,20 @@ class TestThreadingBehavior:
                 "origin_server_ts": 1234567890,
                 "room_id": "!test:localhost",
                 "type": "m.room.message",
-            }
+            },
         )
 
         # Mock the bot's response
         bot.client.room_send = AsyncMock(  # type: ignore[union-attr]
-            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost")
+            return_value=nio.RoomSendResponse.from_dict({"event_id": "$response:localhost"}, room_id="!test:localhost"),
         )
 
         # Mock thread history
         bot.client.room_messages = AsyncMock(  # type: ignore[union-attr]
             return_value=nio.RoomMessagesResponse.from_dict(
-                {"chunk": [], "start": "s1", "end": "e1"}, room_id="!test:localhost"
-            )
+                {"chunk": [], "start": "s1", "end": "e1"},
+                room_id="!test:localhost",
+            ),
         )
 
         # Initialize response tracking
@@ -459,7 +463,10 @@ class TestThreadingBehavior:
 
             # Now simulate the response being sent
             await bot._send_response(
-                room, event.event_id, "I can help with that complex question!", "$thread_root:localhost"
+                room,
+                event.event_id,
+                "I can help with that complex question!",
+                "$thread_root:localhost",
             )
 
         # Verify the bot sent a response

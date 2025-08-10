@@ -3,7 +3,8 @@
 import re
 from typing import Any
 
-from ..config import Config
+from mindroom.config import Config
+
 from .client import markdown_to_html
 from .identity import MatrixID
 
@@ -15,7 +16,8 @@ def create_mention_content(
     reply_to_event_id: str | None = None,
     formatted_body: str | None = None,
 ) -> dict[str, Any]:
-    """Create a properly formatted Matrix message with mentions.
+    """
+    Create a properly formatted Matrix message with mentions.
 
     Args:
         body: The message body text (plain text version)
@@ -26,6 +28,7 @@ def create_mention_content(
 
     Returns:
         Properly formatted content dict for room_send
+
     """
     content: dict[str, Any] = {
         "msgtype": "m.text",
@@ -55,7 +58,8 @@ def create_mention_content(
 
 
 def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tuple[str, list[str], str]:
-    """Parse text for agent mentions and return processed text with user IDs.
+    """
+    Parse text for agent mentions and return processed text with user IDs.
 
     Args:
         text: Text that may contain @agent_name mentions
@@ -63,6 +67,7 @@ def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tup
 
     Returns:
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
+
     """
     # Pattern to match @agent_name (with optional @mindroom_ prefix or domain)
     # Matches: @calculator, @mindroom_calculator, @mindroom_calculator:localhost
@@ -97,7 +102,8 @@ def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tup
 
 
 def _process_mention(match: re.Match, config: Any, sender_domain: str) -> tuple[str, str, str] | None:
-    """Process a single mention match and return replacement data.
+    """
+    Process a single mention match and return replacement data.
 
     Args:
         match: The regex match object
@@ -106,6 +112,7 @@ def _process_mention(match: re.Match, config: Any, sender_domain: str) -> tuple[
 
     Returns:
         Tuple of (original_text, matrix_user_id, display_name) or None if not a valid agent
+
     """
     original = match.group(0)
     prefix = match.group(1) or ""  # "mindroom_" or empty
@@ -139,7 +146,8 @@ def create_mention_content_from_text(
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
 ) -> dict[str, Any]:
-    """Parse text for mentions and create properly formatted Matrix message.
+    """
+    Parse text for mentions and create properly formatted Matrix message.
 
     This is the universal function that should be used everywhere.
 
@@ -151,6 +159,7 @@ def create_mention_content_from_text(
 
     Returns:
         Properly formatted content dict for room_send
+
     """
     plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(text, sender_domain, config)
 

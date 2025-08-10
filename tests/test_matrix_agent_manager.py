@@ -43,7 +43,7 @@ def mock_agent_config() -> dict:
         "agents": {
             "calculator": {"display_name": "CalculatorAgent"},
             "general": {"display_name": "GeneralAgent"},
-        }
+        },
     }
 
 

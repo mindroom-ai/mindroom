@@ -17,7 +17,7 @@ DEFAULT_TIMEOUT_HOURS = 24
 
 
 class ThreadInviteManager:
-    def __init__(self, client: nio.AsyncClient):
+    def __init__(self, client: nio.AsyncClient) -> None:
         self.client = client
 
     def _get_state_key(self, thread_id: str, agent_name: str) -> str:

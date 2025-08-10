@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,6 +12,10 @@ from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import get_agents_in_thread
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 
 # Test fixtures for team agents
@@ -119,7 +121,7 @@ class TestTeamFormation:
                     "user_ids": [
                         mock_research_agent.user_id,
                         mock_analyst_agent.user_id,
-                    ]
+                    ],
                 },
             },
             "sender": "@user:localhost",
@@ -269,7 +271,7 @@ class TestTeamCollaboration:
         }
 
         # Verify routing logic (to be implemented)
-        for _task, agent in expected_delegations.items():
+        for agent in expected_delegations.values():
             assert agent in ["research", "code", "analyst"]
 
 
@@ -340,9 +342,9 @@ class TestTeamResponseBehavior:
         }
 
         # Only mentioned agent should respond, not the team
-        content = cast(dict[str, Any], message_event["content"])
-        mentions = cast(dict[str, Any], content["m.mentions"])
-        user_ids = cast(list[str], mentions["user_ids"])
+        content = cast("dict[str, Any]", message_event["content"])
+        mentions = cast("dict[str, Any]", content["m.mentions"])
+        user_ids = cast("list[str]", mentions["user_ids"])
         assert len(user_ids) == 1
         assert mock_code_agent.user_id in user_ids
 
@@ -393,7 +395,6 @@ class TestTeamEdgeCases:
         """Test behavior when a team member is unavailable."""
         # Setup scenario where one agent is offline/unavailable
         # Team should adapt and continue with available members
-        pass
 
     @pytest.mark.asyncio
     async def test_conflicting_team_responses(
@@ -406,7 +407,6 @@ class TestTeamEdgeCases:
         """Test handling of conflicting information from team members."""
         # Agents might have different data or opinions
         # Team synthesis should handle gracefully
-        pass
 
     @pytest.mark.asyncio
     async def test_team_context_overflow(
@@ -420,7 +420,6 @@ class TestTeamEdgeCases:
         """Test team behavior when context window is nearly full."""
         # Large thread history approaching token limits
         # Team should coordinate to provide concise responses
-        pass
 
 
 class TestRouterTeamFormation:

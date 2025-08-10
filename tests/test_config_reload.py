@@ -121,7 +121,10 @@ def mock_agent_users() -> dict[str, AgentMatrixUser]:
 
 @pytest.mark.asyncio
 async def test_agent_joins_new_rooms_on_config_reload(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+    initial_config: Config,
+    updated_config: Config,
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that agents join new rooms when their configuration is updated."""
     # Track room operations
@@ -162,11 +165,11 @@ async def test_agent_joins_new_rooms_on_config_reload(
         user_id = client.user_id
         if "agent1" in user_id:
             return ["room1", "room2"]  # agent1 is currently in room1 and room2
-        elif "agent2" in user_id:
+        if "agent2" in user_id:
             return ["room1"]  # agent2 is currently in room1
-        elif "team1" in user_id:
+        if "team1" in user_id:
             return ["room3"]  # team1 is currently in room3
-        elif ROUTER_AGENT_NAME in user_id:
+        if ROUTER_AGENT_NAME in user_id:
             return ["room1", "room2", "room3"]  # router is in all initial rooms
         return []
 
@@ -199,7 +202,10 @@ async def test_agent_joins_new_rooms_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_router_updates_rooms_on_config_reload(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+    initial_config: Config,
+    updated_config: Config,
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that the router updates its room list when agents/teams change their rooms."""
     # Track room operations
@@ -270,7 +276,10 @@ async def test_router_updates_rooms_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_new_agent_joins_rooms_on_config_reload(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+    initial_config: Config,
+    updated_config: Config,
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that new agents are created and join their configured rooms."""
     # Track room operations
@@ -330,7 +339,10 @@ async def test_new_agent_joins_rooms_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_team_room_changes_on_config_reload(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+    initial_config: Config,
+    updated_config: Config,
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that teams update their room memberships when configuration changes."""
     # Track room operations
@@ -399,7 +411,10 @@ async def test_team_room_changes_on_config_reload(
 
 @pytest.mark.asyncio
 async def test_orchestrator_handles_config_reload(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+    initial_config: Config,
+    updated_config: Config,
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that the orchestrator properly handles config reloads and updates all bots."""
     # Track config loads
@@ -514,7 +529,10 @@ async def test_orchestrator_handles_config_reload(
 
 @pytest.mark.asyncio
 async def test_room_membership_state_after_config_update(
-    initial_config: Config, updated_config: Config, mock_agent_users: dict[str, AgentMatrixUser], monkeypatch: Any
+    initial_config: Config,
+    updated_config: Config,
+    mock_agent_users: dict[str, AgentMatrixUser],
+    monkeypatch: Any,
 ) -> None:
     """Test that room membership state is correct after config updates."""
     # Simulate room membership state

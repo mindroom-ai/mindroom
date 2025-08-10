@@ -1,4 +1,5 @@
-"""Room cleanup utilities for removing stale bot memberships from Matrix rooms.
+"""
+Room cleanup utilities for removing stale bot memberships from Matrix rooms.
 
 With the new self-managing agent pattern, agents handle their own room
 memberships. This module only handles cleanup of stale/orphaned bots.
@@ -6,23 +7,29 @@ memberships. This module only handles cleanup of stale/orphaned bots.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import nio
 
-from .config import Config
 from .logging_config import get_logger
 from .matrix.client import get_joined_rooms, get_room_members
 from .matrix.identity import MatrixID
 from .matrix.state import MatrixState
-from .thread_invites import ThreadInviteManager
+
+if TYPE_CHECKING:
+    from .config import Config
+    from .thread_invites import ThreadInviteManager
 
 logger = get_logger(__name__)
 
 
 def _get_all_known_bot_usernames() -> set[str]:
-    """Get all bot usernames that have ever been created (from matrix_state.yaml).
+    """
+    Get all bot usernames that have ever been created (from matrix_state.yaml).
 
     Returns:
         Set of all known bot usernames
+
     """
     state = MatrixState.load()
     bot_usernames = set()
@@ -43,7 +50,8 @@ async def _cleanup_orphaned_bots_in_room(
     config: Config,
     thread_invite_manager: ThreadInviteManager,
 ) -> list[str]:
-    """Remove orphaned bots from a single room.
+    """
+    Remove orphaned bots from a single room.
 
     Args:
         client: An authenticated Matrix client with kick permissions
@@ -53,6 +61,7 @@ async def _cleanup_orphaned_bots_in_room(
 
     Returns:
         List of bot usernames that were kicked
+
     """
     # Get room members
     member_ids = await get_room_members(client, room_id)
@@ -80,13 +89,13 @@ async def _cleanup_orphaned_bots_in_room(
             if agent_threads:
                 logger.info(
                     f"Bot {matrix_id.username} not configured for room {room_id} but has "
-                    f"{len(agent_threads)} thread invitation(s), keeping in room"
+                    f"{len(agent_threads)} thread invitation(s), keeping in room",
                 )
                 continue
 
             logger.info(
                 f"Found orphaned bot {matrix_id.username} in room {room_id} "
-                f"(configured bots for this room: {configured_bots})"
+                f"(configured bots for this room: {configured_bots})",
             )
 
             # Kick the bot
@@ -102,17 +111,20 @@ async def _cleanup_orphaned_bots_in_room(
 
 
 async def cleanup_all_orphaned_bots(
-    client: nio.AsyncClient, config: Config, thread_invite_manager: ThreadInviteManager
+    client: nio.AsyncClient,
+    config: Config,
+    thread_invite_manager: ThreadInviteManager,
 ) -> dict[str, list[str]]:
-    """Remove all orphaned bots from all rooms the client has access to.
+    """
+    Remove all orphaned bots from all rooms the client has access to.
 
     This should be called by a user or bot with admin/moderator permissions
     in the rooms that need cleaning.
 
     Returns:
         Dictionary mapping room IDs to lists of kicked bot usernames
-    """
 
+    """
     # Track what we're doing
     kicked_bots: dict[str, list[str]] = {}
 

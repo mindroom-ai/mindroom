@@ -87,7 +87,10 @@ class TestAgentBot:
     @pytest.mark.asyncio
     @patch("mindroom.config.Config.from_yaml")
     async def test_agent_bot_initialization(
-        self, mock_load_config: MagicMock, mock_agent_user: AgentMatrixUser, tmp_path: Path
+        self,
+        mock_load_config: MagicMock,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
     ) -> None:
         """Test AgentBot initialization."""
         mock_load_config.return_value = self.create_mock_config()
@@ -102,7 +105,11 @@ class TestAgentBot:
 
         # Test with streaming disabled
         bot_no_stream = AgentBot(
-            mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
+            mock_agent_user,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=False,
+            config=config,
         )
         assert bot_no_stream.enable_streaming is False
 
@@ -192,7 +199,9 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_ignore_other_agents(
-        self, mock_agent_user: AgentMatrixUser, tmp_path: Path
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
     ) -> None:
         """Test that agent ignores messages from other agents."""
         config = Config.from_yaml()
@@ -237,7 +246,11 @@ class TestAgentBot:
         config = Config.from_yaml()
 
         bot = AgentBot(
-            mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming, config=config
+            mock_agent_user,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=enable_streaming,
+            config=config,
         )
         bot.client = AsyncMock()
 
@@ -262,7 +275,7 @@ class TestAgentBot:
                 "body": "@mindroom_calculator:localhost: What's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root_id"},
-            }
+            },
         }
 
         await bot._on_message(mock_room, mock_event)
@@ -348,7 +361,11 @@ class TestAgentBot:
         mock_get_model_instance.return_value = mock_model
 
         bot = AgentBot(
-            mock_agent_user, tmp_path, rooms=["!test:localhost"], enable_streaming=enable_streaming, config=config
+            mock_agent_user,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=enable_streaming,
+            config=config,
         )
         bot.client = AsyncMock()
 
@@ -539,7 +556,7 @@ class TestAgentBot:
                 "body": "@mindroom_calculator:localhost: What's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root_id"},
-            }
+            },
         }
 
         await bot._on_message(mock_room, mock_event)
@@ -617,7 +634,7 @@ class TestMultiAgentOrchestrator:
 
         # Start the orchestrator but don't wait for sync_forever
         start_tasks = []
-        for _agent_name, bot in orchestrator.agent_bots.items():
+        for bot in orchestrator.agent_bots.values():
             start_tasks.append(bot.start())
 
         await asyncio.gather(*start_tasks)
@@ -686,6 +703,6 @@ class TestMultiAgentOrchestrator:
         await orchestrator.initialize()
 
         # All bots should have streaming disabled except teams (which never stream)
-        for _name, bot in orchestrator.agent_bots.items():
+        for bot in orchestrator.agent_bots.values():
             if hasattr(bot, "enable_streaming"):
                 assert bot.enable_streaming is False

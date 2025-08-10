@@ -25,7 +25,6 @@ async def test_streaming_edits_e2e(
     tmp_path: Path,
 ) -> None:
     """End-to-end test that agents don't respond to streaming edits from other agents."""
-
     # Mock ensure_all_agent_users to return proper user objects
     from mindroom.matrix.users import AgentMatrixUser
 
@@ -73,7 +72,6 @@ async def test_streaming_edits_e2e(
                 agent_user.user_id = "@mindroom_calculator:localhost"
             elif agent_user.agent_name == "router":
                 agent_user.user_id = "@mindroom_router:localhost"
-        return None  # ensure_user_account doesn't return anything
 
     # Need to handle both positional and method call
     def ensure_user_wrapper(*args: object, **kwargs: object) -> object:
@@ -101,9 +99,9 @@ async def test_streaming_edits_e2e(
         if hasattr(agent_user, "agent_name"):
             if agent_user.agent_name == "helper":
                 return helper_client
-            elif agent_user.agent_name == "calculator":
+            if agent_user.agent_name == "calculator":
                 return calc_client
-            elif agent_user.agent_name == "router":
+            if agent_user.agent_name == "router":
                 # Return a mock client for the router
                 router_client = AsyncMock()
                 router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[test_room_id])
@@ -122,7 +120,7 @@ async def test_streaming_edits_e2e(
                 "room_id": room_id,
                 "type": message_type,
                 "content": content,
-            }
+            },
         )
         return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
 
@@ -134,7 +132,7 @@ async def test_streaming_edits_e2e(
                 "room_id": room_id,
                 "type": message_type,
                 "content": content,
-            }
+            },
         )
         return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
 
@@ -164,7 +162,10 @@ async def test_streaming_edits_e2e(
             from mindroom.bot import AgentBot
 
             def create_bot_side_effect(
-                entity_name: str, agent_user: object, config: object, storage_path: object
+                entity_name: str,
+                agent_user: object,
+                config: object,
+                storage_path: object,
             ) -> object:
                 # Update the agent_user with proper user_id
                 if entity_name == "helper":
@@ -228,7 +229,12 @@ async def test_streaming_edits_e2e(
                 yield "@mindroom_calculator:localhost what's 2+2?"
 
             mock_streaming.return_value = stream_response(
-                "helper", user_event.body, "session", tmp_path, [], test_room_id
+                "helper",
+                user_event.body,
+                "session",
+                tmp_path,
+                [],
+                test_room_id,
             )
 
             # Mock that helper is mentioned
@@ -351,7 +357,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
                 {
                     "event_id": event_id,
                     "content": content,
-                }
+                },
             )
             return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
 

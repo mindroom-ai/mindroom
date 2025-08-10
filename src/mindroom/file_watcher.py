@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 
 async def watch_file(
-    file_path: Path | str, callback: Callable[[], Awaitable[None]], stop_event: asyncio.Event | None = None
+    file_path: Path | str,
+    callback: Callable[[], Awaitable[None]],
+    stop_event: asyncio.Event | None = None,
 ) -> None:
-    """Watch a file for changes and call callback when modified.
+    """
+    Watch a file for changes and call callback when modified.
 
     Args:
         file_path: Path to the file to watch
         callback: Async function to call when file changes
         stop_event: Optional event to signal when to stop watching
+
     """
     file_path = Path(file_path)
     last_mtime = file_path.stat().st_mtime if file_path.exists() else 0

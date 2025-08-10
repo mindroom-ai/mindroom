@@ -1,4 +1,5 @@
-"""Regression tests for routing behavior.
+"""
+Regression tests for routing behavior.
 
 These tests ensure that fixed bugs don't resurface, particularly:
 1. Router should NOT respond when any agent is mentioned
@@ -19,7 +20,10 @@ from mindroom.thread_invites import ThreadInviteManager
 
 
 def setup_test_bot(
-    agent: AgentMatrixUser, storage_path: Path, room_id: str, enable_streaming: bool = False
+    agent: AgentMatrixUser,
+    storage_path: Path,
+    room_id: str,
+    enable_streaming: bool = False,
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
     config = Config.from_yaml()
@@ -67,7 +71,8 @@ class TestRoutingRegression:
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test that router doesn't activate when an agent is directly mentioned.
+        """
+        Test that router doesn't activate when an agent is directly mentioned.
 
         Regression test for issue where both mentioned agent AND router-selected
         agent would respond to the same message.
@@ -108,7 +113,7 @@ class TestRoutingRegression:
             "content": {
                 "body": "@mindroom_research:localhost what can you do?",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
-            }
+            },
         }
 
         # Process with research bot - SHOULD respond
@@ -182,7 +187,7 @@ class TestRoutingRegression:
         message_event.source = {
             "content": {
                 "body": "What's the latest news?",
-            }
+            },
         }
 
         # Process with router bot (should handle routing)
@@ -276,7 +281,7 @@ class TestRoutingRegression:
             "content": {
                 "body": "@mindroom_research:localhost and @mindroom_news:localhost, what do you think?",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost", "@mindroom_news:localhost"]},
-            }
+            },
         }
 
         # Process with both bots
@@ -299,7 +304,8 @@ class TestRoutingRegression:
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test that router messages trigger responses from mentioned agents.
+        """
+        Test that router messages trigger responses from mentioned agents.
 
         Regression test for potential issue where router mentions an agent but
         that agent ignores it.
@@ -344,7 +350,7 @@ class TestRoutingRegression:
             "content": {
                 "body": "@research could you help with this?",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
-            }
+            },
         }
 
         # Process router message with research bot

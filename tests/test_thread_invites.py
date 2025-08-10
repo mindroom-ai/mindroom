@@ -12,8 +12,7 @@ from mindroom.thread_invites import AGENT_ACTIVITY_EVENT_TYPE, THREAD_INVITE_EVE
 @pytest.fixture
 def mock_client() -> AsyncMock:
     """Create a mock Matrix client."""
-    client = AsyncMock(spec=nio.AsyncClient)
-    return client
+    return AsyncMock(spec=nio.AsyncClient)
 
 
 @pytest.fixture
@@ -265,7 +264,8 @@ async def test_get_invite_state(invite_manager: ThreadInviteManager, mock_client
 
     # Mock not found
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventError(
-        status_code="M_NOT_FOUND", message="Not found"
+        status_code="M_NOT_FOUND",
+        message="Not found",
     )
     state = await invite_manager.get_invite_state("$thread123", "!room456", "unknown")
     assert state is None
@@ -287,7 +287,8 @@ async def test_get_agent_activity(invite_manager: ThreadInviteManager, mock_clie
 
     # Mock not found (no activity recorded)
     mock_client.room_get_state_event.return_value = nio.RoomGetStateEventError(
-        status_code="M_NOT_FOUND", message="Not found"
+        status_code="M_NOT_FOUND",
+        message="Not found",
     )
     activity = await invite_manager.get_agent_activity("!room456", "unknown")
     assert activity is None

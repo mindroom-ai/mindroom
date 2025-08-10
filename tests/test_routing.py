@@ -26,7 +26,8 @@ class TestAIRouting:
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = AgentSuggestion(
-                agent_name="calculator", reasoning="User is asking about math calculation"
+                agent_name="calculator",
+                reasoning="User is asking about math calculation",
             )
             mock_agent.arun.return_value = mock_response
 
@@ -54,7 +55,10 @@ class TestAIRouting:
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
                 result = await suggest_agent_for_message(
-                    "How do I calculate deductions?", ["calculator", "finance", "general"], config, thread_context
+                    "How do I calculate deductions?",
+                    ["calculator", "finance", "general"],
+                    config,
+                    thread_context,
                 )
 
                 assert result == "finance"

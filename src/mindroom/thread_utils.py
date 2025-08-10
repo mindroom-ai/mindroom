@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import nio
-
-from .config import Config
 from .constants import ROUTER_AGENT_NAME
 from .matrix.identity import extract_agent_name
 
+if TYPE_CHECKING:
+    import nio
+
+    from .config import Config
+
 
 def check_agent_mentioned(event_source: dict, agent_name: str, config: Config) -> tuple[list[str], bool]:
-    """Check if an agent is mentioned in a message.
+    """
+    Check if an agent is mentioned in a message.
 
     Returns (mentioned_agents, am_i_mentioned).
     """
@@ -28,7 +31,8 @@ def create_session_id(room_id: str, thread_id: str | None) -> str:
 
 
 def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[str]:
-    """Get list of unique agents that have participated in thread.
+    """
+    Get list of unique agents that have participated in thread.
 
     Note: Router agent is excluded from the participant list as it's not
     a conversation participant.
@@ -41,7 +45,7 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
         if agent_name and agent_name != ROUTER_AGENT_NAME:
             agents.add(agent_name)
 
-    return sorted(list(agents))
+    return sorted(agents)
 
 
 def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[str]:
@@ -58,7 +62,8 @@ def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[str]:
 
 
 def has_user_responded_after_message(thread_history: list[dict], target_event_id: str, user_id: str) -> bool:
-    """Check if a user has sent any messages after a specific message in the thread.
+    """
+    Check if a user has sent any messages after a specific message in the thread.
 
     Args:
         thread_history: List of messages in the thread
@@ -67,6 +72,7 @@ def has_user_responded_after_message(thread_history: list[dict], target_event_id
 
     Returns:
         True if the user has responded after the target message
+
     """
     # Find the target message and check for user responses after it
     found_target = False
@@ -79,7 +85,8 @@ def has_user_responded_after_message(thread_history: list[dict], target_event_id
 
 
 def get_available_agents_in_room(room: Any, config: Config) -> list[str]:
-    """Get list of available agents in a room.
+    """
+    Get list of available agents in a room.
 
     Note: Router agent is excluded as it's not a regular conversation participant.
     """
@@ -114,7 +121,7 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
         agents = get_mentioned_agents(mentions, config)
         mentioned_agents.update(agents)
 
-    return sorted(list(mentioned_agents))
+    return sorted(mentioned_agents)
 
 
 def should_agent_respond(
@@ -127,11 +134,11 @@ def should_agent_respond(
     config: Config,
     is_invited_to_thread: bool = False,
 ) -> bool:
-    """Determine if an agent should respond to a message individually.
+    """
+    Determine if an agent should respond to a message individually.
 
     Team formation is handled elsewhere - this just determines individual responses.
     """
-
     # Check if agent has access (either native or invited to thread)
     has_room_access = room_id in configured_rooms
     has_thread_access = is_thread and is_invited_to_thread
@@ -164,7 +171,8 @@ def should_agent_respond(
 
 
 def get_safe_thread_root(event: nio.RoomMessageText | None) -> str | None:
-    """Get a safe thread root for a message.
+    """
+    Get a safe thread root for a message.
 
     If the message is a reply to another message (has m.in_reply_to relation),
     we can't create a thread from it. Instead, return the message it's replying to
@@ -175,6 +183,7 @@ def get_safe_thread_root(event: nio.RoomMessageText | None) -> str | None:
 
     Returns:
         The event ID to use as thread root, or None to use the event itself
+
     """
     if not event:
         return None

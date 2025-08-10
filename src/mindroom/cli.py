@@ -38,7 +38,8 @@ def run(
         help="Base directory for storing agent data (response tracking, etc.)",
     ),
 ) -> None:
-    """Run the mindroom multi-agent system.
+    """
+    Run the mindroom multi-agent system.
 
     This command starts the multi-agent bot system which automatically:
     - Creates all necessary user and agent accounts
@@ -63,7 +64,6 @@ async def _run(log_level: str, storage_path: Path) -> None:
 
 def main() -> None:
     """Main entry point that shows help by default."""
-
     # Handle -h flag by replacing with --help
     for i, arg in enumerate(sys.argv):
         if arg == "-h":

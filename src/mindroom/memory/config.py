@@ -6,14 +6,15 @@ from typing import Any
 
 from mem0 import AsyncMemory
 
-from ..config import Config
-from ..logging_config import get_logger
+from mindroom.config import Config
+from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
 def get_memory_config(storage_path: Path, config: Config) -> dict:
-    """Get Mem0 configuration with ChromaDB backend.
+    """
+    Get Mem0 configuration with ChromaDB backend.
 
     Args:
         storage_path: Base directory for memory storage
@@ -21,6 +22,7 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
 
     Returns:
         Configuration dictionary for Mem0
+
     """
     app_config = config
 
@@ -58,7 +60,8 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
             if key == "host" and app_config.memory.llm.provider == "ollama":
                 # mem0 expects ollama_base_url, not host
                 llm_config["config"]["ollama_base_url"] = value or os.environ.get(
-                    "OLLAMA_HOST", "http://localhost:11434"
+                    "OLLAMA_HOST",
+                    "http://localhost:11434",
                 )
             elif key != "host":  # Skip host for other fields
                 llm_config["config"][key] = value
@@ -70,7 +73,7 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
             llm_config["config"]["api_key"] = os.environ.get("ANTHROPIC_API_KEY")
 
         logger.info(
-            f"Using {app_config.memory.llm.provider} model '{app_config.memory.llm.config.get('model')}' for memory"
+            f"Using {app_config.memory.llm.provider} model '{app_config.memory.llm.config.get('model')}' for memory",
         )
     else:
         # Fallback if no LLM configured
@@ -85,7 +88,7 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
             },
         }
 
-    memory_config = {
+    return {
         "embedder": embedder_config,
         "llm": llm_config,
         "vector_store": {
@@ -97,11 +100,10 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
         },
     }
 
-    return memory_config
-
 
 async def create_memory_instance(storage_path: Path, config: Config) -> AsyncMemory:
-    """Create a Mem0 memory instance with ChromaDB backend.
+    """
+    Create a Mem0 memory instance with ChromaDB backend.
 
     Args:
         storage_path: Base directory for memory storage
@@ -109,6 +111,7 @@ async def create_memory_instance(storage_path: Path, config: Config) -> AsyncMem
 
     Returns:
         Configured AsyncMemory instance
+
     """
     config_dict = get_memory_config(storage_path, config)
 

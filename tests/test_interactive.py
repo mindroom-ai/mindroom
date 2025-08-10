@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-import mindroom.interactive as interactive
+from mindroom import interactive
 from mindroom.config import AgentConfig, Config, ModelConfig
 
 
@@ -37,7 +37,7 @@ class TestInteractiveFunctions:
         assert interactive.should_create_interactive_question("Here's a question:\n```interactive\n{}\n```")
 
         assert interactive.should_create_interactive_question(
-            'Text before\n```interactive\n{"question": "test"}\n```\nText after'
+            'Text before\n```interactive\n{"question": "test"}\n```\nText after',
         )
 
         # Should detect - newline format (agent mistake)
@@ -426,7 +426,11 @@ Just let me know your preference!"""
         # Register the question
         event_id = "$q123"
         interactive.register_interactive_question(
-            event_id, "!room:localhost", "$thread123", option_map or {}, "test_agent"
+            event_id,
+            "!room:localhost",
+            "$thread123",
+            option_map or {},
+            "test_agent",
         )
 
         # Verify question was created

@@ -32,7 +32,9 @@ class TestUserAccountManagement:
 
         # Mock successful registration
         mock_client.register.return_value = nio.RegisterResponse(
-            user_id="@test_user:localhost", device_id="TEST_DEVICE", access_token="test_token"
+            user_id="@test_user:localhost",
+            device_id="TEST_DEVICE",
+            access_token="test_token",
         )
         mock_client.set_displayname.return_value = AsyncMock()
 
@@ -43,7 +45,9 @@ class TestUserAccountManagement:
 
             # Verify registration was called
             mock_client.register.assert_called_once_with(
-                username="test_user", password="test_password", device_name="mindroom_agent"
+                username="test_user",
+                password="test_password",
+                device_name="mindroom_agent",
             )
             # Verify display name was set
             mock_client.set_displayname.assert_called_once_with("Test User")
@@ -57,7 +61,8 @@ class TestUserAccountManagement:
 
         # Mock user already exists error
         mock_client.register.return_value = nio.responses.RegisterErrorResponse(
-            message="User ID already taken.", status_code="M_USER_IN_USE"
+            message="User ID already taken.",
+            status_code="M_USER_IN_USE",
         )
 
         with patch("mindroom.matrix.client.matrix_client", return_value=mock_context):
@@ -71,17 +76,23 @@ class TestUserAccountManagement:
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_creates_new(
-        self, tmp_path: Path, mock_matrix_client: tuple[MagicMock, AsyncMock]
+        self,
+        tmp_path: Path,
+        mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
         """Test ensuring user account when none exists."""
         mock_context, mock_client = mock_matrix_client
 
         # Setup mocks for successful registration
         mock_client.register.return_value = nio.RegisterResponse(
-            user_id="@mindroom_user_test:localhost", device_id="TEST_DEVICE", access_token="test_token"
+            user_id="@mindroom_user_test:localhost",
+            device_id="TEST_DEVICE",
+            access_token="test_token",
         )
         mock_client.login.return_value = nio.LoginResponse(
-            user_id="@mindroom_user_test:localhost", device_id="TEST_DEVICE", access_token="test_token"
+            user_id="@mindroom_user_test:localhost",
+            device_id="TEST_DEVICE",
+            access_token="test_token",
         )
         mock_client.set_displayname.return_value = AsyncMock()
 
@@ -105,7 +116,9 @@ class TestUserAccountManagement:
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_uses_existing_valid(
-        self, tmp_path: Path, mock_matrix_client: tuple[MagicMock, AsyncMock]
+        self,
+        tmp_path: Path,
+        mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
         """Test ensuring user account when valid credentials exist."""
         mock_context, mock_client = mock_matrix_client
@@ -120,10 +133,13 @@ class TestUserAccountManagement:
 
             # Mock that user already exists when trying to register
             mock_client.register.return_value = nio.ErrorResponse(
-                message="User ID already taken", status_code="M_USER_IN_USE"
+                message="User ID already taken",
+                status_code="M_USER_IN_USE",
             )
             mock_client.login.return_value = nio.LoginResponse(
-                user_id="@mindroom_user:localhost", device_id="TEST_DEVICE", access_token="test_token"
+                user_id="@mindroom_user:localhost",
+                device_id="TEST_DEVICE",
+                access_token="test_token",
             )
 
             with (
@@ -144,7 +160,9 @@ class TestUserAccountManagement:
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_invalid_credentials(
-        self, tmp_path: Path, mock_matrix_client: tuple[MagicMock, AsyncMock]
+        self,
+        tmp_path: Path,
+        mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
         """Test ensuring user account when stored credentials are invalid."""
         mock_context, mock_client = mock_matrix_client
@@ -159,12 +177,15 @@ class TestUserAccountManagement:
 
             # Mock failed login
             mock_client.login.return_value = nio.LoginError(
-                message="Invalid username or password", status_code="M_FORBIDDEN"
+                message="Invalid username or password",
+                status_code="M_FORBIDDEN",
             )
 
             # Mock successful registration for new account
             mock_client.register.return_value = nio.RegisterResponse(
-                user_id="@mindroom_user:localhost", device_id="TEST_DEVICE", access_token="test_token"
+                user_id="@mindroom_user:localhost",
+                device_id="TEST_DEVICE",
+                access_token="test_token",
             )
             mock_client.set_displayname.return_value = AsyncMock()
 
