@@ -19,6 +19,8 @@ from mindroom.matrix.users import (
     save_agent_credentials,
 )
 
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
 
 @pytest.fixture
 def temp_matrix_users_file(tmp_path: Path) -> Path:
@@ -62,8 +64,8 @@ class TestAgentMatrixUser:
         assert user.agent_name == "calculator"
         assert user.user_id == "@mindroom_calculator:localhost"
         assert user.display_name == "CalculatorAgent"
-        assert user.password == "secure_pass"
-        assert user.access_token == "token123"
+        assert user.password == TEST_PASSWORD
+        assert user.access_token == TEST_ACCESS_TOKEN
 
 
 class TestMatrixUserManagement:
