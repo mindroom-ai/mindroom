@@ -134,14 +134,26 @@ def wikipedia_tools() -> type:
     return WikipediaTools
 
 
-@register_tool("newspaper")
+@register_tool_with_metadata(
+    name="newspaper",
+    display_name="News Articles",
+    description="Extract and analyze news articles from URLs",
+    category=ToolCategory.RESEARCH,
+    icon="Newspaper",
+)
 def newspaper_tools() -> type:
     from agno.tools.newspaper import NewspaperTools
 
     return NewspaperTools
 
 
-@register_tool("yfinance")
+@register_tool_with_metadata(
+    name="yfinance",
+    display_name="Yahoo Finance",
+    description="Stock market data and financial information",
+    category=ToolCategory.RESEARCH,
+    icon="TrendingUp",
+)
 def yfinance_tools() -> type:
     from agno.tools.yfinance import YFinanceTools
 
@@ -235,28 +247,61 @@ def telegram_tools() -> type:
     return TelegramTools
 
 
-@register_tool("tavily")
+@register_tool_with_metadata(
+    name="tavily",
+    display_name="Tavily Search",
+    description="Advanced AI-powered web search engine",
+    category=ToolCategory.RESEARCH,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="Search",
+    requires_config=["TAVILY_API_KEY"],
+)
 def tavily_tools() -> type:
     from agno.tools.tavily import TavilyTools
 
     return TavilyTools
 
 
-@register_tool("googlesearch")
+@register_tool_with_metadata(
+    name="googlesearch",
+    display_name="Google Search",
+    description="Search the web using Google",
+    category=ToolCategory.RESEARCH,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="Search",
+    requires_config=["GOOGLE_SEARCH_API_KEY", "GOOGLE_SEARCH_CSE_ID"],
+)
 def googlesearch_tools() -> type:
     from agno.tools.googlesearch import GoogleSearchTools
 
     return GoogleSearchTools
 
 
-@register_tool("website")
+@register_tool_with_metadata(
+    name="website",
+    display_name="Website Reader",
+    description="Extract and analyze content from websites",
+    category=ToolCategory.RESEARCH,
+    icon="Globe",
+)
 def website_tools() -> type:
     from agno.tools.website import WebsiteTools
 
     return WebsiteTools
 
 
-@register_tool("jina")
+@register_tool_with_metadata(
+    name="jina",
+    display_name="Jina Reader",
+    description="Advanced content extraction and processing",
+    category=ToolCategory.RESEARCH,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="FileText",
+    requires_config=["JINA_API_KEY"],
+)
 def jina_tools() -> type:
     from agno.tools.jina import JinaReaderTools
 

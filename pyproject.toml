@@ -21,6 +21,7 @@ dependencies = [
   "arxiv",                                                                                                       # for Arxiv tool
   "chromadb>=1.0.15",
   "diskcache>=5.6.3",
+  "fastapi>=0.116.1",
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
@@ -40,10 +41,13 @@ dependencies = [
   "pyyaml>=6",
   "rich>=13.10.5",          # for CLI output
   "slack-sdk",              # for Slack tool
+  "spotipy>=2.25.1",
   "structlog>=24.1",        # for structured logging
   "tavily-python",          # for Tavily tool
   "tweepy",                 # for Twitter/X tool
   "typer>=0.16",
+  "uvicorn>=0.35",
+  "watchdog>=6",
   "wikipedia",              # for Wikipedia tool
   "youtube-transcript-api", # for YouTube tool
 ]

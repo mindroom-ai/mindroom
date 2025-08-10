@@ -20,6 +20,7 @@ import {
   TrendingUp,
   FileText,
   Database,
+  Mail,
 } from 'lucide-react';
 // Brand icons from react-icons
 import {
@@ -42,6 +43,7 @@ import {
   FaMicrosoft,
   FaYahoo,
   FaDocker,
+  FaSlack,
 } from 'react-icons/fa';
 import { SiNetflix, SiWalmart, SiTarget, SiHbo } from 'react-icons/si';
 import { Button } from '@/components/ui/button';
@@ -258,11 +260,11 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
   {
     id: 'telegram',
     name: 'Telegram',
-    description: 'Send and receive messages',
-    category: 'social',
+    description: 'Send and receive messages (tool: telegram)',
+    category: 'communication',
     icon: <FaTelegram className="h-5 w-5 text-blue-500" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
+    status: 'available',
+    setup_type: 'api_key',
   },
 
   // Development & Tools
@@ -413,6 +415,64 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
     icon: <Database className="h-5 w-5 text-purple-600" />,
     status: 'available',
     setup_type: 'special',
+  },
+
+  // Additional Research Tools
+  {
+    id: 'tavily',
+    name: 'Tavily Search',
+    description: 'Advanced AI-powered web search (tool: tavily)',
+    category: 'research',
+    icon: <Search className="h-5 w-5 text-indigo-600" />,
+    status: 'available',
+    setup_type: 'api_key',
+  },
+  {
+    id: 'googlesearch',
+    name: 'Google Search',
+    description: 'Search the web using Google (tool: googlesearch)',
+    category: 'research',
+    icon: <FaGoogle className="h-5 w-5" />,
+    status: 'available',
+    setup_type: 'api_key',
+  },
+  {
+    id: 'website',
+    name: 'Website Reader',
+    description: 'Extract and analyze website content (tool: website)',
+    category: 'research',
+    icon: <Globe className="h-5 w-5 text-blue-600" />,
+    status: 'available',
+    setup_type: 'special',
+  },
+  {
+    id: 'jina',
+    name: 'Jina Reader',
+    description: 'Advanced content extraction (tool: jina)',
+    category: 'research',
+    icon: <FileText className="h-5 w-5 text-purple-500" />,
+    status: 'available',
+    setup_type: 'api_key',
+  },
+
+  // Communication Tools
+  {
+    id: 'email',
+    name: 'Email (SMTP)',
+    description: 'Send emails via SMTP (tool: email)',
+    category: 'communication',
+    icon: <Mail className="h-5 w-5" />,
+    status: 'available',
+    setup_type: 'api_key',
+  },
+  {
+    id: 'slack',
+    name: 'Slack',
+    description: 'Send messages and manage channels (tool: slack)',
+    category: 'communication',
+    icon: <FaSlack className="h-5 w-5 text-purple-600" />,
+    status: 'available',
+    setup_type: 'api_key',
   },
 ];
 

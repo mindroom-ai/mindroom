@@ -109,10 +109,10 @@ def register_tool_with_metadata(
             factory=func,
         )
 
-        # Store in registry
+        # Store in metadata registry
         TOOL_METADATA[name] = metadata
 
-        # Also register in the original TOOL_REGISTRY for backward compatibility
+        # Also register in TOOL_REGISTRY for actual tool loading
         from mindroom.tools import TOOL_REGISTRY
 
         TOOL_REGISTRY[name] = func
