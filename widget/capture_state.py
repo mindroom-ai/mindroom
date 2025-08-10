@@ -14,7 +14,7 @@ def capture_widget_state():
     output_dir = Path(__file__).parent / "captures"
     output_dir.mkdir(exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(tz=datetime.UTC).strftime("%Y%m%d_%H%M%S")
 
     try:
         # Get the current configuration
