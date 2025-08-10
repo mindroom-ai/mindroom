@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -10,6 +11,17 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from mindroom.config import Config
+
+# Import routers
+from .api.gmail_config import router as gmail_config_router
+from .api.google_auth import router as google_router
+from .api.google_setup_wizard import router as google_setup_router
+from .api.integrations import router as integrations_router
+
+# Load environment variables from .env file
+# Look for .env in the widget directory (parent of backend)
+env_path = Path(__file__).parent.parent.parent / ".env"
+load_dotenv(env_path)
 
 app = FastAPI(title="MindRoom Widget Backend")
 
@@ -68,6 +80,12 @@ load_config_from_file()
 observer = Observer()
 observer.schedule(ConfigFileHandler(), path=str(CONFIG_PATH.parent), recursive=False)
 observer.start()
+
+# Include routers
+app.include_router(gmail_config_router)
+app.include_router(google_router)
+app.include_router(google_setup_router)
+app.include_router(integrations_router)
 
 
 @app.on_event("startup")
@@ -361,6 +379,8 @@ async def get_available_tools():
         "github",
         "email",
         "telegram",
+        "gmail",
+        "integrations",
     ]
     return tools
 

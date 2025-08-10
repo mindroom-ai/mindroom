@@ -63,7 +63,7 @@ export function TeamList() {
       <CardContent className="flex-1 overflow-hidden p-0">
         <ScrollArea className="h-full px-4">
           {isCreating && (
-            <div className="mb-2 p-3 border rounded-lg bg-blue-50">
+            <div className="mb-2 p-3 border rounded-lg bg-amber-50 dark:bg-amber-900/20">
               <Input
                 placeholder="Team name..."
                 value={newTeamName}
@@ -101,11 +101,11 @@ export function TeamList() {
                 key={team.id}
                 onClick={() => selectTeam(team.id)}
                 className={cn(
-                  'w-full text-left p-3 rounded-lg transition-all duration-200',
-                  'hover:shadow-md hover:scale-[1.02]',
+                  'w-full text-left p-3 rounded-xl transition-all duration-200',
+                  'hover:shadow-md dark:hover:shadow-xl hover:scale-[1.01] hover:-translate-y-0.5',
                   selectedTeamId === team.id
-                    ? 'bg-gradient-to-r from-blue-500 to-purple-500 text-white shadow-lg'
-                    : 'bg-white border border-gray-200 hover:border-blue-300'
+                    ? 'bg-gradient-to-r from-primary to-primary/80 text-primary-foreground shadow-lg dark:shadow-2xl'
+                    : 'bg-white dark:bg-white/5 backdrop-blur-xl border border-gray-200 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-white/10 hover:border-gray-300 dark:hover:border-white/20'
                 )}
               >
                 <div className="flex items-start justify-between">
@@ -113,7 +113,9 @@ export function TeamList() {
                     <h3
                       className={cn(
                         'font-semibold',
-                        selectedTeamId === team.id ? 'text-white' : 'text-gray-900'
+                        selectedTeamId === team.id
+                          ? 'text-primary-foreground'
+                          : 'text-gray-900 dark:text-stone-100'
                       )}
                     >
                       {team.display_name}
@@ -121,7 +123,9 @@ export function TeamList() {
                     <p
                       className={cn(
                         'text-sm mt-1 line-clamp-2',
-                        selectedTeamId === team.id ? 'text-blue-100' : 'text-gray-600'
+                        selectedTeamId === team.id
+                          ? 'text-primary-foreground/90'
+                          : 'text-gray-600 dark:text-stone-400'
                       )}
                     >
                       {team.role}
@@ -130,7 +134,9 @@ export function TeamList() {
                       <span
                         className={cn(
                           'text-xs',
-                          selectedTeamId === team.id ? 'text-blue-100' : 'text-gray-500'
+                          selectedTeamId === team.id
+                            ? 'text-primary-foreground/80'
+                            : 'text-gray-500 dark:text-stone-400'
                         )}
                       >
                         {team.agents.length} agents
@@ -139,8 +145,8 @@ export function TeamList() {
                         className={cn(
                           'text-xs px-2 py-0.5 rounded-full',
                           selectedTeamId === team.id
-                            ? 'bg-white/20 text-white'
-                            : 'bg-gray-100 text-gray-600'
+                            ? 'bg-primary-foreground/20 text-primary-foreground backdrop-blur-md'
+                            : 'bg-gray-100 dark:bg-white/10 text-gray-700 dark:text-stone-200 backdrop-blur-md'
                         )}
                       >
                         {team.mode}

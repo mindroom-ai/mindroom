@@ -84,6 +84,26 @@ Think of it as a **chat-native operating system for AI** - where the chat interf
 - Configurable per-room schedules
 - Cron-based automation
 
+### External Integrations
+
+MindRoom connects with your favorite services through two modes:
+
+#### Simple Mode (No Setup Required)
+- Instant access to Amazon, Reddit, GitHub, weather, news, and more
+- No API keys or authentication needed
+- Perfect for quick searches and public information
+- Available through the widget's "✨ Simple Mode" tab
+
+#### Full Integrations (OAuth/API)
+- **Gmail**: Search and read emails
+- **Spotify**: Control playback, access playlists
+- **GitHub**: Access private repos, manage issues
+- **Reddit, Facebook, Dropbox**: Full API access
+- **Amazon, IMDb, Walmart**: Real-time data with API keys
+- One-click OAuth connections through the widget
+
+See [docs/integrations.md](docs/integrations.md) for complete setup guide.
+
 ### Advanced Capabilities
 
 #### Thread Management

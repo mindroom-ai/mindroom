@@ -167,6 +167,86 @@ def jina_tools() -> type:
     return JinaReaderTools
 
 
+@register_tool("gmail")
+def gmail_tools() -> type[Toolkit]:
+    """Gmail tools using Agno's native Gmail toolkit."""
+    from agno.tools.gmail import GmailTools
+
+    logger.info("Using Agno's native Gmail toolkit")
+    return GmailTools
+
+
+@register_tool("integrations")
+def integrations_tools() -> type[Toolkit]:
+    """Tools for various external service integrations."""
+    from agno.tools import Toolkit
+
+    from .integrations_tool import (
+        get_facebook_page,
+        get_imdb_details,
+        get_spotify_current,
+        list_dropbox_files,
+        search_amazon,
+        search_github_repos,
+        search_imdb,
+        search_reddit,
+        search_walmart,
+        send_telegram,
+    )
+
+    class IntegrationsTools(Toolkit):
+        """Toolkit for external service integrations."""
+
+        def __init__(self) -> None:
+            super().__init__(name="integrations")
+
+        def search_amazon(self, query: str, max_results: int = 5) -> str:
+            """Search Amazon for products."""
+            return search_amazon(query, max_results)
+
+        def search_imdb(self, query: str, type: str = "movie") -> str:
+            """Search IMDb for movies or TV shows."""
+            return search_imdb(query, type)
+
+        def get_imdb_details(self, title: str) -> str:
+            """Get detailed information about a movie or show."""
+            return get_imdb_details(title)
+
+        def get_spotify_current(self) -> str:
+            """Get currently playing track on Spotify."""
+            return get_spotify_current()
+
+        def search_walmart(self, query: str, max_results: int = 5) -> str:
+            """Search Walmart for products."""
+            return search_walmart(query, max_results)
+
+        def send_telegram(self, chat_id: str, message: str) -> str:
+            """Send a message via Telegram bot."""
+            return send_telegram(chat_id, message)
+
+        def search_reddit(self, query: str, subreddit: str | None = None, limit: int = 5) -> str:
+            """Search Reddit for posts."""
+            return search_reddit(query, subreddit, limit)
+
+        def list_dropbox_files(self, path: str = "/") -> str:
+            """List files in Dropbox folder."""
+            return list_dropbox_files(path)
+
+        def search_github_repos(self, query: str, limit: int = 5) -> str:
+            """Search GitHub repositories."""
+            return search_github_repos(query, limit)
+
+        def get_facebook_page(self, page_id: str) -> str:
+            """Get information about a Facebook page."""
+            return get_facebook_page(page_id)
+
+    return IntegrationsTools
+
+
+# Simple tools removed - functionality moved to proper API integrations
+# @register_tool("simple") - Removed as mocked implementations have been cleaned up
+
+
 def get_tool_by_name(tool_name: str) -> Any:
     """Get a tool instance by its registered name.
 

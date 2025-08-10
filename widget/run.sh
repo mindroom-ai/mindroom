@@ -5,8 +5,13 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Load .env file if it exists
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+fi
+
 # Set ports from environment variables or use defaults
-BACKEND_PORT=${BACKEND_PORT:-8001}
+BACKEND_PORT=${BACKEND_PORT:-8765}
 FRONTEND_PORT=${FRONTEND_PORT:-3003}
 
 echo -e "${BLUE}Starting MindRoom Configuration Widget...${NC}"
@@ -44,7 +49,7 @@ if [ ! -d "node_modules" ]; then
     pnpm install
 fi
 
-BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev &
+VITE_BACKEND_PORT=$BACKEND_PORT BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev &
 FRONTEND_PID=$!
 cd ..
 

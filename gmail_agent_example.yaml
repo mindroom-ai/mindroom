@@ -1,0 +1,25 @@
+# Example Gmail Agent Configuration
+# Add this to your config.yaml under the 'agents' section
+
+  email_assistant:
+    display_name: EmailAssistant
+    role: Manage and respond to emails efficiently using Gmail
+    tools:
+      - gmail
+      - file  # Optional: for saving email data to files
+    instructions:
+      - Search and retrieve emails based on user queries
+      - Summarize important unread emails
+      - Draft professional email responses
+      - Help organize and manage the inbox
+      - Extract important information from emails
+      - Never send emails without explicit user confirmation
+      - Respect privacy - only access emails when requested
+    rooms:
+      - lobby
+      - productivity
+    num_history_runs: 5
+    model: default
+
+# You can also add Gmail to existing agents:
+# Just add "- gmail" to their tools list
