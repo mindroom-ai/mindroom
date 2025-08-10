@@ -635,6 +635,15 @@ wheels = [
 ]
 
 [[package]]
+name = "defusedxml"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69", size = 75520, upload-time = "2021-03-08T10:59:26.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61", size = 25604, upload-time = "2021-03-08T10:59:24.45Z" },
+]
+
+[[package]]
 name = "diskcache"
 version = "5.6.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1543,16 +1552,20 @@ dependencies = [
     { name = "matrix-nio" },
     { name = "mcp", extra = ["cli"] },
     { name = "mem0ai" },
+    { name = "praw" },
     { name = "pycountry" },
     { name = "pydantic" },
     { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "rich" },
+    { name = "slack-sdk" },
     { name = "structlog" },
     { name = "tavily-python" },
+    { name = "tweepy" },
     { name = "typer" },
     { name = "wikipedia" },
+    { name = "youtube-transcript-api" },
 ]
 
 [package.dev-dependencies]
@@ -1590,16 +1603,20 @@ requires-dist = [
     { name = "matrix-nio", specifier = ">=0.24" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.12.4" },
     { name = "mem0ai", specifier = ">=0.1.115" },
+    { name = "praw" },
     { name = "pycountry" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pypdf" },
     { name = "python-dotenv", specifier = ">=1" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "rich", specifier = ">=13.10.5" },
+    { name = "slack-sdk" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "tavily-python" },
+    { name = "tweepy" },
     { name = "typer", specifier = ">=0.16" },
     { name = "wikipedia" },
+    { name = "youtube-transcript-api" },
 ]
 
 [package.metadata.requires-dev]
@@ -2303,6 +2320,32 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/48/20/60ae67bb9d82f00427946218d49e2e7e80fb41c15dc5019482289ec9ce8d/posthog-5.4.0.tar.gz", hash = "sha256:701669261b8d07cdde0276e5bc096b87f9e200e3b9589c5ebff14df658c5893c", size = 88076, upload-time = "2025-06-20T23:19:23.485Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4f/98/e480cab9a08d1c09b1c59a93dade92c1bb7544826684ff2acbfd10fcfbd4/posthog-5.4.0-py3-none-any.whl", hash = "sha256:284dfa302f64353484420b52d4ad81ff5c2c2d1d607c4e2db602ac72761831bd", size = 105364, upload-time = "2025-06-20T23:19:22.001Z" },
+]
+
+[[package]]
+name = "praw"
+version = "7.8.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "prawcore" },
+    { name = "update-checker" },
+    { name = "websocket-client" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4c/52/7dd0b3d9ccb78e90236420ef6c51b6d9b2400a7229442f0cfcf2258cce21/praw-7.8.1.tar.gz", hash = "sha256:3c5767909f71e48853eb6335fef7b50a43cbe3da728cdfb16d3be92904b0a4d8", size = 154106, upload-time = "2024-10-25T21:49:33.16Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/73/ca/60ec131c3b43bff58261167045778b2509b83922ce8f935ac89d871bd3ea/praw-7.8.1-py3-none-any.whl", hash = "sha256:15917a81a06e20ff0aaaf1358481f4588449fa2421233040cb25e5c8202a3e2f", size = 189338, upload-time = "2024-10-25T21:49:31.109Z" },
+]
+
+[[package]]
+name = "prawcore"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/62/d4c99cf472205f1e5da846b058435a6a7c988abf8eb6f7d632a7f32f4a77/prawcore-2.4.0.tar.gz", hash = "sha256:b7b2b5a1d04406e086ab4e79988dc794df16059862f329f4c6a43ed09986c335", size = 15862, upload-time = "2023-10-01T23:30:49.408Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/96/5c/8af904314e42d5401afcfaff69940dc448e974f80f7aa39b241a4fbf0cf1/prawcore-2.4.0-py3-none-any.whl", hash = "sha256:29af5da58d85704b439ad3c820873ad541f4535e00bb98c66f0fbcc8c603065a", size = 17203, upload-time = "2023-10-01T23:30:47.651Z" },
 ]
 
 [[package]]
@@ -3246,6 +3289,15 @@ wheels = [
 ]
 
 [[package]]
+name = "slack-sdk"
+version = "3.36.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/73/1e/bbf7fdd00306f097ddb839c23628b7e271128cc8f584b9cae8f704b3924e/slack_sdk-3.36.0.tar.gz", hash = "sha256:8586022bdbdf9f8f8d32f394540436c53b1e7c8da9d21e1eab4560ba70cfcffa", size = 233382, upload-time = "2025-07-09T20:58:22.838Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/70/9a/380d20856d9ea39fbc4d3bb66f076b0d72035ebe873eb05fc88ebee4125f/slack_sdk-3.36.0-py2.py3-none-any.whl", hash = "sha256:6c96887d7175fc1b0b2777b73bb65f39b5b8bee9bd8acfec071d64014f9e2d10", size = 293949, upload-time = "2025-07-09T20:58:21.233Z" },
+]
+
+[[package]]
 name = "smmap"
 version = "5.0.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3485,6 +3537,20 @@ wheels = [
 ]
 
 [[package]]
+name = "tweepy"
+version = "4.16.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "oauthlib" },
+    { name = "requests" },
+    { name = "requests-oauthlib" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6e/45/a73bb812b1817247d3f79b3b9a4784ab93a081853b697e87428caa8c287b/tweepy-4.16.0.tar.gz", hash = "sha256:1d95cbdc50bf6353a387f881f2584eaf60d14e00dbbdd8872a73de79c66878e3", size = 87646, upload-time = "2025-06-22T01:17:51.34Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ee/7c/3375cd1fbefcb8ead580fe324b1b6dcdc21aabf51562ee6def7266fcf363/tweepy-4.16.0-py3-none-any.whl", hash = "sha256:48d1a1eb311d2c4b8990abcfa6f9fa2b2ad61be05c723b1a9b4f242656badae2", size = 98843, upload-time = "2025-06-22T01:17:49.823Z" },
+]
+
+[[package]]
 name = "typer"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3566,6 +3632,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/4d/f8/114266b21a7a9e3d09b352bb63c9d61d918bb7aa35d08c722793bfbfd28f/unpaddedbase64-2.1.0.tar.gz", hash = "sha256:7273c60c089de39d90f5d6d4a7883a79e319dc9d9b1c8924a7fab96178a5f005", size = 5621, upload-time = "2021-03-09T11:35:47.729Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4c/a7/563b2d8fb7edc07320bf69ac6a7eedcd7a1a9d663a6bb90a4d9bd2eda5f7/unpaddedbase64-2.1.0-py3-none-any.whl", hash = "sha256:485eff129c30175d2cd6f0cd8d2310dff51e666f7f36175f738d75dfdbd0b1c6", size = 6083, upload-time = "2021-03-09T11:35:46.7Z" },
+]
+
+[[package]]
+name = "update-checker"
+version = "0.18.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5c/0b/1bec4a6cc60d33ce93d11a7bcf1aeffc7ad0aa114986073411be31395c6f/update_checker-0.18.0.tar.gz", hash = "sha256:6a2d45bb4ac585884a6b03f9eade9161cedd9e8111545141e9aa9058932acb13", size = 6699, upload-time = "2020-08-04T07:08:50.429Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/ba/8dd7fa5f0b1c6a8ac62f8f57f7e794160c1f86f31c6d0fb00f582372a3e4/update_checker-0.18.0-py3-none-any.whl", hash = "sha256:cbba64760a36fe2640d80d85306e8fe82b6816659190993b7bdabadee4d4bbfd", size = 7008, upload-time = "2020-08-04T07:08:49.51Z" },
 ]
 
 [[package]]
@@ -3882,6 +3960,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a3/c1/2ef5acda45a71297f4be22e205359e0f93b0171f2b6ebdd681362e725686/yfinance-0.2.65.tar.gz", hash = "sha256:3d465e58c49be9d61f9862829de3e00bef6b623809f32f4efb5197b62fc60485", size = 128666, upload-time = "2025-07-06T16:20:12.769Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c9/1e/631c80e0f97aef46eb73549b9b0f60d94057294e040740f4cad0cb1f48e4/yfinance-0.2.65-py2.py3-none-any.whl", hash = "sha256:7be13abb0d80a17230bf798e9c6a324fa2bef0846684a6d4f7fa2abd21938963", size = 119438, upload-time = "2025-07-06T16:20:11.251Z" },
+]
+
+[[package]]
+name = "youtube-transcript-api"
+version = "1.2.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "defusedxml" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/f8/5e12d3d0c7001c3b3078697b9918241022bdb1ae12715e9debb00a83e16e/youtube_transcript_api-1.2.2.tar.gz", hash = "sha256:5f67cfaff3621d969778817a3d7b2172c16784855f45fcaed4f0529632e2fef4", size = 469634, upload-time = "2025-08-04T12:22:52.158Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/41/92/3d1a580f0efcad926f45876cf6cb92b2c260e84ae75dae5463bbf38f92e7/youtube_transcript_api-1.2.2-py3-none-any.whl", hash = "sha256:feca8c7f7c9d65188ef6377fc0e01cf466e6b68f1b3e648019646ab342f994d2", size = 485047, upload-time = "2025-08-04T12:22:50.836Z" },
 ]
 
 [[package]]

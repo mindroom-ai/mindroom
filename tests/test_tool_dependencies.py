@@ -11,6 +11,9 @@ TOOLS_REQUIRING_CONFIG = {
     "email": "Requires SMTP configuration",
     "googlesearch": "Requires Google API credentials",
     "tavily": "Requires TAVILY_API_KEY environment variable",
+    "slack": "Requires SLACK_TOKEN environment variable",
+    "reddit": "Requires Reddit API credentials (client_id, client_secret)",
+    "twitter": "Requires Twitter API credentials",
 }
 
 
