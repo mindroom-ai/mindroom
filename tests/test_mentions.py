@@ -1,5 +1,7 @@
 """Tests for universal mention parsing."""
 
+from __future__ import annotations
+
 from mindroom.config import Config
 from mindroom.matrix.mentions import create_mention_content_from_text, parse_mentions_in_text
 

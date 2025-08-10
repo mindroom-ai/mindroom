@@ -1,6 +1,8 @@
 """Tests for MindRoom agent functionality."""
 
-from pathlib import Path
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,6 +10,9 @@ from agno.agent import Agent
 
 from mindroom.agents import create_agent
 from mindroom.config import Config
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @patch("mindroom.agents.SqliteStorage")

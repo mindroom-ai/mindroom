@@ -1,8 +1,9 @@
 """Tests for config auto-reload and room membership updates."""
 
+from __future__ import annotations
+
 import asyncio
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -126,21 +127,21 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     initial_config: Config,  # noqa: ARG001
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that agents join new rooms when their configuration is updated."""
     # Track room operations
     joined_rooms: dict[str, list[str]] = {}
     left_rooms: dict[str, list[str]] = {}
 
-    async def mock_join_room(client: Any, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
         if user_id not in joined_rooms:
             joined_rooms[user_id] = []
         joined_rooms[user_id].append(room_id)
         return True
 
-    async def mock_leave_room(client: Any, room_id: str) -> bool:
+    async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
         if user_id not in left_rooms:
             left_rooms[user_id] = []
@@ -151,7 +152,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -163,7 +164,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock get_joined_rooms to simulate current room membership
-    async def mock_get_joined_rooms(client: Any) -> list[str]:
+    async def mock_get_joined_rooms(client: AsyncMock) -> list[str]:
         user_id = client.user_id
         if "agent1" in user_id:
             return ["room1", "room2"]  # agent1 is currently in room1 and room2
@@ -207,18 +208,18 @@ async def test_router_updates_rooms_on_config_reload(
     initial_config: Config,
     updated_config: Config,
     mock_agent_users: dict[str, AgentMatrixUser],
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that the router updates its room list when agents/teams change their rooms."""
     # Track room operations
     joined_rooms: list[str] = []
     left_rooms: list[str] = []
 
-    async def mock_join_room(_client: Any, room_id: str) -> bool:
+    async def mock_join_room(_client: AsyncMock, room_id: str) -> bool:
         joined_rooms.append(room_id)
         return True
 
-    async def mock_leave_room(_client: Any, room_id: str) -> bool:
+    async def mock_leave_room(_client: AsyncMock, room_id: str) -> bool:
         left_rooms.append(room_id)
         return True
 
@@ -226,7 +227,7 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -238,7 +239,7 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock get_joined_rooms to simulate current room membership
-    async def mock_get_joined_rooms(_client: Any) -> list[str]:
+    async def mock_get_joined_rooms(_client: AsyncMock) -> list[str]:
         # Router is currently in initial config rooms
         return ["room1", "room2", "room3"]
 
@@ -281,19 +282,19 @@ async def test_new_agent_joins_rooms_on_config_reload(
     initial_config: Config,  # noqa: ARG001
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that new agents are created and join their configured rooms."""
     # Track room operations
     joined_rooms: dict[str, list[str]] = {}
 
-    async def mock_ensure_all_agent_users(_homeserver: Any) -> dict[str, AgentMatrixUser]:
+    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
         # Return both existing and new agent users
         return mock_agent_users
 
     monkeypatch.setattr("mindroom.matrix.users.ensure_all_agent_users", mock_ensure_all_agent_users)
 
-    async def mock_join_room(client: Any, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
         if user_id not in joined_rooms:
             joined_rooms[user_id] = []
@@ -303,7 +304,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -315,7 +316,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock get_joined_rooms
-    async def mock_get_joined_rooms(_client: Any) -> list[str]:
+    async def mock_get_joined_rooms(_client: AsyncMock) -> list[str]:
         return []  # New agent has no rooms initially
 
     monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
@@ -344,21 +345,21 @@ async def test_team_room_changes_on_config_reload(
     initial_config: Config,  # noqa: ARG001
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that teams update their room memberships when configuration changes."""
     # Track room operations
     joined_rooms: dict[str, list[str]] = {}
     left_rooms: dict[str, list[str]] = {}
 
-    async def mock_join_room(client: Any, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
         if user_id not in joined_rooms:
             joined_rooms[user_id] = []
         joined_rooms[user_id].append(room_id)
         return True
 
-    async def mock_leave_room(client: Any, room_id: str) -> bool:
+    async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
         user_id = client.user_id
         if user_id not in left_rooms:
             left_rooms[user_id] = []
@@ -369,7 +370,7 @@ async def test_team_room_changes_on_config_reload(
     monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -381,7 +382,7 @@ async def test_team_room_changes_on_config_reload(
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock get_joined_rooms to simulate current room membership
-    async def mock_get_joined_rooms(client: Any) -> list[str]:
+    async def mock_get_joined_rooms(client: AsyncMock) -> list[str]:
         user_id = client.user_id
         if "team1" in user_id:
             return ["room3"]  # team1 is currently only in room3
@@ -416,21 +417,21 @@ async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
     initial_config: Config,
     updated_config: Config,
     mock_agent_users: dict[str, AgentMatrixUser],
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that the orchestrator properly handles config reloads and updates all bots."""
     # Track config loads
     config_loads = [initial_config, updated_config]
     load_count = [0]
 
-    def mock_load_config(_config_path: Any = None) -> Config:
+    def mock_load_config(_config_path: Path | None = None) -> Config:
         result = config_loads[min(load_count[0], len(config_loads) - 1)]
         load_count[0] += 1
         return result
 
     monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
 
-    async def mock_ensure_all_agent_users(_homeserver: Any) -> dict[str, AgentMatrixUser]:
+    async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
         return mock_agent_users
 
     monkeypatch.setattr("mindroom.matrix.users.ensure_all_agent_users", mock_ensure_all_agent_users)
@@ -443,7 +444,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
     # Create orchestrator
     # Mock start/sync at class level so newly created bots during update_config don't perform real login/sync
     # But we need to ensure client gets set when start() is called
-    async def mock_start(self: Any) -> None:
+    async def mock_start(self: AgentBot) -> None:
         """Mock start that sets a mock client."""
         self.client = AsyncMock()
         self.client.user_id = self.agent_user.user_id
@@ -473,7 +474,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
     assert set(orchestrator.agent_bots[ROUTER_AGENT_NAME].rooms) == {"room1", "room2", "room3"}
 
     # Create a mock start method that initializes thread_invite_manager and client
-    async def mock_start_with_thread_manager(self: Any) -> None:
+    async def mock_start_with_thread_manager(self: AgentBot) -> None:
         """Mock start that initializes thread_invite_manager and client."""
         if not hasattr(self, "client") or self.client is None:
             self.client = AsyncMock()
@@ -534,7 +535,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
     initial_config: Config,  # noqa: ARG001
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that room membership state is correct after config updates."""
     # Simulate room membership state
@@ -559,11 +560,11 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
             if room_id in room_memberships and user_id in room_memberships[room_id]:
                 room_memberships[room_id].remove(user_id)
 
-    async def mock_join_room(client: Any, room_id: str) -> bool:
+    async def mock_join_room(client: AsyncMock, room_id: str) -> bool:
         update_room_membership(client.user_id, room_id, "join")
         return True
 
-    async def mock_leave_room(client: Any, room_id: str) -> bool:
+    async def mock_leave_room(client: AsyncMock, room_id: str) -> bool:
         update_room_membership(client.user_id, room_id, "leave")
         return True
 
@@ -571,7 +572,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
     monkeypatch.setattr("mindroom.bot.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -583,7 +584,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Mock get_joined_rooms based on room_memberships
-    async def mock_get_joined_rooms(client: Any) -> list[str]:
+    async def mock_get_joined_rooms(client: AsyncMock) -> list[str]:
         user_id = client.user_id
         rooms = []
         for room_id, members in room_memberships.items():

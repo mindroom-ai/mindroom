@@ -10,6 +10,8 @@ from agno.storage.sqlite import SqliteStorage
 from . import agent_prompts
 from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
+from .matrix import MATRIX_HOMESERVER
+from .matrix.identity import MatrixID, extract_server_name_from_homeserver
 from .tools import get_tool_by_name
 
 if TYPE_CHECKING:
@@ -51,7 +53,7 @@ def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
         ValueError: If agent_name is not found in configuration
 
     """
-    from .ai import get_model_instance
+    from .ai import get_model_instance  # noqa: PLC0415
 
     # Use passed config (config_path is deprecated)
     agent_config = config.get_agent(agent_name)
@@ -170,9 +172,6 @@ def describe_agent(agent_name: str, config: Config) -> str:
 
 def get_agent_ids_for_room(room_key: str, config: Config, homeserver: str | None = None) -> list[str]:
     """Get all agent Matrix IDs assigned to a specific room."""
-    from .matrix import MATRIX_HOMESERVER
-    from .matrix.identity import MatrixID, extract_server_name_from_homeserver
-
     # Determine server name
     server_url = homeserver or MATRIX_HOMESERVER
     server_name = extract_server_name_from_homeserver(server_url)

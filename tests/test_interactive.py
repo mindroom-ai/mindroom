@@ -1,5 +1,7 @@
 """Tests for the interactive Q&A system using Matrix reactions."""
 
+from __future__ import annotations
+
 from unittest.mock import AsyncMock, MagicMock
 
 import nio

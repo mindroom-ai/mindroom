@@ -16,18 +16,21 @@ Key insights learned during development:
 - aioresponses captures requests as dict with (method, URL) tuple as key
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import re
-from collections.abc import AsyncGenerator
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING
 
 import nio
 import pytest
 import pytest_asyncio
 from aioresponses import CallbackResult, aioresponses
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 TIMEOUT = 0.2
 
 
@@ -273,7 +276,7 @@ class TestMockingStrategy:
             # Capture the request
             request_data = None
 
-            async def capture_request(_url: str, **kwargs: Any) -> CallbackResult:
+            async def capture_request(_url: str, **kwargs: dict[str, object]) -> CallbackResult:
                 nonlocal request_data
                 request_data = kwargs
 

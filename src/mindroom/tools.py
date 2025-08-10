@@ -79,7 +79,7 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
 )
 def calculator_tools() -> type[CalculatorTools]:
     """Return calculator tools for mathematical operations."""
-    from agno.tools.calculator import CalculatorTools
+    from agno.tools.calculator import CalculatorTools  # noqa: PLC0415
 
     return CalculatorTools
 
@@ -94,7 +94,7 @@ def calculator_tools() -> type[CalculatorTools]:
 )
 def file_tools() -> type[FileTools]:
     """Return file tools for file system operations."""
-    from agno.tools.file import FileTools
+    from agno.tools.file import FileTools  # noqa: PLC0415
 
     return FileTools
 
@@ -109,7 +109,7 @@ def file_tools() -> type[FileTools]:
 )
 def shell_tools() -> type[ShellTools]:
     """Return shell tools for command execution."""
-    from agno.tools.shell import ShellTools
+    from agno.tools.shell import ShellTools  # noqa: PLC0415
 
     return ShellTools
 
@@ -124,7 +124,7 @@ def shell_tools() -> type[ShellTools]:
 )
 def python_tools() -> type[PythonTools]:
     """Return Python tools for code execution."""
-    from agno.tools.python import PythonTools
+    from agno.tools.python import PythonTools  # noqa: PLC0415
 
     return PythonTools
 
@@ -140,7 +140,7 @@ def python_tools() -> type[PythonTools]:
 )
 def docker_tools() -> type[DockerTools]:
     """Return Docker tools for container management."""
-    from agno.tools.docker import DockerTools
+    from agno.tools.docker import DockerTools  # noqa: PLC0415
 
     return DockerTools
 
@@ -159,7 +159,7 @@ def docker_tools() -> type[DockerTools]:
 )
 def github_tools() -> type[GithubTools]:
     """Return GitHub tools for repository management."""
-    from agno.tools.github import GithubTools
+    from agno.tools.github import GithubTools  # noqa: PLC0415
 
     return GithubTools
 
@@ -176,7 +176,7 @@ def github_tools() -> type[GithubTools]:
 )
 def csv_tools() -> type[CsvTools]:
     """Return CSV tools for data processing."""
-    from agno.tools.csv_toolkit import CsvTools
+    from agno.tools.csv_toolkit import CsvTools  # noqa: PLC0415
 
     return CsvTools
 
@@ -192,7 +192,7 @@ def csv_tools() -> type[CsvTools]:
 )
 def arxiv_tools() -> type[ArxivTools]:
     """Return ArXiv tools for academic paper research."""
-    from agno.tools.arxiv import ArxivTools
+    from agno.tools.arxiv import ArxivTools  # noqa: PLC0415
 
     return ArxivTools
 
@@ -208,7 +208,7 @@ def arxiv_tools() -> type[ArxivTools]:
 )
 def duckduckgo_tools() -> type[DuckDuckGoTools]:
     """Return DuckDuckGo tools for web search."""
-    from agno.tools.duckduckgo import DuckDuckGoTools
+    from agno.tools.duckduckgo import DuckDuckGoTools  # noqa: PLC0415
 
     return DuckDuckGoTools
 
@@ -224,7 +224,7 @@ def duckduckgo_tools() -> type[DuckDuckGoTools]:
 )
 def wikipedia_tools() -> type[WikipediaTools]:
     """Return Wikipedia tools for encyclopedia research."""
-    from agno.tools.wikipedia import WikipediaTools
+    from agno.tools.wikipedia import WikipediaTools  # noqa: PLC0415
 
     return WikipediaTools
 
@@ -240,7 +240,7 @@ def wikipedia_tools() -> type[WikipediaTools]:
 )
 def newspaper_tools() -> type[NewspaperTools]:
     """Return newspaper tools for article extraction."""
-    from agno.tools.newspaper import NewspaperTools
+    from agno.tools.newspaper import NewspaperTools  # noqa: PLC0415
 
     return NewspaperTools
 
@@ -256,7 +256,7 @@ def newspaper_tools() -> type[NewspaperTools]:
 )
 def yfinance_tools() -> type[YFinanceTools]:
     """Return Yahoo Finance tools for financial data."""
-    from agno.tools.yfinance import YFinanceTools
+    from agno.tools.yfinance import YFinanceTools  # noqa: PLC0415
 
     return YFinanceTools
 
@@ -272,7 +272,7 @@ def yfinance_tools() -> type[YFinanceTools]:
 )
 def pandas_tools() -> type[PandasTools]:
     """Return Pandas tools for data analysis."""
-    from agno.tools.pandas import PandasTools
+    from agno.tools.pandas import PandasTools  # noqa: PLC0415
 
     return PandasTools
 
@@ -291,7 +291,7 @@ def pandas_tools() -> type[PandasTools]:
 )
 def tavily_tools() -> type[TavilyTools]:
     """Return Tavily tools for AI-powered search."""
-    from agno.tools.tavily import TavilyTools
+    from agno.tools.tavily import TavilyTools  # noqa: PLC0415
 
     return TavilyTools
 
@@ -307,7 +307,7 @@ def tavily_tools() -> type[TavilyTools]:
 )
 def googlesearch_tools() -> type[GoogleSearchTools]:
     """Return Google Search tools for web queries."""
-    from agno.tools.googlesearch import GoogleSearchTools
+    from agno.tools.googlesearch import GoogleSearchTools  # noqa: PLC0415
 
     return GoogleSearchTools
 
@@ -322,7 +322,7 @@ def googlesearch_tools() -> type[GoogleSearchTools]:
 )
 def website_tools() -> type[WebsiteTools]:
     """Return website tools for web scraping."""
-    from agno.tools.website import WebsiteTools
+    from agno.tools.website import WebsiteTools  # noqa: PLC0415
 
     return WebsiteTools
 
@@ -341,7 +341,7 @@ def website_tools() -> type[WebsiteTools]:
 )
 def jina_tools() -> type[JinaReaderTools]:
     """Return Jina tools for document reading."""
-    from agno.tools.jina import JinaReaderTools
+    from agno.tools.jina import JinaReaderTools  # noqa: PLC0415
 
     return JinaReaderTools
 
@@ -360,7 +360,7 @@ def jina_tools() -> type[JinaReaderTools]:
 )
 def email_tools() -> type[EmailTools]:
     """Return email tools for message handling."""
-    from agno.tools.email import EmailTools
+    from agno.tools.email import EmailTools  # noqa: PLC0415
 
     return EmailTools
 
@@ -379,7 +379,7 @@ def email_tools() -> type[EmailTools]:
 )
 def telegram_tools() -> type[TelegramTools]:
     """Return Telegram tools for messaging integration."""
-    from agno.tools.telegram import TelegramTools
+    from agno.tools.telegram import TelegramTools  # noqa: PLC0415
 
     return TelegramTools
 
@@ -398,7 +398,7 @@ def telegram_tools() -> type[TelegramTools]:
 )
 def slack_tools() -> type[SlackTools]:
     """Slack tools for messaging and channel management."""
-    from agno.tools.slack import SlackTools
+    from agno.tools.slack import SlackTools  # noqa: PLC0415
 
     return SlackTools
 
@@ -418,7 +418,7 @@ def slack_tools() -> type[SlackTools]:
 )
 def gmail_tools() -> type[GmailTools]:
     """Gmail tools using Agno's native Gmail toolkit."""
-    from agno.tools.gmail import GmailTools
+    from agno.tools.gmail import GmailTools  # noqa: PLC0415
 
     logger.info("Using Agno's native Gmail toolkit")
     return GmailTools
@@ -439,7 +439,7 @@ def gmail_tools() -> type[GmailTools]:
 )
 def reddit_tools() -> type[RedditTools]:
     """Reddit tools for browsing and searching Reddit."""
-    from agno.tools.reddit import RedditTools
+    from agno.tools.reddit import RedditTools  # noqa: PLC0415
 
     return RedditTools
 
@@ -464,7 +464,7 @@ def reddit_tools() -> type[RedditTools]:
 )
 def twitter_tools() -> type[XTools]:
     """Twitter/X tools for posting and searching tweets."""
-    from agno.tools.x import XTools
+    from agno.tools.x import XTools  # noqa: PLC0415
 
     return XTools
 
@@ -483,7 +483,7 @@ def twitter_tools() -> type[XTools]:
 )
 def youtube_tools() -> type[YouTubeTools]:
     """YouTube tools for searching and getting video information."""
-    from agno.tools.youtube import YouTubeTools
+    from agno.tools.youtube import YouTubeTools  # noqa: PLC0415
 
     return YouTubeTools
 

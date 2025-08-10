@@ -5,19 +5,24 @@ These tests ensure that fixed bugs don't resurface, particularly:
 2. Only mentioned agents should respond
 """
 
-from pathlib import Path
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config import Config
+from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def setup_test_bot(
@@ -221,8 +226,6 @@ class TestRoutingRegression:
     ) -> None:
         """Test that when multiple agents are mentioned, each responds exactly once."""
         # Create a mock config with proper models
-        from mindroom.config import AgentConfig, Config, ModelConfig
-
         mock_config = Config(
             agents={
                 "research": AgentConfig(display_name="ResearchAgent", rooms=["!research:localhost"]),

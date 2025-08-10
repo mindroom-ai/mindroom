@@ -8,10 +8,13 @@ of threads immediately upon invitation.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
+
+if TYPE_CHECKING:
+    from nio.responses import Response
 import pytest
 
 from mindroom.bot import AgentBot
@@ -272,7 +275,7 @@ async def test_bot_leaves_room_preserves_thread_invitations() -> None:
     # Track which rooms were left
     left_rooms = []
 
-    async def mock_room_leave(room_id: str) -> Any:
+    async def mock_room_leave(room_id: str) -> Response:
         left_rooms.append(room_id)
         response = MagicMock()
         response.__class__ = nio.RoomLeaveResponse

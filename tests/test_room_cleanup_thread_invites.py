@@ -7,7 +7,6 @@ configured for the room.
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -59,7 +58,7 @@ async def test_cleanup_preserves_invited_agents() -> None:
     thread_invite_manager.get_agent_threads = AsyncMock(side_effect=mock_get_agent_threads)
 
     # Mock get_room_members to return various bots
-    async def mock_get_room_members(_client: Any, _room_id: str) -> list[str]:
+    async def mock_get_room_members(_client: AsyncMock, _room_id: str) -> list[str]:
         return [
             "@mindroom_calculator:localhost",  # Not configured but has thread invitations
             "@mindroom_general:localhost",  # Not configured, no invitations (should be kicked)
@@ -69,7 +68,7 @@ async def test_cleanup_preserves_invited_agents() -> None:
     # Track kicked bots
     kicked_bots = []
 
-    async def mock_room_kick(_room_id: str, user_id: str, reason: str = "") -> Any:  # noqa: ARG001
+    async def mock_room_kick(_room_id: str, user_id: str, reason: str = "") -> MagicMock:  # noqa: ARG001
         kicked_bots.append(user_id)
         response = MagicMock()
         response.__class__ = nio.RoomKickResponse
@@ -154,7 +153,7 @@ async def test_cleanup_all_preserves_invited_agents() -> None:
     thread_invite_manager.get_agent_threads = AsyncMock(side_effect=mock_get_agent_threads)
 
     # Mock get_room_members for each room
-    async def mock_get_room_members(_client: Any, room_id: str) -> list[str]:
+    async def mock_get_room_members(_client: AsyncMock, room_id: str) -> list[str]:
         if room_id == "!room1:localhost":
             return [
                 "@mindroom_calculator:localhost",  # Has thread invitation here
@@ -169,7 +168,7 @@ async def test_cleanup_all_preserves_invited_agents() -> None:
     # Track kicked bots per room
     kicked_bots_by_room: dict[str, list[str]] = {}
 
-    async def mock_room_kick(room_id: str, user_id: str, reason: str = "") -> Any:  # noqa: ARG001
+    async def mock_room_kick(room_id: str, user_id: str, reason: str = "") -> MagicMock:  # noqa: ARG001
         if room_id not in kicked_bots_by_room:
             kicked_bots_by_room[room_id] = []
         kicked_bots_by_room[room_id].append(user_id)
