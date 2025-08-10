@@ -52,6 +52,7 @@ class ToolMetadata:
     icon: str | None = None  # Icon identifier for frontend
     requires_config: list[str] | None = None  # Required env vars or config
     dependencies: list[str] | None = None  # Required pip packages
+    docs_url: str | None = None  # Documentation URL
     factory: Callable[[], type] | None = None  # Tool factory function
 
 
@@ -69,6 +70,7 @@ def register_tool_with_metadata(
     icon: str | None = None,
     requires_config: list[str] | None = None,
     dependencies: list[str] | None = None,
+    docs_url: str | None = None,
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
     """Enhanced decorator to register a tool with full metadata.
 
@@ -82,6 +84,7 @@ def register_tool_with_metadata(
         icon: Icon identifier
         requires_config: Required configuration
         dependencies: Required pip packages
+        docs_url: Documentation URL
 
     Returns:
         Decorator function
@@ -106,6 +109,7 @@ def register_tool_with_metadata(
             icon=icon,
             requires_config=requires_config,
             dependencies=dependencies,
+            docs_url=docs_url,
             factory=func,
         )
 

@@ -26,16 +26,19 @@ dependencies = [
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
   "google-auth-oauthlib>=1.2.2",
-  "googlesearch-python",                                                                                         # for Google tool
+  "googlesearch-python",                                                                                         # for Google Search tool
+  "httpx>=0.27",                                                                                                 # for Jina and Telegram tools
   "loguru>=0.7.3",
   "markdown>=3.7",                                                                                               # for HTML formatting in Matrix messages
   "matrix-nio>=0.24",
   "mcp[cli]>=1.12.4",
   "mem0ai>=0.1.115",
+  "pandas>=2.2",                                                                                                 # for Pandas data analysis tool
   # Integration tools (optional, but included for convenience)
   "praw",                   # for Reddit tool
-  "pycountry",              # for Google tool
+  "pycountry",              # for Google Search tool
   "pydantic>=2",
+  "pygithub>=2.5",          # for GitHub tool
   "pypdf",                  # for Arxiv tool
   "python-dotenv>=1",
   "pyyaml>=6",
@@ -48,7 +51,7 @@ dependencies = [
   "typer>=0.16",
   "uvicorn>=0.35",
   "watchdog>=6",
-  "wikipedia",              # for Wikipedia tool
+  "wikipedia-api>=0.7",     # for Wikipedia tool (correct package)
   "youtube-transcript-api", # for YouTube tool
 ]
 
