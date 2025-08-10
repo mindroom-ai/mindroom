@@ -69,7 +69,7 @@ class TestMockingStrategy:
                 assert len(m.requests) == 1
         else:
             # WITHOUT mocking - should fail
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises((ConnectionError, TimeoutError, OSError)) as exc_info:
                 # Can't modify frozen config, just let it fail
                 await asyncio.wait_for(client.login("password"), timeout=TIMEOUT)
 

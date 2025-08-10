@@ -14,7 +14,25 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from agno.tools import Toolkit
-
+    from agno.tools.arxiv import ArxivTools
+    from agno.tools.calculator import CalculatorTools
+    from agno.tools.csv_toolkit import CsvTools
+    from agno.tools.docker import DockerTools
+    from agno.tools.duckduckgo import DuckDuckGoTools
+    from agno.tools.email import EmailTools
+    from agno.tools.file import FileTools
+    from agno.tools.github import GithubTools
+    from agno.tools.googlesearch import GoogleSearchTools
+    from agno.tools.jina import JinaReaderTools
+    from agno.tools.newspaper import NewspaperTools
+    from agno.tools.pandas import PandasTools
+    from agno.tools.python import PythonTools
+    from agno.tools.shell import ShellTools
+    from agno.tools.tavily import TavilyTools
+    from agno.tools.telegram import TelegramTools
+    from agno.tools.website import WebsiteTools
+    from agno.tools.wikipedia import WikipediaTools
+    from agno.tools.yfinance import YFinanceTools
 # Registry mapping tool names to their factory functions
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 
@@ -39,7 +57,7 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
 
 # Register all available tools
 @register_tool("calculator")
-def calculator_tools() -> Toolkit:
+def calculator_tools() -> type[CalculatorTools]:
     """Return calculator tools for mathematical operations."""
     from agno.tools.calculator import CalculatorTools
 
@@ -47,7 +65,7 @@ def calculator_tools() -> Toolkit:
 
 
 @register_tool("file")
-def file_tools() -> Toolkit:
+def file_tools() -> type[FileTools]:
     """Return file tools for file system operations."""
     from agno.tools.file import FileTools
 
@@ -55,7 +73,7 @@ def file_tools() -> Toolkit:
 
 
 @register_tool("shell")
-def shell_tools() -> Toolkit:
+def shell_tools() -> type[ShellTools]:
     """Return shell tools for command execution."""
     from agno.tools.shell import ShellTools
 
@@ -63,7 +81,7 @@ def shell_tools() -> Toolkit:
 
 
 @register_tool("csv")
-def csv_tools() -> Toolkit:
+def csv_tools() -> type[CsvTools]:
     """Return CSV tools for data processing."""
     from agno.tools.csv_toolkit import CsvTools
 
@@ -71,7 +89,7 @@ def csv_tools() -> Toolkit:
 
 
 @register_tool("arxiv")
-def arxiv_tools() -> Toolkit:
+def arxiv_tools() -> type[ArxivTools]:
     """Return ArXiv tools for academic paper research."""
     from agno.tools.arxiv import ArxivTools
 
@@ -79,7 +97,7 @@ def arxiv_tools() -> Toolkit:
 
 
 @register_tool("duckduckgo")
-def duckduckgo_tools() -> Toolkit:
+def duckduckgo_tools() -> type[DuckDuckGoTools]:
     """Return DuckDuckGo tools for web search."""
     from agno.tools.duckduckgo import DuckDuckGoTools
 
@@ -87,7 +105,7 @@ def duckduckgo_tools() -> Toolkit:
 
 
 @register_tool("wikipedia")
-def wikipedia_tools() -> Toolkit:
+def wikipedia_tools() -> type[WikipediaTools]:
     """Return Wikipedia tools for encyclopedia research."""
     from agno.tools.wikipedia import WikipediaTools
 
@@ -95,7 +113,7 @@ def wikipedia_tools() -> Toolkit:
 
 
 @register_tool("newspaper")
-def newspaper_tools() -> Toolkit:
+def newspaper_tools() -> type[NewspaperTools]:
     """Return newspaper tools for article extraction."""
     from agno.tools.newspaper import NewspaperTools
 
@@ -103,7 +121,7 @@ def newspaper_tools() -> Toolkit:
 
 
 @register_tool("yfinance")
-def yfinance_tools() -> Toolkit:
+def yfinance_tools() -> type[YFinanceTools]:
     """Return Yahoo Finance tools for financial data."""
     from agno.tools.yfinance import YFinanceTools
 
@@ -111,7 +129,7 @@ def yfinance_tools() -> Toolkit:
 
 
 @register_tool("python")
-def python_tools() -> Toolkit:
+def python_tools() -> type[PythonTools]:
     """Return Python tools for code execution."""
     from agno.tools.python import PythonTools
 
@@ -119,7 +137,7 @@ def python_tools() -> Toolkit:
 
 
 @register_tool("pandas")
-def pandas_tools() -> Toolkit:
+def pandas_tools() -> type[PandasTools]:
     """Return Pandas tools for data analysis."""
     from agno.tools.pandas import PandasTools
 
@@ -127,7 +145,7 @@ def pandas_tools() -> Toolkit:
 
 
 @register_tool("docker")
-def docker_tools() -> Toolkit:
+def docker_tools() -> type[DockerTools]:
     """Return Docker tools for container management."""
     from agno.tools.docker import DockerTools
 
@@ -135,7 +153,7 @@ def docker_tools() -> Toolkit:
 
 
 @register_tool("github")
-def github_tools() -> Toolkit:
+def github_tools() -> type[GithubTools]:
     """Return GitHub tools for repository management."""
     from agno.tools.github import GithubTools
 
@@ -143,7 +161,7 @@ def github_tools() -> Toolkit:
 
 
 @register_tool("email")
-def email_tools() -> Toolkit:
+def email_tools() -> type[EmailTools]:
     """Return email tools for message handling."""
     from agno.tools.email import EmailTools
 
@@ -151,7 +169,7 @@ def email_tools() -> Toolkit:
 
 
 @register_tool("telegram")
-def telegram_tools() -> Toolkit:
+def telegram_tools() -> type[TelegramTools]:
     """Return Telegram tools for messaging integration."""
     from agno.tools.telegram import TelegramTools
 
@@ -159,7 +177,7 @@ def telegram_tools() -> Toolkit:
 
 
 @register_tool("tavily")
-def tavily_tools() -> Toolkit:
+def tavily_tools() -> type[TavilyTools]:
     """Return Tavily tools for AI-powered search."""
     from agno.tools.tavily import TavilyTools
 
@@ -167,7 +185,7 @@ def tavily_tools() -> Toolkit:
 
 
 @register_tool("googlesearch")
-def googlesearch_tools() -> Toolkit:
+def googlesearch_tools() -> type[GoogleSearchTools]:
     """Return Google Search tools for web queries."""
     from agno.tools.googlesearch import GoogleSearchTools
 
@@ -175,7 +193,7 @@ def googlesearch_tools() -> Toolkit:
 
 
 @register_tool("website")
-def website_tools() -> Toolkit:
+def website_tools() -> type[WebsiteTools]:
     """Return website tools for web scraping."""
     from agno.tools.website import WebsiteTools
 
@@ -183,7 +201,7 @@ def website_tools() -> Toolkit:
 
 
 @register_tool("jina")
-def jina_tools() -> Toolkit:
+def jina_tools() -> type[JinaReaderTools]:
     """Return Jina tools for document reading."""
     from agno.tools.jina import JinaReaderTools
 

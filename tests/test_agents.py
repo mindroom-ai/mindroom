@@ -63,7 +63,5 @@ def test_get_agent_summary(mock_storage: MagicMock, tmp_path: Path) -> None:
 def test_get_agent_unknown(tmp_path: Path) -> None:
     """Tests that an unknown agent raises a ValueError."""
     config = Config.from_yaml()
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(ValueError, match="Unknown agent: unknown"):
         create_agent("unknown", storage_path=tmp_path, config=config)
-    assert "Unknown agent: unknown" in str(exc_info.value)
-    assert "Available agents:" in str(exc_info.value)

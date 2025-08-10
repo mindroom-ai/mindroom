@@ -249,8 +249,6 @@ async def ai_response(
             store_conversation_memory(prompt, agent_name, storage_path, session_id, config, room_id),
             name=f"memory_save_{agent_name}_{session_id}",
         )
-
-        return response_text
     except Exception as e:
         # AI models can fail for various reasons (network, API limits, etc)
         logger.exception("Error generating AI response for agent %s", agent_name)
@@ -260,6 +258,8 @@ async def ai_response(
         )
         logger.exception(f"Traceback:\n{traceback.format_exc()}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"
+    else:
+        return response_text
 
 
 async def ai_response_streaming(  # noqa: C901
