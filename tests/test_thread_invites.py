@@ -1,6 +1,6 @@
 """Tests for thread-specific agent invitations."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import nio
@@ -185,7 +185,7 @@ async def test_remove_invite(invite_manager: ThreadInviteManager, mock_client: A
 async def test_cleanup_inactive_agents(invite_manager: ThreadInviteManager, mock_client: AsyncMock) -> None:
     """Test cleanup of inactive agents using last_activity."""
     # Mock room_get_state to return some expired and non-expired invitations
-    now = datetime.now()
+    now = datetime.now(tz=UTC)
     old_time = (now - timedelta(hours=25)).isoformat()  # 25 hours ago - expired
     recent_time = (now - timedelta(hours=1)).isoformat()  # 1 hour ago - not expired
 

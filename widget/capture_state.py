@@ -4,7 +4,7 @@
 import json
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -14,7 +14,7 @@ def capture_widget_state():
     output_dir = Path(__file__).parent / "captures"
     output_dir.mkdir(exist_ok=True)
 
-    timestamp = datetime.now(tz=datetime.UTC).strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
 
     try:
         # Get the current configuration
@@ -28,7 +28,7 @@ def capture_widget_state():
 
         # Save the configuration state
         state_file = output_dir / f"widget_state_{timestamp}.json"
-        with open(state_file, "w") as f:
+        with state_file.open("w") as f:
             json.dump(config, f, indent=2)
 
         print(f"✓ Configuration state saved to: {state_file}")
@@ -56,7 +56,7 @@ def capture_widget_state():
         }
 
         summary_file = output_dir / f"widget_summary_{timestamp}.json"
-        with open(summary_file, "w") as f:
+        with summary_file.open("w") as f:
             json.dump(summary, f, indent=2)
 
         print(f"✓ Summary saved to: {summary_file}")

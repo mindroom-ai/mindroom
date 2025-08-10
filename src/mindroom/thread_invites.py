@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import nio
 
@@ -30,7 +30,7 @@ class ThreadInviteManager:
         agent_name: str,
         invited_by: str,
     ) -> None:
-        now = datetime.now().isoformat()
+        now = datetime.now(tz=UTC).isoformat()
         await self.client.room_put_state(
             room_id=room_id,
             event_type=THREAD_INVITE_EVENT_TYPE,
@@ -118,7 +118,7 @@ class ThreadInviteManager:
             room_id=room_id,
             event_type=AGENT_ACTIVITY_EVENT_TYPE,
             content={
-                "last_activity": datetime.now().isoformat(),
+                "last_activity": datetime.now(tz=UTC).isoformat(),
             },
             state_key=agent_name,
         )
@@ -159,7 +159,7 @@ class ThreadInviteManager:
             return 0
 
         # Check activity for each invited agent
-        now = datetime.now()
+        now = datetime.now(tz=UTC)
         threshold = timedelta(hours=timeout_hours)
         agents_to_remove = []
 

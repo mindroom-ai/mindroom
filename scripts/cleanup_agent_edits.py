@@ -22,7 +22,7 @@ Usage:
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import psycopg2
 import typer
@@ -77,7 +77,7 @@ def find_messages_with_edits(
 ) -> dict:
     """Find messages from agents that have excessive edit history."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cutoff_time = int((datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).timestamp() * 1000)
+        cutoff_time = int((datetime.now(UTC) - timedelta(hours=older_than_hours)).timestamp() * 1000)
         agent_ids_str = ",".join(f"'{uid}'" for uid in agent_user_ids)
 
         query = f"""  # noqa: S608

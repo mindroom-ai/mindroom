@@ -1,6 +1,6 @@
 """Pydantic models for Matrix state."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Self
 
@@ -23,7 +23,7 @@ class MatrixRoom(BaseModel):
     room_id: str
     alias: str
     name: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @field_serializer("created_at")
     def serialize_datetime(self, dt: datetime) -> str:
@@ -70,7 +70,7 @@ class MatrixState(BaseModel):
 
     def add_room(self, key: str, room_id: str, alias: str, name: str) -> None:
         """Add or update a room."""
-        self.rooms[key] = MatrixRoom(room_id=room_id, alias=alias, name=name, created_at=datetime.now(tz=timezone.utc))
+        self.rooms[key] = MatrixRoom(room_id=room_id, alias=alias, name=name, created_at=datetime.now(tz=UTC))
 
     def get_room_aliases(self) -> dict[str, str]:
         """Get mapping of room aliases to room IDs."""
