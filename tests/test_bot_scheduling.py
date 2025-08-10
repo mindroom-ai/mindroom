@@ -80,8 +80,8 @@ class TestBotScheduleCommands:
 
     @pytest.mark.asyncio
     async def test_handle_schedule_command_no_message(self, mock_agent_bot: AgentBot) -> None:
-        mock_agent_bot.response_tracker = MagicMock()
         """Test schedule command with no message uses default."""
+        mock_agent_bot.response_tracker = MagicMock()
         room = MagicMock()
         room.room_id = "!test:server"
 

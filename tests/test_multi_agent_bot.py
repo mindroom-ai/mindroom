@@ -635,9 +635,7 @@ class TestMultiAgentOrchestrator:
             bot.running = False
 
         # Start the orchestrator but don't wait for sync_forever
-        start_tasks = []
-        for bot in orchestrator.agent_bots.values():
-            start_tasks.append(bot.start())
+        start_tasks = [bot.start() for bot in orchestrator.agent_bots.values()]
 
         await asyncio.gather(*start_tasks)
         orchestrator.running = True  # Manually set since we're not calling orchestrator.start()

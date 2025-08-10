@@ -59,7 +59,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
-    async def test_streaming_agent_mentions_another_agent(
+    async def test_streaming_agent_mentions_another_agent(  # noqa: PLR0915
         self,
         mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,

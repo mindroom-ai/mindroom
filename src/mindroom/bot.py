@@ -1197,10 +1197,11 @@ class MultiAgentOrchestrator:
                 del self.agent_bots[entity_name]
 
         # Setup rooms and have new/restarted bots join them
-        bots_to_setup = []
-        for entity_name in entities_to_restart | new_entities:
-            if entity_name in self.agent_bots:
-                bots_to_setup.append(self.agent_bots[entity_name])
+        bots_to_setup = [
+            self.agent_bots[entity_name] 
+            for entity_name in entities_to_restart | new_entities
+            if entity_name in self.agent_bots
+        ]
 
         if bots_to_setup:
             await self._setup_rooms_and_memberships(bots_to_setup)

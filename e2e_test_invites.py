@@ -235,7 +235,8 @@ async def test_thread_invitations(test: InviteE2ETest) -> None:
 
     # Filter for thread messages
     thread_messages = [
-        msg for msg in messages
+        msg
+        for msg in messages
         if "123 * 456" in msg["body"] or "56088" in msg["body"] or "/invite" in msg["body"] or "Invited" in msg["body"]
     ]
 

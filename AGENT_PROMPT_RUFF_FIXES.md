@@ -21,7 +21,7 @@ You are tasked with fixing ruff linting errors in the mindroom codebase. There a
 
 ### Agent 1: Unused Arguments (44 errors)
 **Error Code**: ARG002 - Unused method argument
-**Your Task**: 
+**Your Task**:
 1. Run `ruff check --select ARG002` to find all instances
 2. For each error, determine if it's:
    - A callback/override method → Add `# noqa: ARG002` on the line
@@ -58,7 +58,7 @@ You are tasked with fixing ruff linting errors in the mindroom codebase. There a
    def get_name(self):
        """Return the name of the object."""
        return self.name
-   
+
    def _internal_helper(self):  # noqa: D103
        return self._value * 2
    ```
@@ -72,7 +72,7 @@ You are tasked with fixing ruff linting errors in the mindroom codebase. There a
    ```python
    def process(self, data, validate=True):
        """Process the given data.
-       
+
        Args:
            data: The data to process
            validate: Whether to validate the data first
@@ -120,10 +120,10 @@ You are tasked with fixing ruff linting errors in the mindroom codebase. There a
    ```bash
    # Check your specific errors are fixed
    ruff check --select YOUR_ERROR_CODES
-   
+
    # Run tests to ensure nothing broke
    pytest tests/
-   
+
    # Check overall error count
    ruff check --statistics
    ```

@@ -14,7 +14,7 @@
 - **Fix**: Add `# noqa: ARG002` where legitimate (callbacks, overrides)
 - **Example files**: tests/, callback handlers
 
-#### 2. Hardcoded Passwords - S105 (23 errors)  
+#### 2. Hardcoded Passwords - S105 (23 errors)
 - **Location**: Test files with test credentials
 - **Fix**: Add `# noqa: S105` for test passwords
 - **Example**: `password = "test_password_123"  # noqa: S105`
@@ -27,7 +27,7 @@
 
 #### 4. Missing Docstrings - D103, D102, D105 (33 errors)
 - D103: Missing docstring in public function (20)
-- D102: Missing docstring in public method (10)  
+- D102: Missing docstring in public method (10)
 - D105: Missing docstring in magic method (3)
 - **Fix**: Add docstrings or add `# noqa` for trivial methods
 
@@ -47,7 +47,7 @@
 #### 8. Too Many Branches - PLR0912 (5 errors)
 - **Fix**: Add `# noqa: PLR0912` or refactor
 
-#### 9. Too Many Returns - PLR0911 (3 errors)  
+#### 9. Too Many Returns - PLR0911 (3 errors)
 - **Fix**: Add `# noqa: PLR0911` or refactor
 
 ### Minor Issues (47 errors)
@@ -67,7 +67,7 @@
 - **Fix**: Review async patterns
 
 #### 13. SQL & Security (6 errors)
-- S608: Hardcoded SQL expression (3) - Already has `# noqa` 
+- S608: Hardcoded SQL expression (3) - Already has `# noqa`
 - S110: Try-except-pass (2)
 - S104: Bind all interfaces (1)
 - **Fix**: Review security implications
@@ -144,7 +144,7 @@ pytest
 
 ## Next Steps
 1. Execute Phase 1 (bulk ignores) - Quick win
-2. Execute Phase 2 (documentation) - Improves code quality  
+2. Execute Phase 2 (documentation) - Improves code quality
 3. Execute Phase 3 (complexity) - Targeted ignores
 4. Execute Phase 4 (minor) - Final cleanup
 5. Run validation

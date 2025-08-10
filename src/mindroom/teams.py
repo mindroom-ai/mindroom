@@ -130,11 +130,12 @@ def _extract_content(response: TeamRunResponse | RunResponse) -> str:
     # multiple turns in a conversation. Consider if you want just the
     # last message or all of them.
     if response.messages:
-        content_parts = []
         messages_list: list[Any] = response.messages
-        for msg in messages_list:
-            if isinstance(msg, Message) and msg.role == "assistant" and msg.content:
-                content_parts.append(str(msg.content))
+        content_parts = [
+            str(msg.content)
+            for msg in messages_list
+            if isinstance(msg, Message) and msg.role == "assistant" and msg.content
+        ]
 
         # Join with newlines to preserve message boundaries
         return "\n\n".join(content_parts) if content_parts else ""

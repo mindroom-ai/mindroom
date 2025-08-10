@@ -20,6 +20,7 @@ TEST_MEMORY_DIR = tempfile.gettempdir() + "/mindroom_test_memory"
 
 @pytest_asyncio.fixture
 async def aioresponse() -> AsyncGenerator[aioresponses, None]:
+    """Async fixture for mocking HTTP responses in tests."""
     # Based on https://github.com/matrix-nio/matrix-nio/blob/main/tests/conftest_async.py
     with aioresponses() as m:
         yield m
