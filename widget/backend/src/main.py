@@ -17,6 +17,7 @@ from .api.gmail_config import router as gmail_config_router
 from .api.google_auth import router as google_router
 from .api.google_setup_wizard import router as google_setup_router
 from .api.integrations import router as integrations_router
+from .api.tools import router as tools_router
 
 # Load environment variables from .env file
 # Look for .env in the widget directory (parent of backend)
@@ -86,6 +87,7 @@ app.include_router(gmail_config_router)
 app.include_router(google_router)
 app.include_router(google_setup_router)
 app.include_router(integrations_router)
+app.include_router(tools_router)
 
 
 @app.on_event("startup")
