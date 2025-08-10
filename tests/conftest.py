@@ -12,7 +12,7 @@ TEST_PASSWORD = "mock_test_password"
 TEST_ACCESS_TOKEN = "mock_test_token"
 
 # Test directory constants - safe temporary directories for testing
-import tempfile
+import tempfile  # noqa: E402
 
 TEST_TMP_DIR = tempfile.gettempdir() + "/mindroom_test"
 TEST_MEMORY_DIR = tempfile.gettempdir() + "/mindroom_test_memory"

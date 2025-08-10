@@ -602,7 +602,7 @@ class TestCommandHandling:
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
-                lambda x, config: "router"
+                lambda x, config: "router"  # noqa: ARG005
                 if "router" in x
                 else ("news" if "news" in x else ("research" if "research" in x else None))
             )
@@ -713,7 +713,7 @@ class TestCommandHandling:
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
-                lambda x, config: "router" if "router" in x else ("finance" if "finance" in x else None)
+                lambda x, config: "router" if "router" in x else ("finance" if "finance" in x else None)  # noqa: ARG005
             )
 
             await bot._on_message(room, event)

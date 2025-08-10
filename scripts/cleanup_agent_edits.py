@@ -80,7 +80,7 @@ def find_messages_with_edits(
         cutoff_time = int((datetime.now() - timedelta(hours=older_than_hours)).timestamp() * 1000)
         agent_ids_str = ",".join(f"'{uid}'" for uid in agent_user_ids)
 
-        query = f"""
+        query = f"""  # noqa: S608
             WITH edit_counts AS (
                 SELECT
                     er.relates_to_id AS original_event_id,
