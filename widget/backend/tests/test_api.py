@@ -4,7 +4,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 
-def test_health_check(test_client: TestClient):
+def test_health_check(test_client: TestClient) -> None:
     """Test the health check endpoint."""
     response = test_client.get("/health")
     assert response.status_code == 200
@@ -13,7 +13,7 @@ def test_health_check(test_client: TestClient):
     assert "config_loaded" in data
 
 
-def test_load_config(test_client: TestClient):
+def test_load_config(test_client: TestClient) -> None:
     """Test loading configuration."""
     response = test_client.post("/api/config/load")
     assert response.status_code == 200
@@ -24,7 +24,7 @@ def test_load_config(test_client: TestClient):
     assert "test_agent" in config["agents"]
 
 
-def test_get_agents(test_client: TestClient):
+def test_get_agents(test_client: TestClient) -> None:
     """Test getting all agents."""
     # First load config
     test_client.post("/api/config/load")
@@ -44,7 +44,7 @@ def test_get_agents(test_client: TestClient):
     assert "rooms" in agent
 
 
-def test_create_agent(test_client: TestClient, sample_agent_data, temp_config_file):
+def test_create_agent(test_client: TestClient, sample_agent_data, temp_config_file) -> None:
     """Test creating a new agent."""
     # Load config first
     test_client.post("/api/config/load")
@@ -63,7 +63,7 @@ def test_create_agent(test_client: TestClient, sample_agent_data, temp_config_fi
     assert config["agents"][result["id"]]["display_name"] == sample_agent_data["display_name"]
 
 
-def test_update_agent(test_client: TestClient, temp_config_file):
+def test_update_agent(test_client: TestClient, temp_config_file) -> None:
     """Test updating an existing agent."""
     # Load config first
     test_client.post("/api/config/load")
@@ -84,7 +84,7 @@ def test_update_agent(test_client: TestClient, temp_config_file):
     assert "updated_room" in config["agents"]["test_agent"]["rooms"]
 
 
-def test_delete_agent(test_client: TestClient, temp_config_file):
+def test_delete_agent(test_client: TestClient, temp_config_file) -> None:
     """Test deleting an agent."""
     # Load config first
     test_client.post("/api/config/load")
@@ -101,7 +101,7 @@ def test_delete_agent(test_client: TestClient, temp_config_file):
     assert "test_agent" not in config["agents"]
 
 
-def test_get_tools(test_client: TestClient):
+def test_get_tools(test_client: TestClient) -> None:
     """Test getting available tools."""
     response = test_client.get("/api/tools")
     assert response.status_code == 200
@@ -113,7 +113,7 @@ def test_get_tools(test_client: TestClient):
     assert "shell" in tools
 
 
-def test_get_rooms(test_client: TestClient):
+def test_get_rooms(test_client: TestClient) -> None:
     """Test getting all rooms."""
     # Load config first
     test_client.post("/api/config/load")
@@ -126,7 +126,7 @@ def test_get_rooms(test_client: TestClient):
     assert "test_room" in rooms
 
 
-def test_save_config(test_client: TestClient, temp_config_file):
+def test_save_config(test_client: TestClient, temp_config_file) -> None:
     """Test saving entire configuration."""
     new_config = {
         "memory": {
@@ -162,7 +162,7 @@ def test_save_config(test_client: TestClient, temp_config_file):
     assert saved_config["defaults"]["num_history_runs"] == 10
 
 
-def test_test_model(test_client: TestClient):
+def test_test_model(test_client: TestClient) -> None:
     """Test model connection testing endpoint."""
     model_test_request = {"modelId": "default"}
 
@@ -174,7 +174,7 @@ def test_test_model(test_client: TestClient):
     assert "message" in result
 
 
-def test_error_handling_agent_not_found(test_client: TestClient):
+def test_error_handling_agent_not_found(test_client: TestClient) -> None:
     """Test error handling for non-existent agent."""
     test_client.post("/api/config/load")
 
@@ -187,7 +187,7 @@ def test_error_handling_agent_not_found(test_client: TestClient):
     assert response.status_code == 404
 
 
-def test_cors_headers(test_client: TestClient):
+def test_cors_headers(test_client: TestClient) -> None:
     """Test CORS headers are present."""
     # Test with a regular request (CORS headers are added to responses)
     response = test_client.get("/health")
@@ -196,7 +196,7 @@ def test_cors_headers(test_client: TestClient):
     assert response.status_code == 200
 
 
-def test_get_teams_empty(test_client: TestClient):
+def test_get_teams_empty(test_client: TestClient) -> None:
     """Test getting teams when none exist."""
     test_client.post("/api/config/load")
 
@@ -207,7 +207,7 @@ def test_get_teams_empty(test_client: TestClient):
     assert len(teams) == 0
 
 
-def test_create_team(test_client: TestClient, temp_config_file):
+def test_create_team(test_client: TestClient, temp_config_file) -> None:
     """Test creating a new team."""
     test_client.post("/api/config/load")
 
@@ -238,7 +238,7 @@ def test_create_team(test_client: TestClient, temp_config_file):
     assert saved_config["teams"]["test_team"]["agents"] == ["test_agent"]
 
 
-def test_get_teams_with_data(test_client: TestClient):
+def test_get_teams_with_data(test_client: TestClient) -> None:
     """Test getting teams after creating one."""
     test_client.post("/api/config/load")
 
@@ -268,7 +268,7 @@ def test_get_teams_with_data(test_client: TestClient):
     assert team["mode"] == "coordinate"
 
 
-def test_update_team(test_client: TestClient, temp_config_file):
+def test_update_team(test_client: TestClient, temp_config_file) -> None:
     """Test updating an existing team."""
     test_client.post("/api/config/load")
 
@@ -305,7 +305,7 @@ def test_update_team(test_client: TestClient, temp_config_file):
     assert saved_config["teams"]["test_team"]["mode"] == "collaborate"
 
 
-def test_delete_team(test_client: TestClient, temp_config_file):
+def test_delete_team(test_client: TestClient, temp_config_file) -> None:
     """Test deleting a team."""
     test_client.post("/api/config/load")
 
@@ -334,7 +334,7 @@ def test_delete_team(test_client: TestClient, temp_config_file):
     assert len(teams) == 0
 
 
-def test_delete_nonexistent_team(test_client: TestClient):
+def test_delete_nonexistent_team(test_client: TestClient) -> None:
     """Test deleting a team that doesn't exist."""
     test_client.post("/api/config/load")
 
@@ -343,7 +343,7 @@ def test_delete_nonexistent_team(test_client: TestClient):
     assert "not found" in response.json()["detail"].lower()
 
 
-def test_create_team_unique_id(test_client: TestClient):
+def test_create_team_unique_id(test_client: TestClient) -> None:
     """Test that creating teams with same display name generates unique IDs."""
     test_client.post("/api/config/load")
 
@@ -372,7 +372,7 @@ def test_create_team_unique_id(test_client: TestClient):
     assert response3.json()["id"] == "test_team_2"
 
 
-def test_get_room_models(test_client: TestClient):
+def test_get_room_models(test_client: TestClient) -> None:
     """Test getting room-specific model overrides."""
     test_client.post("/api/config/load")
 
@@ -382,7 +382,7 @@ def test_get_room_models(test_client: TestClient):
     assert isinstance(room_models, dict)
 
 
-def test_update_room_models(test_client: TestClient, temp_config_file):
+def test_update_room_models(test_client: TestClient, temp_config_file) -> None:
     """Test updating room-specific model overrides."""
     test_client.post("/api/config/load")
 

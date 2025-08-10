@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
-def capture_widget_state():
+def capture_widget_state() -> None:
     """Capture the current state of the widget configuration."""
     # Create output directory
     output_dir = Path(__file__).parent / "captures"
@@ -30,8 +30,6 @@ def capture_widget_state():
         state_file = output_dir / f"widget_state_{timestamp}.json"
         with state_file.open("w") as f:
             json.dump(config, f, indent=2)
-
-        print(f"✓ Configuration state saved to: {state_file}")
 
         # Get list of agents
         with urllib.request.urlopen("http://localhost:8000/api/config/agents") as response:
@@ -59,30 +57,17 @@ def capture_widget_state():
         with summary_file.open("w") as f:
             json.dump(summary, f, indent=2)
 
-        print(f"✓ Summary saved to: {summary_file}")
-
         # Print a text representation
-        print("\n" + "=" * 60)
-        print("MINDROOM CONFIGURATION WIDGET STATE")
-        print("=" * 60)
-        print(f"Timestamp: {timestamp}")
-        print(f"\nAgents ({len(agents)}):")
-        for agent in agents:
-            print(f"  • {agent['display_name']} (ID: {agent['id']})")
-            print(f"    - Tools: {', '.join(agent['tools']) if agent['tools'] else 'None'}")
-            print(f"    - Rooms: {', '.join(agent['rooms']) if agent['rooms'] else 'None'}")
+        for _agent in agents:
+            pass
 
-        print(f"\nModels ({len(config.get('models', {}))}):")
-        for model_id, model_config in config.get("models", {}).items():
-            print(f"  • {model_id}: {model_config.get('provider', 'unknown')} - {model_config.get('id', 'unknown')}")
+        for _model_id, _model_config in config.get("models", {}).items():
+            pass
 
-        print("\n✓ Widget is running and accessible at: http://localhost:3003")
-
-    except urllib.error.URLError as e:
-        print("✗ Could not connect to backend. Is it running on port 8000?")
-        print(f"   Error: {e}")
-    except Exception as e:
-        print(f"✗ Error capturing state: {e}")
+    except urllib.error.URLError:
+        pass
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

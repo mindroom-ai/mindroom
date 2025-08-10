@@ -5,6 +5,7 @@ import sys
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -56,7 +57,7 @@ def test_client(temp_config_file, monkeypatch) -> TestClient:
 
 
 @pytest.fixture
-def sample_agent_data():
+def sample_agent_data() -> dict[str, Any]:
     """Sample agent data for testing."""
     return {
         "display_name": "New Test Agent",

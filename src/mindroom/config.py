@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
 
 from .constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME
 from .logging_config import get_logger
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = get_logger(__name__)
 

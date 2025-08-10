@@ -5,7 +5,7 @@ import time
 import yaml
 
 
-def test_file_watcher_detects_changes(test_client, temp_config_file):
+def test_file_watcher_detects_changes(test_client, temp_config_file) -> None:
     """Test that external config changes can be loaded."""
     # Load initial config
     response = test_client.post("/api/config/load")
@@ -45,7 +45,7 @@ def test_file_watcher_detects_changes(test_client, temp_config_file):
     assert external_agent["display_name"] == "External Agent"
 
 
-def test_config_format_validation(test_client, temp_config_file):
+def test_config_format_validation(test_client, temp_config_file) -> None:
     """Test that invalid config format is handled gracefully."""
     # Write invalid YAML
     with temp_config_file.open("w") as f:
