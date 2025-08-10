@@ -301,7 +301,7 @@ class TestRoutingRegression:
         self,
         mock_ai_response: AsyncMock,
         mock_research_agent: AgentMatrixUser,
-        mock_news_agent: AgentMatrixUser,
+        mock_news_agent: AgentMatrixUser,  # noqa: ARG002
         tmp_path: Path,
     ) -> None:
         """Test that router messages trigger responses from mentioned agents.

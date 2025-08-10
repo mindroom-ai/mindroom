@@ -206,7 +206,7 @@ class TestStreamingBehavior:
     async def test_agent_responds_only_to_final_message(
         self,
         mock_ai_response: AsyncMock,
-        mock_helper_agent: AgentMatrixUser,
+        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
         mock_calculator_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
@@ -287,8 +287,8 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_streaming_response_flow(
         self,
-        mock_helper_agent: AgentMatrixUser,
-        tmp_path: Path,
+        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test the StreamingResponse class behavior."""
         # Create a mock client
@@ -349,8 +349,8 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
         self,
-        mock_helper_agent: AgentMatrixUser,
-        tmp_path: Path,
+        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that in-progress marker is shown during streaming but not in final message."""
         # Create a mock client

@@ -59,7 +59,7 @@ class CommandParser:
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
 
-    def parse(self, message: str) -> Command | None:
+    def parse(self, message: str) -> Command | None:  # noqa: PLR0911
         """Parse a message for commands.
 
         Args:
@@ -160,7 +160,7 @@ class CommandParser:
         return None
 
 
-def get_command_help(topic: str | None = None) -> str:
+def get_command_help(topic: str | None = None) -> str:  # noqa: PLR0911
     """Get help text for commands.
 
     Args:

@@ -149,8 +149,8 @@ class TestTeamFormation:
         self,
         mock_code_agent: AgentMatrixUser,
         mock_security_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that multiple agents already in a thread form a team when no one is mentioned."""
         # Mock thread history showing both agents have participated
@@ -189,11 +189,11 @@ class TestTeamCollaboration:
     @patch("mindroom.bot.ai_response_streaming")
     async def test_team_coordinate_mode(
         self,
-        mock_ai_response_streaming: AsyncMock,
-        mock_research_agent: AgentMatrixUser,
-        mock_analyst_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        mock_ai_response_streaming: AsyncMock,  # noqa: ARG002
+        mock_research_agent: AgentMatrixUser,  # noqa: ARG002
+        mock_analyst_agent: AgentMatrixUser,  # noqa: ARG002
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team coordination mode where agents build on each other's work."""
 
@@ -228,10 +228,10 @@ class TestTeamCollaboration:
     @pytest.mark.asyncio
     async def test_team_collaborate_mode(
         self,
-        mock_code_agent: AgentMatrixUser,
-        mock_security_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        mock_code_agent: AgentMatrixUser,  # noqa: ARG002
+        mock_security_agent: AgentMatrixUser,  # noqa: ARG002
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team collaboration mode where agents work in parallel."""
         # In collaborate mode, multiple agents analyze the same problem
@@ -257,8 +257,8 @@ class TestTeamCollaboration:
         mock_research_agent: AgentMatrixUser,
         mock_code_agent: AgentMatrixUser,
         mock_analyst_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team route mode where lead agent delegates to specialists."""
         # In route mode, a lead agent determines who should handle what
@@ -298,8 +298,8 @@ class TestTeamResponseBehavior:
     async def test_single_agent_still_continues_conversation(
         self,
         mock_code_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that single agent behavior remains unchanged."""
         # Thread with only one agent
@@ -326,9 +326,9 @@ class TestTeamResponseBehavior:
     async def test_explicit_mention_overrides_team(
         self,
         mock_code_agent: AgentMatrixUser,
-        mock_security_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        mock_security_agent: AgentMatrixUser,  # noqa: ARG002
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that explicit mention of one agent prevents team formation."""
         # Thread with multiple agents (thread_history would show both agents)
@@ -355,8 +355,8 @@ class TestTeamResponseBehavior:
         self,
         mock_research_agent: AgentMatrixUser,
         mock_analyst_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team formation with invited agents."""
         # One agent is native to room, another is invited
@@ -430,8 +430,8 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_router_forms_team_for_complex_query(
         self,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test router creating a team for multi-domain queries."""
         # Complex query requiring multiple agents:
@@ -448,8 +448,8 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_router_single_agent_for_simple_query(
         self,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test router selecting single agent for simple queries."""
         # Simple query = "What's 2 + 2?"

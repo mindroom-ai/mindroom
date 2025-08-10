@@ -83,6 +83,7 @@ class MatrixID:
         return name if name in config.agents else None
 
     def __str__(self) -> str:
+        """Return the full Matrix ID string representation."""
         return self.full_id
 
 
@@ -111,6 +112,7 @@ class ThreadStateKey:
         return f"{self.thread_id}:{self.agent_name}"
 
     def __str__(self) -> str:
+        """Return the state key string representation."""
         return self.key
 
 

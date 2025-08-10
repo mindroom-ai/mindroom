@@ -341,7 +341,7 @@ class TestAgentBot:
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
-    async def test_agent_bot_thread_response(
+    async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,
         mock_fetch_history: AsyncMock,
         mock_ai_response_streaming: AsyncMock,

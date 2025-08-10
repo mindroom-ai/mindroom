@@ -53,7 +53,7 @@ class InviteE2ETest:
         """Load credentials and setup client."""
         # Create a test user with consistent credentials
         self.username = "e2e_test_user"
-        self.password = "e2e_test_password_12345"
+        self.password = "e2e_test_password_12345"  # noqa: S105
 
         # Create client
         self.client = nio.AsyncClient(MATRIX_HOMESERVER, f"@{self.username}:localhost")
@@ -74,7 +74,7 @@ class InviteE2ETest:
             and hasattr(response, "status_code")
             and response.status_code == "M_USER_IN_USE"
         ):
-            print("ℹ️  Test user already exists, will try to login")
+            print("i️  Test user already exists, will try to login")
         else:
             print(f"⚠️  Registration response: {response}")
 
@@ -234,10 +234,10 @@ async def test_thread_invitations(test: InviteE2ETest) -> None:
     messages = await test.get_recent_messages(test.lobby_room_id, limit=30)
 
     # Filter for thread messages
-    thread_messages = []
-    for msg in messages:
-        if "123 * 456" in msg["body"] or "56088" in msg["body"] or "/invite" in msg["body"] or "Invited" in msg["body"]:
-            thread_messages.append(msg)
+    thread_messages = [
+        msg for msg in messages
+        if "123 * 456" in msg["body"] or "56088" in msg["body"] or "/invite" in msg["body"] or "Invited" in msg["body"]
+    ]
 
     print(f"\n   Found {len(thread_messages)} relevant messages:")
     for msg in thread_messages[-10:]:  # Show last 10

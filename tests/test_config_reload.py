@@ -122,7 +122,7 @@ def mock_agent_users() -> dict[str, AgentMatrixUser]:
 
 
 @pytest.mark.asyncio
-async def test_agent_joins_new_rooms_on_config_reload(
+async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     initial_config: Config,  # noqa: ARG001
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
@@ -412,7 +412,7 @@ async def test_team_room_changes_on_config_reload(
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_handles_config_reload(
+async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
     initial_config: Config,
     updated_config: Config,
     mock_agent_users: dict[str, AgentMatrixUser],
@@ -530,7 +530,7 @@ async def test_orchestrator_handles_config_reload(
 
 
 @pytest.mark.asyncio
-async def test_room_membership_state_after_config_update(
+async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
     initial_config: Config,  # noqa: ARG001
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],

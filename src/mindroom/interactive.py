@@ -74,6 +74,7 @@ async def handle_reaction(
         _room: The room the reaction occurred in (unused but required for interface consistency)
         event: The reaction event
         agent_name: The name of the agent handling this
+        config: Application configuration
 
     Returns:
         Tuple of (selected_value, thread_id) if this was a valid response, None otherwise

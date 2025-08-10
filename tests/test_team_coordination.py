@@ -20,9 +20,9 @@ class TestTeamCoordination:
     @patch("mindroom.bot.ai_response_streaming")
     async def test_sequential_team_responses(
         self,
-        mock_ai_response_streaming: AsyncMock,
+        mock_ai_response_streaming: AsyncMock,  # noqa: ARG002
         mock_fetch_thread_history: AsyncMock,
-        tmp_path: Path,
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that team members respond in a coordinated sequence."""
         # Test coordination between research and writer agents
@@ -68,7 +68,7 @@ class TestTeamCoordination:
     @pytest.mark.asyncio
     async def test_team_synthesis_response(
         self,
-        tmp_path: Path,
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test synthesis of multiple agent responses into unified team response."""
         # Individual agent contributions
@@ -85,7 +85,7 @@ class TestTeamCoordination:
     @pytest.mark.asyncio
     async def test_team_conflict_resolution(
         self,
-        tmp_path: Path,
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test how team handles conflicting recommendations."""
         # Test setup for conflicting recommendations
@@ -110,8 +110,8 @@ We have different recommendations:
     @patch("mindroom.bot.ai_response")
     async def test_team_handoff_mechanism(
         self,
-        mock_ai_response: AsyncMock,
-        tmp_path: Path,
+        mock_ai_response: AsyncMock,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test explicit handoffs between team members."""
         # Scenario: Complex task requiring handoffs
@@ -138,7 +138,7 @@ I'll optimize the code:
     @pytest.mark.asyncio
     async def test_team_parallel_processing(
         self,
-        tmp_path: Path,
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team members working in parallel on different aspects."""
         # Parallel task: "Create a secure web API"
@@ -161,7 +161,7 @@ I'll optimize the code:
     @pytest.mark.asyncio
     async def test_team_context_sharing(
         self,
-        tmp_path: Path,
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test how team members share context and build on each other's work."""
         # Initial context: "We're building a fintech application"
@@ -180,7 +180,7 @@ I'll optimize the code:
     @pytest.mark.asyncio
     async def test_team_role_assignment(
         self,
-        tmp_path: Path,
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test dynamic role assignment within teams."""
         # Complex request that needs role assignment
@@ -202,7 +202,7 @@ I'll optimize the code:
     @pytest.mark.asyncio
     async def test_team_progress_tracking(
         self,
-        tmp_path: Path,
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test tracking progress across team members."""
         # Multi-step team task
@@ -228,7 +228,7 @@ I'll optimize the code:
     @pytest.mark.asyncio
     async def test_team_error_handling(
         self,
-        tmp_path: Path,
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team behavior when one member encounters an error."""
         # Scenario: One agent fails during team operation

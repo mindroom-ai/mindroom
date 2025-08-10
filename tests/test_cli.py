@@ -154,7 +154,7 @@ class TestUserAccountManagement:
                 # Should use existing account
                 result_config = MatrixState.load()
                 assert result_config.accounts["agent_user"].username == "mindroom_user"
-                assert result_config.accounts["agent_user"].password == "existing_password"
+                assert result_config.accounts["agent_user"].password == "existing_password"  # noqa: S105
 
                 # Should have tried to register (which returns M_USER_IN_USE)
                 mock_client.register.assert_called_once()
@@ -204,7 +204,7 @@ class TestUserAccountManagement:
                 assert "agent_user" in result_config.accounts
                 assert result_config.accounts["agent_user"].username == "mindroom_user"
                 # Password stays the same - create_agent_user reuses existing credentials
-                assert result_config.accounts["agent_user"].password == "wrong_password"
+                assert result_config.accounts["agent_user"].password == "wrong_password"  # noqa: S105
 
                 # create_agent_user doesn't login, just registers
                 # Should have registered new user

@@ -257,7 +257,7 @@ async def _execute_scheduled_task(
         logger.exception("Failed to execute scheduled task %s", task_id)
 
 
-async def list_scheduled_tasks(
+async def list_scheduled_tasks(  # noqa: C901
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str | None = None,

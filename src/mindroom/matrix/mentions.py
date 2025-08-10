@@ -62,6 +62,7 @@ def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tup
     Args:
         text: Text that may contain @agent_name mentions
         sender_domain: Domain part of the sender's user ID (e.g., "localhost" from "@user:localhost")
+        config: Application configuration
 
     Returns:
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
@@ -148,6 +149,7 @@ def create_mention_content_from_text(
     This is the universal function that should be used everywhere.
 
     Args:
+        config: Application configuration
         text: Message text that may contain @agent_name mentions
         sender_domain: Domain part of the sender's user ID
         thread_event_id: Optional thread root event ID

@@ -122,7 +122,7 @@ Based on your choice, I'll proceed accordingly."""
         assert mock_client.room_send.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_handle_interactive_response_invalid_json(self, mock_client: AsyncMock) -> None:
+    async def test_handle_interactive_response_invalid_json(self, mock_client: AsyncMock) -> None:  # noqa: ARG002
         """Test handling invalid JSON in interactive block."""
         interactive._active_questions.clear()
 
@@ -145,7 +145,7 @@ Based on your choice, I'll proceed accordingly."""
         assert len(interactive._active_questions) == 0
 
     @pytest.mark.asyncio
-    async def test_handle_interactive_response_missing_options(self, mock_client: AsyncMock) -> None:
+    async def test_handle_interactive_response_missing_options(self, mock_client: AsyncMock) -> None:  # noqa: ARG002
         """Test handling JSON without options."""
         interactive._active_questions.clear()
 

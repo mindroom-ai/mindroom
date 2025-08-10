@@ -115,7 +115,7 @@ class TestMatrixUserManagement:
         creds = get_agent_credentials("calculator")
         assert creds is not None
         assert creds["username"] == "mindroom_calculator"
-        assert creds["password"] == "calc_pass"
+        assert creds["password"] == "calc_pass"  # noqa: S105
 
         # Test non-existent agent
         creds = get_agent_credentials("nonexistent")
@@ -134,7 +134,7 @@ class TestMatrixUserManagement:
         # Verify the account was added
         assert "agent_calculator" in mock_state.accounts
         assert mock_state.accounts["agent_calculator"].username == "mindroom_calculator"
-        assert mock_state.accounts["agent_calculator"].password == "calc_pass"
+        assert mock_state.accounts["agent_calculator"].password == "calc_pass"  # noqa: S105
         mock_save.assert_called_once()
 
 
@@ -148,7 +148,7 @@ class TestMatrixRegistration:
         # Mock successful registration
         mock_response = MagicMock(spec=nio.RegisterResponse)
         mock_response.user_id = "@test_user:localhost"
-        mock_response.access_token = "test_token"
+        mock_response.access_token = "test_token"  # noqa: S105
         mock_response.device_id = "test_device"
         mock_client.register.return_value = mock_response
         mock_login_response = MagicMock(spec=nio.LoginResponse)
@@ -246,7 +246,7 @@ class TestAgentUserCreation:
 
         agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent")
 
-        assert agent_user.password == "existing_pass"
+        assert agent_user.password == "existing_pass"  # noqa: S105
         mock_save_creds.assert_not_called()  # Should not save again
         mock_register.assert_called_once()  # Still tries to register/verify
 
@@ -266,13 +266,13 @@ class TestAgentLogin:
 
         with patch("mindroom.matrix.users.login") as mock_login:
             mock_client = AsyncMock()
-            mock_client.access_token = "new_token"
+            mock_client.access_token = "new_token"  # noqa: S105
             mock_login.return_value = mock_client
 
             client = await login_agent_user("http://localhost:8008", agent_user)
 
             assert client == mock_client
-            assert agent_user.access_token == "new_token"
+            assert agent_user.access_token == "new_token"  # noqa: S105
             mock_login.assert_called_once_with("http://localhost:8008", agent_user.user_id, agent_user.password)
 
     @pytest.mark.asyncio

@@ -153,6 +153,7 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
 
     Args:
         homeserver: The Matrix homeserver URL
+        config: Application configuration
 
     Returns:
         Dictionary mapping agent/team names to AgentMatrixUser objects

@@ -173,7 +173,7 @@ async def test_agent_ignores_other_agents(
 
 @pytest.mark.asyncio
 @patch("mindroom.teams.Team.arun")
-async def test_agent_responds_in_threads_based_on_participation(
+async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR0915
     mock_team_arun: AsyncMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,

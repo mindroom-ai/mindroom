@@ -51,7 +51,7 @@ def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -
     return _extract_contributions_recursive(response, indent=0, include_consensus=True)
 
 
-def _extract_contributions_recursive(
+def _extract_contributions_recursive(  # noqa: C901
     response: TeamRunResponse | RunResponse,
     indent: int,
     include_consensus: bool,
@@ -228,7 +228,7 @@ def get_team_model(team_name: str, room_id: str, config: Config) -> str:
     return "default"
 
 
-async def create_team_response(
+async def create_team_response(  # noqa: C901
     agent_names: list[str],
     mode: TeamMode,
     message: str,

@@ -42,7 +42,7 @@ class DBConfig:
     port: int = 5432
     database: str = "synapse"
     user: str = "synapse"
-    password: str = "synapse_password"
+    password: str = "synapse_password"  # noqa: S105
 
 
 def get_db_connection(config: DBConfig) -> psycopg2.extensions.connection:
@@ -177,7 +177,7 @@ def cleanup_edit_events(
     return deleted_count
 
 
-def perform_cleanup(
+def perform_cleanup(  # noqa: C901, PLR0912
     conn: psycopg2.extensions.connection,
     dry_run: bool,
     keep_last: int,

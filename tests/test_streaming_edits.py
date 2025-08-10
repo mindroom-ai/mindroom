@@ -70,7 +70,7 @@ class TestStreamingEdits:
     @patch("mindroom.bot.ai_response_streaming")
     async def test_agent_ignores_edits_of_responded_messages(
         self,
-        mock_ai_response_streaming: AsyncMock,
+        mock_ai_response_streaming: AsyncMock,  # noqa: ARG002
         mock_ai_response: AsyncMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,

@@ -87,6 +87,7 @@ lint.ignore = [
   "FBT002",  # Boolean default value
   "FBT003",  # Boolean positional value in call
   "FIX002",  # Line contains TODO
+  "G004",    # Logging statement uses f-string
   "PD901",   # df is a bad variable name. Be kinder to your future self.
   "PLC0415", # `import` should be at the top-level of a file
   "PLR0913", # Too many arguments to function call (N > 5)

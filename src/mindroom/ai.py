@@ -262,7 +262,7 @@ async def ai_response(
         return f"Sorry, I encountered an error trying to generate a response: {e}"
 
 
-async def ai_response_streaming(
+async def ai_response_streaming(  # noqa: C901
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -281,6 +281,7 @@ async def ai_response_streaming(
         prompt: User prompt
         session_id: Session ID for conversation tracking
         storage_path: Path for storing agent data
+        config: Application configuration
         thread_history: Optional thread history
         room_id: Optional room ID for room memory access
 

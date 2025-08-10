@@ -43,7 +43,7 @@ async def add_agent_memory(
         content: The memory content to store
         agent_name: Name of the agent
         storage_path: Storage path for memory
-        user_id: Optional user ID to associate memory with
+        config: Application configuration
         metadata: Optional metadata to store with memory
 
     """
@@ -76,6 +76,7 @@ async def search_agent_memories(
         query: Search query
         agent_name: Name of the agent
         storage_path: Storage path for memory
+        config: Application configuration
         limit: Maximum number of results
 
     Returns:
@@ -105,6 +106,7 @@ async def add_room_memory(
         content: The memory content to store
         room_id: Room ID
         storage_path: Storage path for memory
+        config: Application configuration
         agent_name: Optional agent that created this memory
         metadata: Optional metadata to store with memory
 
@@ -137,6 +139,7 @@ async def search_room_memories(
         query: Search query
         room_id: Room ID
         storage_path: Storage path for memory
+        config: Application configuration
         limit: Maximum number of results
 
     Returns:
@@ -191,6 +194,7 @@ async def build_memory_enhanced_prompt(
         prompt: The original user prompt
         agent_name: Name of the agent
         storage_path: Path for memory storage
+        config: Application configuration
         room_id: Optional room ID for room context
 
     Returns:
@@ -235,6 +239,7 @@ async def store_conversation_memory(
         agent_name: Name of the agent
         storage_path: Path for memory storage
         session_id: Session ID for the conversation
+        config: Application configuration
         room_id: Optional room ID for room memory
 
     """

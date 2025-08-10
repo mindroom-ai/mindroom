@@ -331,7 +331,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
         assert self.client is not None
         if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
             return
@@ -815,7 +815,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
+    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901
         self.logger.info("Handling command", command_type=command.type.value)
 
         is_thread, thread_id = extract_thread_info(event.source)
@@ -1127,7 +1127,7 @@ class MultiAgentOrchestrator:
         # Run all sync tasks
         await asyncio.gather(*sync_tasks)
 
-    async def update_config(self) -> bool:
+    async def update_config(self) -> bool:  # noqa: C901, PLR0912
         """Update configuration with simplified self-managing agents.
 
         Each agent handles its own user account creation and room management.
@@ -1277,7 +1277,7 @@ class MultiAgentOrchestrator:
         # Store room IDs for later use
         self._created_room_ids = room_ids
 
-    async def _ensure_room_invitations(self) -> None:
+    async def _ensure_room_invitations(self) -> None:  # noqa: C901, PLR0912
         """Ensure all agents and the user are invited to their configured rooms.
 
         This uses the router bot's client to manage room invitations,
