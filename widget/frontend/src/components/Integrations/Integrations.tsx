@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Film,
   ArrowRight,
@@ -64,6 +64,8 @@ import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { GoogleIntegration } from '@/components/GoogleIntegration/GoogleIntegration';
 import { API_BASE } from '@/lib/api';
+import { useTools, mapToolToIntegration } from '@/hooks/useTools';
+import { getIconForTool } from './iconMapping';
 
 interface UnifiedIntegration {
   id: string;
@@ -477,8 +479,35 @@ const UNIFIED_INTEGRATIONS: UnifiedIntegration[] = [
 ];
 
 export function Integrations() {
-  const [integrations, setIntegrations] = useState<UnifiedIntegration[]>(UNIFIED_INTEGRATIONS);
+  // Fetch tools from backend
+  const { tools: backendTools, loading: toolsLoading } = useTools();
+
+  // Map backend tools to frontend format
+  const toolIntegrations = useMemo(() => {
+    return backendTools.map(tool => {
+      const mapped = mapToolToIntegration(tool);
+      return {
+        ...mapped,
+        icon: getIconForTool(tool.icon),
+        connected: false, // Will be updated by loadServicesStatus
+      } as UnifiedIntegration;
+    });
+  }, [backendTools]);
+
+  // Combine with any additional frontend-only integrations if needed
+  const [integrations, setIntegrations] = useState<UnifiedIntegration[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // Update integrations when tools are loaded
+  useEffect(() => {
+    if (toolIntegrations.length > 0) {
+      // For now, keep some frontend-only integrations that don't exist in backend
+      const frontendOnlyIntegrations = UNIFIED_INTEGRATIONS.filter(
+        fi => !toolIntegrations.find(ti => ti.id === fi.id)
+      );
+      setIntegrations([...toolIntegrations, ...frontendOnlyIntegrations]);
+    }
+  }, [toolIntegrations]);
   const [configDialog, setConfigDialog] = useState<{ open: boolean; service?: string }>({
     open: false,
   });
@@ -825,6 +854,18 @@ export function Integrations() {
     if (categoryId === 'all') return filteredIntegrations;
     return filteredIntegrations.filter(i => i.category === categoryId);
   };
+
+  // Show loading state while fetching tools
+  if (toolsLoading && integrations.length === 0) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4" />
+          <p className="text-gray-600 dark:text-gray-400">Loading available tools...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>

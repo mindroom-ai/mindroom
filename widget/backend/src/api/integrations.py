@@ -127,7 +127,7 @@ def save_service_credentials(service: str, credentials: dict[str, Any]) -> None:
 
 
 @router.get("/status")
-async def get_all_services_status():
+async def get_all_services_status() -> list[ServiceStatus]:
     """Get connection status for all services."""
     statuses = []
 
@@ -162,7 +162,7 @@ async def get_all_services_status():
 
 
 @router.get("/{service}/status")
-async def get_service_status(service: str):
+async def get_service_status(service: str) -> ServiceStatus:
     """Get connection status for a specific service."""
     if service not in SERVICES:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
@@ -203,7 +203,7 @@ async def get_service_status(service: str):
 
 # Amazon Shopping
 @router.post("/amazon/configure")
-async def configure_amazon(request: ApiKeyRequest):
+async def configure_amazon(request: ApiKeyRequest) -> dict[str, str]:
     """Configure Amazon Product Advertising API credentials."""
     if request.service != "amazon":
         raise HTTPException(status_code=400, detail="Invalid service")
@@ -220,7 +220,7 @@ async def configure_amazon(request: ApiKeyRequest):
 
 
 @router.post("/amazon/search")
-async def search_amazon(query: str, max_results: int = 5):
+async def search_amazon(query: str, max_results: int = 5) -> dict[str, Any]:
     """Search Amazon products."""
     creds = get_service_credentials("amazon")
     if not creds or "api_key" not in creds:
@@ -247,7 +247,7 @@ async def search_amazon(query: str, max_results: int = 5):
 
 # IMDb
 @router.post("/imdb/configure")
-async def configure_imdb(request: ApiKeyRequest):
+async def configure_imdb(request: ApiKeyRequest) -> dict[str, str]:
     """Configure IMDb/OMDB API key."""
     if request.service != "imdb":
         raise HTTPException(status_code=400, detail="Invalid service")
@@ -357,7 +357,7 @@ async def connect_spotify():
 
 
 @router.get("/spotify/callback")
-async def spotify_callback(code: str):
+async def spotify_callback(code: str) -> RedirectResponse:
     """Handle Spotify OAuth callback."""
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -394,7 +394,7 @@ async def spotify_callback(code: str):
 
 
 @router.get("/spotify/current")
-async def get_spotify_current():
+async def get_spotify_current() -> dict[str, Any]:
     """Get currently playing track on Spotify."""
     creds = get_service_credentials("spotify")
     if not creds or "access_token" not in creds:
@@ -421,7 +421,7 @@ async def get_spotify_current():
 
 
 @router.get("/spotify/top-tracks")
-async def get_spotify_top_tracks(limit: int = 10):
+async def get_spotify_top_tracks(limit: int = 10) -> dict[str, Any]:
     """Get user's top tracks."""
     creds = get_service_credentials("spotify")
     if not creds or "access_token" not in creds:
@@ -448,7 +448,7 @@ async def get_spotify_top_tracks(limit: int = 10):
 
 # Walmart
 @router.post("/walmart/configure")
-async def configure_walmart(request: ApiKeyRequest):
+async def configure_walmart(request: ApiKeyRequest) -> dict[str, str]:
     """Configure Walmart API credentials."""
     if request.service != "walmart":
         raise HTTPException(status_code=400, detail="Invalid service")
@@ -459,7 +459,7 @@ async def configure_walmart(request: ApiKeyRequest):
 
 
 @router.get("/walmart/search")
-async def search_walmart(query: str, max_results: int = 5):
+async def search_walmart(query: str, max_results: int = 5) -> dict[str, Any]:
     """Search Walmart products."""
     creds = get_service_credentials("walmart")
     if not creds or "api_key" not in creds:
@@ -487,7 +487,7 @@ async def search_walmart(query: str, max_results: int = 5):
 
 
 @router.post("/{service}/disconnect")
-async def disconnect_service(service: str):
+async def disconnect_service(service: str) -> dict[str, str]:
     """Disconnect a service by removing stored credentials."""
     if service not in SERVICES:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
