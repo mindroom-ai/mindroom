@@ -45,7 +45,7 @@ def temp_config_file() -> Generator[Path, None, None]:
 def test_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Create a test client with mocked config file."""
     # Mock the config file path before importing
-    import main
+    import main  # noqa: PLC0415
 
     monkeypatch.setattr(main, "CONFIG_PATH", temp_config_file)
 

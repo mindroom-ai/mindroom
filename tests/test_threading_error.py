@@ -6,8 +6,9 @@ This test verifies that:
 3. The bot handles various message relation scenarios correctly
 """
 
-from collections.abc import AsyncGenerator
-from pathlib import Path
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -19,6 +20,10 @@ from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_PASSWORD
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 
 class TestThreadingBehavior:

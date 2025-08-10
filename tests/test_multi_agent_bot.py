@@ -1,23 +1,27 @@
 """Tests for the multi-agent bot system."""
 
+from __future__ import annotations
+
 import asyncio
 import os
-from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import Config
+from mindroom.config import Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 
 @dataclass
@@ -70,8 +74,6 @@ class TestAgentBot:
 
     def create_mock_config(self) -> MagicMock:
         """Create a mock config for testing."""
-        from mindroom.config import ModelConfig
-
         mock_config = MagicMock()
         mock_config.agents = {
             "calculator": MagicMock(display_name="CalculatorAgent", rooms=["!test:localhost"]),

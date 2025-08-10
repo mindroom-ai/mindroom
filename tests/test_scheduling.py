@@ -1,5 +1,7 @@
 """Tests for scheduling functionality that actually exercise the real code."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 

@@ -1,8 +1,9 @@
 """End-to-end tests for the multi-agent bot system."""
 
+from __future__ import annotations
+
 import re
-from collections.abc import AsyncGenerator
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -10,10 +11,14 @@ import pytest
 from aioresponses import aioresponses
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import Config
+from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -184,7 +189,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     thread_root_id = "$thread_root:example.org"
 
     # Mock the config to include both agents
-    from mindroom.config import AgentConfig, ModelConfig
 
     mock_config = Config(
         agents={

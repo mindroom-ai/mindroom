@@ -4,8 +4,10 @@ With the new self-managing agent pattern, agents handle their own room
 memberships. This test module verifies that behavior.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -17,6 +19,9 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+
+if TYPE_CHECKING:
+    from nio.responses import Response
 
 
 @pytest.fixture
@@ -47,7 +52,7 @@ def mock_config() -> Config:
 
 
 @pytest.mark.asyncio
-async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
+async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that agents join their configured rooms on startup."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -74,14 +79,14 @@ async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
     # Track which rooms were joined
     joined_rooms = []
 
-    async def mock_join_room(_client: Any, room_id: str) -> bool:
+    async def mock_join_room(_client: AsyncMock, room_id: str) -> bool:
         joined_rooms.append(room_id)
         return True
 
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -96,7 +101,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:  # noqa: ARG001
+async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ARG001
     """Test that agents leave rooms they're no longer configured for."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -133,7 +138,7 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:  # noq
     # Track which rooms were left
     left_rooms = []
 
-    async def mock_room_leave(room_id: str) -> Any:
+    async def mock_room_leave(room_id: str) -> Response:
         left_rooms.append(room_id)
         response = MagicMock()
         response.__class__ = nio.RoomLeaveResponse
@@ -150,7 +155,7 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: Any) -> None:  # noq
 
 
 @pytest.mark.asyncio
-async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
+async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that agents update their room memberships when configuration changes."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -182,11 +187,11 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
     joined_rooms = []
     left_rooms = []
 
-    async def mock_join_room(_client: Any, room_id: str) -> bool:
+    async def mock_join_room(_client: AsyncMock, room_id: str) -> bool:
         joined_rooms.append(room_id)
         return True
 
-    async def mock_room_leave(room_id: str) -> Any:
+    async def mock_room_leave(room_id: str) -> Response:
         left_rooms.append(room_id)
         response = MagicMock()
         response.__class__ = nio.RoomLeaveResponse
@@ -196,7 +201,7 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: Any) -> None:
     mock_client.room_leave = mock_room_leave
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: Any, _room_id: str) -> int:
+    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)

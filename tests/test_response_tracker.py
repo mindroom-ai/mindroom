@@ -1,10 +1,16 @@
 """Tests for the ResponseTracker class."""
 
+from __future__ import annotations
+
 import json
+import threading
 import time
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from mindroom.response_tracker import ResponseTracker
 
@@ -138,8 +144,6 @@ class TestResponseTracker:
 
     def test_concurrent_access(self, temp_dir: Path) -> None:
         """Test that file locking prevents corruption during concurrent writes."""
-        import threading
-
         tracker = ResponseTracker("test_concurrent", base_path=temp_dir)
 
         def mark_events(start: int, count: int) -> None:

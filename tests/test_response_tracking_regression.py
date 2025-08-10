@@ -4,7 +4,9 @@ These tests ensure that commands, unknown commands, and router messages
 are properly tracked to prevent re-processing after restart.
 """
 
-from pathlib import Path
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -18,6 +20,9 @@ from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture

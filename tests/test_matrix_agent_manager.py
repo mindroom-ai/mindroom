@@ -1,6 +1,8 @@
 """Tests for matrix agent manager functionality."""
 
-from pathlib import Path
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -20,6 +22,9 @@ from mindroom.matrix.users import (
 )
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture

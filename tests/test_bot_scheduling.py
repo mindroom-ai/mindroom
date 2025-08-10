@@ -1,5 +1,9 @@
 """Integration tests for scheduling functionality in the bot."""
 
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -9,6 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.thread_utils import should_agent_respond
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -181,9 +186,6 @@ class TestBotTaskRestoration:
     @pytest.mark.asyncio
     async def test_restore_tasks_on_room_join(self) -> None:
         """Test that scheduled tasks are restored when joining rooms."""
-        import tempfile
-        from pathlib import Path
-
         agent_user = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -223,9 +225,6 @@ class TestBotTaskRestoration:
     @pytest.mark.asyncio
     async def test_no_log_when_no_tasks_restored(self) -> None:
         """Test that no log is generated when no tasks are restored."""
-        import tempfile
-        from pathlib import Path
-
         agent_user = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -466,8 +465,6 @@ class TestCommandHandling:
         # 1. User sends a schedule command
         # 2. RouterAgent fails to parse it and sends an error message
         # 3. FinanceAgent should NOT respond to the error message
-
-        from mindroom.thread_utils import should_agent_respond
 
         # Create thread history with user command and router error
         thread_history = [

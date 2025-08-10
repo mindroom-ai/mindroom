@@ -1,5 +1,7 @@
 """Tests for command parsing."""
 
+from __future__ import annotations
+
 from mindroom.commands import CommandType, command_parser, get_command_help
 
 

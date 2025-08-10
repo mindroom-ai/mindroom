@@ -1,15 +1,21 @@
 """Tests for CLI functionality."""
 
-from pathlib import Path
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
 from mindroom.bot import MultiAgentOrchestrator
+from mindroom.matrix.client import register_user
 from mindroom.matrix.state import MatrixState
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -28,8 +34,6 @@ class TestUserAccountManagement:
     @pytest.mark.asyncio
     async def test_register_user_success(self, mock_matrix_client: tuple[MagicMock, AsyncMock]) -> None:
         """Test successful user registration."""
-        from mindroom.matrix.client import register_user
-
         mock_context, mock_client = mock_matrix_client
 
         # Mock successful registration
@@ -57,8 +61,6 @@ class TestUserAccountManagement:
     @pytest.mark.asyncio
     async def test_register_user_already_exists(self, mock_matrix_client: tuple[MagicMock, AsyncMock]) -> None:
         """Test registration when user already exists."""
-        from mindroom.matrix.client import register_user
-
         mock_context, mock_client = mock_matrix_client
 
         # Mock user already exists error
