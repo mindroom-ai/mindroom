@@ -52,16 +52,12 @@ class TestTeamCoordination:
             yield "The landscape of AI is rapidly evolving with three key trends..."
 
         # Verify sequential execution is possible
-        research_complete = []
-        async for chunk in research_response():
-            research_complete.append(chunk)
+        research_complete = [chunk async for chunk in research_response()]
 
         assert len(research_complete) > 0
 
         # Writer can now use research context
-        writer_complete = []
-        async for chunk in writer_response():
-            writer_complete.append(chunk)
+        writer_complete = [chunk async for chunk in writer_response()]
 
         assert "Based on the research findings" in "".join(writer_complete)
 

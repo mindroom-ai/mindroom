@@ -354,7 +354,12 @@ async def main() -> None:
 
     # Kill any existing mindroom processes
     print("\n🧹 Cleaning up old processes...")
-    subprocess.run(["pkill", "-f", "mindroom run"], check=False, capture_output=True)
+    process = await asyncio.create_subprocess_exec(
+        "pkill", "-f", "mindroom run",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    await process.wait()
     await asyncio.sleep(2)
 
     # Start mindroom
@@ -383,7 +388,12 @@ async def main() -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await bot_task
 
-        subprocess.run(["pkill", "-f", "mindroom run"], check=False, capture_output=True)
+        process = await asyncio.create_subprocess_exec(
+            "pkill", "-f", "mindroom run",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await process.wait()
 
         # Clean up temp directory
         import shutil

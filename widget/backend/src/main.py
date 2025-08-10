@@ -47,6 +47,7 @@ class ConfigFileHandler(FileSystemEventHandler):
     """Watch for changes to config.yaml."""
 
     def on_modified(self, event: object) -> None:
+        """Handle file modification events."""
         if event.src_path.endswith("config.yaml"):
             load_config_from_file()
 

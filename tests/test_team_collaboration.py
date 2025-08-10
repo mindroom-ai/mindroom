@@ -212,13 +212,9 @@ class TestTeamCollaboration:
         # Implementation will ensure agents respond sequentially
 
         # Expected: Research agent provides data, then analyst builds on it
-        research_chunks = []
-        async for chunk in research_response():
-            research_chunks.append(chunk)
+        research_chunks = [chunk async for chunk in research_response()]
 
-        analyst_chunks = []
-        async for chunk in analyst_response():
-            analyst_chunks.append(chunk)
+        analyst_chunks = [chunk async for chunk in analyst_response()]
 
         # Verify responses can be combined coherently
         combined = "".join(research_chunks) + "\n\n" + "".join(analyst_chunks)

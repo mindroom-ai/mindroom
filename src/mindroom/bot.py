@@ -1127,7 +1127,7 @@ class MultiAgentOrchestrator:
         # Run all sync tasks
         await asyncio.gather(*sync_tasks)
 
-    async def update_config(self) -> bool:  # noqa: C901, PLR0912
+    async def update_config(self) -> bool:  # noqa: C901
         """Update configuration with simplified self-managing agents.
 
         Each agent handles its own user account creation and room management.
@@ -1198,7 +1198,7 @@ class MultiAgentOrchestrator:
 
         # Setup rooms and have new/restarted bots join them
         bots_to_setup = [
-            self.agent_bots[entity_name] 
+            self.agent_bots[entity_name]
             for entity_name in entities_to_restart | new_entities
             if entity_name in self.agent_bots
         ]

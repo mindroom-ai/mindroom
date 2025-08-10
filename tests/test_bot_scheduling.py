@@ -104,8 +104,8 @@ class TestBotScheduleCommands:
 
     @pytest.mark.asyncio
     async def test_handle_list_schedules_command(self, mock_agent_bot: AgentBot) -> None:
-        mock_agent_bot.response_tracker = MagicMock()
         """Test bot handles list schedules command."""
+        mock_agent_bot.response_tracker = MagicMock()
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -131,8 +131,8 @@ class TestBotScheduleCommands:
 
     @pytest.mark.asyncio
     async def test_handle_cancel_schedule_command(self, mock_agent_bot: AgentBot) -> None:
-        mock_agent_bot.response_tracker = MagicMock()
         """Test bot handles cancel schedule command."""
+        mock_agent_bot.response_tracker = MagicMock()
         room = MagicMock()
         room.room_id = "!test:server"
 
@@ -152,8 +152,8 @@ class TestBotScheduleCommands:
 
     @pytest.mark.asyncio
     async def test_schedule_command_auto_creates_thread(self, mock_agent_bot: AgentBot) -> None:
-        mock_agent_bot.response_tracker = MagicMock()
         """Test that schedule commands auto-create threads when used in main room."""
+        mock_agent_bot.response_tracker = MagicMock()
         room = MagicMock()
         room.room_id = "!test:server"
 

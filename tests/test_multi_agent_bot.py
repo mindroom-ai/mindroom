@@ -27,6 +27,7 @@ class MockConfig:
     agents: dict[str, Any] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
+        """Initialize agents dictionary if not provided."""
         if self.agents is None:
             self.agents = {
                 "calculator": MagicMock(rooms=["lobby", "science", "analysis"]),
