@@ -66,7 +66,7 @@ def capture_widget_state() -> None:
 
     except urllib.error.URLError:
         pass
-    except Exception:
+    except Exception:  # noqa: S110
         pass
 
 

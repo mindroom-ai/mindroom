@@ -58,7 +58,7 @@ def load_config_from_file() -> None:
     try:
         with CONFIG_PATH.open() as f, config_lock:
             config = yaml.safe_load(f)
-    except Exception:
+    except Exception:  # noqa: S110
         pass
 
 

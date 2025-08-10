@@ -3,7 +3,6 @@
 
 import asyncio
 import contextlib
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -355,9 +354,11 @@ async def main() -> None:
     # Kill any existing mindroom processes
     print("\n🧹 Cleaning up old processes...")
     process = await asyncio.create_subprocess_exec(
-        "pkill", "-f", "mindroom run",
+        "pkill",
+        "-f",
+        "mindroom run",
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
     )
     await process.wait()
     await asyncio.sleep(2)
@@ -389,9 +390,11 @@ async def main() -> None:
             await bot_task
 
         process = await asyncio.create_subprocess_exec(
-            "pkill", "-f", "mindroom run",
+            "pkill",
+            "-f",
+            "mindroom run",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
         await process.wait()
 

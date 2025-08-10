@@ -234,7 +234,6 @@ class TestTeamCollaboration:
         # and provide different perspectives simultaneously
 
         # In collaborate mode, multiple agents analyze the same problem
-        # problem = "How should we implement user authentication?"
 
         # Team synthesis would combine these perspectives
         expected_synthesis = (
@@ -260,7 +259,6 @@ class TestTeamCollaboration:
         # In route mode, a lead agent determines who should handle what
 
         # In route mode, a lead agent determines who should handle what
-        # complex_request = "Research the latest web frameworks, analyze their performance, and create a comparison chart"
 
         expected_delegations = {
             "research_task": mock_research_agent.agent_name,

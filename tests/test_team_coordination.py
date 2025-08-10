@@ -111,7 +111,6 @@ We have different recommendations:
     ) -> None:
         """Test explicit handoffs between team members."""
         # Scenario: Complex task requiring handoffs
-        # Task: "Analyze this code for security issues and then optimize it"
 
         # Security agent identifies issues and hands off to performance agent
         security_response = """I've identified the following security issues:
@@ -180,7 +179,6 @@ I'll optimize the code:
     ) -> None:
         """Test dynamic role assignment within teams."""
         # Complex request that needs role assignment
-        # Request: "Design, implement, test, and document a user authentication system"
 
         # Expected role assignments
         role_assignments = {

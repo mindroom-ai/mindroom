@@ -3,7 +3,6 @@
 
 import asyncio
 import contextlib
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -52,7 +51,7 @@ class MindRoomE2ETest:
     async def setup(self) -> None:
         """Load credentials and setup client."""
         # Load user credentials
-        with Path("matrix_state.yaml").open() as f:
+        with Path("matrix_state.yaml").open() as f:  # noqa: ASYNC230
             users_data = yaml.safe_load(f)
 
         # Use the main user account
@@ -218,9 +217,11 @@ async def main() -> None:
     # Kill any existing mindroom processes
     print("\n🧹 Cleaning up old processes...")
     process = await asyncio.create_subprocess_exec(
-        "pkill", "-f", "mindroom run",
+        "pkill",
+        "-f",
+        "mindroom run",
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
     )
     await process.wait()
     await asyncio.sleep(2)
@@ -253,9 +254,11 @@ async def main() -> None:
             await bot_task
 
         process = await asyncio.create_subprocess_exec(
-            "pkill", "-f", "mindroom run",
+            "pkill",
+            "-f",
+            "mindroom run",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
         await process.wait()
 

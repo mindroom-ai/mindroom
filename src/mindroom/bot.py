@@ -276,7 +276,7 @@ class AgentBot:
             except Exception as e:
                 self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
 
-            asyncio.create_task(self._periodic_cleanup())
+            asyncio.create_task(self._periodic_cleanup())  # noqa: RUF006
 
         # Note: Room joining is deferred until after invitations are handled
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
@@ -1173,7 +1173,7 @@ class MultiAgentOrchestrator:
                     # Agent handles its own setup (but doesn't join rooms yet)
                     await bot.start()
                     # Start sync loop
-                    asyncio.create_task(bot.sync_forever())
+                    asyncio.create_task(bot.sync_forever())  # noqa: RUF006
             # Entity was removed from config
             elif entity_name in self.agent_bots:
                 del self.agent_bots[entity_name]
@@ -1186,7 +1186,7 @@ class MultiAgentOrchestrator:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot
                 await bot.start()
-                asyncio.create_task(bot.sync_forever())
+                asyncio.create_task(bot.sync_forever())  # noqa: RUF006
 
         # Handle removed entities (cleanup)
         removed_entities = existing_entities - all_new_entities

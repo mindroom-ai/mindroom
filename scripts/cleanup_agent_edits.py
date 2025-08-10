@@ -103,7 +103,7 @@ def find_messages_with_edits(
             FROM edit_counts ec
             LEFT JOIN room_aliases ra ON ec.room_id = ra.room_id
             ORDER BY edit_count DESC
-        """
+        """  # noqa: S608
 
         cur.execute(query)
         return {row["original_event_id"]: row for row in cur.fetchall()}
@@ -162,12 +162,12 @@ def cleanup_edit_events(
     with conn.cursor() as cur:
         for table in tables_to_clean:
             if dry_run:
-                cur.execute(f"SELECT COUNT(*) FROM {table} WHERE event_id = ANY(%s)", (event_ids_to_delete,))
+                cur.execute(f"SELECT COUNT(*) FROM {table} WHERE event_id = ANY(%s)", (event_ids_to_delete,))  # noqa: S608
                 count = cur.fetchone()[0]
                 if count > 0:
                     console.print(f"  [yellow]Would delete {count} rows from {table}[/yellow]")
             else:
-                cur.execute(f"DELETE FROM {table} WHERE event_id = ANY(%s)", (event_ids_to_delete,))
+                cur.execute(f"DELETE FROM {table} WHERE event_id = ANY(%s)", (event_ids_to_delete,))  # noqa: S608
                 if table == "events":
                     deleted_count = cur.rowcount
 
