@@ -51,7 +51,7 @@ dependencies = [
   "typer>=0.16",
   "uvicorn>=0.35",
   "watchdog>=6",
-  "wikipedia-api>=0.7",     # for Wikipedia tool (correct package)
+  "wikipedia",              # for Wikipedia tool (required by agno.tools.wikipedia)
   "youtube-transcript-api", # for YouTube tool
 ]
 
