@@ -1,16 +1,9 @@
-# ruff: noqa: INP001 D100
+# ruff: noqa: D100
 import threading
 from pathlib import Path
 from typing import Any
 
 import yaml
-
-# Import routers
-from api.gmail_config import router as gmail_config_router
-from api.google_auth import router as google_router
-from api.google_setup_wizard import router as google_setup_router
-from api.integrations import router as integrations_router
-from api.tools import router as tools_router
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +12,13 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from mindroom.config import Config
+
+# Import routers
+from src.api.gmail_config import router as gmail_config_router
+from src.api.google_auth import router as google_router
+from src.api.google_setup_wizard import router as google_setup_router
+from src.api.integrations import router as integrations_router
+from src.api.tools import router as tools_router
 
 # Load environment variables from .env file
 # Look for .env in the widget directory (parent of backend)
