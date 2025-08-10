@@ -62,7 +62,6 @@ def should_create_interactive_question(response_text: str) -> bool:
 
 async def handle_reaction(
     client: nio.AsyncClient,
-    _room: nio.MatrixRoom,
     event: nio.ReactionEvent,
     agent_name: str,
     config: Config,
@@ -71,7 +70,6 @@ async def handle_reaction(
 
     Args:
         client: The Matrix client
-        _room: The room the reaction occurred in (unused but required for interface consistency)
         event: The reaction event
         agent_name: The name of the agent handling this
         config: Application configuration

@@ -94,14 +94,11 @@ class ThreadStateKey:
     thread_id: str
     agent_name: str
 
-    # Number of parts in a thread state key (thread_id:agent_name)
-    STATE_KEY_PARTS: ClassVar[int] = 2
-
     @classmethod
     def parse(cls, state_key: str) -> ThreadStateKey:
         """Parse a state key."""
         parts = state_key.split(":", 1)
-        if len(parts) != cls.STATE_KEY_PARTS:
+        if len(parts) != 2:
             msg = f"Invalid state key: {state_key}"
             raise ValueError(msg)
         return cls(thread_id=parts[0], agent_name=parts[1])

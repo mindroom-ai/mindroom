@@ -458,7 +458,7 @@ class AgentBot:
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
         assert self.client is not None
-        result = await interactive.handle_reaction(self.client, room, event, self.agent_name, self.config)
+        result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
 
         if result:
             selected_value, thread_id = result

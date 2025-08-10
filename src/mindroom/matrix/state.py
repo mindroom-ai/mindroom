@@ -1,13 +1,12 @@
 """Pydantic models for Matrix state."""
 
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Self
 
 import yaml
 from pydantic import BaseModel, Field, field_serializer
 
-MATRIX_STATE_FILE = Path("matrix_state.yaml")
+from mindroom.constants import MATRIX_STATE_FILE
 
 
 class MatrixAccount(BaseModel):

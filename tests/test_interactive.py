@@ -195,7 +195,7 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$question123"
         event.key = "🚀"
 
-        result = await interactive.handle_reaction(mock_client, room, event, "test_agent", self.config)
+        result = await interactive.handle_reaction(mock_client, event, "test_agent", self.config)
 
         # Should return the selected value and thread_id
         assert result == ("fast", "$thread123")
@@ -220,7 +220,7 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$unknown123"
         event.key = "👍"
 
-        result = await interactive.handle_reaction(mock_client, room, event, "test_agent", self.config)
+        result = await interactive.handle_reaction(mock_client, event, "test_agent", self.config)
 
         # Should return None for unknown reaction
         assert result is None
@@ -242,13 +242,12 @@ Based on your choice, I'll proceed accordingly."""
         )
 
         # Create reaction event from bot itself
-        room = MagicMock()
         event = MagicMock(spec=nio.ReactionEvent)
         event.sender = "@mindroom_test:localhost"  # Bot's own ID
         event.reacts_to = "$question123"
         event.key = "✅"
 
-        result = await interactive.handle_reaction(mock_client, room, event, "test_agent", self.config)
+        result = await interactive.handle_reaction(mock_client, event, "test_agent", self.config)
 
         # Should return None (ignoring own reaction)
         assert result is None
@@ -455,7 +454,7 @@ Just let me know your preference!"""
         reaction_event.reacts_to = event_id
         reaction_event.key = "🔍"
 
-        result = await interactive.handle_reaction(mock_client, room, reaction_event, "test_agent", self.config)
+        result = await interactive.handle_reaction(mock_client, reaction_event, "test_agent", self.config)
 
         # Verify reaction was processed
         assert result == ("detailed", "$thread123")  # Thread ID from the question

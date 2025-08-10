@@ -12,3 +12,5 @@ ROUTER_AGENT_NAME = "router"
 
 # Default path to agents configuration file
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
+
+MATRIX_STATE_FILE = Path("matrix_state.yaml")
