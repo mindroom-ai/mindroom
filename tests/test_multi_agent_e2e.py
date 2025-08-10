@@ -12,7 +12,7 @@ import pytest
 from aioresponses import aioresponses
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import Config
+from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
@@ -186,7 +186,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     thread_root_id = "$thread_root:example.org"
 
     # Mock the config to include both agents
-    from mindroom.config import AgentConfig, ModelConfig  # noqa: PLC0415
 
     mock_config = Config(
         agents={

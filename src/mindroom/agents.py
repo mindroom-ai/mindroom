@@ -10,6 +10,8 @@ from agno.storage.sqlite import SqliteStorage
 from . import agent_prompts
 from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
+from .matrix import MATRIX_HOMESERVER
+from .matrix.identity import MatrixID, extract_server_name_from_homeserver
 from .tools import get_tool_by_name
 
 if TYPE_CHECKING:
@@ -170,9 +172,6 @@ def describe_agent(agent_name: str, config: Config) -> str:
 
 def get_agent_ids_for_room(room_key: str, config: Config, homeserver: str | None = None) -> list[str]:
     """Get all agent Matrix IDs assigned to a specific room."""
-    from .matrix import MATRIX_HOMESERVER  # noqa: PLC0415
-    from .matrix.identity import MatrixID, extract_server_name_from_homeserver  # noqa: PLC0415
-
     # Determine server name
     server_url = homeserver or MATRIX_HOMESERVER
     server_name = extract_server_name_from_homeserver(server_url)
