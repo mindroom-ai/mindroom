@@ -242,7 +242,7 @@ async def search_amazon(query: str, max_results: int = 5):
         ]
         return {"query": query, "results": products}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Search failed: {e!s}") from e
 
 
 # IMDb
@@ -259,7 +259,7 @@ async def configure_imdb(request: ApiKeyRequest):
         if data.get("Response") == "False":
             raise HTTPException(status_code=400, detail="Invalid API key")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to validate API key: {str(e)}") from e
+        raise HTTPException(status_code=400, detail=f"Failed to validate API key: {e!s}") from e
 
     credentials = {"api_key": request.api_key}
     save_service_credentials("imdb", credentials)
@@ -301,7 +301,7 @@ async def search_imdb(query: str, type: str = "movie"):
 
         return {"query": query, "results": results}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Search failed: {e!s}") from e
 
 
 @router.get("/imdb/details/{imdb_id}")
@@ -329,7 +329,7 @@ async def get_imdb_details(imdb_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get details: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to get details: {e!s}") from e
 
 
 # Spotify
@@ -390,7 +390,7 @@ async def spotify_callback(code: str):
         # Redirect back to widget
         return RedirectResponse(url="http://localhost:5173/?spotify=connected")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OAuth failed: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"OAuth failed: {e!s}") from e
 
 
 @router.get("/spotify/current")
@@ -417,7 +417,7 @@ async def get_spotify_current():
             "duration_ms": track["duration_ms"],
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get current track: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to get current track: {e!s}") from e
 
 
 @router.get("/spotify/top-tracks")
@@ -443,7 +443,7 @@ async def get_spotify_top_tracks(limit: int = 10):
 
         return {"tracks": tracks}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get top tracks: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to get top tracks: {e!s}") from e
 
 
 # Walmart
@@ -483,7 +483,7 @@ async def search_walmart(query: str, max_results: int = 5):
 
         return {"query": query, "results": products}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Search failed: {e!s}") from e
 
 
 @router.post("/{service}/disconnect")

@@ -63,7 +63,7 @@ MINDROOM_OAUTH_CONFIG = {
         "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
         "redirect_uris": [f"http://localhost:{BACKEND_PORT}/api/auth/google/callback"],
         "javascript_origins": ["http://localhost:5173", f"http://localhost:{BACKEND_PORT}"],
-    }
+    },
 }
 
 
@@ -87,7 +87,7 @@ def get_oauth_credentials():
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
                 "redirect_uris": [REDIRECT_URI],
-            }
+            },
         }
 
     # Use MindRoom's OAuth app (would be properly configured in production)
@@ -182,7 +182,7 @@ async def connect_google():
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
                 "redirect_uris": [REDIRECT_URI],
-            }
+            },
         }
 
     try:
@@ -195,7 +195,7 @@ async def connect_google():
 
         return GoogleAuthUrl(auth_url=auth_url)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start Google login: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to start Google login: {e!s}") from e
 
 
 @router.get("/callback")
@@ -239,7 +239,7 @@ async def google_callback(request: Request):
         # Redirect back to widget with success message
         return RedirectResponse(url="http://localhost:5173/?google=connected")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to complete Google login: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to complete Google login: {e!s}") from e
 
 
 @router.post("/disconnect")
@@ -250,4 +250,4 @@ async def disconnect_google():
             TOKEN_PATH.unlink()
         return {"status": "disconnected"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to disconnect: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e

@@ -157,7 +157,7 @@ async def start_oauth_flow():
             "token_uri": "https://oauth2.googleapis.com/token",
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
             "redirect_uris": [REDIRECT_URI],
-        }
+        },
     }
 
     try:
@@ -169,7 +169,7 @@ async def start_oauth_flow():
 
         return {"auth_url": auth_url}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start OAuth: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"Failed to start OAuth: {e!s}") from e
 
 
 @router.get("/callback")
@@ -194,7 +194,7 @@ async def oauth_callback(code: str):
             "token_uri": "https://oauth2.googleapis.com/token",
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
             "redirect_uris": [REDIRECT_URI],
-        }
+        },
     }
 
     try:
@@ -228,7 +228,7 @@ async def oauth_callback(code: str):
         return RedirectResponse(url="http://localhost:5173/?gmail=configured")
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OAuth callback failed: {str(e)}") from e
+        raise HTTPException(status_code=500, detail=f"OAuth callback failed: {e!s}") from e
 
 
 @router.post("/reset")

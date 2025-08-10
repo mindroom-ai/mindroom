@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class ToolCategory(str, Enum):
@@ -64,9 +67,9 @@ def register_tool_with_metadata(
     name: str,
     display_name: str,
     description: str,
-    category: ToolCategory | str,
-    status: ToolStatus | str = ToolStatus.AVAILABLE,
-    setup_type: SetupType | str = SetupType.NONE,
+    category: ToolCategory,
+    status: ToolStatus = ToolStatus.AVAILABLE,
+    setup_type: SetupType = SetupType.NONE,
     icon: str | None = None,
     requires_config: list[str] | None = None,
     dependencies: list[str] | None = None,
@@ -88,14 +91,8 @@ def register_tool_with_metadata(
 
     Returns:
         Decorator function
+
     """
-    # Convert strings to enums if needed
-    if isinstance(category, str):
-        category = ToolCategory(category)
-    if isinstance(status, str):
-        status = ToolStatus(status)
-    if isinstance(setup_type, str):
-        setup_type = SetupType(setup_type)
 
     def decorator(func: Callable[[], type]) -> Callable[[], type]:
         # Create metadata

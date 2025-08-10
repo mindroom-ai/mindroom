@@ -26,10 +26,12 @@ class ToolsResponse(BaseModel):
     tools: list[ToolInfo]
 
 
-@router.get("", response_model=ToolsResponse)
+@router.get("")
 async def get_registered_tools() -> ToolsResponse:
     """Get all registered tools from mindroom with full metadata."""
     try:
+        # Import tools module to trigger registrations
+        import mindroom.tools  # noqa: F401
         from mindroom.tools_metadata import TOOL_METADATA
     except ImportError:
         # Return empty list if mindroom is not available
@@ -50,7 +52,7 @@ async def get_registered_tools() -> ToolsResponse:
                 icon=metadata.icon,
                 requires_config=metadata.requires_config,
                 dependencies=metadata.dependencies,
-            )
+            ),
         )
 
     # Sort by category, then by name
@@ -63,6 +65,7 @@ async def get_registered_tools() -> ToolsResponse:
 async def check_frontend_coverage() -> dict:
     """Check which tools are in backend but missing from frontend."""
     try:
+        import mindroom.tools  # noqa: F401 - trigger registrations
         from mindroom.tools import TOOL_REGISTRY
     except ImportError:
         return {"error": "Could not import mindroom.tools"}

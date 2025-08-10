@@ -31,7 +31,7 @@ class SetupRequest(BaseModel):
 def run_command(cmd: list[str]) -> tuple[bool, str]:
     """Run a shell command and return success status and output."""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
         return result.returncode == 0, result.stdout + result.stderr
     except subprocess.TimeoutExpired:
         return False, "Command timed out"
@@ -97,7 +97,7 @@ async def create_project(request: SetupRequest):
 
     # Create project
     success, output = run_command(
-        ["gcloud", "projects", "create", project_id, "--name", request.project_name, "--format=json"]
+        ["gcloud", "projects", "create", project_id, "--name", request.project_name, "--format=json"],
     )
 
     if not success:
