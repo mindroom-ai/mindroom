@@ -3,8 +3,11 @@
 
 import asyncio
 import contextlib
+import shutil
 import sys
+import tempfile
 import time
+import traceback
 from pathlib import Path
 
 import nio
@@ -365,8 +368,6 @@ async def main() -> None:
 
     # Start mindroom
     print("🚀 Starting Mindroom...")
-    import tempfile
-
     temp_dir = tempfile.mkdtemp(prefix="mindroom_invite_test_")
     bot_task = asyncio.create_task(_run(log_level="INFO", storage_path=Path(temp_dir)))
 
@@ -379,8 +380,6 @@ async def main() -> None:
         await run_test_sequence()
     except Exception as e:
         print(f"\n❌ Test failed: {e}")
-        import traceback
-
         traceback.print_exc()
     finally:
         # Cleanup
@@ -399,8 +398,6 @@ async def main() -> None:
         await process.wait()
 
         # Clean up temp directory
-        import shutil
-
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 

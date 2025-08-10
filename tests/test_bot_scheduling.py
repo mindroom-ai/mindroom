@@ -1,5 +1,9 @@
 """Integration tests for scheduling functionality in the bot."""
 
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -181,9 +185,6 @@ class TestBotTaskRestoration:
     @pytest.mark.asyncio
     async def test_restore_tasks_on_room_join(self) -> None:
         """Test that scheduled tasks are restored when joining rooms."""
-        import tempfile
-        from pathlib import Path
-
         agent_user = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -223,9 +224,6 @@ class TestBotTaskRestoration:
     @pytest.mark.asyncio
     async def test_no_log_when_no_tasks_restored(self) -> None:
         """Test that no log is generated when no tasks are restored."""
-        import tempfile
-        from pathlib import Path
-
         agent_user = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
