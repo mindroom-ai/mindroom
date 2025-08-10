@@ -374,7 +374,7 @@ async def get_available_rooms():
             agent_rooms = agent_data.get("rooms", [])
             rooms.update(agent_rooms)
 
-    return sorted(list(rooms))
+    return sorted(rooms)
 
 
 @app.post("/api/keys/encrypt")

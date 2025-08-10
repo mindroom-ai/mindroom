@@ -33,7 +33,7 @@ def temp_matrix_users_file(tmp_path: Path) -> Path:
         },
         "rooms": {},
     }
-    with open(file_path, "w") as f:
+    with file_path.open("w") as f:
         yaml.dump(initial_data, f)
     return file_path
 
@@ -99,7 +99,7 @@ class TestMatrixUserManagement:
             state.save()
 
         # Verify the file was written correctly
-        with open(file_path) as f:
+        with file_path.open() as f:
             saved_data = yaml.safe_load(f)
         assert "accounts" in saved_data
         assert "agent_test" in saved_data["accounts"]

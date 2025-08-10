@@ -117,7 +117,7 @@ class Config(BaseModel):
             msg = f"Agent configuration file not found: {path}"
             raise FileNotFoundError(msg)
 
-        with open(path) as f:
+        with path.open() as f:
             data = yaml.safe_load(f)
 
         # Handle None values for optional dictionaries
@@ -205,6 +205,6 @@ class Config(BaseModel):
         """
         path = config_path or DEFAULT_AGENTS_CONFIG
         config_dict = self.model_dump(exclude_none=True)
-        with open(path, "w") as f:
+        with Path(path).open("w") as f:
             yaml.dump(config_dict, f, default_flow_style=False, sort_keys=True)
         logger.info(f"Saved configuration to {path}")

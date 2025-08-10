@@ -48,14 +48,14 @@ class ResponseTracker:
         if not self._responses_file.exists():
             return {}
 
-        with open(self._responses_file) as f:
+        with self._responses_file.open() as f:
             data = json.load(f)
             return data.get("events", {})  # type: ignore[no-any-return]
 
     def _save_responded_events(self) -> None:
         """Save the responded event IDs with timestamps to disk using file locking."""
         # Use file locking to prevent concurrent access issues
-        with open(self._responses_file, "w") as f:
+        with self._responses_file.open("w") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
                 json.dump({"events": self._responded_events}, f, indent=2)
