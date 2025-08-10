@@ -186,7 +186,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     thread_root_id = "$thread_root:example.org"
 
     # Mock the config to include both agents
-    from mindroom.config import AgentConfig, ModelConfig
+    from mindroom.config import AgentConfig, ModelConfig  # noqa: PLC0415
 
     mock_config = Config(
         agents={

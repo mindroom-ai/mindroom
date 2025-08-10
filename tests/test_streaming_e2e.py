@@ -11,8 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
-from mindroom.bot import MultiAgentOrchestrator
+from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config, RouterConfig
+from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -30,7 +31,6 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 ) -> None:
     """End-to-end test that agents don't respond to streaming edits from other agents."""
     # Mock ensure_all_agent_users to return proper user objects
-    from mindroom.matrix.users import AgentMatrixUser
 
     mock_agents = {
         "helper": AgentMatrixUser(
@@ -163,7 +163,6 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 
         # Patch create_bot_for_entity to create bots with proper user_ids
         with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
-            from mindroom.bot import AgentBot
 
             def create_bot_side_effect(
                 entity_name: str,
@@ -180,8 +179,6 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                     agent_user.user_id = "@mindroom_router:localhost"  # type: ignore[attr-defined]
 
                 # Create the actual bot with config
-                from pathlib import Path
-
                 return AgentBot(agent_user, Path(str(storage_path)), config, rooms=[test_room_id])  # type: ignore[arg-type]
 
             mock_create_bot.side_effect = create_bot_side_effect
@@ -336,8 +333,6 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 @pytest.mark.e2e
 async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
     """Test that agents DO respond to user edits that add mentions."""
-    from mindroom.matrix.users import AgentMatrixUser
-
     # Create a single bot for this test
     calc_user = AgentMatrixUser(
         agent_name="calculator",
@@ -368,7 +363,6 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         mock_client.room_send.side_effect = mock_room_send
 
         # Create bot
-        from mindroom.bot import AgentBot
 
         config = Config(router=RouterConfig(model="default"))
 
@@ -378,8 +372,6 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         test_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="", encrypted=False)
 
         # User sends initial message without mention
-        from unittest.mock import MagicMock
-
         initial_event = MagicMock(spec=nio.RoomMessageText)
         initial_event.body = "What's the sum?"
         initial_event.sender = "@user:localhost"

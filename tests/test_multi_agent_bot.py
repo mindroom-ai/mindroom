@@ -14,7 +14,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import Config
+from mindroom.config import Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
@@ -72,8 +72,6 @@ class TestAgentBot:
 
     def create_mock_config(self) -> MagicMock:
         """Create a mock config for testing."""
-        from mindroom.config import ModelConfig
-
         mock_config = MagicMock()
         mock_config.agents = {
             "calculator": MagicMock(display_name="CalculatorAgent", rooms=["!test:localhost"]),

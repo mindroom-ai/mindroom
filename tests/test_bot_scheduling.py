@@ -13,6 +13,7 @@ from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.thread_utils import should_agent_respond
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -464,8 +465,6 @@ class TestCommandHandling:
         # 1. User sends a schedule command
         # 2. RouterAgent fails to parse it and sends an error message
         # 3. FinanceAgent should NOT respond to the error message
-
-        from mindroom.thread_utils import should_agent_respond
 
         # Create thread history with user command and router error
         thread_history = [

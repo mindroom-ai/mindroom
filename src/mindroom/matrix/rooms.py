@@ -174,7 +174,7 @@ async def ensure_all_rooms_exist(
         Dict mapping room keys to room IDs
 
     """
-    from mindroom.agents import get_agent_ids_for_room
+    from mindroom.agents import get_agent_ids_for_room  # noqa: PLC0415
 
     room_ids = {}
 

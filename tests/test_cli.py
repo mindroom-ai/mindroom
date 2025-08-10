@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.bot import MultiAgentOrchestrator
+from mindroom.matrix.client import register_user
 from mindroom.matrix.state import MatrixState
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
@@ -30,8 +31,6 @@ class TestUserAccountManagement:
     @pytest.mark.asyncio
     async def test_register_user_success(self, mock_matrix_client: tuple[MagicMock, AsyncMock]) -> None:
         """Test successful user registration."""
-        from mindroom.matrix.client import register_user
-
         mock_context, mock_client = mock_matrix_client
 
         # Mock successful registration
@@ -59,8 +58,6 @@ class TestUserAccountManagement:
     @pytest.mark.asyncio
     async def test_register_user_already_exists(self, mock_matrix_client: tuple[MagicMock, AsyncMock]) -> None:
         """Test registration when user already exists."""
-        from mindroom.matrix.client import register_user
-
         mock_context, mock_client = mock_matrix_client
 
         # Mock user already exists error

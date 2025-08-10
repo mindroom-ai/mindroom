@@ -14,7 +14,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config import Config
+from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
@@ -223,8 +223,6 @@ class TestRoutingRegression:
     ) -> None:
         """Test that when multiple agents are mentioned, each responds exactly once."""
         # Create a mock config with proper models
-        from mindroom.config import AgentConfig, Config, ModelConfig
-
         mock_config = Config(
             agents={
                 "research": AgentConfig(display_name="ResearchAgent", rooms=["!research:localhost"]),

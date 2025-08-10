@@ -172,7 +172,7 @@ class Config(BaseModel):
             Set of bot usernames (without domain) that should be in this room
 
         """
-        from .matrix.rooms import resolve_room_aliases
+        from .matrix.rooms import resolve_room_aliases  # noqa: PLC0415
 
         configured_bots = set()
 
