@@ -100,7 +100,7 @@ describe('TeamList', () => {
     render(<TeamList />);
 
     const devTeamButton = screen.getByText('Dev Team').closest('button');
-    expect(devTeamButton).toHaveClass('bg-gradient-to-r', 'from-blue-500', 'to-purple-500');
+    expect(devTeamButton).toHaveClass('bg-gradient-to-r', 'from-primary', 'to-primary/80');
   });
 
   it('shows create team form when plus button is clicked', () => {

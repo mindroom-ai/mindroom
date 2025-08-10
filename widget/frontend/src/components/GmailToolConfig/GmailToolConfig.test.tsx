@@ -157,6 +157,17 @@ describe('GmailToolConfig', () => {
     });
 
     it('validates required fields in manual setup', async () => {
+      // Mock status as not configured
+      global.fetch = vi.fn().mockImplementation(url => {
+        if (url.includes('/api/gmail/status')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ configured: false, hasCredentials: false }),
+          });
+        }
+        return Promise.reject(new Error(`Unexpected URL: ${url}`));
+      });
+
       render(<GmailToolConfig />);
 
       // Switch to manual tab
@@ -165,18 +176,22 @@ describe('GmailToolConfig', () => {
 
       const saveButton = screen.getByRole('button', { name: /Save Credentials/i });
 
-      // Try to save without filling fields
-      await userEvent.click(saveButton);
+      // Button should be disabled when fields are empty
+      expect(saveButton).toBeDisabled();
 
-      await waitFor(() => {
-        expect(mockToast).toHaveBeenCalledWith(
-          expect.objectContaining({
-            title: 'Missing Credentials',
-            description: 'Please enter both Client ID and Client Secret',
-            variant: 'destructive',
-          })
-        );
-      });
+      // Fill only one field
+      const clientIdInput = screen.getByLabelText('Client ID');
+      await userEvent.type(clientIdInput, 'test-client-id');
+
+      // Button should still be disabled with only one field
+      expect(saveButton).toBeDisabled();
+
+      // Fill both fields
+      const clientSecretInput = screen.getByLabelText('Client Secret');
+      await userEvent.type(clientSecretInput, 'test-secret');
+
+      // Now button should be enabled
+      expect(saveButton).toBeEnabled();
     });
 
     it('saves manual credentials successfully', async () => {
@@ -191,8 +206,7 @@ describe('GmailToolConfig', () => {
         if (url.includes('/api/gmail/status')) {
           return Promise.resolve({
             ok: true,
-            json: () =>
-              Promise.resolve({ configured: true, method: 'manual', hasCredentials: true }),
+            json: () => Promise.resolve({ configured: false, hasCredentials: false }),
           });
         }
         return Promise.reject(new Error(`Unexpected URL: ${url}`));
