@@ -5,21 +5,26 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
-from .config import Config
 from .logging_config import get_logger
 from .matrix.client import send_message
+
+if TYPE_CHECKING:
+    from .config import Config
 
 logger = get_logger(__name__)
 
 # Event type for scheduled tasks in Matrix state
 SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
+
+# Maximum length for message preview in task listings
+MESSAGE_PREVIEW_LENGTH = 50
 
 # Global task storage for running asyncio tasks
 _running_tasks: dict[str, asyncio.Task] = {}
@@ -41,7 +46,9 @@ class ScheduleParseError(BaseModel):
 
 
 async def parse_schedule(
-    full_text: str, config: Config, current_time: datetime | None = None
+    full_text: str,
+    config: Config,
+    current_time: datetime | None = None,
 ) -> ScheduledTimeResponse | ScheduleParseError:
     """Use AI with structured output to parse natural language schedule requests."""
     if current_time is None:
@@ -95,7 +102,7 @@ IMPORTANT: Always provide a valid response. If the request is unclear, make a re
                 interpretation=result.interpretation,
             )
             return result
-        elif isinstance(result, ScheduleParseError):
+        if isinstance(result, ScheduleParseError):
             logger.debug("AI returned parse error", error=result.error)
             return result
 
@@ -128,6 +135,7 @@ async def schedule_task(
 
     Returns:
         Tuple of (task_id, response_message)
+
     """
     # Parse the full request
     parse_result = await parse_schedule(full_text, config)
@@ -182,8 +190,14 @@ async def schedule_task(
     # Start the async task
     task = asyncio.create_task(
         _execute_scheduled_task(
-            client, task_id, room_id, thread_id, agent_user_id, parse_result.execute_at, parse_result.message
-        )
+            client,
+            task_id,
+            room_id,
+            thread_id,
+            agent_user_id,
+            parse_result.execute_at,
+            parse_result.message,
+        ),
     )
     _running_tasks[task_id] = task
 
@@ -200,7 +214,7 @@ async def _execute_scheduled_task(
     task_id: str,
     room_id: str,
     thread_id: str | None,
-    agent_user_id: str,
+    _agent_user_id: str,
     execute_at: datetime,
     message: str,
 ) -> None:
@@ -234,17 +248,16 @@ async def _execute_scheduled_task(
         )
 
         # Clean up
-        if task_id in _running_tasks:
-            del _running_tasks[task_id]
+        _running_tasks.pop(task_id, None)
 
     except asyncio.CancelledError:
         logger.info(f"Scheduled task {task_id} was cancelled")
         raise
-    except Exception as e:
-        logger.error(f"Failed to execute scheduled task {task_id}: {e}")
+    except Exception:
+        logger.exception("Failed to execute scheduled task %s", task_id)
 
 
-async def list_scheduled_tasks(
+async def list_scheduled_tasks(  # noqa: C901
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str | None = None,
@@ -327,7 +340,9 @@ async def list_scheduled_tasks(
     lines = ["**Scheduled Tasks:**"]
     for task in tasks:
         time_str = task["time"].strftime("%Y-%m-%d %H:%M UTC")
-        msg_preview = task["message"][:50] + ("..." if len(task["message"]) > 50 else "")
+        msg_preview = task["message"][:MESSAGE_PREVIEW_LENGTH] + (
+            "..." if len(task["message"]) > MESSAGE_PREVIEW_LENGTH else ""
+        )
         lines.append(f'• `{task["id"]}` - {time_str}: "{msg_preview}"')
 
     return "\n".join(lines)
@@ -370,6 +385,7 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str) -> int:
 
     Returns:
         Number of tasks restored
+
     """
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
@@ -395,13 +411,13 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str) -> int:
                                 content["agent_user_id"],
                                 execute_at,
                                 content["message"],
-                            )
+                            ),
                         )
                         _running_tasks[task_id] = task
                         restored_count += 1
 
-                except (KeyError, ValueError) as e:
-                    logger.error(f"Failed to restore task: {e}")
+                except (KeyError, ValueError):
+                    logger.exception("Failed to restore task")
                     continue
 
     if restored_count > 0:

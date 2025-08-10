@@ -12,6 +12,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD
+
 
 def setup_test_bot(
     agent: AgentMatrixUser,
@@ -42,7 +44,7 @@ def mock_agent_user() -> AgentMatrixUser:
     """Create a mock agent user."""
     return AgentMatrixUser(
         agent_name="calculator",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="CalculatorAgent",
         user_id="@mindroom_calculator:localhost",
     )
@@ -68,7 +70,7 @@ class TestStreamingEdits:
     @patch("mindroom.bot.ai_response_streaming")
     async def test_agent_ignores_edits_of_responded_messages(
         self,
-        mock_ai_response_streaming: AsyncMock,
+        mock_ai_response_streaming: AsyncMock,  # noqa: ARG002
         mock_ai_response: AsyncMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -98,7 +100,7 @@ class TestStreamingEdits:
             "content": {
                 "body": "@mindroom_calculator:localhost: What's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            }
+            },
         }
 
         # Process initial message - bot should respond
@@ -127,7 +129,7 @@ class TestStreamingEdits:
                     "body": "@mindroom_calculator:localhost: What's 2+2? Can you show the work?",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
-            }
+            },
         }
 
         # Process edit - bot should NOT respond again
@@ -152,7 +154,7 @@ class TestStreamingEdits:
                     "body": "@mindroom_calculator:localhost: What's 2+2? Can you show the work step by step?",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
-            }
+            },
         }
 
         # Process second edit - bot should still NOT respond
@@ -196,7 +198,7 @@ class TestStreamingEdits:
             "content": {
                 "body": "@mindroom_calculator:localhost: What's 5+5?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            }
+            },
         }
 
         # Process new message - bot SHOULD respond
@@ -236,7 +238,7 @@ class TestStreamingEdits:
         initial_event.source = {
             "content": {
                 "body": "Let me calculate something...",
-            }
+            },
         }
 
         # Process initial message - calculator should NOT respond (not mentioned)
@@ -261,7 +263,7 @@ class TestStreamingEdits:
                     "body": "Let me calculate something... @mindroom_calculator:localhost can you help? ⋯",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
-            }
+            },
         }
 
         # Process edit - calculator should STILL NOT respond (it's an edit from an agent)
@@ -304,7 +306,7 @@ class TestStreamingEdits:
         initial_event.source = {
             "content": {
                 "body": "I need some help...",
-            }
+            },
         }
 
         # Process initial message - calculator should NOT respond (not mentioned)
@@ -329,7 +331,7 @@ class TestStreamingEdits:
                     "body": "I need some help... @mindroom_calculator:localhost what's 2+2?",
                     "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
                 },
-            }
+            },
         }
 
         # Process edit - calculator SHOULD respond (it's a user edit with new mention)

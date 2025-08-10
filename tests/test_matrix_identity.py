@@ -31,10 +31,10 @@ class TestMatrixID:
 
     def test_parse_invalid_matrix_id(self) -> None:
         """Test parsing invalid Matrix IDs."""
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid Matrix ID"):
             MatrixID.parse("invalid")
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid Matrix ID format"):
             MatrixID.parse("@nodomainpart")
 
     def test_from_agent(self) -> None:
@@ -96,7 +96,7 @@ class TestThreadStateKey:
 
     def test_parse_invalid_state_key(self) -> None:
         """Test parsing invalid state keys."""
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Invalid state key"):
             ThreadStateKey.parse("invalid")
 
     def test_create_state_key(self) -> None:

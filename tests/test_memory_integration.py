@@ -29,7 +29,7 @@ class TestMemoryIntegration:
             patch("mindroom.ai.store_conversation_memory", new_callable=AsyncMock) as mock_store,
         ):
             # Set up async side effects
-            async def build_side_effect(prompt: str, *args: Any, **kwargs: Any) -> str:
+            async def build_side_effect(prompt: str, *_args: Any, **_kwargs: Any) -> str:
                 return f"[Enhanced] {prompt}"
 
             mock_build.side_effect = build_side_effect
@@ -42,7 +42,11 @@ class TestMemoryIntegration:
 
     @pytest.mark.asyncio
     async def test_ai_response_with_memory(
-        self, mock_agent_run: AsyncMock, mock_memory_functions: tuple[AsyncMock, AsyncMock], tmp_path: Any, config: Any
+        self,
+        mock_agent_run: AsyncMock,
+        mock_memory_functions: tuple[AsyncMock, AsyncMock],
+        tmp_path: Any,
+        config: Any,
     ) -> None:
         """Test that AI response uses memory enhancement."""
         mock_build, mock_store = mock_memory_functions
@@ -75,12 +79,21 @@ class TestMemoryIntegration:
 
             # Verify conversation was stored
             mock_store.assert_called_once_with(
-                "What is 2+2?", "calculator", tmp_path, "test_session", config, "!test:room"
+                "What is 2+2?",
+                "calculator",
+                tmp_path,
+                "test_session",
+                config,
+                "!test:room",
             )
 
     @pytest.mark.asyncio
     async def test_ai_response_without_room_id(
-        self, mock_agent_run: AsyncMock, mock_memory_functions: tuple[AsyncMock, AsyncMock], tmp_path: Any, config: Any
+        self,
+        mock_agent_run: AsyncMock,
+        mock_memory_functions: tuple[AsyncMock, AsyncMock],
+        tmp_path: Any,
+        config: Any,
     ) -> None:
         """Test AI response without room context."""
         mock_build, mock_store = mock_memory_functions
@@ -118,7 +131,11 @@ class TestMemoryIntegration:
             patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory),
         ):
             response = await ai_response(
-                agent_name="general", prompt="Test", session_id="session", storage_path=tmp_path, config=config
+                agent_name="general",
+                prompt="Test",
+                session_id="session",
+                storage_path=tmp_path,
+                config=config,
             )
 
             # Should return error message
@@ -163,7 +180,11 @@ class TestMemoryIntegration:
             mock_memory.search.return_value = {"results": [{"memory": "Remember this: A=1", "id": "1"}]}
 
             await ai_response(
-                agent_name="general", prompt="What is A?", session_id="session2", storage_path=tmp_path, config=config
+                agent_name="general",
+                prompt="What is A?",
+                session_id="session2",
+                storage_path=tmp_path,
+                config=config,
             )
 
             # Memory search should have been called

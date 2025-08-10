@@ -309,8 +309,8 @@ User: "What's 15% of 240?"
 Agent: I'll calculate 15% of 240 step by step.
 
 To find 15% of 240:
-- Method 1: 240 × 0.15 = 36
-- Method 2: (15/100) × 240 = 36
+- Method 1: 240 x 0.15 = 36
+- Method 2: (15/100) x 240 = 36
 - Verification: 36/240 = 0.15 = 15% ✓
 
 **Answer: 36**
@@ -327,7 +327,7 @@ Given:
 Using the compound interest formula: A = P(1 + r)^t
 A = 5000(1 + 0.04)^10
 A = 5000(1.04)^10
-A = 5000 × 1.4802442849
+A = 5000 x 1.4802442849
 A = $7,401.22
 
 **Answer: After 10 years, you'll have $7,401.22**
@@ -692,7 +692,7 @@ Agent: I'll calculate the future value of your monthly investment plan using the
 - Time Period: 20 years (240 months)
 
 **Using Future Value of Annuity Formula**:
-FV = PMT × [((1 + r)^n - 1) / r]
+FV = PMT x [((1 + r)^n - 1) / r]
 
 Where:
 - PMT = $500
@@ -700,13 +700,13 @@ Where:
 - n = 240 months
 
 **Calculation**:
-FV = $500 × [((1.0058333)^240 - 1) / 0.0058333]
-FV = $500 × [2.6533 / 0.0058333]
-FV = $500 × 454.94
+FV = $500 x [((1.0058333)^240 - 1) / 0.0058333]
+FV = $500 x [2.6533 / 0.0058333]
+FV = $500 x 454.94
 FV = **$522,470**
 
 **Summary**:
-- Total invested: $500 × 240 = $120,000
+- Total invested: $500 x 240 = $120,000
 - Total return: $522,470 - $120,000 = $402,470
 - Your money will grow by 335% over 20 years
 

@@ -5,14 +5,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nio
 
-from .config import Config
 from .logging_config import get_logger
 from .matrix.client import get_room_members, invite_to_room
 from .matrix.identity import MatrixID
+
+if TYPE_CHECKING:
+    from .config import Config
+    from .thread_invites import ThreadInviteManager
 
 logger = get_logger(__name__)
 
@@ -56,7 +59,7 @@ class CommandParser:
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
 
-    def parse(self, message: str) -> Command | None:
+    def parse(self, message: str) -> Command | None:  # noqa: PLR0911
         """Parse a message for commands.
 
         Args:
@@ -64,6 +67,7 @@ class CommandParser:
 
         Returns:
             Parsed command or None if no command found
+
         """
         message = message.strip()
         if not message.startswith("!"):
@@ -156,7 +160,7 @@ class CommandParser:
         return None
 
 
-def get_command_help(topic: str | None = None) -> str:
+def get_command_help(topic: str | None = None) -> str:  # noqa: PLR0911
     """Get help text for commands.
 
     Args:
@@ -164,6 +168,7 @@ def get_command_help(topic: str | None = None) -> str:
 
     Returns:
         Help text
+
     """
     if topic == "invite":
         return """**Invite Command**
@@ -176,7 +181,7 @@ Example:
 Note: Invites only work in threads. The agent will be able to participate in this thread only.
 Agents are automatically removed from the room 24 hours after being invited."""
 
-    elif topic == "uninvite":
+    if topic == "uninvite":
         return """**Uninvite Command**
 
 Usage: `!uninvite <agent>`
@@ -186,14 +191,14 @@ Example:
 
 The agent will no longer receive messages from this thread."""
 
-    elif topic == "list" or topic == "list_invites":
+    if topic in {"list", "list_invites"}:
         return """**List Invites Command**
 
 Usage: `!list_invites` or `!listinvites`
 
 Shows all agents currently invited to this thread."""
 
-    elif topic == "schedule":
+    if topic == "schedule":
         return """**Schedule Command**
 
 Usage: `!schedule <time> <message>` - Schedule a reminder
@@ -205,14 +210,14 @@ Examples:
 
 The agent will send you a reminder at the specified time."""
 
-    elif topic == "list_schedules":
+    if topic == "list_schedules":
         return """**List Schedules Command**
 
 Usage: `!list_schedules` or `!listschedules`
 
 Shows all pending scheduled tasks in this thread."""
 
-    elif topic == "cancel" or topic == "cancel_schedule":
+    if topic in {"cancel", "cancel_schedule"}:
         return """**Cancel Schedule Command**
 
 Usage: `!cancel_schedule <id>` - Cancel a scheduled task
@@ -222,7 +227,7 @@ Example:
 
 Use `!list_schedules` to see task IDs."""
 
-    elif topic == "widget":
+    if topic == "widget":
         return """**Widget Command**
 
 Usage: `!widget [url]` - Add the MindRoom configuration widget to this room
@@ -236,9 +241,8 @@ Pin it to keep it visible in the room.
 
 Note: Widget support requires Element Desktop or self-hosted Element Web."""
 
-    else:
-        # General help
-        return """**Available Commands**
+    # General help
+    return """**Available Commands**
 
 - `!invite <agent>` - Invite an agent to this thread
 - `!uninvite <agent>` - Remove an agent from this thread
@@ -262,7 +266,7 @@ async def handle_invite_command(
     sender: str,
     agent_domain: str,
     client: nio.AsyncClient,
-    thread_invite_manager: Any,
+    thread_invite_manager: ThreadInviteManager,
     config: Config,
 ) -> str:
     """Handle the invite command to invite an agent to a thread."""
@@ -295,7 +299,7 @@ async def handle_invite_command(
 async def handle_list_invites_command(
     room_id: str,
     thread_id: str,
-    thread_invite_manager: Any,
+    thread_invite_manager: ThreadInviteManager,
 ) -> str:
     """Handle the list invites command."""
     thread_invites = await thread_invite_manager.get_thread_agents(thread_id, room_id)
@@ -320,6 +324,7 @@ async def handle_widget_command(
 
     Returns:
         Response text for the user
+
     """
     # Default URL for local development
     default_url = "http://localhost:3003/matrix-widget.html"
@@ -338,7 +343,10 @@ async def handle_widget_command(
     try:
         # Send the state event to add the widget
         response = await client.room_put_state(
-            room_id=room_id, event_type="im.vector.modular.widgets", state_key="mindroom_config", content=widget_content
+            room_id=room_id,
+            event_type="im.vector.modular.widgets",
+            state_key="mindroom_config",
+            content=widget_content,
         )
 
         if isinstance(response, nio.RoomPutStateError):
@@ -346,7 +354,10 @@ async def handle_widget_command(
             return f"❌ Failed to add widget: {response.message}"
 
         logger.info(f"Successfully added widget to room {room_id}")
-
+    except Exception as e:
+        logger.exception("Error adding widget to room %s", room_id)
+        return f"❌ Error adding widget: {e!s}"
+    else:
         return (
             "✅ **MindRoom Configuration widget added!**\n\n"
             "• Pin the widget to keep it visible\n"
@@ -356,10 +367,6 @@ async def handle_widget_command(
             "**Note:** Widgets require Element Desktop or self-hosted Element Web.\n"
             "Alternatively, you can use: `/addwidget {url}` in Element."
         )
-
-    except Exception as e:
-        logger.error(f"Error adding widget to room {room_id}: {e}")
-        return f"❌ Error adding widget: {str(e)}"
 
 
 # Global parser instance

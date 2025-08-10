@@ -12,6 +12,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import extract_agent_name, has_any_agent_mentions_in_thread
 
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, TEST_TMP_DIR
+
 
 class TestAIRouting:
     """Tests for AI routing in multi-agent threads."""
@@ -26,7 +28,8 @@ class TestAIRouting:
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = AgentSuggestion(
-                agent_name="calculator", reasoning="User is asking about math calculation"
+                agent_name="calculator",
+                reasoning="User is asking about math calculation",
             )
             mock_agent.arun.return_value = mock_response
 
@@ -54,7 +57,10 @@ class TestAIRouting:
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
                 result = await suggest_agent_for_message(
-                    "How do I calculate deductions?", ["calculator", "finance", "general"], config, thread_context
+                    "How do I calculate deductions?",
+                    ["calculator", "finance", "general"],
+                    config,
+                    thread_context,
                 )
 
                 assert result == "finance"
@@ -64,8 +70,8 @@ class TestAIRouting:
                 assert "Previous messages:" in prompt
 
     @pytest.mark.asyncio
-    async def test_suggest_agent_unavailable_raises_assertion(self) -> None:
-        """Test that suggesting unavailable agent raises assertion error."""
+    async def test_suggest_agent_unavailable_returns_none(self) -> None:
+        """Test that suggesting unavailable agent returns None."""
         config = Config(router=RouterConfig(model="default"))
 
         with patch("mindroom.routing.get_model_instance"):
@@ -78,15 +84,14 @@ class TestAIRouting:
             )
             mock_agent.arun.return_value = mock_response
 
-            with (
-                patch("mindroom.routing.Agent", return_value=mock_agent),
-                pytest.raises(AssertionError, match="AI suggested code but available agents are"),
-            ):
-                await suggest_agent_for_message(
+            with patch("mindroom.routing.Agent", return_value=mock_agent):
+                result = await suggest_agent_for_message(
                     "How do I write a Python function?",
                     ["calculator", "general"],  # code not available
                     config,
                 )
+                # Should return None when agent is not available
+                assert result is None
 
     @pytest.mark.asyncio
     async def test_suggest_agent_error_handling(self) -> None:
@@ -108,13 +113,13 @@ class TestAIRouting:
             agent_name="general",
             user_id="@mindroom_general:localhost",
             display_name="GeneralAgent",
-            password="test",
-            access_token="token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         )
 
         config = Config(router=RouterConfig(model="default"))
 
-        bot = AgentBot(agent, Path("/tmp"), config=config)
+        bot = AgentBot(agent, Path(TEST_TMP_DIR), config=config)
 
         mock_room = MagicMock()
         mock_room.users = MagicMock()

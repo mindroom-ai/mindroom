@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agno.agent import Agent
 from agno.storage.sqlite import SqliteStorage
 
 from . import agent_prompts
-from .config import Config
 from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .tools import get_tool_by_name
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from .config import Config
+
 logger = get_logger(__name__)
+
+# Maximum length for instruction descriptions to include in agent summary
+MAX_INSTRUCTION_LENGTH = 100
 
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
 RICH_PROMPTS = {
@@ -29,20 +36,20 @@ RICH_PROMPTS = {
 }
 
 
-def create_agent(agent_name: str, storage_path: Path, config: Config, config_path: Path | None = None) -> Agent:
+def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
         agent_name: Name of the agent to create
         storage_path: Base directory for storing agent data
         config: Application configuration
-        config_path: Optional path to configuration file (deprecated, config is now passed)
 
     Returns:
         Configured Agent instance
 
     Raises:
         ValueError: If agent_name is not found in configuration
+
     """
     from .ai import get_model_instance
 
@@ -51,7 +58,7 @@ def create_agent(agent_name: str, storage_path: Path, config: Config, config_pat
     defaults = config.defaults
 
     # Create tools
-    tools = []
+    tools: list = []  # Use list type to satisfy Agent's parameter type
     for tool_name in agent_config.tools:
         try:
             tool = get_tool_by_name(tool_name)
@@ -65,7 +72,8 @@ def create_agent(agent_name: str, storage_path: Path, config: Config, config_pat
 
     # Add identity context to all agents using the unified template
     identity_context = agent_prompts.AGENT_IDENTITY_CONTEXT.format(
-        display_name=agent_config.display_name, agent_name=agent_name
+        display_name=agent_config.display_name,
+        agent_name=agent_name,
     )
 
     # Use rich prompt if available, otherwise use YAML config
@@ -110,10 +118,11 @@ def describe_agent(agent_name: str, config: Config) -> str:
 
     Args:
         agent_name: Name of the agent or team to describe
-        config_path: Optional path to configuration file
+        config: Application configuration
 
     Returns:
         Human-readable description of the agent or team
+
     """
     # Handle built-in router agent
     if agent_name == ROUTER_AGENT_NAME:
@@ -153,7 +162,7 @@ def describe_agent(agent_name: str, config: Config) -> str:
     if agent_config.instructions:
         # Take first instruction as it's usually the most descriptive
         first_instruction = agent_config.instructions[0]
-        if len(first_instruction) < 100:  # Only include if reasonably short
+        if len(first_instruction) < MAX_INSTRUCTION_LENGTH:  # Only include if reasonably short
             parts.append(f"- {first_instruction}")
 
     return "\n  ".join(parts)
@@ -161,7 +170,6 @@ def describe_agent(agent_name: str, config: Config) -> str:
 
 def get_agent_ids_for_room(room_key: str, config: Config, homeserver: str | None = None) -> list[str]:
     """Get all agent Matrix IDs assigned to a specific room."""
-
     from .matrix import MATRIX_HOMESERVER
     from .matrix.identity import MatrixID, extract_server_name_from_homeserver
 
@@ -189,6 +197,7 @@ def get_rooms_for_entity(entity_name: str, config: Config) -> list[str]:
 
     Returns:
         List of room aliases the entity should be in
+
     """
     # TeamBot check (teams)
     if entity_name in config.teams:

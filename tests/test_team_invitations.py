@@ -15,11 +15,13 @@ from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+
 
 @pytest.fixture
 def mock_config_with_teams() -> Config:
     """Create a mock config with agents and teams."""
-    config = Config(
+    return Config(
         agents={
             "agent1": AgentConfig(
                 display_name="Agent 1",
@@ -36,7 +38,6 @@ def mock_config_with_teams() -> Config:
             ),
         },
     )
-    return config
 
 
 class TestTeamRoomMembership:
@@ -50,14 +51,14 @@ class TestTeamRoomMembership:
             agent_name="team1",
             user_id="@mindroom_team1:localhost",
             display_name="Team 1",
-            password="test_password",
+            password=TEST_PASSWORD,
         )
 
         # Create the team bot with configured rooms
         config = Config(router=RouterConfig(model="default"))
         bot = TeamBot(
             agent_user=team_user,
-            storage_path=Path("/tmp/test"),
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=["!test_room:localhost"],
             team_agents=["agent1"],
@@ -73,14 +74,14 @@ class TestTeamRoomMembership:
         # Track which rooms were joined
         joined_rooms = []
 
-        async def mock_join_room(client: object, room_id: str) -> bool:
+        async def mock_join_room(_client: object, room_id: str) -> bool:
             joined_rooms.append(room_id)
             return True
 
         monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
         # Mock restore_scheduled_tasks
-        async def mock_restore_scheduled_tasks(client: object, room_id: str) -> int:
+        async def mock_restore_scheduled_tasks(_client: object, _room_id: str) -> int:
             return 0
 
         monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -93,21 +94,21 @@ class TestTeamRoomMembership:
         assert "!test_room:localhost" in joined_rooms
 
     @pytest.mark.asyncio
-    async def test_team_leaves_unconfigured_rooms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_team_leaves_unconfigured_rooms(self) -> None:
         """Test that teams leave rooms they're no longer configured for."""
         # Create a mock team user
         team_user = AgentMatrixUser(
             agent_name="team1",
             user_id="@mindroom_team1:localhost",
             display_name="Team 1",
-            password="test_password",
+            password=TEST_PASSWORD,
         )
 
         # Create the team bot with no configured rooms
         config = Config(router=RouterConfig(model="default"))
         bot = TeamBot(
             agent_user=team_user,
-            storage_path=Path("/tmp/test"),
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=[],  # No configured rooms
             team_agents=["agent1"],

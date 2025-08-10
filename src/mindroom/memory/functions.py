@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
-from ..config import Config
-from ..logging_config import get_logger
+from mindroom.logging_config import get_logger
+
 from .config import create_memory_instance
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.config import Config
 
 
 class MemoryResult(TypedDict, total=False):
@@ -39,8 +43,9 @@ async def add_agent_memory(
         content: The memory content to store
         agent_name: Name of the agent
         storage_path: Storage path for memory
-        user_id: Optional user ID to associate memory with
+        config: Application configuration
         metadata: Optional metadata to store with memory
+
     """
     memory = await create_memory_instance(storage_path, config)
 
@@ -55,7 +60,7 @@ async def add_agent_memory(
         await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
         logger.info("Memory added", agent=agent_name)
     except Exception as e:
-        logger.error("Failed to add memory", agent=agent_name, error=str(e))
+        logger.exception("Failed to add memory", agent=agent_name, error=str(e))
 
 
 async def search_agent_memories(
@@ -71,10 +76,12 @@ async def search_agent_memories(
         query: Search query
         agent_name: Name of the agent
         storage_path: Storage path for memory
+        config: Application configuration
         limit: Maximum number of results
 
     Returns:
         List of relevant memories
+
     """
     memory = await create_memory_instance(storage_path, config)
     search_result = await memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
@@ -99,8 +106,10 @@ async def add_room_memory(
         content: The memory content to store
         room_id: Room ID
         storage_path: Storage path for memory
+        config: Application configuration
         agent_name: Optional agent that created this memory
         metadata: Optional metadata to store with memory
+
     """
     memory = await create_memory_instance(storage_path, config)
 
@@ -118,7 +127,11 @@ async def add_room_memory(
 
 
 async def search_room_memories(
-    query: str, room_id: str, storage_path: Path, config: Config, limit: int = 3
+    query: str,
+    room_id: str,
+    storage_path: Path,
+    config: Config,
+    limit: int = 3,
 ) -> list[MemoryResult]:
     """Search room memories.
 
@@ -126,10 +139,12 @@ async def search_room_memories(
         query: Search query
         room_id: Room ID
         storage_path: Storage path for memory
+        config: Application configuration
         limit: Maximum number of results
 
     Returns:
         List of relevant memories
+
     """
     memory = await create_memory_instance(storage_path, config)
     safe_room_id = room_id.replace(":", "_").replace("!", "")
@@ -150,6 +165,7 @@ def format_memories_as_context(memories: list[MemoryResult], context_type: str =
 
     Returns:
         Formatted context string
+
     """
     if not memories:
         return ""
@@ -178,10 +194,12 @@ async def build_memory_enhanced_prompt(
         prompt: The original user prompt
         agent_name: Name of the agent
         storage_path: Path for memory storage
+        config: Application configuration
         room_id: Optional room ID for room context
 
     Returns:
         Enhanced prompt with memory context
+
     """
     logger.debug("Building enhanced prompt", agent=agent_name)
     enhanced_prompt = prompt
@@ -221,7 +239,9 @@ async def store_conversation_memory(
         agent_name: Name of the agent
         storage_path: Path for memory storage
         session_id: Session ID for the conversation
+        config: Application configuration
         room_id: Optional room ID for room memory
+
     """
     if not prompt:
         return

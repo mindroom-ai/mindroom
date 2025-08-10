@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,6 +13,12 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import get_agents_in_thread
 
+from .conftest import TEST_PASSWORD
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
+
 
 # Test fixtures for team agents
 @pytest.fixture
@@ -24,7 +28,7 @@ def mock_research_agent() -> AgentMatrixUser:
         agent_name="research",
         user_id="@mindroom_research:localhost",
         display_name="ResearchAgent",
-        password="test_pass",
+        password=TEST_PASSWORD,
     )
 
 
@@ -35,7 +39,7 @@ def mock_analyst_agent() -> AgentMatrixUser:
         agent_name="analyst",
         user_id="@mindroom_analyst:localhost",
         display_name="AnalystAgent",
-        password="test_pass",
+        password=TEST_PASSWORD,
     )
 
 
@@ -46,7 +50,7 @@ def mock_code_agent() -> AgentMatrixUser:
         agent_name="code",
         user_id="@mindroom_code:localhost",
         display_name="CodeAgent",
-        password="test_pass",
+        password=TEST_PASSWORD,
     )
 
 
@@ -57,7 +61,7 @@ def mock_security_agent() -> AgentMatrixUser:
         agent_name="security",
         user_id="@mindroom_security:localhost",
         display_name="SecurityAgent",
-        password="test_pass",
+        password=TEST_PASSWORD,
     )
 
 
@@ -119,7 +123,7 @@ class TestTeamFormation:
                     "user_ids": [
                         mock_research_agent.user_id,
                         mock_analyst_agent.user_id,
-                    ]
+                    ],
                 },
             },
             "sender": "@user:localhost",
@@ -145,8 +149,8 @@ class TestTeamFormation:
         self,
         mock_code_agent: AgentMatrixUser,
         mock_security_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that multiple agents already in a thread form a team when no one is mentioned."""
         # Mock thread history showing both agents have participated
@@ -185,11 +189,11 @@ class TestTeamCollaboration:
     @patch("mindroom.bot.ai_response_streaming")
     async def test_team_coordinate_mode(
         self,
-        mock_ai_response_streaming: AsyncMock,
-        mock_research_agent: AgentMatrixUser,
-        mock_analyst_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        mock_ai_response_streaming: AsyncMock,  # noqa: ARG002
+        mock_research_agent: AgentMatrixUser,  # noqa: ARG002
+        mock_analyst_agent: AgentMatrixUser,  # noqa: ARG002
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team coordination mode where agents build on each other's work."""
 
@@ -208,13 +212,9 @@ class TestTeamCollaboration:
         # Implementation will ensure agents respond sequentially
 
         # Expected: Research agent provides data, then analyst builds on it
-        research_chunks = []
-        async for chunk in research_response():
-            research_chunks.append(chunk)
+        research_chunks = [chunk async for chunk in research_response()]
 
-        analyst_chunks = []
-        async for chunk in analyst_response():
-            analyst_chunks.append(chunk)
+        analyst_chunks = [chunk async for chunk in analyst_response()]
 
         # Verify responses can be combined coherently
         combined = "".join(research_chunks) + "\n\n" + "".join(analyst_chunks)
@@ -224,17 +224,16 @@ class TestTeamCollaboration:
     @pytest.mark.asyncio
     async def test_team_collaborate_mode(
         self,
-        mock_code_agent: AgentMatrixUser,
-        mock_security_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        mock_code_agent: AgentMatrixUser,  # noqa: ARG002
+        mock_security_agent: AgentMatrixUser,  # noqa: ARG002
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team collaboration mode where agents work in parallel."""
         # In collaborate mode, multiple agents analyze the same problem
         # and provide different perspectives simultaneously
 
         # In collaborate mode, multiple agents analyze the same problem
-        # problem = "How should we implement user authentication?"
 
         # Team synthesis would combine these perspectives
         expected_synthesis = (
@@ -253,14 +252,13 @@ class TestTeamCollaboration:
         mock_research_agent: AgentMatrixUser,
         mock_code_agent: AgentMatrixUser,
         mock_analyst_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team route mode where lead agent delegates to specialists."""
         # In route mode, a lead agent determines who should handle what
 
         # In route mode, a lead agent determines who should handle what
-        # complex_request = "Research the latest web frameworks, analyze their performance, and create a comparison chart"
 
         expected_delegations = {
             "research_task": mock_research_agent.agent_name,
@@ -269,7 +267,7 @@ class TestTeamCollaboration:
         }
 
         # Verify routing logic (to be implemented)
-        for _task, agent in expected_delegations.items():
+        for agent in expected_delegations.values():
             assert agent in ["research", "code", "analyst"]
 
 
@@ -294,8 +292,8 @@ class TestTeamResponseBehavior:
     async def test_single_agent_still_continues_conversation(
         self,
         mock_code_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that single agent behavior remains unchanged."""
         # Thread with only one agent
@@ -322,9 +320,9 @@ class TestTeamResponseBehavior:
     async def test_explicit_mention_overrides_team(
         self,
         mock_code_agent: AgentMatrixUser,
-        mock_security_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        mock_security_agent: AgentMatrixUser,  # noqa: ARG002
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that explicit mention of one agent prevents team formation."""
         # Thread with multiple agents (thread_history would show both agents)
@@ -340,9 +338,9 @@ class TestTeamResponseBehavior:
         }
 
         # Only mentioned agent should respond, not the team
-        content = cast(dict[str, Any], message_event["content"])
-        mentions = cast(dict[str, Any], content["m.mentions"])
-        user_ids = cast(list[str], mentions["user_ids"])
+        content = cast("dict[str, Any]", message_event["content"])
+        mentions = cast("dict[str, Any]", content["m.mentions"])
+        user_ids = cast("list[str]", mentions["user_ids"])
         assert len(user_ids) == 1
         assert mock_code_agent.user_id in user_ids
 
@@ -351,8 +349,8 @@ class TestTeamResponseBehavior:
         self,
         mock_research_agent: AgentMatrixUser,
         mock_analyst_agent: AgentMatrixUser,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test team formation with invited agents."""
         # One agent is native to room, another is invited
@@ -393,7 +391,6 @@ class TestTeamEdgeCases:
         """Test behavior when a team member is unavailable."""
         # Setup scenario where one agent is offline/unavailable
         # Team should adapt and continue with available members
-        pass
 
     @pytest.mark.asyncio
     async def test_conflicting_team_responses(
@@ -406,7 +403,6 @@ class TestTeamEdgeCases:
         """Test handling of conflicting information from team members."""
         # Agents might have different data or opinions
         # Team synthesis should handle gracefully
-        pass
 
     @pytest.mark.asyncio
     async def test_team_context_overflow(
@@ -420,7 +416,6 @@ class TestTeamEdgeCases:
         """Test team behavior when context window is nearly full."""
         # Large thread history approaching token limits
         # Team should coordinate to provide concise responses
-        pass
 
 
 class TestRouterTeamFormation:
@@ -429,8 +424,8 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_router_forms_team_for_complex_query(
         self,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test router creating a team for multi-domain queries."""
         # Complex query requiring multiple agents:
@@ -447,8 +442,8 @@ class TestRouterTeamFormation:
     @pytest.mark.asyncio
     async def test_router_single_agent_for_simple_query(
         self,
-        team_room_id: str,
-        tmp_path: Path,
+        team_room_id: str,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test router selecting single agent for simple queries."""
         # Simple query = "What's 2 + 2?"

@@ -5,9 +5,11 @@ from dataclasses import dataclass
 
 import nio
 
-from ..config import Config
-from ..constants import ROUTER_AGENT_NAME
-from ..logging_config import get_logger
+from mindroom.config import Config
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.logging_config import get_logger
+
+from .client import login, register_user
 from .identity import MatrixID, extract_server_name_from_homeserver, parse_matrix_id
 from .state import MatrixState
 
@@ -40,6 +42,7 @@ def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
 
     Returns:
         Dictionary with username and password, or None if not found
+
     """
     state = MatrixState.load()
     agent_key = f"agent_{agent_name}"
@@ -56,6 +59,7 @@ def save_agent_credentials(agent_name: str, username: str, password: str) -> Non
         agent_name: The agent name
         username: The Matrix username
         password: The Matrix password
+
     """
     state = MatrixState.load()
     agent_key = f"agent_{agent_name}"
@@ -78,6 +82,7 @@ async def create_agent_user(
 
     Returns:
         AgentMatrixUser object with account details
+
     """
     # Check if credentials already exist in matrix_state.yaml
     existing_creds = get_agent_credentials(agent_name)
@@ -101,8 +106,6 @@ async def create_agent_user(
 
     # Try to register/verify the user
     try:
-        from .client import register_user
-
         await register_user(
             homeserver=homeserver,
             username=username,
@@ -136,9 +139,8 @@ async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.
 
     Raises:
         ValueError: If login fails
-    """
-    from .client import login
 
+    """
     client = await login(homeserver, agent_user.user_id, agent_user.password)
     agent_user.access_token = client.access_token
     return client
@@ -151,9 +153,11 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
 
     Args:
         homeserver: The Matrix homeserver URL
+        config: Application configuration
 
     Returns:
         Dictionary mapping agent/team names to AgentMatrixUser objects
+
     """
     agent_users = {}
 
@@ -166,8 +170,8 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
         )
         agent_users[ROUTER_AGENT_NAME] = router_user
         logger.info(f"Ensured Matrix user for built-in router agent: {router_user.user_id}")
-    except Exception as e:
-        logger.error(f"Failed to create Matrix user for built-in router agent: {e}")
+    except Exception:
+        logger.exception("Failed to create Matrix user for built-in router agent")
 
     # Create user-configured agents
     for agent_name, agent_config in config.agents.items():
@@ -179,9 +183,9 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
             )
             agent_users[agent_name] = agent_user
             logger.info(f"Ensured Matrix user for agent: {agent_name} -> {agent_user.user_id}")
-        except Exception as e:
+        except Exception:
             # Continue with other agents even if one fails
-            logger.error(f"Failed to create Matrix user for agent {agent_name}: {e}")
+            logger.exception("Failed to create Matrix user for agent %s", agent_name)
 
     # Create team users
     for team_name, team_config in config.teams.items():
@@ -193,8 +197,8 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
             )
             agent_users[team_name] = team_user
             logger.info(f"Ensured Matrix user for team: {team_name} -> {team_user.user_id}")
-        except Exception as e:
+        except Exception:
             # Continue with other teams even if one fails
-            logger.error(f"Failed to create Matrix user for team {team_name}: {e}")
+            logger.exception("Failed to create Matrix user for team %s", team_name)
 
     return agent_users

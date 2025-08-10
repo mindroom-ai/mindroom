@@ -15,13 +15,15 @@ from mindroom.response_tracker import ResponseTracker
 from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD
+
 
 @pytest.fixture
 def mock_helper_agent() -> AgentMatrixUser:
     """Create a mock helper agent user."""
     return AgentMatrixUser(
         agent_name="helper",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="HelperAgent",
         user_id="@mindroom_helper:localhost",
     )
@@ -32,7 +34,7 @@ def mock_calculator_agent() -> AgentMatrixUser:
     """Create a mock calculator agent user."""
     return AgentMatrixUser(
         agent_name="calculator",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="CalculatorAgent",
         user_id="@mindroom_calculator:localhost",
     )
@@ -57,7 +59,7 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
-    async def test_streaming_agent_mentions_another_agent(
+    async def test_streaming_agent_mentions_another_agent(  # noqa: PLR0915
         self,
         mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,
@@ -70,7 +72,11 @@ class TestStreamingBehavior:
         config = self.config
 
         helper_bot = AgentBot(
-            mock_helper_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=True, config=config
+            mock_helper_agent,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=True,
+            config=config,
         )
         helper_bot.client = AsyncMock()
         helper_bot.response_tracker = ResponseTracker(helper_bot.agent_name, base_path=tmp_path)
@@ -85,7 +91,11 @@ class TestStreamingBehavior:
         config = self.config
 
         calc_bot = AgentBot(
-            mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
+            mock_calculator_agent,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=False,
+            config=config,
         )
         calc_bot.client = AsyncMock()
         calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
@@ -126,7 +136,7 @@ class TestStreamingBehavior:
             "content": {
                 "body": "@mindroom_helper:localhost can you help me with math?",
                 "m.mentions": {"user_ids": ["@mindroom_helper:localhost"]},
-            }
+            },
         }
 
         # Mock that we're mentioned
@@ -148,7 +158,7 @@ class TestStreamingBehavior:
             "content": {
                 "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2? ⋯",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            }
+            },
         }
 
         # Process initial message - calculator should NOT respond (has in-progress marker)
@@ -177,7 +187,7 @@ class TestStreamingBehavior:
             "content": {
                 "body": "Let me help with that calculation. @mindroom_calculator:localhost what's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            }
+            },
         }
 
         # Process final message - calculator SHOULD respond now
@@ -196,7 +206,7 @@ class TestStreamingBehavior:
     async def test_agent_responds_only_to_final_message(
         self,
         mock_ai_response: AsyncMock,
-        mock_helper_agent: AgentMatrixUser,
+        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
         mock_calculator_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
@@ -205,7 +215,11 @@ class TestStreamingBehavior:
         config = self.config
 
         calc_bot = AgentBot(
-            mock_calculator_agent, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config
+            mock_calculator_agent,
+            tmp_path,
+            rooms=["!test:localhost"],
+            enable_streaming=False,
+            config=config,
         )
         calc_bot.client = AsyncMock()
         calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
@@ -237,7 +251,7 @@ class TestStreamingBehavior:
             "content": {
                 "body": "Hey @mindroom_calculator:localhost, what's 2+2?",
                 "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-            }
+            },
         }
 
         # Process initial message - calculator SHOULD respond
@@ -262,7 +276,7 @@ class TestStreamingBehavior:
                     "rel_type": "m.replace",
                     "event_id": "$helper_msg_123",
                 },
-            }
+            },
         }
 
         # Process edit - calculator should NOT respond again
@@ -273,8 +287,8 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_streaming_response_flow(
         self,
-        mock_helper_agent: AgentMatrixUser,
-        tmp_path: Path,
+        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test the StreamingResponse class behavior."""
         # Create a mock client
@@ -335,8 +349,8 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     async def test_streaming_in_progress_marker(
         self,
-        mock_helper_agent: AgentMatrixUser,
-        tmp_path: Path,
+        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test that in-progress marker is shown during streaming but not in final message."""
         # Create a mock client

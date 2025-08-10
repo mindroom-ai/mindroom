@@ -1,16 +1,14 @@
+"""AI integration module for MindRoom agents and memory management."""
+
 from __future__ import annotations
 
 import functools
 import os
 import traceback
-from collections.abc import AsyncIterator
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import diskcache
-from agno.agent import Agent
 from agno.models.anthropic import Claude
-from agno.models.base import Model
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
 from agno.models.openrouter import OpenRouter
@@ -24,12 +22,20 @@ from dotenv import load_dotenv
 
 from .agents import create_agent
 from .background_tasks import create_background_task
-from .config import Config
 from .logging_config import get_logger
 from .memory import (
     build_memory_enhanced_prompt,
     store_conversation_memory,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+    from agno.agent import Agent
+    from agno.models.base import Model
+
+    from .config import Config
 
 logger = get_logger(__name__)
 
@@ -106,8 +112,8 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
 
     Raises:
         ValueError: If model not found or provider not supported
-    """
 
+    """
     if model_name not in config.models:
         available = ", ".join(sorted(config.models.keys()))
         msg = f"Unknown model: {model_name}. Available models: {available}"
@@ -147,7 +153,7 @@ def _build_full_prompt(prompt: str, thread_history: list[dict[str, Any]] | None 
 
 def _build_cache_key(agent: Agent, full_prompt: str, session_id: str) -> str:
     model = agent.model
-    assert model is not None, "Agent should always have a model in our implementation"
+    assert model is not None
     return f"{agent.name}:{model.__class__.__name__}:{model.id}:{full_prompt}:{session_id}"
 
 
@@ -164,7 +170,7 @@ async def _cached_agent_run(
         return await agent.arun(full_prompt, session_id=session_id)  # type: ignore[no-any-return]
 
     model = agent.model
-    assert model is not None, "Agent should always have a model in our implementation"
+    assert model is not None
     cache_key = _build_cache_key(agent, full_prompt, session_id)
     cached_result = cache.get(cache_key)
     if cached_result is not None:
@@ -191,6 +197,7 @@ async def _prepare_agent_and_prompt(
 
     Returns:
         Tuple of (agent, full_prompt, session_id)
+
     """
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
@@ -221,11 +228,17 @@ async def ai_response(
 
     Returns:
         Agent response string
+
     """
     logger.info("AI request", agent=agent_name)
     try:
         agent, full_prompt = await _prepare_agent_and_prompt(
-            agent_name, prompt, storage_path, room_id, config, thread_history
+            agent_name,
+            prompt,
+            storage_path,
+            room_id,
+            config,
+            thread_history,
         )
 
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
@@ -236,18 +249,20 @@ async def ai_response(
             store_conversation_memory(prompt, agent_name, storage_path, session_id, config, room_id),
             name=f"memory_save_{agent_name}_{session_id}",
         )
-
-        return response_text
     except Exception as e:
         # AI models can fail for various reasons (network, API limits, etc)
-        logger.exception(f"Error generating AI response for agent {agent_name}: {e}")
-        logger.error(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
-        logger.error(f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}")
-        logger.error(f"Traceback:\n{traceback.format_exc()}")
+        logger.exception("Error generating AI response for agent %s", agent_name)
+        logger.exception(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
+        logger.exception(
+            f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}",
+        )
+        logger.exception(f"Traceback:\n{traceback.format_exc()}")
         return f"Sorry, I encountered an error trying to generate a response: {e}"
+    else:
+        return response_text
 
 
-async def ai_response_streaming(
+async def ai_response_streaming(  # noqa: C901
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -266,22 +281,29 @@ async def ai_response_streaming(
         prompt: User prompt
         session_id: Session ID for conversation tracking
         storage_path: Path for storing agent data
+        config: Application configuration
         thread_history: Optional thread history
         room_id: Optional room ID for room memory access
 
     Yields:
         Chunks of the AI response as they become available
+
     """
     logger.info("AI streaming request", agent=agent_name)
 
     agent, full_prompt = await _prepare_agent_and_prompt(
-        agent_name, prompt, storage_path, room_id, config, thread_history
+        agent_name,
+        prompt,
+        storage_path,
+        room_id,
+        config,
+        thread_history,
     )
 
     cache = get_cache(storage_path)
     if cache is not None:
         model = agent.model
-        assert model is not None, "Agent should always have a model in our implementation"
+        assert model is not None
         cache_key = _build_cache_key(agent, full_prompt, session_id)
         cached_result = cache.get(cache_key)
         if cached_result is not None:
@@ -318,7 +340,7 @@ async def ai_response_streaming(
                 logger.warning(f"Unhandled event type: {type(event).__name__} - {event}")
 
     except Exception as e:
-        logger.exception(f"Error generating streaming AI response: {e}")
+        logger.exception("Error generating streaming AI response")
         error_message = f"Sorry, I encountered an error trying to generate a response: {e}"
         yield error_message
         return

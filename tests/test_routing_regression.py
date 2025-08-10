@@ -17,9 +17,14 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD
+
 
 def setup_test_bot(
-    agent: AgentMatrixUser, storage_path: Path, room_id: str, enable_streaming: bool = False
+    agent: AgentMatrixUser,
+    storage_path: Path,
+    room_id: str,
+    enable_streaming: bool = False,
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
     config = Config.from_yaml()
@@ -36,7 +41,7 @@ def mock_research_agent() -> AgentMatrixUser:
     """Create a mock research agent user."""
     return AgentMatrixUser(
         agent_name="research",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="MindRoomResearch",
         user_id="@mindroom_research:localhost",
     )
@@ -47,7 +52,7 @@ def mock_news_agent() -> AgentMatrixUser:
     """Create a mock news agent user."""
     return AgentMatrixUser(
         agent_name="news",
-        password="test_password",
+        password=TEST_PASSWORD,
         display_name="MindRoomNews",
         user_id="@mindroom_news:localhost",
     )
@@ -108,7 +113,7 @@ class TestRoutingRegression:
             "content": {
                 "body": "@mindroom_research:localhost what can you do?",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
-            }
+            },
         }
 
         # Process with research bot - SHOULD respond
@@ -139,7 +144,7 @@ class TestRoutingRegression:
         # Create router agent
         router_agent = AgentMatrixUser(
             agent_name="router",
-            password="test_password",
+            password=TEST_PASSWORD,
             display_name="RouterAgent",
             user_id="@mindroom_router:localhost",
         )
@@ -182,7 +187,7 @@ class TestRoutingRegression:
         message_event.source = {
             "content": {
                 "body": "What's the latest news?",
-            }
+            },
         }
 
         # Process with router bot (should handle routing)
@@ -276,7 +281,7 @@ class TestRoutingRegression:
             "content": {
                 "body": "@mindroom_research:localhost and @mindroom_news:localhost, what do you think?",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost", "@mindroom_news:localhost"]},
-            }
+            },
         }
 
         # Process with both bots
@@ -296,7 +301,7 @@ class TestRoutingRegression:
         self,
         mock_ai_response: AsyncMock,
         mock_research_agent: AgentMatrixUser,
-        mock_news_agent: AgentMatrixUser,
+        mock_news_agent: AgentMatrixUser,  # noqa: ARG002
         tmp_path: Path,
     ) -> None:
         """Test that router messages trigger responses from mentioned agents.
@@ -309,7 +314,7 @@ class TestRoutingRegression:
         # Create router agent
         router_agent = AgentMatrixUser(
             agent_name="router",
-            password="test_password",
+            password=TEST_PASSWORD,
             display_name="RouterAgent",
             user_id="@mindroom_router:localhost",
         )
@@ -344,7 +349,7 @@ class TestRoutingRegression:
             "content": {
                 "body": "@research could you help with this?",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
-            }
+            },
         }
 
         # Process router message with research bot

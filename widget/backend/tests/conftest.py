@@ -5,6 +5,7 @@ import sys
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -27,7 +28,7 @@ def temp_config_file() -> Generator[Path, None, None]:
                     "instructions": ["Test instruction"],
                     "rooms": ["test_room"],
                     "num_history_runs": 5,
-                }
+                },
             },
             "defaults": {"num_history_runs": 5, "markdown": True},
         }
@@ -41,7 +42,7 @@ def temp_config_file() -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def test_client(temp_config_file, monkeypatch) -> TestClient:
+def test_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Create a test client with mocked config file."""
     # Mock the config file path before importing
     import main
@@ -56,7 +57,7 @@ def test_client(temp_config_file, monkeypatch) -> TestClient:
 
 
 @pytest.fixture
-def sample_agent_data():
+def sample_agent_data() -> dict[str, Any]:
     """Sample agent data for testing."""
     return {
         "display_name": "New Test Agent",

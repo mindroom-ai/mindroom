@@ -17,6 +17,8 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 
+from .conftest import TEST_PASSWORD
+
 
 class TestRoutingIntegration:
     """Integration tests for routing behavior with multiple agents."""
@@ -45,14 +47,14 @@ class TestRoutingIntegration:
         # Create agents
         research_agent = AgentMatrixUser(
             agent_name="research",
-            password="test",
+            password=TEST_PASSWORD,
             display_name="MindRoomResearch",
             user_id="@mindroom_research:localhost",
         )
 
         news_agent = AgentMatrixUser(
             agent_name="news",
-            password="test",
+            password=TEST_PASSWORD,
             display_name="MindRoomNews",
             user_id="@mindroom_news:localhost",
         )
@@ -70,7 +72,11 @@ class TestRoutingIntegration:
         )
 
         research_bot = AgentBot(
-            research_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True, config=config
+            research_agent,
+            tmp_path,
+            rooms=["!research:localhost"],
+            enable_streaming=True,
+            config=config,
         )
 
         news_bot = AgentBot(news_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True, config=config)
@@ -110,7 +116,7 @@ class TestRoutingIntegration:
             "content": {
                 "body": "@mindroom_research:localhost what can you do?",
                 "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
-            }
+            },
         }
 
         # Process message with both bots

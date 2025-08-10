@@ -21,6 +21,8 @@ from mindroom.response_tracker import ResponseTracker
 from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import should_agent_respond
 
+from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+
 
 @pytest.fixture
 def mock_config() -> Config:
@@ -51,7 +53,7 @@ async def test_invited_agent_responds_in_unconfigured_room() -> None:
         agent_name="calculator",
         user_id="@mindroom_calculator:localhost",
         display_name="Calculator",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Create config where calculator is NOT configured for automation room
@@ -69,7 +71,7 @@ async def test_invited_agent_responds_in_unconfigured_room() -> None:
     # Create bot
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=["#math:localhost"],  # Bot only knows about math room
     )
@@ -106,7 +108,7 @@ async def test_invited_agent_responds_in_unconfigured_room() -> None:
                 "rel_type": "m.thread",
                 "event_id": "$thread1",
             },
-        }
+        },
     }
 
     # Mock interactive.handle_text_response to track if it's called
@@ -231,14 +233,14 @@ async def test_bot_leaves_room_preserves_thread_invitations() -> None:
         agent_name="calculator",
         user_id="@mindroom_calculator:localhost",
         display_name="Calculator",
-        password="test_password",
+        password=TEST_PASSWORD,
     )
 
     # Create bot not configured for any rooms
     config = Config(router=RouterConfig(model="default"))
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),
+        storage_path=Path(TEST_TMP_DIR),
         config=config,
         rooms=[],  # Not configured for any rooms
     )

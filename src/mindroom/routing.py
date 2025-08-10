@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
 from .agents import describe_agent
 from .ai import get_model_instance
-from .config import Config
 from .logging_config import get_logger
 from .matrix.identity import MatrixID
+
+if TYPE_CHECKING:
+    from .config import Config
+    from .thread_invites import ThreadInviteManager
 
 logger = get_logger(__name__)
 
@@ -30,7 +33,7 @@ async def suggest_agent_for_message(
     thread_context: list[dict[str, Any]] | None = None,
     thread_id: str | None = None,
     room_id: str | None = None,
-    thread_invite_manager: Any = None,
+    thread_invite_manager: ThreadInviteManager | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message."""
     try:
@@ -89,17 +92,23 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         suggestion = response.content
 
         # With response_model, we should always get the correct type
-        assert isinstance(suggestion, AgentSuggestion), f"Expected AgentSuggestion, got {type(suggestion)}"
+        if not isinstance(suggestion, AgentSuggestion):
+            logger.error(
+                "Unexpected response type from AI routing",
+                expected="AgentSuggestion",
+                actual=type(suggestion).__name__,
+            )
+            return None
 
         # The AI should only suggest agents from the available list
-        assert suggestion.agent_name in all_agents, (
-            f"AI suggested {suggestion.agent_name} but available agents are {all_agents}"
-        )
+        if suggestion.agent_name not in all_agents:
+            logger.warning("AI suggested invalid agent", suggested=suggestion.agent_name, available=all_agents)
+            return None
 
         logger.info("Routing decision", agent=suggestion.agent_name, reason=suggestion.reasoning)
-        return suggestion.agent_name
-
     except (KeyError, ValueError) as e:
         # Only catch specific errors that we expect from AI response parsing
-        logger.error("Routing failed", error=str(e))
+        logger.exception("Routing failed", error=str(e))
         return None
+    else:
+        return suggestion.agent_name

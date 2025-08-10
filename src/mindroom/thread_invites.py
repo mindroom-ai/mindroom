@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import nio
 
@@ -17,7 +17,9 @@ DEFAULT_TIMEOUT_HOURS = 24
 
 
 class ThreadInviteManager:
-    def __init__(self, client: nio.AsyncClient):
+    """Manages thread-specific agent invitations using Matrix state events."""
+
+    def __init__(self, client: nio.AsyncClient) -> None:
         self.client = client
 
     def _get_state_key(self, thread_id: str, agent_name: str) -> str:
@@ -30,7 +32,8 @@ class ThreadInviteManager:
         agent_name: str,
         invited_by: str,
     ) -> None:
-        now = datetime.now().isoformat()
+        """Add an agent invitation to a specific thread."""
+        now = datetime.now(tz=UTC).isoformat()
         await self.client.room_put_state(
             room_id=room_id,
             event_type=THREAD_INVITE_EVENT_TYPE,
@@ -44,6 +47,7 @@ class ThreadInviteManager:
         await self.update_agent_activity(room_id, agent_name)
 
     async def get_thread_agents(self, thread_id: str, room_id: str) -> list[str]:
+        """Get list of agents invited to a specific thread."""
         response = await self.client.room_get_state(room_id)
         if not isinstance(response, nio.RoomGetStateResponse):
             return []
@@ -63,6 +67,7 @@ class ThreadInviteManager:
         room_id: str,
         agent_name: str,
     ) -> bool:
+        """Check if an agent is invited to a specific thread."""
         response = await self.client.room_get_state_event(
             room_id=room_id,
             event_type=THREAD_INVITE_EVENT_TYPE,
@@ -71,6 +76,7 @@ class ThreadInviteManager:
         return isinstance(response, nio.RoomGetStateEventResponse)
 
     async def get_agent_threads(self, room_id: str, agent_name: str) -> list[str]:
+        """Get list of threads an agent is invited to in a room."""
         response = await self.client.room_get_state(room_id)
         if not isinstance(response, nio.RoomGetStateResponse):
             return []
@@ -90,6 +96,7 @@ class ThreadInviteManager:
         room_id: str,
         agent_name: str,
     ) -> bool:
+        """Remove an agent invitation from a specific thread."""
         if not await self.is_agent_invited_to_thread(thread_id, room_id, agent_name):
             return False
 
@@ -118,7 +125,7 @@ class ThreadInviteManager:
             room_id=room_id,
             event_type=AGENT_ACTIVITY_EVENT_TYPE,
             content={
-                "last_activity": datetime.now().isoformat(),
+                "last_activity": datetime.now(tz=UTC).isoformat(),
             },
             state_key=agent_name,
         )
@@ -135,7 +142,7 @@ class ThreadInviteManager:
             return content.get("last_activity")  # type: ignore[no-any-return]
         return None
 
-    async def cleanup_inactive_agents(self, room_id: str, timeout_hours: int = DEFAULT_TIMEOUT_HOURS) -> int:
+    async def cleanup_inactive_agents(self, room_id: str, timeout_hours: int = DEFAULT_TIMEOUT_HOURS) -> int:  # noqa: C901, PLR0912
         """Remove agents who haven't responded in the room for timeout_hours."""
         state_response = await self.client.room_get_state(room_id)
         if not isinstance(state_response, nio.RoomGetStateResponse):
@@ -159,7 +166,7 @@ class ThreadInviteManager:
             return 0
 
         # Check activity for each invited agent
-        now = datetime.now()
+        now = datetime.now(tz=UTC)
         threshold = timedelta(hours=timeout_hours)
         agents_to_remove = []
 

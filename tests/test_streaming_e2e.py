@@ -12,20 +12,21 @@ import pytest
 from mindroom.bot import MultiAgentOrchestrator
 from mindroom.config import Config, RouterConfig
 
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
 
 @pytest.mark.asyncio
 @pytest.mark.e2e  # Mark as end-to-end test
 @patch("mindroom.matrix.users.ensure_all_agent_users")
 @patch("mindroom.bot.login_agent_user")
 @patch("mindroom.bot.AgentBot.ensure_user_account")
-async def test_streaming_edits_e2e(
+async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     mock_ensure_user: AsyncMock,
     mock_login: AsyncMock,
     mock_ensure_all: AsyncMock,
     tmp_path: Path,
 ) -> None:
     """End-to-end test that agents don't respond to streaming edits from other agents."""
-
     # Mock ensure_all_agent_users to return proper user objects
     from mindroom.matrix.users import AgentMatrixUser
 
@@ -34,22 +35,22 @@ async def test_streaming_edits_e2e(
             agent_name="helper",
             user_id="@mindroom_helper:localhost",
             display_name="HelperAgent",
-            password="helper_pass",
-            access_token="helper_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         ),
         "calculator": AgentMatrixUser(
             agent_name="calculator",
             user_id="@mindroom_calculator:localhost",
             display_name="CalculatorAgent",
-            password="calc_pass",
-            access_token="calc_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         ),
         "router": AgentMatrixUser(
             agent_name="router",
             user_id="@mindroom_router:localhost",
             display_name="RouterAgent",
-            password="router_pass",
-            access_token="router_token",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
         ),
     }
     mock_ensure_all.return_value = mock_agents
@@ -73,7 +74,6 @@ async def test_streaming_edits_e2e(
                 agent_user.user_id = "@mindroom_calculator:localhost"
             elif agent_user.agent_name == "router":
                 agent_user.user_id = "@mindroom_router:localhost"
-        return None  # ensure_user_account doesn't return anything
 
     # Need to handle both positional and method call
     def ensure_user_wrapper(*args: object, **kwargs: object) -> object:
@@ -97,13 +97,13 @@ async def test_streaming_edits_e2e(
     calc_client = AsyncMock()
 
     # Configure login to return appropriate clients
-    def login_side_effect(homeserver: str, agent_user: object) -> object:
+    def login_side_effect(_homeserver: str, agent_user: object) -> object:
         if hasattr(agent_user, "agent_name"):
             if agent_user.agent_name == "helper":
                 return helper_client
-            elif agent_user.agent_name == "calculator":
+            if agent_user.agent_name == "calculator":
                 return calc_client
-            elif agent_user.agent_name == "router":
+            if agent_user.agent_name == "router":
                 # Return a mock client for the router
                 router_client = AsyncMock()
                 router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[test_room_id])
@@ -122,7 +122,7 @@ async def test_streaming_edits_e2e(
                 "room_id": room_id,
                 "type": message_type,
                 "content": content,
-            }
+            },
         )
         return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
 
@@ -134,7 +134,7 @@ async def test_streaming_edits_e2e(
                 "room_id": room_id,
                 "type": message_type,
                 "content": content,
-            }
+            },
         )
         return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
 
@@ -164,7 +164,10 @@ async def test_streaming_edits_e2e(
             from mindroom.bot import AgentBot
 
             def create_bot_side_effect(
-                entity_name: str, agent_user: object, config: object, storage_path: object
+                entity_name: str,
+                agent_user: object,
+                config: object,
+                storage_path: object,
             ) -> object:
                 # Update the agent_user with proper user_id
                 if entity_name == "helper":
@@ -217,18 +220,23 @@ async def test_streaming_edits_e2e(
         with patch("mindroom.bot.ai_response_streaming") as mock_streaming:
 
             async def stream_response(
-                agent_name: str,
-                prompt: str,
-                session_id: str,
-                storage_path: object,
-                thread_history: list[object],
-                room_id: str,
+                _agent_name: str,
+                _prompt: str,
+                _session_id: str,
+                _storage_path: object,
+                _thread_history: list[object],
+                _room_id: str,
             ) -> AsyncGenerator[str, None]:
                 yield "I can help! Let me ask "
                 yield "@mindroom_calculator:localhost what's 2+2?"
 
             mock_streaming.return_value = stream_response(
-                "helper", user_event.body, "session", tmp_path, [], test_room_id
+                "helper",
+                user_event.body,
+                "session",
+                tmp_path,
+                [],
+                test_room_id,
             )
 
             # Mock that helper is mentioned
@@ -333,8 +341,8 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         agent_name="calculator",
         user_id="@mindroom_calculator:localhost",
         display_name="CalculatorAgent",
-        password="test_pass",
-        access_token="calc_token",
+        password=TEST_PASSWORD,
+        access_token=TEST_ACCESS_TOKEN,
     )
 
     # Mock login
@@ -345,13 +353,13 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
         # Track events
         events_sent: list[dict[str, object]] = []
 
-        async def mock_room_send(room_id: str, message_type: str, content: dict[str, object]) -> object:
+        async def mock_room_send(room_id: str, message_type: str, content: dict[str, object]) -> object:  # noqa: ARG001
             event_id = f"$calc_{len(events_sent)}"
             events_sent.append(
                 {
                     "event_id": event_id,
                     "content": content,
-                }
+                },
             )
             return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
 
