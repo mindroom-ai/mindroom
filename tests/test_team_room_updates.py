@@ -9,6 +9,8 @@ import pytest
 from mindroom.bot import MultiAgentOrchestrator
 from mindroom.config import Config
 
+from .conftest import TEST_TMP_DIR
+
 
 class TestTeamRoomUpdates:
     """Test team room configuration updates."""
