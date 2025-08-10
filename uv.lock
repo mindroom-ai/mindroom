@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -1585,7 +1585,7 @@ dependencies = [
     { name = "typer" },
     { name = "uvicorn" },
     { name = "watchdog" },
-    { name = "wikipedia-api" },
+    { name = "wikipedia" },
     { name = "youtube-transcript-api" },
 ]
 
@@ -1643,7 +1643,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.16" },
     { name = "uvicorn", specifier = ">=0.35" },
     { name = "watchdog", specifier = ">=6" },
-    { name = "wikipedia-api", specifier = ">=0.7" },
+    { name = "wikipedia" },
     { name = "youtube-transcript-api" },
 ]
 
@@ -3931,13 +3931,14 @@ wheels = [
 ]
 
 [[package]]
-name = "wikipedia-api"
-version = "0.8.1"
+name = "wikipedia"
+version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "beautifulsoup4" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b9/aa/2e35be124dfc7e581480705f912040172f6570cc12e68a245ba9258c32ef/wikipedia_api-0.8.1.tar.gz", hash = "sha256:b31e93b3f5407c1a1ba413ed7326a05379a3c270df6cf6a211aca67a14c5658b", size = 19934, upload-time = "2025-01-19T23:44:33.488Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/67/35/25e68fbc99e672127cc6fbb14b8ec1ba3dfef035bf1e4c90f78f24a80b7d/wikipedia-1.4.0.tar.gz", hash = "sha256:db0fad1829fdd441b1852306e9856398204dc0786d2996dd2e0c8bb8e26133b2", size = 27748, upload-time = "2014-11-15T15:59:49.808Z" }
 
 [[package]]
 name = "win32-setctime"
