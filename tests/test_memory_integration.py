@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +10,10 @@ import pytest
 from mindroom.ai import ai_response
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config import Config
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from pathlib import Path
 
 
 class TestMemoryIntegration:

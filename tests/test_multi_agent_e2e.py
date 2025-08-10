@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncGenerator
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -16,6 +15,10 @@ from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 
 @pytest.fixture

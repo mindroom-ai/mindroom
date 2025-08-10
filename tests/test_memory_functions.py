@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,6 +17,9 @@ from mindroom.memory.functions import (
     search_agent_memories,
     store_conversation_memory,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class TestMemoryFunctions:

@@ -96,7 +96,6 @@ lint.ignore = [
   "S607",    # Starting a process with a partial executable path
   "SLF001",  # Private member accessed
   "T20",     # flake8-print
-  "TC003",   # Move standard library import into a type-checking block
   "TD002",   # Missing author in TODO; try: `# TODO(<author_name>): ...`
   "TD003",   # Missing issue link on the line following this TODO
 ]

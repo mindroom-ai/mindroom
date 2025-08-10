@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -13,6 +13,9 @@ from mindroom.matrix.client import register_user
 from mindroom.matrix.state import MatrixState
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
