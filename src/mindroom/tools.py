@@ -12,6 +12,13 @@ from typing import Any
 from agno.tools import Toolkit
 from loguru import logger
 
+from .tools_metadata import (
+    SetupType,
+    ToolCategory,
+    ToolStatus,
+    register_tool_with_metadata,
+)
+
 # Registry mapping tool names to their factory functions
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 
@@ -33,50 +40,94 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
     return decorator
 
 
-# Register all available tools
-@register_tool("calculator")
+# Register all available tools with metadata
+@register_tool_with_metadata(
+    name="calculator",
+    display_name="Calculator",
+    description="Mathematical calculations and expressions",
+    category=ToolCategory.DEVELOPMENT,
+    icon="Calculator",
+)
 def calculator_tools() -> type:
     from agno.tools.calculator import CalculatorTools
 
     return CalculatorTools
 
 
-@register_tool("file")
+@register_tool_with_metadata(
+    name="file",
+    display_name="File Operations",
+    description="Read, write, and manage files",
+    category=ToolCategory.DEVELOPMENT,
+    icon="Folder",
+)
 def file_tools() -> type:
     from agno.tools.file import FileTools
 
     return FileTools
 
 
-@register_tool("shell")
+@register_tool_with_metadata(
+    name="shell",
+    display_name="Shell Commands",
+    description="Execute shell commands and scripts",
+    category=ToolCategory.DEVELOPMENT,
+    icon="Terminal",
+)
 def shell_tools() -> type:
     from agno.tools.shell import ShellTools
 
     return ShellTools
 
 
-@register_tool("csv")
+@register_tool_with_metadata(
+    name="csv",
+    display_name="CSV Files",
+    description="Read and analyze CSV data",
+    category=ToolCategory.RESEARCH,
+    icon="FileText",
+)
 def csv_tools() -> type:
     from agno.tools.csv_toolkit import CsvTools
 
     return CsvTools
 
 
-@register_tool("arxiv")
+@register_tool_with_metadata(
+    name="arxiv",
+    display_name="arXiv",
+    description="Search and retrieve academic papers",
+    category=ToolCategory.RESEARCH,
+    icon="Book",
+    dependencies=["pypdf"],
+)
 def arxiv_tools() -> type:
     from agno.tools.arxiv import ArxivTools
 
     return ArxivTools
 
 
-@register_tool("duckduckgo")
+@register_tool_with_metadata(
+    name="duckduckgo",
+    display_name="DuckDuckGo",
+    description="Web search without tracking",
+    category=ToolCategory.RESEARCH,
+    icon="Search",
+)
 def duckduckgo_tools() -> type:
     from agno.tools.duckduckgo import DuckDuckGoTools
 
     return DuckDuckGoTools
 
 
-@register_tool("wikipedia")
+@register_tool_with_metadata(
+    name="wikipedia",
+    display_name="Wikipedia",
+    description="Search encyclopedia articles",
+    category=ToolCategory.RESEARCH,
+    icon="Globe",
+    dependencies=["wikipedia"],
+)
 def wikipedia_tools() -> type:
     from agno.tools.wikipedia import WikipediaTools
 
@@ -97,42 +148,87 @@ def yfinance_tools() -> type:
     return YFinanceTools
 
 
-@register_tool("python")
+@register_tool_with_metadata(
+    name="python",
+    display_name="Python Execution",
+    description="Execute Python code in a sandboxed environment",
+    category=ToolCategory.DEVELOPMENT,
+    icon="Code",
+)
 def python_tools() -> type:
     from agno.tools.python import PythonTools
 
     return PythonTools
 
 
-@register_tool("pandas")
+@register_tool_with_metadata(
+    name="pandas",
+    display_name="Data Analysis",
+    description="Pandas data manipulation and analysis",
+    category=ToolCategory.RESEARCH,
+    icon="Database",
+)
 def pandas_tools() -> type:
     from agno.tools.pandas import PandasTools
 
     return PandasTools
 
 
-@register_tool("docker")
+@register_tool_with_metadata(
+    name="docker",
+    display_name="Docker",
+    description="Manage Docker containers and images",
+    category=ToolCategory.DEVELOPMENT,
+    icon="FaDocker",
+)
 def docker_tools() -> type:
     from agno.tools.docker import DockerTools
 
     return DockerTools
 
 
-@register_tool("github")
+@register_tool_with_metadata(
+    name="github",
+    display_name="GitHub",
+    description="Repository and issue management",
+    category=ToolCategory.DEVELOPMENT,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="FaGithub",
+    requires_config=["GITHUB_ACCESS_TOKEN"],
+)
 def github_tools() -> type:
     from agno.tools.github import GithubTools
 
     return GithubTools
 
 
-@register_tool("email")
+@register_tool_with_metadata(
+    name="email",
+    display_name="Email",
+    description="Send emails via SMTP",
+    category=ToolCategory.COMMUNICATION,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="Mail",
+    requires_config=["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD"],
+)
 def email_tools() -> type:
     from agno.tools.email import EmailTools
 
     return EmailTools
 
 
-@register_tool("telegram")
+@register_tool_with_metadata(
+    name="telegram",
+    display_name="Telegram",
+    description="Send and receive Telegram messages",
+    category=ToolCategory.COMMUNICATION,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="FaTelegram",
+    requires_config=["TELEGRAM_BOT_TOKEN"],
+)
 def telegram_tools() -> type:
     from agno.tools.telegram import TelegramTools
 
@@ -167,7 +263,16 @@ def jina_tools() -> type:
     return JinaReaderTools
 
 
-@register_tool("gmail")
+@register_tool_with_metadata(
+    name="gmail",
+    display_name="Gmail",
+    description="Read, search, and manage Gmail emails",
+    category=ToolCategory.EMAIL,
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.OAUTH,
+    icon="FaGoogle",
+    requires_config=["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+)
 def gmail_tools() -> type[Toolkit]:
     """Gmail tools using Agno's native Gmail toolkit."""
     from agno.tools.gmail import GmailTools
@@ -176,8 +281,18 @@ def gmail_tools() -> type[Toolkit]:
     return GmailTools
 
 
-# Tools that match what's shown in the frontend
-@register_tool("reddit")
+# Social media and communication tools
+@register_tool_with_metadata(
+    name="reddit",
+    display_name="Reddit",
+    description="Browse subreddits and search posts",
+    category=ToolCategory.SOCIAL,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="FaReddit",
+    requires_config=["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET"],
+    dependencies=["praw"],
+)
 def reddit_tools() -> type[Toolkit]:
     """Reddit tools for browsing and searching Reddit."""
     from agno.tools.reddit import RedditTools
@@ -185,7 +300,16 @@ def reddit_tools() -> type[Toolkit]:
     return RedditTools
 
 
-@register_tool("youtube")
+@register_tool_with_metadata(
+    name="youtube",
+    display_name="YouTube",
+    description="Search videos and get transcripts",
+    category=ToolCategory.ENTERTAINMENT,
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.API_KEY,
+    icon="FaYoutube",
+    dependencies=["youtube-transcript-api"],
+)
 def youtube_tools() -> type[Toolkit]:
     """YouTube tools for searching and getting video information."""
     from agno.tools.youtube import YouTubeTools
@@ -193,7 +317,17 @@ def youtube_tools() -> type[Toolkit]:
     return YouTubeTools
 
 
-@register_tool("twitter")
+@register_tool_with_metadata(
+    name="twitter",
+    display_name="Twitter/X",
+    description="Post tweets and search Twitter",
+    category=ToolCategory.SOCIAL,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="FaTwitter",
+    requires_config=["TWITTER_API_KEY", "TWITTER_API_SECRET"],
+    dependencies=["tweepy"],
+)
 def twitter_tools() -> type[Toolkit]:
     """Twitter/X tools for posting and searching tweets."""
     from agno.tools.x import XTools
@@ -201,7 +335,17 @@ def twitter_tools() -> type[Toolkit]:
     return XTools
 
 
-@register_tool("slack")
+@register_tool_with_metadata(
+    name="slack",
+    display_name="Slack",
+    description="Send messages and manage channels",
+    category=ToolCategory.COMMUNICATION,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="FaSlack",
+    requires_config=["SLACK_TOKEN"],
+    dependencies=["slack-sdk"],
+)
 def slack_tools() -> type[Toolkit]:
     """Slack tools for messaging and channel management."""
     from agno.tools.slack import SlackTools

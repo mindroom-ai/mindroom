@@ -10,8 +10,14 @@ class ToolInfo(BaseModel):
     """Information about a registered tool."""
 
     name: str
+    display_name: str
     description: str
-    requires_config: bool
+    category: str
+    status: str
+    setup_type: str
+    icon: str | None
+    requires_config: list[str] | None
+    dependencies: list[str] | None
 
 
 class ToolsResponse(BaseModel):
@@ -22,43 +28,60 @@ class ToolsResponse(BaseModel):
 
 @router.get("", response_model=ToolsResponse)
 async def get_registered_tools() -> ToolsResponse:
-    """Get all registered tools from mindroom."""
+    """Get all registered tools from mindroom with full metadata."""
     try:
         from mindroom.tools import TOOL_REGISTRY
+        from mindroom.tools_metadata import TOOL_METADATA
     except ImportError:
         # Return empty list if mindroom is not available
         return ToolsResponse(tools=[])
 
-    # Tools that require configuration to work
-    TOOLS_REQUIRING_CONFIG = {
-        "github",
-        "telegram",
-        "email",
-        "googlesearch",
-        "tavily",
-        "slack",
-        "reddit",
-        "twitter",
-    }
-
     tools = []
-    for tool_name in sorted(TOOL_REGISTRY.keys()):
-        # Get the tool's docstring as description
-        try:
-            tool_factory = TOOL_REGISTRY[tool_name]
-            description = tool_factory.__doc__ or f"{tool_name.title()} tool"
-            # Clean up the description
-            description = description.strip().split("\n")[0]  # First line only
-        except Exception:
-            description = f"{tool_name.title()} tool"
 
+    # First, add tools that have metadata
+    for tool_name, metadata in TOOL_METADATA.items():
         tools.append(
             ToolInfo(
                 name=tool_name,
-                description=description,
-                requires_config=tool_name in TOOLS_REQUIRING_CONFIG,
+                display_name=metadata.display_name,
+                description=metadata.description,
+                category=metadata.category.value,
+                status=metadata.status.value,
+                setup_type=metadata.setup_type.value,
+                icon=metadata.icon,
+                requires_config=metadata.requires_config,
+                dependencies=metadata.dependencies,
             )
         )
+
+    # Then add any tools that don't have metadata yet (backward compatibility)
+    for tool_name in TOOL_REGISTRY:
+        if tool_name not in TOOL_METADATA:
+            # Get the tool's docstring as description
+            try:
+                tool_factory = TOOL_REGISTRY[tool_name]
+                description = tool_factory.__doc__ or f"{tool_name.title()} tool"
+                # Clean up the description
+                description = description.strip().split("\n")[0]  # First line only
+            except Exception:
+                description = f"{tool_name.title()} tool"
+
+            tools.append(
+                ToolInfo(
+                    name=tool_name,
+                    display_name=tool_name.replace("_", " ").title(),
+                    description=description,
+                    category="uncategorized",
+                    status="available",
+                    setup_type="none",
+                    icon=None,
+                    requires_config=None,
+                    dependencies=None,
+                )
+            )
+
+    # Sort by category, then by name
+    tools.sort(key=lambda t: (t.category, t.name))
 
     return ToolsResponse(tools=tools)
 
