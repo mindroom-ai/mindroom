@@ -87,7 +87,7 @@ async def get_gmail_status():
         configured=configured,
         method="oauth" if has_token else "manual" if configured else None,
         email=email,
-        hasCredentials=configured,
+        has_credentials=configured,
     )
 
 
@@ -130,7 +130,7 @@ async def configure_gmail(request: GmailConfigRequest):
 
 
 @router.post("/oauth/start")
-async def start_oauth_flow():
+async def start_oauth_flow() -> dict[str, str | bool | None]:
     """Start OAuth flow for automatic setup."""
     # First try to use MindRoom's shared OAuth app (for better UX)
     client_id = os.getenv("MINDROOM_OAUTH_CLIENT_ID")
@@ -173,7 +173,7 @@ async def start_oauth_flow():
 
 
 @router.get("/callback")
-async def oauth_callback(code: str):
+async def oauth_callback(code: str) -> dict[str, str]:
     """Handle OAuth callback and save tokens."""
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -216,7 +216,7 @@ async def oauth_callback(code: str):
         if hasattr(creds, "_id_token") and creds._id_token:
             token_data["_id_token"] = creds._id_token
 
-        with open(TOKEN_PATH, "w") as f:
+        with TOKEN_PATH.open("w") as f:
             json.dump(token_data, f, indent=2)
 
         # Save credentials to .env as well
@@ -232,7 +232,7 @@ async def oauth_callback(code: str):
 
 
 @router.post("/reset")
-async def reset_gmail_config():
+async def reset_gmail_config() -> dict[str, str]:
     """Reset Gmail configuration."""
     # Remove token file
     if TOKEN_PATH.exists():
@@ -240,7 +240,7 @@ async def reset_gmail_config():
 
     # Remove from environment variables
     if ENV_PATH.exists():
-        with open(ENV_PATH) as f:
+        with ENV_PATH.open() as f:
             lines = f.readlines()
 
         # Filter out Google-related variables
@@ -253,7 +253,7 @@ async def reset_gmail_config():
             )
         ]
 
-        with open(ENV_PATH, "w") as f:
+        with ENV_PATH.open("w") as f:
             f.writelines(filtered_lines)
 
     return {"success": True, "message": "Gmail configuration reset"}

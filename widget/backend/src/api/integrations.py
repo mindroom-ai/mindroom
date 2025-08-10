@@ -113,7 +113,7 @@ def get_service_credentials(service: str) -> dict[str, Any]:
         return {}
 
     try:
-        with open(creds_file) as f:
+        with creds_file.open() as f:
             return json.load(f)
     except Exception:
         return {}
@@ -122,7 +122,7 @@ def get_service_credentials(service: str) -> dict[str, Any]:
 def save_service_credentials(service: str, credentials: dict[str, Any]) -> None:
     """Save service credentials."""
     creds_file = CREDS_PATH / f"{service}_credentials.json"
-    with open(creds_file, "w") as f:
+    with creds_file.open("w") as f:
         json.dump(credentials, f, indent=2)
 
 
@@ -254,11 +254,14 @@ async def configure_imdb(request: ApiKeyRequest) -> dict[str, str]:
 
     # Test the API key
     try:
-        response = requests.get(f"http://www.omdbapi.com/?apikey={request.api_key}&t=Inception")
+        response = requests.get(
+            f"http://www.omdbapi.com/?apikey={request.api_key}&t=Inception",
+            timeout=10,  # Add timeout for security
+        )
         data = response.json()
         if data.get("Response") == "False":
             raise HTTPException(status_code=400, detail="Invalid API key")
-    except Exception as e:
+    except requests.RequestException as e:
         raise HTTPException(status_code=400, detail=f"Failed to validate API key: {e!s}") from e
 
     credentials = {"api_key": request.api_key}
