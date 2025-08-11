@@ -37,7 +37,7 @@ get_project_info() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
-    # Get the project directory (parent of nixos/)
+    # Get the project directory (parent of deploy/)
     PROJECT_DIR="$(dirname "$script_dir")"
 
     # Get the user who owns the project directory
@@ -148,7 +148,7 @@ WorkingDirectory=$PROJECT_DIR
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 
 # Script to check for updates and restart services if needed
-ExecStart=$PROJECT_DIR/nixos/autoupdate.sh
+ExecStart=$PROJECT_DIR/deploy/autoupdate.sh
 
 # Logging
 StandardOutput=append:/var/log/mindroom-autoupdate.log

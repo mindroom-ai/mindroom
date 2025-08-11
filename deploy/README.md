@@ -15,13 +15,13 @@ This directory contains systemd services and scripts to automatically run MindRo
 ### For NixOS:
 1. **Install services** (run as root):
    ```bash
-   sudo ./nixos/setup-mindroom.sh
+   sudo ./deploy/setup-mindroom.sh
    ```
 
 ### For Regular Linux (Ubuntu, Debian, CentOS, etc.):
 1. **Install services** (run as root):
    ```bash
-   sudo ./nixos/setup-linux.sh
+   sudo ./deploy/setup-linux.sh
    ```
 
 2. **Start services**:
@@ -86,7 +86,7 @@ tail -f /var/log/mindroom-widget.log
 tail -f /var/log/mindroom-autoupdate.log
 
 # Manual update check
-sudo -u basnijholt /home/basnijholt/Work/mindroom-2/nixos/autoupdate.sh
+sudo -u basnijholt /home/basnijholt/Work/mindroom-2/deploy/autoupdate.sh
 ```
 
 ## How Auto-Updates Work
@@ -102,7 +102,7 @@ sudo -u basnijholt /home/basnijholt/Work/mindroom-2/nixos/autoupdate.sh
 ## File Structure
 
 ```
-nixos/
+deploy/
 ├── README.md                     # This file
 ├── setup-mindroom.sh             # Installation script (run as root)
 ├── autoupdate.sh                 # Auto-update logic script
@@ -140,7 +140,7 @@ nixos/
 
 4. **Test manual update**:
    ```bash
-   sudo -u basnijholt /home/basnijholt/Work/mindroom-2/nixos/autoupdate.sh
+   sudo -u basnijholt /home/basnijholt/Work/mindroom-2/deploy/autoupdate.sh
    ```
 
 5. **If services fail to start**:
