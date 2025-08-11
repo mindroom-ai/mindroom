@@ -96,39 +96,51 @@ export function NetworkGraph({
     // Create links
     const links: NetworkLink[] = [];
 
+    // Create a set of existing node IDs for validation
+    const nodeIds = new Set(nodes.map(n => n.id));
+
     // Agent-Room links
     agents.forEach(agent => {
       agent.rooms.forEach(roomId => {
-        links.push({
-          source: `agent-${agent.id}`,
-          target: `room-${roomId}`,
-          type: 'agent-room',
-          distance: 80,
-        });
+        const targetId = `room-${roomId}`;
+        if (nodeIds.has(targetId)) {
+          links.push({
+            source: `agent-${agent.id}`,
+            target: targetId,
+            type: 'agent-room',
+            distance: 80,
+          });
+        }
       });
     });
 
     // Team-Agent links
     teams.forEach(team => {
       team.agents.forEach(agentId => {
-        links.push({
-          source: `team-${team.id}`,
-          target: `agent-${agentId}`,
-          type: 'team-agent',
-          distance: 60,
-        });
+        const targetId = `agent-${agentId}`;
+        if (nodeIds.has(targetId)) {
+          links.push({
+            source: `team-${team.id}`,
+            target: targetId,
+            type: 'team-agent',
+            distance: 60,
+          });
+        }
       });
     });
 
     // Team-Room links
     teams.forEach(team => {
       team.rooms.forEach(roomId => {
-        links.push({
-          source: `team-${team.id}`,
-          target: `room-${roomId}`,
-          type: 'team-room',
-          distance: 100,
-        });
+        const targetId = `room-${roomId}`;
+        if (nodeIds.has(targetId)) {
+          links.push({
+            source: `team-${team.id}`,
+            target: targetId,
+            type: 'team-room',
+            distance: 100,
+          });
+        }
       });
     });
 
@@ -193,11 +205,11 @@ export function NetworkGraph({
       .on('click', (event, d) => {
         event.stopPropagation();
         if (d.type === 'agent') {
-          const agentId = d.id.replace('agent-', '');
-          onSelectAgent(agentId);
+          const agent = d.data as Agent;
+          onSelectAgent(agent.id);
         } else if (d.type === 'room') {
-          const roomId = d.id.replace('room-', '');
-          onSelectRoom(roomId);
+          const room = d.data as Room;
+          onSelectRoom(room.id);
         }
       })
       .on('mouseover', (event, d) => {
