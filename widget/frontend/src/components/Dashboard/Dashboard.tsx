@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { NetworkGraph } from './NetworkGraph';
+import { NetworkVisualization } from './NetworkVisualization';
 
 export function Dashboard() {
   const { agents, rooms, teams, config, selectedRoomId, selectedAgentId, selectRoom, selectAgent } =
@@ -263,11 +264,11 @@ export function Dashboard() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <span className="text-2xl">🌐</span>
-              Network Visualization
+              <span className="text-2xl">📊</span>
+              System Insights
             </CardTitle>
             <CardDescription>
-              Interactive graph of rooms, agents, and teams relationships
+              Key metrics and actionable insights about your MindRoom configuration
             </CardDescription>
           </CardHeader>
           <CardContent className="p-2">
@@ -597,6 +598,38 @@ export function Dashboard() {
             </CardContent>
           </Card>
         </div>
+      </div>
+
+      {/* Network Visualization Section - Bottom */}
+      <div className="mt-8">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <span className="text-2xl">🌐</span>
+              Network Visualization
+            </CardTitle>
+            <CardDescription>
+              Visual representation of relationships between agents, rooms, and teams
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-4">
+            <NetworkVisualization
+              agents={filteredData.agents}
+              rooms={filteredData.rooms}
+              teams={filteredData.teams}
+              selectedAgentId={selectedAgentId}
+              selectedRoomId={selectedRoomId}
+              onSelectAgent={(agentId: string | null) => {
+                selectAgent(agentId);
+                selectRoom(null);
+              }}
+              onSelectRoom={(roomId: string | null) => {
+                selectRoom(roomId);
+                selectAgent(null);
+              }}
+            />
+          </CardContent>
+        </Card>
       </div>
     </div>
   );

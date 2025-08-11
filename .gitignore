@@ -188,3 +188,11 @@ matrix_state.yaml
 
 # Vite cache
 widget/frontend/.vite/
+# Test and setup files
+test_gmail*.py
+complete_gmail_oauth.py
+GMAIL_SETUP.md
+
+# OAuth tokens (contain sensitive data)
+google_token.json
+token.json
