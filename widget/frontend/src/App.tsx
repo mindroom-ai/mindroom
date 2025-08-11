@@ -116,8 +116,8 @@ function AppContent() {
               </TabsTrigger>
             </TabsList>
 
-            <TabsContent value="dashboard" className="flex-1 p-4 overflow-hidden min-h-0">
-              <div className="h-full overflow-hidden">
+            <TabsContent value="dashboard" className="flex-1 p-4 overflow-auto min-h-0">
+              <div className="min-h-full">
                 <Dashboard />
               </div>
             </TabsContent>

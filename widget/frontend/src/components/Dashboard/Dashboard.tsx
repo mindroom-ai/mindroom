@@ -150,7 +150,7 @@ export function Dashboard() {
   }, [agents, rooms, teams, config, stats]);
 
   return (
-    <div className="flex flex-col h-full gap-4">
+    <div className="flex flex-col gap-4">
       {/* Header with Quick Actions */}
       <div className="flex justify-between items-center">
         <div>
@@ -259,8 +259,8 @@ export function Dashboard() {
       </div>
 
       {/* Network Graph Section */}
-      <div className="flex-1 mb-4">
-        <Card className="h-full">
+      <div className="mb-4">
+        <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <span className="text-2xl">🌐</span>
@@ -295,10 +295,10 @@ export function Dashboard() {
       </div>
 
       {/* Main Content Grid */}
-      <div className="grid grid-cols-12 gap-4 min-h-0">
+      <div className="grid grid-cols-12 gap-4">
         {/* Agent Cards - Left Sidebar */}
         <div className="col-span-4">
-          <Card className="h-full">
+          <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <span className="text-2xl">🤖</span>
@@ -307,7 +307,7 @@ export function Dashboard() {
               <CardDescription>Click an agent to see details</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              <ScrollArea className="h-[calc(100vh-400px)]">
+              <ScrollArea className="h-96">
                 <div className="p-4 space-y-3">
                   {filteredData.agents.map(agent => (
                     <Card
@@ -367,8 +367,8 @@ export function Dashboard() {
         </div>
 
         {/* Center - Rooms Overview */}
-        <div className="col-span-5 h-full">
-          <Card className="h-full">
+        <div className="col-span-5">
+          <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <span className="text-2xl">🏠</span>
@@ -377,7 +377,7 @@ export function Dashboard() {
               <CardDescription>Click a room to see details</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              <ScrollArea className="h-[calc(100vh-400px)]">
+              <ScrollArea className="h-96">
                 <div className="p-4 space-y-3">
                   {filteredData.rooms.map(room => (
                     <Card
@@ -454,8 +454,8 @@ export function Dashboard() {
         </div>
 
         {/* Right Panel - Selected Details */}
-        <div className="col-span-3 h-full">
-          <Card className="h-full">
+        <div className="col-span-3">
+          <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <span className="text-2xl">ℹ️</span>
