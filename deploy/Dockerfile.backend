@@ -1,0 +1,28 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+# Copy project files
+COPY . /app/
+
+# Install dependencies
+RUN uv sync --all-extras
+
+# Create necessary directories
+RUN mkdir -p /app/tmp /app/logs /app/config
+
+# Expose port (not strictly necessary for backend, but good practice)
+EXPOSE 8080
+
+# Run the mindroom backend
+CMD ["uv", "run", "python", "-m", "mindroom.cli", "run", "--log-level", "INFO", "--storage-path", "/app/tmp"]

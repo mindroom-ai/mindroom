@@ -1,0 +1,51 @@
+services:
+  mindroom-backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    container_name: mindroom-backend
+    restart: always
+    volumes:
+      - /mnt/data/mindroom/config:/app/config
+      - /mnt/data/mindroom/tmp:/app/tmp
+      - /mnt/data/mindroom/logs:/app/logs
+    environment:
+      - LOG_LEVEL=INFO
+      - STORAGE_PATH=/app/tmp
+    networks:
+      - mynetwork
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.mindroom-backend.rule=Host(`mindroom-backend.${DOMAIN}`)
+      - traefik.http.routers.mindroom-backend.entrypoints=websecure
+      - traefik.http.routers.mindroom-backend-local.rule=Host(`mindroom-backend.local`)
+      - traefik.http.routers.mindroom-backend-local.entrypoints=web
+      - traefik.http.services.mindroom-backend.loadbalancer.server.port=8080
+
+  mindroom-widget:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.widget
+    container_name: mindroom-widget
+    restart: always
+    ports:
+      - "3004:3003"  # Avoiding conflict with your open-webui on 3003
+    volumes:
+      - /mnt/data/mindroom/config:/app/config
+      - /mnt/data/mindroom/logs:/app/logs
+    environment:
+      - BACKEND_PORT=8001
+      - FRONTEND_PORT=3003
+    networks:
+      - mynetwork
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.mindroom.rule=Host(`mindroom.${DOMAIN}`)
+      - traefik.http.routers.mindroom.entrypoints=websecure
+      - traefik.http.routers.mindroom-local.rule=Host(`mindroom.local`)
+      - traefik.http.routers.mindroom-local.entrypoints=web
+      - traefik.http.services.mindroom.loadbalancer.server.port=3003
+
+networks:
+  mynetwork:
+    external: true
