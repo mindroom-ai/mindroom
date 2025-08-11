@@ -28,8 +28,6 @@ services:
       dockerfile: deploy/Dockerfile.widget
     container_name: mindroom-widget
     restart: always
-    ports:
-      - "3004:3003"  # Avoiding conflict with your open-webui on 3003
     volumes:
       - /mnt/data/mindroom/config:/app/config
       - /mnt/data/mindroom/logs:/app/logs
