@@ -21,8 +21,7 @@ RUN uv sync --all-extras
 # Create necessary directories
 RUN mkdir -p /app/tmp /app/logs /app/config
 
-# Expose port (not strictly necessary for backend, but good practice)
-EXPOSE 8080
+# No port exposure needed - this is a Matrix bot, not a web server
 
 # Run the mindroom backend
 CMD ["uv", "run", "python", "-m", "mindroom.cli", "run", "--log-level", "INFO", "--storage-path", "/app/tmp"]

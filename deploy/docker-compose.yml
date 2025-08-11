@@ -15,12 +15,7 @@ services:
     networks:
       - mynetwork
     labels:
-      - traefik.enable=true
-      - traefik.http.routers.mindroom-backend.rule=Host(`mindroom-backend.${DOMAIN}`)
-      - traefik.http.routers.mindroom-backend.entrypoints=websecure
-      - traefik.http.routers.mindroom-backend-local.rule=Host(`mindroom-backend.local`)
-      - traefik.http.routers.mindroom-backend-local.entrypoints=web
-      - traefik.http.services.mindroom-backend.loadbalancer.server.port=8080
+      - traefik.enable=false
 
   mindroom-widget:
     build:
