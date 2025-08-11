@@ -9,6 +9,7 @@ export interface ToolInfo {
   status: string;
   setup_type: string;
   icon: string | null;
+  icon_color: string | null;
   requires_config: string[] | null;
   dependencies: string[] | null;
 }
@@ -90,6 +91,7 @@ export function mapToolToIntegration(tool: ToolInfo) {
     description: tool.description,
     category: tool.category,
     icon: tool.icon, // This will need to be mapped to React components
+    icon_color: tool.icon_color,
     status,
     setup_type,
     requires_config: tool.requires_config,

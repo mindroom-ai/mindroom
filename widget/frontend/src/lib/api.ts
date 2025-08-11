@@ -40,7 +40,7 @@ export const API_ENDPOINTS = {
   },
 
   // Other endpoints
-  tools: `${API_BASE_URL}/api/tools`,
+  tools: `${API_BASE_URL}/api/tools/`,
   rooms: `${API_BASE_URL}/api/rooms`,
   testModel: `${API_BASE_URL}/api/test/model`,
   encryptKey: `${API_BASE_URL}/api/keys/encrypt`,
