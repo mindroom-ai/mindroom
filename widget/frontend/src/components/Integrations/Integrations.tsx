@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-  Film,
   ArrowRight,
   Settings,
   CheckCircle2,
@@ -11,22 +10,7 @@ import {
   Star,
 } from 'lucide-react';
 // Brand icons from react-icons
-import {
-  FaGoogle,
-  FaFacebook,
-  FaInstagram,
-  FaLinkedin,
-  FaGitlab,
-  FaDropbox,
-  FaAmazon,
-  FaEbay,
-  FaSpotify,
-  FaGoodreads,
-  FaApple,
-  FaMicrosoft,
-  FaYahoo,
-} from 'react-icons/fa';
-import { SiNetflix, SiWalmart, SiTarget, SiHbo } from 'react-icons/si';
+import { FaGoogle } from 'react-icons/fa';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -60,10 +44,9 @@ interface UnifiedIntegration {
   details?: any;
 }
 
-// Frontend-only integrations that don't exist in backend yet
-// These are aspirational integrations that we show as "coming soon"
-const FRONTEND_ONLY_INTEGRATIONS: UnifiedIntegration[] = [
-  // Email & Calendar (Coming Soon)
+// Special handling for integrations that require custom configuration
+// These override the backend metadata with special frontend requirements
+const SPECIAL_INTEGRATIONS: UnifiedIntegration[] = [
   {
     id: 'google',
     name: 'Google Services',
@@ -73,79 +56,13 @@ const FRONTEND_ONLY_INTEGRATIONS: UnifiedIntegration[] = [
     status: 'available',
     setup_type: 'special',
   },
-  {
-    id: 'outlook',
-    name: 'Microsoft Outlook',
-    description: 'Email and calendar integration',
-    category: 'email',
-    icon: <FaMicrosoft className="h-5 w-5 text-blue-600" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-  {
-    id: 'yahoo',
-    name: 'Yahoo Mail',
-    description: 'Email and calendar access',
-    category: 'email',
-    icon: <FaYahoo className="h-5 w-5 text-purple-600" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-  {
-    id: 'calendar',
-    name: 'Google Calendar',
-    description: 'Manage calendar events and schedules',
-    category: 'email',
-    icon: <FaGoogle className="h-5 w-5 text-blue-500" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-
-  // Shopping (Coming Soon)
-  {
-    id: 'amazon',
-    name: 'Amazon',
-    description: 'Search products and track orders',
-    category: 'shopping',
-    icon: <FaAmazon className="h-5 w-5 text-orange-500" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-  {
-    id: 'walmart',
-    name: 'Walmart',
-    description: 'Product search and price tracking',
-    category: 'shopping',
-    icon: <SiWalmart className="h-5 w-5 text-blue-500" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-  {
-    id: 'ebay',
-    name: 'eBay',
-    description: 'Auction monitoring and bidding',
-    category: 'shopping',
-    icon: <FaEbay className="h-5 w-5" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-  {
-    id: 'target',
-    name: 'Target',
-    description: 'Product search and availability',
-    category: 'shopping',
-    icon: <SiTarget className="h-5 w-5 text-red-600" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-
-  // Entertainment (Coming Soon - except IMDb and Spotify which are handled separately)
+  // IMDb and Spotify have special frontend handling even though they're "coming soon" in backend
   {
     id: 'imdb',
     name: 'Movies & TV (IMDb)',
     description: 'Get movie and TV show information from IMDb',
     category: 'entertainment',
-    icon: <Film className="h-5 w-5 text-yellow-500" />,
+    icon: null, // Will be replaced by iconMapping
     status: 'available',
     setup_type: 'api_key',
   },
@@ -154,96 +71,9 @@ const FRONTEND_ONLY_INTEGRATIONS: UnifiedIntegration[] = [
     name: 'Spotify',
     description: 'Access your Spotify music data and current playback',
     category: 'entertainment',
-    icon: <FaSpotify className="h-5 w-5 text-green-500" />,
+    icon: null, // Will be replaced by iconMapping
     status: 'available',
     setup_type: 'oauth',
-  },
-  {
-    id: 'netflix',
-    name: 'Netflix',
-    description: 'Track watch history and get recommendations',
-    category: 'entertainment',
-    icon: <SiNetflix className="h-5 w-5 text-red-600" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-  {
-    id: 'apple_music',
-    name: 'Apple Music',
-    description: 'Library and playlist management',
-    category: 'entertainment',
-    icon: <FaApple className="h-5 w-5 text-gray-800" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-  {
-    id: 'hbo',
-    name: 'HBO Max',
-    description: 'Watch history and content discovery',
-    category: 'entertainment',
-    icon: <SiHbo className="h-5 w-5" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-
-  // Social Networks (Coming Soon)
-  {
-    id: 'facebook',
-    name: 'Facebook',
-    description: 'Access posts and pages',
-    category: 'social',
-    icon: <FaFacebook className="h-5 w-5 text-blue-600" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-  {
-    id: 'instagram',
-    name: 'Instagram',
-    description: 'View posts and stories',
-    category: 'social',
-    icon: <FaInstagram className="h-5 w-5 text-pink-600" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-  {
-    id: 'linkedin',
-    name: 'LinkedIn',
-    description: 'Professional network access',
-    category: 'social',
-    icon: <FaLinkedin className="h-5 w-5 text-blue-700" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-
-  // Development & Tools (Coming Soon)
-  {
-    id: 'gitlab',
-    name: 'GitLab',
-    description: 'Code and CI/CD management',
-    category: 'development',
-    icon: <FaGitlab className="h-5 w-5 text-orange-600" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-  {
-    id: 'dropbox',
-    name: 'Dropbox',
-    description: 'File storage and sharing',
-    category: 'development',
-    icon: <FaDropbox className="h-5 w-5 text-blue-600" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
-  },
-
-  // Information (Coming Soon)
-  {
-    id: 'goodreads',
-    name: 'Goodreads',
-    description: 'Book tracking and recommendations',
-    category: 'information',
-    icon: <FaGoodreads className="h-5 w-5 text-amber-700" />,
-    status: 'coming_soon',
-    setup_type: 'coming_soon',
   },
 ];
 
@@ -263,18 +93,36 @@ export function Integrations() {
     });
   }, [backendTools]);
 
-  // Combine with any additional frontend-only integrations if needed
+  // Combine with special integrations (Google)
   const [integrations, setIntegrations] = useState<UnifiedIntegration[]>([]);
   const [loading, setLoading] = useState(false);
 
   // Update integrations when tools are loaded
   useEffect(() => {
     if (toolIntegrations.length > 0) {
-      // Combine backend tools with frontend-only aspirational integrations
-      const frontendOnlyIntegrations = FRONTEND_ONLY_INTEGRATIONS.filter(
-        fi => !toolIntegrations.find(ti => ti.id === fi.id)
-      );
-      setIntegrations([...toolIntegrations, ...frontendOnlyIntegrations]);
+      // Start with backend tools
+      let merged = [...toolIntegrations];
+
+      // Override or add special integrations
+      SPECIAL_INTEGRATIONS.forEach(special => {
+        const existingIndex = merged.findIndex(ti => ti.id === special.id);
+        if (existingIndex >= 0) {
+          // Override existing with special configuration
+          merged[existingIndex] = {
+            ...merged[existingIndex],
+            ...special,
+            icon: special.icon || getIconForTool(merged[existingIndex].icon as string),
+          };
+        } else {
+          // Add new special integration
+          merged.push({
+            ...special,
+            icon: special.icon || getIconForTool(special.id),
+          });
+        }
+      });
+
+      setIntegrations(merged);
     }
   }, [toolIntegrations]);
   const [configDialog, setConfigDialog] = useState<{ open: boolean; service?: string }>({
