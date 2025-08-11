@@ -278,11 +278,11 @@ export function Dashboard() {
                 teams={filteredData.teams}
                 selectedAgentId={selectedAgentId}
                 selectedRoomId={selectedRoomId}
-                onSelectAgent={agentId => {
+                onSelectAgent={(agentId: string | null) => {
                   selectAgent(agentId);
                   selectRoom(null);
                 }}
-                onSelectRoom={roomId => {
+                onSelectRoom={(roomId: string | null) => {
                   selectRoom(roomId);
                   selectAgent(null);
                 }}
