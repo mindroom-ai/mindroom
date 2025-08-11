@@ -181,6 +181,7 @@ export function NetworkVisualization({
   };
 
   const handleNodeClick = (node: NetworkNode) => {
+    console.log('Node clicked:', node.type, node.name); // Debug log
     if (node.type === 'agent') {
       onSelectAgent((node.data as Agent).id);
     } else if (node.type === 'room') {
@@ -214,7 +215,16 @@ export function NetworkVisualization({
 
   return (
     <div className="w-full bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-      <svg width="100%" height="600" viewBox="0 0 1000 600" className="overflow-visible">
+      <svg
+        width="100%"
+        height="600"
+        viewBox="0 0 1000 600"
+        className="overflow-visible"
+        style={{ userSelect: 'none' }}
+        onClick={e => {
+          console.log('SVG clicked', e);
+        }}
+      >
         {/* Links */}
         {links.map((link, index) => {
           const sourceNode = nodes.find(n => n.id === link.source);
@@ -245,7 +255,16 @@ export function NetworkVisualization({
           const isHovered = hoveredNode === node.id;
 
           return (
-            <g key={node.id} className="cursor-pointer">
+            <g
+              key={node.id}
+              className="cursor-pointer"
+              onClick={e => {
+                e.stopPropagation();
+                handleNodeClick(node);
+              }}
+              onMouseEnter={() => setHoveredNode(node.id)}
+              onMouseLeave={() => setHoveredNode(null)}
+            >
               {/* Node circle */}
               <circle
                 cx={node.x}
@@ -255,9 +274,6 @@ export function NetworkVisualization({
                 stroke={isSelected ? '#f59e0b' : '#fff'}
                 strokeWidth={isSelected ? 3 : 2}
                 className="transition-all duration-200 hover:drop-shadow-lg"
-                onClick={() => handleNodeClick(node)}
-                onMouseEnter={() => setHoveredNode(node.id)}
-                onMouseLeave={() => setHoveredNode(null)}
               />
 
               {/* Node icon */}
@@ -268,7 +284,6 @@ export function NetworkVisualization({
                 dominantBaseline="central"
                 fontSize={Math.max(10, size * 0.8)}
                 className="pointer-events-none select-none"
-                onClick={() => handleNodeClick(node)}
               >
                 {getNodeIcon(node.type)}
               </text>
