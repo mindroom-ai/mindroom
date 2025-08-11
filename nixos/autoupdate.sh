@@ -36,13 +36,23 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     exit 1
 fi
 
-# Fetch the latest changes from origin
-log "Fetching latest changes from origin..."
-git fetch origin main
+# Get current branch name
+CURRENT_BRANCH=$(git branch --show-current)
+
+# Default to main branch if current branch doesn't exist on remote
+TARGET_BRANCH="$CURRENT_BRANCH"
+
+# Fetch the latest changes from origin for current branch
+log "Fetching latest changes from origin for branch $CURRENT_BRANCH..."
+if ! git fetch origin "$CURRENT_BRANCH" 2>/dev/null; then
+    log_warning "Branch $CURRENT_BRANCH not found on remote, falling back to main"
+    TARGET_BRANCH="main"
+    git fetch origin main
+fi
 
 # Get current and remote commit hashes
 CURRENT_COMMIT=$(git rev-parse HEAD)
-REMOTE_COMMIT=$(git rev-parse origin/main)
+REMOTE_COMMIT=$(git rev-parse "origin/$TARGET_BRANCH")
 
 if [ "$CURRENT_COMMIT" = "$REMOTE_COMMIT" ]; then
     log "Already up to date (commit: ${CURRENT_COMMIT:0:8})"
@@ -57,9 +67,9 @@ log "Remote commit:  ${REMOTE_COMMIT:0:8}"
 log "Changes incoming:"
 git log --oneline "$CURRENT_COMMIT".."$REMOTE_COMMIT"
 
-# Reset to the latest main branch
-log "Updating to latest main branch..."
-git reset --hard origin/main
+# Reset to the latest branch
+log "Updating to latest $TARGET_BRANCH branch..."
+git reset --hard "origin/$TARGET_BRANCH"
 
 # Update dependencies
 log "Updating root dependencies..."
