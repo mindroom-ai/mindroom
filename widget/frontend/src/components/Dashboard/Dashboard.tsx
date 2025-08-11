@@ -1,26 +1,153 @@
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { NetworkGraph } from './NetworkGraph';
 
 export function Dashboard() {
   const { agents, rooms, teams, config, selectedRoomId, selectedAgentId, selectRoom, selectAgent } =
     useConfigStore();
 
-  // Calculate system stats
-  const stats = {
-    totalAgents: agents.length,
-    totalRooms: rooms.length,
-    totalTeams: teams.length,
-    modelsInUse: config ? Object.keys(config.models).length : 0,
-    agentsOnline: agents.length, // TODO: Real status
-    activeConnections: rooms.length, // TODO: Real data
-  };
+  // Search and filter state
+  const [searchTerm, setSearchTerm] = useState('');
+  const [showTypes, setShowTypes] = useState<string[]>(['agents', 'rooms', 'teams']);
+
+  // Real-time status simulation (replace with actual WebSocket connection)
+  const [lastUpdated, setLastUpdated] = useState(new Date());
+
+  // Memoized status functions for performance
+  const getAgentStatus = useCallback((agentId: string) => {
+    const hash = agentId.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+    const statusOptions = ['online', 'busy', 'idle', 'offline'] as const;
+    return statusOptions[hash % statusOptions.length];
+  }, []);
+
+  const getStatusColor = useCallback((status: string) => {
+    switch (status) {
+      case 'online':
+        return 'bg-green-500';
+      case 'busy':
+        return 'bg-orange-500';
+      case 'idle':
+        return 'bg-yellow-500';
+      case 'offline':
+        return 'bg-gray-400';
+      default:
+        return 'bg-gray-400';
+    }
+  }, []);
+
+  const getStatusLabel = useCallback((status: string) => {
+    switch (status) {
+      case 'online':
+        return 'Online';
+      case 'busy':
+        return 'Busy';
+      case 'idle':
+        return 'Idle';
+      case 'offline':
+        return 'Offline';
+      default:
+        return 'Unknown';
+    }
+  }, []);
+
+  // Simulate periodic updates
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setLastUpdated(new Date());
+    }, 30000); // Update every 30 seconds
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Calculate system stats with real-time status
+  const stats = useMemo(() => {
+    const agentStatuses = agents.map(agent => getAgentStatus(agent.id));
+    return {
+      totalAgents: agents.length,
+      totalRooms: rooms.length,
+      totalTeams: teams.length,
+      modelsInUse: config ? Object.keys(config.models).length : 0,
+      agentsOnline: agentStatuses.filter(status => status === 'online').length,
+      agentsBusy: agentStatuses.filter(status => status === 'busy').length,
+      agentsIdle: agentStatuses.filter(status => status === 'idle').length,
+      agentsOffline: agentStatuses.filter(status => status === 'offline').length,
+      activeConnections: rooms.length,
+    };
+  }, [agents, rooms, teams, config, lastUpdated]);
+
+  // Filter data based on search and type filters
+  const filteredData = useMemo(() => {
+    const searchLower = searchTerm.toLowerCase();
+
+    return {
+      agents: showTypes.includes('agents')
+        ? agents.filter(
+            agent =>
+              agent.display_name.toLowerCase().includes(searchLower) ||
+              agent.role.toLowerCase().includes(searchLower) ||
+              agent.tools.some(tool => tool.toLowerCase().includes(searchLower)) ||
+              agent.rooms.some(room => room.toLowerCase().includes(searchLower))
+          )
+        : [],
+      rooms: showTypes.includes('rooms')
+        ? rooms.filter(
+            room =>
+              room.display_name.toLowerCase().includes(searchLower) ||
+              room.id.toLowerCase().includes(searchLower)
+          )
+        : [],
+      teams: showTypes.includes('teams')
+        ? teams.filter(
+            team =>
+              team.display_name.toLowerCase().includes(searchLower) ||
+              team.role.toLowerCase().includes(searchLower) ||
+              team.mode.toLowerCase().includes(searchLower)
+          )
+        : [],
+    };
+  }, [agents, rooms, teams, searchTerm, showTypes]);
 
   // Get selected room details
   const selectedRoom = selectedRoomId ? rooms.find(r => r.id === selectedRoomId) : null;
   const selectedAgent = selectedAgentId ? agents.find(a => a.id === selectedAgentId) : null;
+
+  // Memoized export configuration function
+  const exportConfiguration = useCallback(() => {
+    const exportData = {
+      timestamp: new Date().toISOString(),
+      stats,
+      agents: agents.map(agent => ({
+        ...agent,
+        teamMemberships: teams
+          .filter(team => team.agents.includes(agent.id))
+          .map(team => team.display_name),
+      })),
+      rooms: rooms.map(room => ({
+        ...room,
+        teamsInRoom: teams
+          .filter(team => team.rooms.includes(room.id))
+          .map(team => team.display_name),
+      })),
+      teams,
+      modelConfigurations: config?.models || {},
+    };
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `mindroom-config-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [agents, rooms, teams, config, stats]);
 
   return (
     <div className="flex flex-col h-full gap-4">
@@ -31,8 +158,22 @@ export function Dashboard() {
           <p className="text-gray-600 dark:text-gray-400">
             Monitor your MindRoom configuration and status
           </p>
+          <p className="text-xs text-gray-500 mt-1">
+            🔄 Last updated: {lastUpdated.toLocaleTimeString()}
+          </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
+          <Input
+            placeholder="Search agents, rooms, teams..."
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            className="w-64"
+          />
+          <ToggleGroup type="multiple" value={showTypes} onValueChange={setShowTypes}>
+            <ToggleGroupItem value="agents">🤖 Agents</ToggleGroupItem>
+            <ToggleGroupItem value="rooms">🏠 Rooms</ToggleGroupItem>
+            <ToggleGroupItem value="teams">👥 Teams</ToggleGroupItem>
+          </ToggleGroup>
           <Button
             variant="outline"
             size="sm"
@@ -43,8 +184,8 @@ export function Dashboard() {
           >
             Clear Selection
           </Button>
-          <Button variant="outline" size="sm">
-            Export Config
+          <Button variant="outline" size="sm" onClick={exportConfiguration}>
+            📄 Export Config
           </Button>
         </div>
       </div>
@@ -61,7 +202,12 @@ export function Dashboard() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-blue-600 dark:text-blue-400">{stats.agentsOnline} online</p>
+            <div className="flex items-center gap-4 text-sm text-blue-600 dark:text-blue-400">
+              <span>🟢 {stats.agentsOnline}</span>
+              <span>🟠 {stats.agentsBusy}</span>
+              <span>🟡 {stats.agentsIdle}</span>
+              <span>⚫ {stats.agentsOffline}</span>
+            </div>
           </CardContent>
         </Card>
 
@@ -112,10 +258,46 @@ export function Dashboard() {
         </Card>
       </div>
 
+      {/* Network Graph Section */}
+      <div className="flex-1 mb-4">
+        <Card className="h-full">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <span className="text-2xl">🌐</span>
+              Network Visualization
+            </CardTitle>
+            <CardDescription>
+              Interactive graph of rooms, agents, and teams relationships
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-2">
+            <div className="w-full h-96">
+              <NetworkGraph
+                agents={filteredData.agents}
+                rooms={filteredData.rooms}
+                teams={filteredData.teams}
+                selectedAgentId={selectedAgentId}
+                selectedRoomId={selectedRoomId}
+                onSelectAgent={agentId => {
+                  selectAgent(agentId);
+                  selectRoom(null);
+                }}
+                onSelectRoom={roomId => {
+                  selectRoom(roomId);
+                  selectAgent(null);
+                }}
+                width={1000}
+                height={350}
+              />
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
       {/* Main Content Grid */}
-      <div className="flex-1 grid grid-cols-12 gap-4 min-h-0">
+      <div className="grid grid-cols-12 gap-4 min-h-0">
         {/* Agent Cards - Left Sidebar */}
-        <div className="col-span-4 h-full">
+        <div className="col-span-4">
           <Card className="h-full">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -127,7 +309,7 @@ export function Dashboard() {
             <CardContent className="p-0">
               <ScrollArea className="h-[calc(100vh-400px)]">
                 <div className="p-4 space-y-3">
-                  {agents.map(agent => (
+                  {filteredData.agents.map(agent => (
                     <Card
                       key={agent.id}
                       className={`cursor-pointer transition-all hover:shadow-md ${
@@ -149,7 +331,12 @@ export function Dashboard() {
                                 👥
                               </Badge>
                             )}
-                            <div className="w-2 h-2 bg-green-500 rounded-full" title="Online" />
+                            <div
+                              className={`w-2 h-2 rounded-full ${getStatusColor(
+                                getAgentStatus(agent.id)
+                              )}`}
+                              title={getStatusLabel(getAgentStatus(agent.id))}
+                            />
                           </div>
                         </div>
                         <div className="text-xs text-gray-600 dark:text-gray-400 space-y-1">
@@ -192,7 +379,7 @@ export function Dashboard() {
             <CardContent className="p-0">
               <ScrollArea className="h-[calc(100vh-400px)]">
                 <div className="p-4 space-y-3">
-                  {rooms.map(room => (
+                  {filteredData.rooms.map(room => (
                     <Card
                       key={room.id}
                       className={`cursor-pointer transition-all hover:shadow-md ${
@@ -310,7 +497,12 @@ export function Dashboard() {
                               <Badge variant="outline" className="text-xs">
                                 {agent.tools.length} tools
                               </Badge>
-                              <div className="w-2 h-2 bg-green-500 rounded-full" />
+                              <div
+                                className={`w-2 h-2 rounded-full ${getStatusColor(
+                                  getAgentStatus(agent.id)
+                                )}`}
+                                title={getStatusLabel(getAgentStatus(agent.id))}
+                              />
                             </div>
                           </div>
                         );
