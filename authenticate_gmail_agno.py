@@ -3,6 +3,7 @@
 
 import os
 from pathlib import Path
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -14,15 +15,16 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
 ]
 
+
 def authenticate():
     """Authenticate and save token for agno Gmail tools."""
     creds = None
     token_file = Path("token.json")
-    
+
     # Check if token already exists
     if token_file.exists():
         creds = Credentials.from_authorized_user_file(str(token_file), SCOPES)
-    
+
     # If there are no (valid) credentials available, let the user log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -38,19 +40,20 @@ def authenticate():
                     "token_uri": "https://oauth2.googleapis.com/token",
                     "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
                     "redirect_uris": ["http://localhost:8080"],
-                }
+                },
             }
-            
+
             flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
             creds = flow.run_local_server(port=8080)
-        
+
         # Save the credentials for the next run
         token_file.write_text(creds.to_json())
         print(f"✅ Token saved to {token_file}")
     else:
         print(f"✅ Using existing token from {token_file}")
-    
+
     return creds
+
 
 if __name__ == "__main__":
     print("Gmail Authentication for Agno Tools")
@@ -59,7 +62,7 @@ if __name__ == "__main__":
     for scope in SCOPES:
         print(f"  - {scope}")
     print()
-    
+
     try:
         creds = authenticate()
         print("\n✅ Authentication successful!")

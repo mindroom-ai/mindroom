@@ -1,7 +1,7 @@
 // API configuration
 export const API_BASE_URL =
   (import.meta as any).env?.VITE_API_URL ||
-  `http://localhost:${(import.meta as any).env?.VITE_BACKEND_PORT || '8001'}`;
+  `http://localhost:${(import.meta as any).env?.VITE_BACKEND_PORT || '8765'}`;
 
 // Export as API_BASE for compatibility
 export const API_BASE = API_BASE_URL;

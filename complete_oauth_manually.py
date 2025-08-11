@@ -20,9 +20,10 @@ if "code=" not in url:
 
 # Extract the code
 import urllib.parse
+
 parsed = urllib.parse.urlparse(url)
 params = urllib.parse.parse_qs(parsed.query)
-code = params.get('code', [None])[0]
+code = params.get("code", [None])[0]
 
 if not code:
     print("Error: Could not extract authorization code")
@@ -35,10 +36,10 @@ import requests
 
 try:
     response = requests.get(
-        f"http://localhost:8765/api/gmail/callback",
-        params={"code": code}
+        "http://localhost:8765/api/gmail/callback",
+        params={"code": code},
     )
-    
+
     if response.status_code == 200:
         print("\n✅ OAuth callback completed successfully!")
         print("You can now use Gmail integration.")
