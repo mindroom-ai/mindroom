@@ -1,6 +1,6 @@
-# MindRoom NixOS Auto-Deploy Setup
+# MindRoom Linux Auto-Deploy Setup
 
-This directory contains systemd services and scripts to automatically run MindRoom frontend and backend on NixOS with auto-updates from the main git branch.
+This directory contains systemd services and scripts to automatically run MindRoom frontend and backend on Linux (NixOS and regular distributions) with auto-updates from the main git branch.
 
 ## Features
 
@@ -12,9 +12,16 @@ This directory contains systemd services and scripts to automatically run MindRo
 
 ## Quick Start
 
+### For NixOS:
 1. **Install services** (run as root):
    ```bash
    sudo ./nixos/setup-mindroom.sh
+   ```
+
+### For Regular Linux (Ubuntu, Debian, CentOS, etc.):
+1. **Install services** (run as root):
+   ```bash
+   sudo ./nixos/setup-linux.sh
    ```
 
 2. **Start services**:
