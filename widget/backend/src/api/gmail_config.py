@@ -18,10 +18,11 @@ ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
 TOKEN_PATH = Path(__file__).parent.parent.parent.parent.parent / "google_token.json"
 
 # OAuth configuration
+# Gmail-only scopes for agent compatibility
 SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
     "openid",
@@ -218,6 +219,23 @@ async def oauth_callback(code: str) -> dict[str, str]:
 
         with TOKEN_PATH.open("w") as f:
             json.dump(token_data, f, indent=2)
+
+        # Also save token for agno compatibility (Gmail-only scopes)
+        agno_token_path = Path(__file__).parent.parent.parent.parent.parent / "token.json"
+        gmail_only_token = {
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": [
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.compose",
+            ],
+        }
+        with agno_token_path.open("w") as f:
+            json.dump(gmail_only_token, f, indent=2)
 
         # Save credentials to .env as well
         await configure_gmail(GmailConfigRequest(client_id=client_id, client_secret=client_secret, method="oauth"))
