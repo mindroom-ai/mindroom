@@ -1,0 +1,18 @@
+[Unit]
+Description=MindRoom Auto-Update Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+User=basnijholt
+Group=users
+WorkingDirectory=/home/basnijholt/Work/mindroom-2
+Environment=PATH=/home/basnijholt/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/bin
+
+# Script to check for updates and restart services if needed
+ExecStart=/home/basnijholt/Work/mindroom-2/deploy/autoupdate.sh
+
+# Logging
+StandardOutput=append:/var/log/mindroom-autoupdate.log
+StandardError=append:/var/log/mindroom-autoupdate.log
