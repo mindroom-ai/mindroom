@@ -25,7 +25,11 @@ log_error() {
     echo -e "${RED}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1"
 }
 
-PROJECT_DIR="/home/basnijholt/Work/mindroom-2"
+# Auto-detect project directory from script location
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+log "Auto-detected project directory: $PROJECT_DIR"
 
 # Change to project directory
 cd "$PROJECT_DIR"
