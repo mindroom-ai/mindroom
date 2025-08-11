@@ -1,0 +1,30 @@
+[Unit]
+Description=MindRoom Multi-Agent System Backend
+After=network.target
+Wants=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+User=root
+Group=root
+WorkingDirectory=/opt/stacks/mindroom
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# Start the mindroom backend (no auto-update)
+ExecStart=/opt/stacks/mindroom/.venv/bin/python -m mindroom.cli run --log-level INFO --storage-path /opt/stacks/mindroom/tmp
+
+# Logging
+StandardOutput=append:/var/log/mindroom-backend.log
+StandardError=append:/var/log/mindroom-backend.log
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/stacks/mindroom /var/log /tmp
+
+[Install]
+WantedBy=multi-user.target

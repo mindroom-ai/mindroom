@@ -1,0 +1,35 @@
+[Unit]
+Description=MindRoom Configuration Widget (Frontend + Backend)
+After=network.target
+Wants=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+User=root
+Group=root
+WorkingDirectory=/opt/stacks/mindroom/widget
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=BACKEND_PORT=8001
+Environment=FRONTEND_PORT=3003
+
+# Use the existing run.sh script (no auto-update)
+ExecStart=/opt/stacks/mindroom/widget/run.sh
+
+# Logging
+StandardOutput=append:/var/log/mindroom-widget.log
+StandardError=append:/var/log/mindroom-widget.log
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/stacks/mindroom /var/log /tmp
+
+# Kill process group on stop (to handle background processes)
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
