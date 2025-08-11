@@ -30,6 +30,12 @@ PROJECT_DIR="/home/basnijholt/Work/mindroom-2"
 # Change to project directory
 cd "$PROJECT_DIR"
 
+# Check for disable flag
+if [ -f ".no-autoupdate" ]; then
+    log "Auto-update disabled by .no-autoupdate file"
+    exit 0
+fi
+
 # Check if we're in a git repository
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     log_error "Not in a git repository!"
