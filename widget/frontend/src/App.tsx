@@ -11,6 +11,7 @@ import { ModelConfig } from '@/components/ModelConfig/ModelConfig';
 import { MemoryConfig } from '@/components/MemoryConfig/MemoryConfig';
 import { Integrations } from '@/components/Integrations/Integrations';
 import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
+import { Dashboard } from '@/components/Dashboard/Dashboard';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
@@ -69,8 +70,14 @@ function AppContent() {
 
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">
-          <Tabs defaultValue="agents" className="h-full flex flex-col">
+          <Tabs defaultValue="dashboard" className="h-full flex flex-col">
             <TabsList className="px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0">
+              <TabsTrigger
+                value="dashboard"
+                className="data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all"
+              >
+                📊 Dashboard
+              </TabsTrigger>
               <TabsTrigger
                 value="agents"
                 className="data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all"
@@ -108,6 +115,12 @@ function AppContent() {
                 🔌 Integrations
               </TabsTrigger>
             </TabsList>
+
+            <TabsContent value="dashboard" className="flex-1 p-4 overflow-hidden min-h-0">
+              <div className="h-full overflow-hidden">
+                <Dashboard />
+              </div>
+            </TabsContent>
 
             <TabsContent value="agents" className="flex-1 p-4 overflow-hidden min-h-0">
               <div className="grid grid-cols-12 gap-4 h-full">
