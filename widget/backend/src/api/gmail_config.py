@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import jwt
 from fastapi import APIRouter, HTTPException
@@ -21,9 +22,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
     "openid",
-    "email",
-    "profile",
 ]
 
 # Get the backend port from environment, default to 8765
@@ -230,7 +231,7 @@ async def oauth_callback(code: str) -> dict[str, str]:
 
 
 @router.post("/reset")
-async def reset_gmail_config() -> dict[str, str]:
+async def reset_gmail_config() -> dict[str, Any]:
     """Reset Gmail configuration."""
     # Remove token file
     if TOKEN_PATH.exists():

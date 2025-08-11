@@ -27,13 +27,20 @@ load_dotenv(env_path)
 
 app = FastAPI(title="MindRoom Widget Backend")
 
-# Configure CORS for widget
+# Configure CORS for widget - allow multiple origins including port forwarding
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3003", "http://localhost:5173"],  # Vite dev server
+    allow_origins=[
+        "http://localhost:3003",  # Frontend dev server alternative port
+        "http://localhost:5173",  # Vite dev server default
+        "http://127.0.0.1:3003",  # Alternative localhost
+        "http://127.0.0.1:5173",
+        "*",  # Allow all origins for development (remove in production)
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Path to the config.yaml file (go up to mindroom root)
