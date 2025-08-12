@@ -371,35 +371,6 @@ async def test_model(request: TestModelRequest) -> dict[str, Any]:
         return {"success": False, "message": f"Model {model_id} not found"}
 
 
-@app.get("/api/tools")
-async def get_available_tools() -> list[str]:
-    """Get list of available tools."""
-    # This should match the tools available in the MindRoom system
-    return [
-        "calculator",
-        "file",
-        "shell",
-        "python",
-        "csv",
-        "pandas",
-        "yfinance",
-        "arxiv",
-        "duckduckgo",
-        "googlesearch",
-        "tavily",
-        "wikipedia",
-        "newspaper",
-        "website",
-        "jina",
-        "docker",
-        "github",
-        "email",
-        "telegram",
-        "gmail",
-        "integrations",
-    ]
-
-
 @app.get("/api/rooms")
 async def get_available_rooms() -> list[str]:
     """Get list of available rooms."""
