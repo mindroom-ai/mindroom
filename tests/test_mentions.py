@@ -134,3 +134,30 @@ class TestMentionParsing:
         # Current implementation might catch this - documenting actual behavior
         # This is a limitation we should be aware of
         assert "@mindroom_code:localhost" in processed or processed == text
+
+    def test_case_insensitive_mentions(self) -> None:
+        """Test that mentions are case-insensitive."""
+        config = Config.from_yaml()
+
+        # Test various capitalizations
+        test_cases = [
+            ("@Calculator help me", ["calculator"]),
+            ("@CALCULATOR help me", ["calculator"]),
+            ("@CaLcUlAtOr help me", ["calculator"]),
+            ("@Code @EMAIL_ASSISTANT help", ["code", "email_assistant"]),
+            ("@EMAIL_assistant @Code help", ["email_assistant", "code"]),
+        ]
+
+        for text, expected_agents in test_cases:
+            processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+
+            # Extract agent names from the mentioned user IDs
+            mentioned_agents = []
+            for user_id in mentions:
+                # Extract agent name from user_id like "@mindroom_calculator:localhost"
+                if user_id.startswith("@mindroom_") and ":" in user_id:
+                    agent_name = user_id.split("@mindroom_")[1].split(":")[0]
+                    mentioned_agents.append(agent_name)
+
+            assert mentioned_agents == expected_agents, f"Failed for text: {text}"
+            assert len(mentions) == len(expected_agents)
