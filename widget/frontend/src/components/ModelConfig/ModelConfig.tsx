@@ -40,22 +40,24 @@ export function ModelConfig() {
     configId: '',
   });
 
-  if (!config) return null;
-
-  // Get unique providers and filter models
+  // Get unique providers and filter models - must be before any conditional returns
   const providers = useMemo(() => {
+    if (!config) return ['all'];
     const providerSet = new Set(Object.values(config.models).map(m => m.provider));
     return ['all', ...Array.from(providerSet)];
-  }, [config.models]);
+  }, [config?.models]);
 
   const filteredModels = useMemo(() => {
+    if (!config) return [];
     if (selectedProvider === 'all') {
       return Object.entries(config.models);
     }
     return Object.entries(config.models).filter(
       ([_, model]) => model.provider === selectedProvider
     );
-  }, [config.models, selectedProvider]);
+  }, [config?.models, selectedProvider]);
+
+  if (!config) return null;
 
   // Provider display names and colors
   const getProviderInfo = (provider: string) => {
