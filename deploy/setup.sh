@@ -32,17 +32,41 @@ check_root() {
     fi
 }
 
-install_systemd_services() {
+get_project_info() {
+    # Get the directory where this script is located
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
-    log "Installing systemd services..."
+    # Get the project directory (parent of deploy/)
+    PROJECT_DIR="$(dirname "$script_dir")"
 
-    # Copy service files to systemd directory
-    cp "$script_dir/mindroom-backend.service" /etc/systemd/system/
-    cp "$script_dir/mindroom-widget.service" /etc/systemd/system/
-    cp "$script_dir/mindroom-autoupdate.service" /etc/systemd/system/
-    cp "$script_dir/mindroom-autoupdate.timer" /etc/systemd/system/
+    # Get the user who owns the project directory
+    PROJECT_USER="$(stat -c '%U' "$PROJECT_DIR")"
+    PROJECT_GROUP="$(stat -c '%G' "$PROJECT_DIR")"
+
+    log "Detected project directory: $PROJECT_DIR"
+    log "Detected project user: $PROJECT_USER"
+    log "Detected project group: $PROJECT_GROUP"
+}
+
+create_service_files() {
+    log "Creating systemd service files from templates..."
+
+    # Store script directory for later use
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+
+    # Create systemd service files from templates
+    sed "s|PROJECT_USER|$PROJECT_USER|g; s|PROJECT_GROUP|$PROJECT_GROUP|g; s|PROJECT_DIR|$PROJECT_DIR|g" \
+        "$SCRIPT_DIR/mindroom-backend.service" > /etc/systemd/system/mindroom-backend.service
+
+    sed "s|PROJECT_USER|$PROJECT_USER|g; s|PROJECT_GROUP|$PROJECT_GROUP|g; s|PROJECT_DIR|$PROJECT_DIR|g" \
+        "$SCRIPT_DIR/mindroom-widget.service" > /etc/systemd/system/mindroom-widget.service
+
+    log_success "Systemd service files created"
+}
+
+install_systemd_services() {
+    log "Installing systemd services..."
 
     # Reload systemd daemon
     systemctl daemon-reload
@@ -56,37 +80,20 @@ setup_log_files() {
     # Create log files with proper permissions
     touch /var/log/mindroom-backend.log
     touch /var/log/mindroom-widget.log
-    touch /var/log/mindroom-autoupdate.log
 
-    # Set ownership to basnijholt
-    chown basnijholt:users /var/log/mindroom-backend.log
-    chown basnijholt:users /var/log/mindroom-widget.log
-    chown basnijholt:users /var/log/mindroom-autoupdate.log
+    # Set ownership to project user
+    chown "$PROJECT_USER:$PROJECT_GROUP" /var/log/mindroom-backend.log
+    chown "$PROJECT_USER:$PROJECT_GROUP" /var/log/mindroom-widget.log
 
     # Set permissions
     chmod 644 /var/log/mindroom-backend.log
     chmod 644 /var/log/mindroom-widget.log
-    chmod 644 /var/log/mindroom-autoupdate.log
 
     log_success "Log files configured"
 }
 
-enable_services() {
-    log "Enabling systemd services..."
-
-    # Enable and start auto-update timer
-    systemctl enable mindroom-autoupdate.timer
-    systemctl start mindroom-autoupdate.timer
-
-    log_success "Auto-update timer enabled and started"
-    log "Services available:"
-    log "  - mindroom-backend.service   (Manual start: sudo systemctl start mindroom-backend)"
-    log "  - mindroom-widget.service    (Manual start: sudo systemctl start mindroom-widget)"
-    log "  - mindroom-autoupdate.timer  (Auto-enabled, checks every 5 minutes)"
-}
-
 show_usage() {
-    log "MindRoom services have been set up!"
+    log "MindRoom services have been set up for user: $PROJECT_USER"
     echo
     log "Available commands:"
     echo "  sudo systemctl start mindroom-backend     # Start the main MindRoom backend"
@@ -95,28 +102,28 @@ show_usage() {
     echo "  sudo systemctl stop mindroom-widget       # Stop the configuration widget"
     echo "  sudo systemctl status mindroom-backend    # Check backend status"
     echo "  sudo systemctl status mindroom-widget     # Check widget status"
-    echo "  sudo systemctl status mindroom-autoupdate.timer  # Check auto-update timer"
     echo
     log "Log locations:"
     echo "  /var/log/mindroom-backend.log      # Backend logs"
     echo "  /var/log/mindroom-widget.log       # Widget logs"
-    echo "  /var/log/mindroom-autoupdate.log   # Auto-update logs"
     echo
-    log "The auto-update timer will check for new commits every 5 minutes and automatically"
-    log "restart services if there are updates to the main branch."
+    log "Project directory: $PROJECT_DIR"
     echo
     log_warning "Note: Services are not started automatically. Start them manually as needed:"
     echo "  sudo systemctl start mindroom-backend"
     echo "  sudo systemctl start mindroom-widget"
+    echo
+    log "To update: pull latest git changes, then restart services"
 }
 
 main() {
-    log "Setting up MindRoom systemd services for NixOS..."
+    log "Setting up MindRoom systemd services..."
 
     check_root
+    get_project_info
+    create_service_files
     install_systemd_services
     setup_log_files
-    enable_services
     show_usage
 
     log_success "Setup complete!"

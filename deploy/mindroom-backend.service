@@ -8,16 +8,13 @@ StartLimitIntervalSec=0
 Type=simple
 Restart=always
 RestartSec=5
-User=basnijholt
-Group=users
-WorkingDirectory=/home/basnijholt/Work/mindroom-2
-Environment=PATH=/home/basnijholt/.nix-profile/bin:/run/current-system/sw/bin:/usr/bin:/bin
+User=PROJECT_USER
+Group=PROJECT_GROUP
+WorkingDirectory=PROJECT_DIR
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 
-# Ensure we're on the latest main branch
-ExecStartPre=/bin/sh -c 'cd /home/basnijholt/Work/mindroom-2 && git fetch origin && git reset --hard origin/main && uv sync --all-extras'
-
-# Start the mindroom backend
-ExecStart=/home/basnijholt/Work/mindroom-2/.venv/bin/python -m mindroom.cli run --log-level INFO --storage-path /home/basnijholt/Work/mindroom-2/tmp
+# Start the mindroom backend (no auto-update)
+ExecStart=PROJECT_DIR/.venv/bin/python -m mindroom.cli run --log-level INFO --storage-path PROJECT_DIR/tmp
 
 # Logging
 StandardOutput=append:/var/log/mindroom-backend.log
@@ -27,7 +24,7 @@ StandardError=append:/var/log/mindroom-backend.log
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/basnijholt/Work/mindroom-2 /var/log /tmp
+ReadWritePaths=PROJECT_DIR /var/log /tmp
 
 [Install]
 WantedBy=multi-user.target

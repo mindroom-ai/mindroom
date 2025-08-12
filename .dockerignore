@@ -1,0 +1,46 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache
+.coverage
+htmlcov
+.venv
+venv
+
+# Node
+node_modules
+npm-debug.log
+yarn-error.log
+.pnpm-store
+
+# IDEs
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+tmp/
+logs/
+*.log
+coverage.xml
+.cache
+
+# Documentation
+docs/
+# Keep README.md for pyproject.toml
+# *.md
+
+# Tests
+tests/
