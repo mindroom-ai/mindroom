@@ -12,6 +12,18 @@ const mockTools = [
     category: 'information',
     status: 'available',
     setup_type: 'api_key',
+    config_fields: [
+      {
+        name: 'WEATHER_API_KEY',
+        label: 'API Key',
+        type: 'password',
+        required: true,
+        placeholder: 'Enter your weather API key',
+        description: 'Your weather service API key',
+      },
+    ],
+    helper_text: null,
+    docs_url: null,
   },
   {
     name: 'news',
@@ -21,11 +33,14 @@ const mockTools = [
     category: 'information',
     status: 'coming_soon',
     setup_type: 'coming_soon',
+    config_fields: null,
+    helper_text: null,
+    docs_url: null,
   },
 ];
 
 vi.mock('@/hooks/useTools', () => ({
-  useTools: () => ({ tools: mockTools, loading: false }),
+  useTools: () => ({ tools: mockTools, loading: false, refetch: vi.fn() }),
   mapToolToIntegration: (tool: any) => ({
     id: tool.name,
     name: tool.display_name,
@@ -33,6 +48,9 @@ vi.mock('@/hooks/useTools', () => ({
     category: tool.category,
     status: tool.status,
     setup_type: tool.setup_type,
+    config_fields: tool.config_fields,
+    helper_text: tool.helper_text,
+    docs_url: tool.docs_url,
   }),
 }));
 
@@ -45,6 +63,20 @@ vi.mock('@/components/ui/use-toast', () => ({
 // Mock icon mapping
 vi.mock('./iconMapping', () => ({
   getIconForTool: (icon: string) => <span>{icon}</span>,
+}));
+
+// Mock API_BASE
+vi.mock('@/lib/api', () => ({
+  API_BASE: 'http://localhost:8080',
+}));
+
+// Mock EnhancedConfigDialog
+vi.mock('./EnhancedConfigDialog', () => ({
+  EnhancedConfigDialog: ({ onSuccess }: any) => {
+    // Auto-call success when dialog opens
+    setTimeout(() => onSuccess?.(), 0);
+    return <div>Enhanced Config Dialog</div>;
+  },
 }));
 
 // Mock integration providers
@@ -330,7 +362,7 @@ describe('Integrations', () => {
     });
   });
 
-  it('should show toast for unimplemented integrations', async () => {
+  it('should show config dialog for tools with config fields', async () => {
     render(<Integrations />);
 
     await waitFor(() => {
@@ -345,11 +377,8 @@ describe('Integrations', () => {
       fireEvent.click(configureButton);
 
       await waitFor(() => {
-        expect(mockToast).toHaveBeenCalledWith({
-          title: 'Not Implemented',
-          description: 'Weather integration is not yet implemented.',
-          variant: 'destructive',
-        });
+        // Should show the Enhanced Config Dialog
+        expect(screen.getByText('Enhanced Config Dialog')).toBeInTheDocument();
       });
     }
   });
@@ -376,6 +405,12 @@ describe('Integrations', () => {
   });
 
   it('should handle disconnect action', async () => {
+    // Mock the fetch API
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    });
+
     render(<Integrations />);
 
     await waitFor(() => {

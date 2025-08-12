@@ -56,7 +56,9 @@ export function Integrations() {
     icon?: any;
     iconColor?: string;
   } | null>(null);
-  const [showOnlyAvailable, setShowOnlyAvailable] = useState(false);
+  const [filterMode, setFilterMode] = useState<
+    'all' | 'available' | 'unconfigured' | 'configured' | 'coming_soon'
+  >('all');
   const [searchTerm, setSearchTerm] = useState('');
   const { toast } = useToast();
 
@@ -364,9 +366,23 @@ export function Integrations() {
   const filteredIntegrations = useMemo(() => {
     let filtered = integrations;
 
-    // Filter by availability
-    if (showOnlyAvailable) {
-      filtered = filtered.filter(i => i.status === 'available' || i.status === 'connected');
+    // Filter by mode
+    switch (filterMode) {
+      case 'available':
+        filtered = filtered.filter(i => i.status === 'available' || i.status === 'connected');
+        break;
+      case 'unconfigured':
+        filtered = filtered.filter(
+          i => i.status !== 'connected' && i.setup_type !== 'coming_soon' && i.setup_type !== 'none'
+        );
+        break;
+      case 'configured':
+        filtered = filtered.filter(i => i.status === 'connected');
+        break;
+      case 'coming_soon':
+        filtered = filtered.filter(i => i.setup_type === 'coming_soon');
+        break;
+      // 'all' - no filtering needed
     }
 
     // Filter by search term
@@ -379,7 +395,7 @@ export function Integrations() {
     }
 
     return filtered;
-  }, [integrations, showOnlyAvailable, searchTerm]);
+  }, [integrations, filterMode, searchTerm]);
 
   const categories = useMemo(() => {
     const allCategories = [
@@ -431,8 +447,8 @@ export function Integrations() {
       },
     ];
 
-    return showOnlyAvailable ? allCategories.filter(cat => cat.count > 0) : allCategories;
-  }, [filteredIntegrations, showOnlyAvailable]);
+    return filterMode !== 'all' ? allCategories.filter(cat => cat.count > 0) : allCategories;
+  }, [filteredIntegrations, filterMode]);
 
   const getIntegrationsForCategory = (categoryId: string) => {
     if (categoryId === 'all') return filteredIntegrations;
@@ -467,15 +483,28 @@ export function Integrations() {
               />
               <ToggleGroup
                 type="single"
-                value={showOnlyAvailable ? 'available' : 'all'}
-                onValueChange={(value: string) => setShowOnlyAvailable(value === 'available')}
+                value={filterMode}
+                onValueChange={(value: string) =>
+                  setFilterMode(
+                    value as 'all' | 'available' | 'unconfigured' | 'configured' | 'coming_soon'
+                  )
+                }
                 className="backdrop-blur-md bg-white/50 dark:bg-white/10 border border-white/20 dark:border-white/10 rounded-lg"
               >
                 <ToggleGroupItem value="all" aria-label="Show all services">
                   <span className="text-xs font-medium">Show All</span>
                 </ToggleGroupItem>
                 <ToggleGroupItem value="available" aria-label="Show available only">
-                  <span className="text-xs font-medium">Available Only</span>
+                  <span className="text-xs font-medium">Available</span>
+                </ToggleGroupItem>
+                <ToggleGroupItem value="unconfigured" aria-label="Show unconfigured only">
+                  <span className="text-xs font-medium">Unconfigured</span>
+                </ToggleGroupItem>
+                <ToggleGroupItem value="configured" aria-label="Show configured only">
+                  <span className="text-xs font-medium">Configured</span>
+                </ToggleGroupItem>
+                <ToggleGroupItem value="coming_soon" aria-label="Show coming soon only">
+                  <span className="text-xs font-medium">Coming Soon</span>
                 </ToggleGroupItem>
               </ToggleGroup>
             </div>
@@ -483,13 +512,6 @@ export function Integrations() {
           <p className="text-gray-600 dark:text-gray-400">
             Connect external services to enable agent capabilities
           </p>
-          <div className="mt-2 p-3 backdrop-blur-md bg-gradient-to-r from-amber-500/10 to-orange-500/10 dark:from-amber-500/20 dark:to-orange-500/20 rounded-lg border border-white/20 dark:border-white/10">
-            <p className="text-sm text-amber-700 dark:text-amber-300">
-              <strong>Currently Available:</strong> Gmail (via Google), IMDb, Spotify •{' '}
-              <strong>Coming Soon:</strong> 20+ services across shopping, social, entertainment &
-              more
-            </p>
-          </div>
         </div>
 
         <div className="flex-1 overflow-auto">
