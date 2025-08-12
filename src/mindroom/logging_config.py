@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TextIO
 
 import structlog
 
@@ -67,69 +68,52 @@ def setup_logging(level: str = "INFO") -> None:
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     log_file = logs_dir / f"mindroom_{timestamp}.log"
 
-    # Create file handler for standard logging
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
+    # Open file for writing logs
+    file_handle = log_file.open("a", encoding="utf-8")
 
-    # Configure standard logging for both console and file
-    logging.basicConfig(
-        format="%(message)s",
-        level=getattr(logging, level.upper(), logging.INFO),
-        handlers=[
-            logging.StreamHandler(sys.stderr),
-            file_handler,
-        ],
-        force=True,  # Force reconfiguration if already configured
-    )
+    # Simple solution: Create a custom writer that strips ANSI codes for file output
+    class DualWriter:
+        def __init__(self, file: TextIO) -> None:
+            self.file = file
+            self.stderr = sys.stderr
+            # Regex to strip ANSI color codes
+            self.ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
-    # Configure structlog processors
-    timestamper = structlog.processors.TimeStamper(fmt="iso")
+        def write(self, message: str) -> None:
+            # Write to console with colors
+            self.stderr.write(message)
+            # Write to file without colors
+            clean_message = self.ansi_escape.sub("", message)
+            self.file.write(clean_message)
+            self.file.flush()  # Ensure logs are written immediately
 
-    # Shared processors
-    shared_processors: list[Any] = [
-        structlog.contextvars.merge_contextvars,
-        structlog.processors.add_log_level,
-        timestamper,
-        structlog.processors.StackInfoRenderer(),
-        structlog.dev.set_exc_info,
-    ]
+        def flush(self) -> None:
+            self.stderr.flush()
+            self.file.flush()
 
-    # Configure structlog to use stdlib logging
+    dual_writer = DualWriter(file_handle)
+
+    # Configure structlog with our dual writer
     structlog.configure(
         processors=[
-            *shared_processors,
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.StackInfoRenderer(),
+            structlog.dev.set_exc_info,
+            structlog.dev.ConsoleRenderer(colors=True),
         ],
-        wrapper_class=structlog.stdlib.BoundLogger,
-        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level.upper(), logging.INFO)),
+        logger_factory=structlog.WriteLoggerFactory(file=dual_writer),  # type: ignore[arg-type]
         cache_logger_on_first_use=True,
     )
 
-    # Set up formatters for the handlers
-    # Console formatter with colors
-    console_formatter = structlog.stdlib.ProcessorFormatter(
-        foreign_pre_chain=shared_processors,
-        processors=[
-            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            structlog.dev.ConsoleRenderer(colors=True),
-        ],
+    # Configure standard logging
+    logging.basicConfig(
+        format="%(message)s",
+        level=getattr(logging, level.upper(), logging.INFO),
+        stream=sys.stderr,
     )
-
-    # File formatter without colors
-    file_formatter = structlog.stdlib.ProcessorFormatter(
-        foreign_pre_chain=shared_processors,
-        processors=[
-            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            structlog.dev.ConsoleRenderer(colors=False),
-        ],
-    )
-
-    # Apply formatters to handlers
-    for handler in logging.root.handlers:
-        if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stderr:
-            handler.setFormatter(console_formatter)
-        elif isinstance(handler, logging.FileHandler):
-            handler.setFormatter(file_formatter)
 
     # Reduce verbosity of nio (Matrix) library
     logging.getLogger("nio").setLevel(logging.WARNING)
@@ -141,7 +125,7 @@ def setup_logging(level: str = "INFO") -> None:
     logger.info("Logging initialized", log_file=str(log_file), level=level)
 
 
-def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
+def get_logger(name: str = __name__) -> structlog.BoundLogger:
     """Get a structlog logger instance.
 
     Args:

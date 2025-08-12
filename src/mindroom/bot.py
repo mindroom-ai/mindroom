@@ -183,7 +183,7 @@ class AgentBot:
         return self.agent_user.agent_name
 
     @cached_property
-    def logger(self) -> structlog.stdlib.BoundLogger:
+    def logger(self) -> structlog.BoundLogger:
         """Get a logger with agent context bound."""
         return logger.bind(agent=emoji(self.agent_name))
 
