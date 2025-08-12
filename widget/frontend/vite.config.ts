@@ -16,6 +16,10 @@ export default defineConfig({
   },
   server: {
     port: frontendPort,
+    host: true,
+    hmr: {
+      host: 'localhost',
+    },
     proxy: {
       '/api': {
         target: `http://localhost:${backendPort}`,
