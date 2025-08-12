@@ -1,4 +1,8 @@
-"""Unified credentials management for all integrations."""
+"""Unified credentials management for MindRoom.
+
+This module provides centralized credential storage and retrieval for all integrations,
+used by both agents and the widget interface.
+"""
 
 import json
 from pathlib import Path
@@ -6,7 +10,7 @@ from typing import Any
 
 
 class CredentialsManager:
-    """Centralized credentials storage and retrieval."""
+    """Centralized credentials storage and retrieval for MindRoom."""
 
     def __init__(self, base_path: Path | None = None) -> None:
         """Initialize the credentials manager.
@@ -51,7 +55,8 @@ class CredentialsManager:
         if credentials_path.exists():
             try:
                 with credentials_path.open() as f:
-                    return json.load(f)
+                    data: dict[str, Any] = json.load(f)
+                    return data
             except Exception:
                 return None
         return None
@@ -98,45 +103,11 @@ class CredentialsManager:
 _credentials_manager = CredentialsManager()
 
 
-def get_credentials(service: str) -> dict[str, Any] | None:
-    """Get credentials for a service using the global manager.
-
-    Args:
-        service: Name of the service
+def get_credentials_manager() -> CredentialsManager:
+    """Get the global credentials manager instance.
 
     Returns:
-        Credentials dictionary or None if not found
+        The global CredentialsManager instance
 
     """
-    return _credentials_manager.load_credentials(service)
-
-
-def save_credentials(service: str, credentials: dict[str, Any]) -> None:
-    """Save credentials for a service using the global manager.
-
-    Args:
-        service: Name of the service
-        credentials: Credentials dictionary to save
-
-    """
-    _credentials_manager.save_credentials(service, credentials)
-
-
-def delete_credentials(service: str) -> None:
-    """Delete credentials for a service using the global manager.
-
-    Args:
-        service: Name of the service
-
-    """
-    _credentials_manager.delete_credentials(service)
-
-
-def list_configured_services() -> list[str]:
-    """List all services with stored credentials.
-
-    Returns:
-        List of service names
-
-    """
-    return _credentials_manager.list_services()
+    return _credentials_manager

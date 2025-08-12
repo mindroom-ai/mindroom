@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from agno.tools.email import EmailTools
     from agno.tools.file import FileTools
     from agno.tools.github import GithubTools
-    from agno.tools.gmail import GmailTools
     from agno.tools.googlesearch import GoogleSearchTools
     from agno.tools.jina import JinaReaderTools
     from agno.tools.newspaper import NewspaperTools
@@ -45,6 +44,8 @@ if TYPE_CHECKING:
     from agno.tools.x import XTools
     from agno.tools.yfinance import YFinanceTools
     from agno.tools.youtube import YouTubeTools
+
+    from mindroom.custom_tools.gmail import GmailTools
 
 # Registry mapping tool names to their factory functions
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
@@ -458,10 +459,10 @@ def slack_tools() -> type[SlackTools]:
     docs_url="https://docs.agno.com/tools/toolkits/social/gmail",
 )
 def gmail_tools() -> type[GmailTools]:
-    """Gmail tools using Agno's native Gmail toolkit."""
-    from agno.tools.gmail import GmailTools  # noqa: PLC0415
+    """Gmail tools using MindRoom's Gmail wrapper."""
+    from mindroom.custom_tools.gmail import GmailTools  # noqa: PLC0415
 
-    logger.info("Using Agno's native Gmail toolkit")
+    logger.info("Using MindRoom's Gmail wrapper with unified credentials")
     return GmailTools
 
 

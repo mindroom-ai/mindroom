@@ -5,12 +5,13 @@ allowing agents to control devices, query states, and execute automations.
 """
 
 import json
-from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
 import httpx
 from agno.tools import Toolkit
+
+from mindroom.credentials import get_credentials_manager
 
 
 class HomeAssistantTools(Toolkit):
@@ -18,8 +19,8 @@ class HomeAssistantTools(Toolkit):
 
     def __init__(self) -> None:
         """Initialize Home Assistant tools."""
-        # Token storage path - unified location only
-        self.token_path = Path.home() / ".mindroom" / "credentials" / "homeassistant_credentials.json"
+        # Use the credentials manager
+        self._creds_manager = get_credentials_manager()
         self._config: dict[str, Any] | None = None
 
         # Initialize the toolkit with all available methods
@@ -45,15 +46,9 @@ class HomeAssistantTools(Toolkit):
         if self._config:
             return self._config
 
-        # Load from unified location only
-        if self.token_path.exists():
-            try:
-                with self.token_path.open() as f:
-                    self._config = json.load(f)
-                    return self._config
-            except Exception:
-                return None
-        return None
+        # Load from credentials manager
+        self._config = self._creds_manager.load_credentials("homeassistant")
+        return self._config
 
     async def _api_request(  # noqa: PLR0911
         self,
