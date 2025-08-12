@@ -13,7 +13,7 @@ from mindroom.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901, PLR0912, PLR0915
+def get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901, PLR0912
     """Get Mem0 configuration with ChromaDB backend.
 
     Args:
@@ -25,6 +25,7 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901
 
     """
     app_config = config
+    creds_manager = get_credentials_manager()
 
     # Ensure storage directories exist
     chroma_path = storage_path / "chroma"
@@ -41,16 +42,11 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901
     # Add provider-specific configuration
     if app_config.memory.embedder.provider == "openai":
         # Set environment variable from CredentialsManager for Mem0 to use
-        creds_manager = get_credentials_manager()
         api_key = creds_manager.get_api_key("openai")
         if api_key:
             os.environ["OPENAI_API_KEY"] = api_key
-        # Let Mem0 handle the API key from environment
-        if "OPENAI_API_KEY" in os.environ:
-            embedder_config["config"]["api_key"] = os.environ["OPENAI_API_KEY"]
     elif app_config.memory.embedder.provider == "ollama":
         # Check CredentialsManager for Ollama host
-        creds_manager = get_credentials_manager()
         ollama_creds = creds_manager.load_credentials("ollama")
         if ollama_creds and "host" in ollama_creds:
             host = ollama_creds["host"]
@@ -69,7 +65,6 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901
         for key, value in app_config.memory.llm.config.items():
             if key == "host" and app_config.memory.llm.provider == "ollama":
                 # Check CredentialsManager for Ollama host
-                creds_manager = get_credentials_manager()
                 ollama_creds = creds_manager.load_credentials("ollama")
                 if ollama_creds and "host" in ollama_creds:
                     llm_config["config"]["ollama_base_url"] = ollama_creds["host"]
@@ -79,19 +74,14 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901
                 llm_config["config"][key] = value
 
         # Set environment variables from CredentialsManager for Mem0 to use
-        creds_manager = get_credentials_manager()
         if app_config.memory.llm.provider == "openai":
             api_key = creds_manager.get_api_key("openai")
             if api_key:
                 os.environ["OPENAI_API_KEY"] = api_key
-            if "OPENAI_API_KEY" in os.environ:
-                llm_config["config"]["api_key"] = os.environ["OPENAI_API_KEY"]
         elif app_config.memory.llm.provider == "anthropic":
             api_key = creds_manager.get_api_key("anthropic")
             if api_key:
                 os.environ["ANTHROPIC_API_KEY"] = api_key
-            if "ANTHROPIC_API_KEY" in os.environ:
-                llm_config["config"]["api_key"] = os.environ["ANTHROPIC_API_KEY"]
 
         logger.info(
             f"Using {app_config.memory.llm.provider} model '{app_config.memory.llm.config.get('model')}' for memory",
@@ -100,7 +90,6 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901
         # Fallback if no LLM configured
         logger.warning("No memory LLM configured, using default ollama/llama3.2")
         # Check CredentialsManager for Ollama host
-        creds_manager = get_credentials_manager()
         ollama_creds = creds_manager.load_credentials("ollama")
         ollama_host = ollama_creds["host"] if ollama_creds and "host" in ollama_creds else "http://localhost:11434"
 
