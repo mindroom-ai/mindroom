@@ -21,7 +21,8 @@ import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
 const queryClient = new QueryClient();
 
 function AppContent() {
-  const { loadConfig, syncStatus, error } = useConfigStore();
+  const { loadConfig, syncStatus, error, selectedAgentId, selectedTeamId, selectedRoomId } =
+    useConfigStore();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -135,10 +136,18 @@ function AppContent() {
 
             <TabsContent value="agents" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                <div className="col-span-1 lg:col-span-4 h-full overflow-hidden">
+                <div
+                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                    selectedAgentId ? 'hidden lg:block' : 'block'
+                  }`}
+                >
                   <AgentList />
                 </div>
-                <div className="col-span-1 lg:col-span-8 h-full overflow-hidden">
+                <div
+                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                    selectedAgentId ? 'block' : 'hidden lg:block'
+                  }`}
+                >
                   <AgentEditor />
                 </div>
               </div>
@@ -146,10 +155,18 @@ function AppContent() {
 
             <TabsContent value="teams" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                <div className="col-span-1 lg:col-span-4 h-full overflow-hidden">
+                <div
+                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                    selectedTeamId ? 'hidden lg:block' : 'block'
+                  }`}
+                >
                   <TeamList />
                 </div>
-                <div className="col-span-1 lg:col-span-8 h-full overflow-hidden">
+                <div
+                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                    selectedTeamId ? 'block' : 'hidden lg:block'
+                  }`}
+                >
                   <TeamEditor />
                 </div>
               </div>
@@ -157,10 +174,18 @@ function AppContent() {
 
             <TabsContent value="rooms" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                <div className="col-span-1 lg:col-span-4 h-full overflow-hidden">
+                <div
+                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                    selectedRoomId ? 'hidden lg:block' : 'block'
+                  }`}
+                >
                   <RoomList />
                 </div>
-                <div className="col-span-1 lg:col-span-8 h-full overflow-hidden">
+                <div
+                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                    selectedRoomId ? 'block' : 'hidden lg:block'
+                  }`}
+                >
                   <RoomEditor />
                 </div>
               </div>

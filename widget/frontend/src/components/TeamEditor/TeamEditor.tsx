@@ -26,6 +26,7 @@ export function TeamEditor() {
     saveConfig,
     config,
     isDirty,
+    selectTeam,
   } = useConfigStore();
 
   const selectedTeam = teams.find(t => t.id === selectedTeamId);
@@ -79,6 +80,7 @@ export function TeamEditor() {
       isDirty={isDirty}
       onSave={handleSave}
       onDelete={handleDelete}
+      onBack={() => selectTeam(null)}
     >
       {/* Display Name */}
       <FieldGroup

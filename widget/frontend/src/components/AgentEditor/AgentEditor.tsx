@@ -21,8 +21,17 @@ import { TOOL_SCHEMAS, toolNeedsConfiguration } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
 
 export function AgentEditor() {
-  const { agents, rooms, selectedAgentId, updateAgent, deleteAgent, saveConfig, config, isDirty } =
-    useConfigStore();
+  const {
+    agents,
+    rooms,
+    selectedAgentId,
+    updateAgent,
+    deleteAgent,
+    saveConfig,
+    config,
+    isDirty,
+    selectAgent,
+  } = useConfigStore();
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
@@ -91,6 +100,7 @@ export function AgentEditor() {
       isDirty={isDirty}
       onSave={handleSave}
       onDelete={handleDelete}
+      onBack={() => selectAgent(null)}
     >
       {/* Display Name */}
       <FieldGroup

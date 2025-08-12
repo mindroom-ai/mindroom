@@ -1,7 +1,7 @@
 import React from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Save, Trash2, LucideIcon } from 'lucide-react';
+import { Save, Trash2, LucideIcon, ArrowLeft } from 'lucide-react';
 
 export interface EditorPanelProps {
   /** Icon to display in the header */
@@ -24,6 +24,8 @@ export interface EditorPanelProps {
   children: React.ReactNode;
   /** Custom class name for the panel */
   className?: string;
+  /** Function to call when back button is clicked (mobile only) */
+  onBack?: () => void;
 }
 
 export interface EditorPanelEmptyStateProps {
@@ -67,6 +69,7 @@ export function EditorPanel({
   disableDelete = false,
   children,
   className = '',
+  onBack,
 }: EditorPanelProps) {
   const handleSave = async () => {
     try {
@@ -85,6 +88,11 @@ export function EditorPanel({
       <CardHeader className="pb-3 flex-shrink-0">
         <div className="flex items-center justify-between">
           <CardTitle className="flex items-center gap-2">
+            {onBack && (
+              <Button variant="ghost" size="sm" onClick={onBack} className="lg:hidden -ml-2 mr-1">
+                <ArrowLeft className="h-4 w-4" />
+              </Button>
+            )}
             <Icon className="h-5 w-5" />
             {title}
           </CardTitle>
@@ -96,8 +104,8 @@ export function EditorPanel({
                 onClick={handleDelete}
                 disabled={disableDelete}
               >
-                <Trash2 className="h-4 w-4 mr-1" />
-                Delete
+                <Trash2 className="h-4 w-4 sm:mr-1" />
+                <span className="hidden sm:inline">Delete</span>
               </Button>
               <Button
                 variant="default"
@@ -105,8 +113,8 @@ export function EditorPanel({
                 onClick={handleSave}
                 disabled={!isDirty || disableSave}
               >
-                <Save className="h-4 w-4 mr-1" />
-                Save
+                <Save className="h-4 w-4 sm:mr-1" />
+                <span className="hidden sm:inline">Save</span>
               </Button>
             </div>
           )}

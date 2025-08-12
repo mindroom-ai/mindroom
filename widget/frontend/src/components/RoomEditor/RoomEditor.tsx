@@ -14,8 +14,17 @@ import {
 } from '@/components/ui/select';
 
 export function RoomEditor() {
-  const { rooms, agents, config, selectedRoomId, updateRoom, deleteRoom, saveConfig, isDirty } =
-    useConfigStore();
+  const {
+    rooms,
+    agents,
+    config,
+    selectedRoomId,
+    updateRoom,
+    deleteRoom,
+    saveConfig,
+    isDirty,
+    selectRoom,
+  } = useConfigStore();
 
   const selectedRoom = rooms.find(r => r.id === selectedRoomId);
   const [localRoom, setLocalRoom] = useState(selectedRoom);
@@ -57,6 +66,7 @@ export function RoomEditor() {
       isDirty={isDirty}
       onSave={saveConfig}
       onDelete={handleDelete}
+      onBack={() => selectRoom(null)}
     >
       {/* Display Name */}
       <FieldGroup
