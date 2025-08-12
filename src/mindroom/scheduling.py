@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -14,6 +15,13 @@ from pydantic import BaseModel, Field
 from .ai import get_model_instance
 from .logging_config import get_logger
 from .matrix.client import send_message
+from .workflow_scheduling import (
+    ScheduledWorkflow,
+    WorkflowParseError,
+    parse_workflow_schedule,
+    run_cron_task,
+    run_once_task,
+)
 
 if TYPE_CHECKING:
     from .config import Config
@@ -131,80 +139,124 @@ async def schedule_task(
     full_text: str,
     config: Config,
 ) -> tuple[str | None, str]:
-    """Schedule a task from natural language request.
+    """Schedule a task or workflow from natural language request.
 
     Returns:
         Tuple of (task_id, response_message)
 
     """
-    # Parse the full request
-    parse_result = await parse_schedule(full_text, config)
+    # Try to parse as a workflow first (supports complex agent interactions and cron)
+    workflow_result = await parse_workflow_schedule(full_text, config)
 
-    if isinstance(parse_result, ScheduleParseError):
-        error_msg = f"❌ {parse_result.error}"
-        if parse_result.suggestion:
-            error_msg += f"\n\n💡 {parse_result.suggestion}"
-        return (None, error_msg)
+    if isinstance(workflow_result, WorkflowParseError):
+        # Fall back to simple scheduling for backwards compatibility
+        parse_result = await parse_schedule(full_text, config)
+
+        if isinstance(parse_result, ScheduleParseError):
+            error_msg = f"❌ {parse_result.error}"
+            if parse_result.suggestion:
+                error_msg += f"\n\n💡 {parse_result.suggestion}"
+            return (None, error_msg)
+
+        # Handle simple scheduled task (old style)
+        task_id = str(uuid.uuid4())[:8]
+
+        task_data = {
+            "task_id": task_id,
+            "room_id": room_id,
+            "thread_id": thread_id,
+            "agent_user_id": agent_user_id,
+            "scheduled_by": scheduled_by,
+            "scheduled_at": datetime.now(UTC).isoformat(),
+            "execute_at": parse_result.execute_at.isoformat(),
+            "message": parse_result.message,
+            "status": "pending",
+            "type": "simple",  # Mark as simple task
+        }
+
+        await client.room_put_state(
+            room_id=room_id,
+            event_type=SCHEDULED_TASK_EVENT_TYPE,
+            content=task_data,
+            state_key=task_id,
+        )
+
+        task = asyncio.create_task(
+            _execute_scheduled_task(
+                client,
+                task_id,
+                room_id,
+                thread_id,
+                agent_user_id,
+                parse_result.execute_at,
+                parse_result.message,
+            ),
+        )
+        _running_tasks[task_id] = task
+
+        success_msg = f"✅ {parse_result.interpretation}\n\n"
+        success_msg += f'I\'ll send: "{parse_result.message}"\n\n'
+        success_msg += f"Task ID: `{task_id}`"
+
+        return (task_id, success_msg)
+
+    # Handle workflow task (new style with agent mentions and cron)
+    # Add metadata to workflow
+    workflow_result.created_by = scheduled_by
+    workflow_result.thread_id = thread_id
+    workflow_result.room_id = room_id
 
     # Create task ID
-    task_id = str(uuid.uuid4())[:8]  # Short ID for user convenience
+    task_id = str(uuid.uuid4())[:8]
 
-    # Store task in Matrix state
+    # Store workflow in Matrix state
     task_data = {
         "task_id": task_id,
-        "room_id": room_id,
-        "thread_id": thread_id,
-        "agent_user_id": agent_user_id,
-        "scheduled_by": scheduled_by,
-        "scheduled_at": datetime.now(UTC).isoformat(),
-        "execute_at": parse_result.execute_at.isoformat(),
-        "message": parse_result.message,
+        "workflow": workflow_result.model_dump_json(),
         "status": "pending",
+        "created_at": datetime.now(UTC).isoformat(),
+        "type": "workflow",  # Mark as workflow task
     }
 
-    # DEBUG: Log what we're storing
     logger.info(
-        "Storing scheduled task in Matrix state",
+        "Storing workflow task in Matrix state",
         task_id=task_id,
         room_id=room_id,
         thread_id=thread_id,
-        event_type=SCHEDULED_TASK_EVENT_TYPE,
-        state_key=task_id,
+        schedule_type=workflow_result.schedule_type,
     )
 
-    put_response = await client.room_put_state(
+    await client.room_put_state(
         room_id=room_id,
         event_type=SCHEDULED_TASK_EVENT_TYPE,
         content=task_data,
         state_key=task_id,
     )
 
-    # DEBUG: Log the response
-    logger.info(
-        "room_put_state response",
-        response_type=type(put_response).__name__,
-        is_success=isinstance(put_response, nio.RoomPutStateResponse),
-        response=str(put_response),
-    )
+    # Start the appropriate async task
+    if workflow_result.schedule_type == "once":
+        task = asyncio.create_task(
+            run_once_task(client, task_id, workflow_result),
+        )
+    else:  # cron
+        task = asyncio.create_task(
+            run_cron_task(client, task_id, workflow_result, _running_tasks),
+        )
 
-    # Start the async task
-    task = asyncio.create_task(
-        _execute_scheduled_task(
-            client,
-            task_id,
-            room_id,
-            thread_id,
-            agent_user_id,
-            parse_result.execute_at,
-            parse_result.message,
-        ),
-    )
     _running_tasks[task_id] = task
 
     # Build success message
-    success_msg = f"✅ {parse_result.interpretation}\n\n"
-    success_msg += f'I\'ll send: "{parse_result.message}"\n\n'
-    success_msg += f"Task ID: `{task_id}`"
+    if workflow_result.schedule_type == "once" and workflow_result.execute_at:
+        exec_time = workflow_result.execute_at.strftime("%Y-%m-%d %H:%M UTC")
+        success_msg = f"✅ Scheduled for {exec_time}\n"
+    elif workflow_result.cron_schedule:
+        success_msg = f"✅ Scheduled recurring task: {workflow_result.cron_schedule.to_cron_string()}\n"
+    else:
+        success_msg = "✅ Task scheduled\n"
+
+    success_msg += f"\n**Task:** {workflow_result.description}\n"
+    success_msg += f"**Will post:** {workflow_result.message}\n"
+    success_msg += f"\n**Task ID:** `{task_id}`"
 
     return (task_id, success_msg)
 
@@ -380,6 +432,42 @@ async def cancel_scheduled_task(
     return f"✅ Cancelled task `{task_id}`"
 
 
+async def _restore_workflow_task(client: nio.AsyncClient, task_id: str, content: dict) -> asyncio.Task | None:
+    """Restore a workflow task from state."""
+    workflow_data = json.loads(content["workflow"])
+    workflow = ScheduledWorkflow(**workflow_data)
+
+    # Only restore if still relevant
+    if workflow.schedule_type == "once" and workflow.execute_at and workflow.execute_at <= datetime.now(UTC):
+        return None  # Skip past one-time tasks
+
+    # Start the appropriate task
+    if workflow.schedule_type == "once":
+        return asyncio.create_task(run_once_task(client, task_id, workflow))
+    return asyncio.create_task(run_cron_task(client, task_id, workflow, _running_tasks))
+
+
+async def _restore_simple_task(client: nio.AsyncClient, task_id: str, content: dict) -> asyncio.Task | None:
+    """Restore a simple (legacy) task from state."""
+    execute_at = datetime.fromisoformat(content["execute_at"])
+
+    # Only restore if still in the future
+    if execute_at <= datetime.now(UTC):
+        return None
+
+    return asyncio.create_task(
+        _execute_scheduled_task(
+            client,
+            task_id,
+            content["room_id"],
+            content.get("thread_id"),
+            content["agent_user_id"],
+            execute_at,
+            content["message"],
+        ),
+    )
+
+
 async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str) -> int:
     """Restore scheduled tasks from Matrix state after bot restart.
 
@@ -393,32 +481,29 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str) -> int:
 
     restored_count = 0
     for event in response.events:
-        if event["type"] == SCHEDULED_TASK_EVENT_TYPE:
-            content = event["content"]
-            if content.get("status") == "pending":
-                try:
-                    task_id = event["state_key"]
-                    execute_at = datetime.fromisoformat(content["execute_at"])
+        if event["type"] != SCHEDULED_TASK_EVENT_TYPE:
+            continue
 
-                    # Only restore if still in the future
-                    if execute_at > datetime.now(UTC):
-                        task = asyncio.create_task(
-                            _execute_scheduled_task(
-                                client,
-                                task_id,
-                                content["room_id"],
-                                content.get("thread_id"),
-                                content["agent_user_id"],
-                                execute_at,
-                                content["message"],
-                            ),
-                        )
-                        _running_tasks[task_id] = task
-                        restored_count += 1
+        content = event["content"]
+        if content.get("status") != "pending":
+            continue
 
-                except (KeyError, ValueError):
-                    logger.exception("Failed to restore task")
-                    continue
+        try:
+            task_id = event["state_key"]
+            task_type = content.get("type", "simple")
+
+            if task_type == "workflow":
+                task = await _restore_workflow_task(client, task_id, content)
+            else:
+                task = await _restore_simple_task(client, task_id, content)
+
+            if task:
+                _running_tasks[task_id] = task
+                restored_count += 1
+
+        except (KeyError, ValueError, json.JSONDecodeError):
+            logger.exception("Failed to restore task")
+            continue
 
     if restored_count > 0:
         logger.info(f"Restored {restored_count} scheduled tasks in room {room_id}")

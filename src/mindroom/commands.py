@@ -201,14 +201,31 @@ Shows all agents currently invited to this thread."""
     if topic == "schedule":
         return """**Schedule Command**
 
-Usage: `!schedule <time> <message>` - Schedule a reminder
+Usage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent workflows
 
-Examples:
+**Simple Reminders:**
 - `!schedule in 5 minutes Check the deployment`
 - `!schedule tomorrow at 3pm Send the weekly report`
 - `!schedule later Ping me about the meeting`
+- `ping me tomorrow about the meeting`
+- `remind me in 2 hours to review PRs`
 
-The agent will send you a reminder at the specified time."""
+**Agent Workflows:**
+- `!schedule Daily at 9am, @finance give me a market analysis`
+- `!schedule Every Monday, @research AI news and @email_assistant send me a summary`
+- `!schedule tomorrow at 2pm, @email_assistant check my Gmail`
+
+**Recurring Tasks (Cron-style):**
+- `!schedule Every hour, @shell check server status`
+- `!schedule Daily at 9am, @finance market report`
+- `!schedule Weekly on Friday, @analyst prepare weekly summary`
+- `!schedule Every Monday at 10am, @research @email_assistant gather news and email it`
+
+The system will:
+- Post messages mentioning agents at scheduled times
+- Agents will respond naturally in the thread
+- Multiple agents will collaborate when mentioned together
+- Support both one-time and recurring schedules"""
 
     if topic == "list_schedules":
         return """**List Schedules Command**
@@ -247,11 +264,16 @@ Note: Widget support requires Element Desktop or self-hosted Element Web."""
 - `!invite <agent>` - Invite an agent to this thread
 - `!uninvite <agent>` - Remove an agent from this thread
 - `!list_invites` - List all invited agents
-- `!schedule <time> <message>` - Schedule a reminder
+- `!schedule <time> <message>` - Schedule tasks, reminders, or agent workflows
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!widget [url]` - Add configuration widget to the room
 - `!help [topic]` - Show this help or help for a specific command
+
+**New Scheduling Features:**
+- Recurring tasks with cron-style scheduling (daily, weekly, hourly)
+- Agent workflows - mention agents to have them collaborate on scheduled tasks
+- Natural language time parsing - "tomorrow", "in 5 minutes", "every Monday"
 
 Note: All commands only work within threads, not in main room messages
 (except !widget which works in the main room).
