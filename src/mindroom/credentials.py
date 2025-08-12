@@ -98,6 +98,35 @@ class CredentialsManager:
                 services.append(service)
         return sorted(services)
 
+    def get_api_key(self, service: str, key_name: str = "api_key") -> str | None:
+        """Get an API key for a service.
+
+        Args:
+            service: Name of the service (e.g., 'openai', 'anthropic')
+            key_name: Name of the key field (default: 'api_key')
+
+        Returns:
+            API key string or None if not found
+
+        """
+        credentials = self.load_credentials(service)
+        if credentials:
+            return credentials.get(key_name)
+        return None
+
+    def set_api_key(self, service: str, api_key: str, key_name: str = "api_key") -> None:
+        """Set an API key for a service.
+
+        Args:
+            service: Name of the service
+            api_key: The API key to store
+            key_name: Name of the key field (default: 'api_key')
+
+        """
+        credentials = self.load_credentials(service) or {}
+        credentials[key_name] = api_key
+        self.save_credentials(service, credentials)
+
 
 # Global instance for convenience
 _credentials_manager = CredentialsManager()
