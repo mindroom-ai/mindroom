@@ -5,6 +5,8 @@ services:
       dockerfile: deploy/Dockerfile.backend
     container_name: mindroom-backend
     restart: always
+    env_file:
+      - ../.env
     volumes:
       - /mnt/data/mindroom/config:/app/config
       - /mnt/data/mindroom/tmp:/app/tmp
@@ -23,6 +25,8 @@ services:
       dockerfile: deploy/Dockerfile.widget
     container_name: mindroom-widget
     restart: always
+    env_file:
+      - ../.env
     volumes:
       - /mnt/data/mindroom/config:/app/config
       - /mnt/data/mindroom/logs:/app/logs
