@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 from agno.agent import Agent
@@ -116,6 +116,12 @@ Examples:
    message: "@email_assistant Please check my Gmail inbox and summarize any important messages"
    description: "One-time Gmail check"
 
+"check my email in 15 seconds"
+-> schedule_type: "once"
+   execute_at: [current_time + 15 seconds]
+   message: "@email_assistant Please check my email"
+   description: "One-time email check"
+
 "Every hour, check server status"
 -> schedule_type: "cron"
    cron_schedule: {{minute: "0", hour: "*", day: "*", month: "*", weekday: "*"}}
@@ -146,9 +152,14 @@ Important rules:
 - For simple reminders (ping, remind), don't mention agents unless specifically requested
 - Be specific about what you want the agents to do if agents are mentioned
 - For complex workflows, the agents will naturally collaborate when mentioned together
-- Convert time expressions to UTC
+- Convert time expressions to UTC for the schedule, but DO NOT include them in the message
+- IMPORTANT: Remove time references like "in 15 seconds", "tomorrow", "later" from the message itself
+- The message is what gets posted WHEN the scheduled time arrives, so it should make sense at that moment
 - For vague times like "tomorrow" without specific time, use 9:00 UTC as default
-- For "later" or "soon", use 30 minutes from now"""
+- For "later" or "soon", use 30 minutes from now
+- CRITICAL: If schedule_type is "once", you MUST provide execute_at with a valid datetime
+- CRITICAL: If schedule_type is "cron", you MUST provide cron_schedule with all fields filled
+- If you cannot determine a specific time, default to 30 minutes from current_time for "once" tasks"""
 
     model = get_model_instance(config, "default")
 
@@ -164,6 +175,14 @@ Important rules:
         result = response.content
 
         if isinstance(result, ScheduledWorkflow):
+            # Add fallback for missing required fields
+            if result.schedule_type == "once" and not result.execute_at:
+                logger.warning("One-time task missing execute_at, defaulting to 30 minutes from now")
+                result.execute_at = current_time + timedelta(minutes=30)
+            elif result.schedule_type == "cron" and not result.cron_schedule:
+                logger.warning("Recurring task missing cron_schedule, defaulting to daily at 9am")
+                result.cron_schedule = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+
             logger.info(
                 "Successfully parsed workflow schedule",
                 request=request,
