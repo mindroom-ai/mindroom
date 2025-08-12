@@ -6,9 +6,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 # Backend deps stage
 FROM base as backend-deps
-WORKDIR /app/widget/backend
-COPY widget/backend/pyproject.toml widget/backend/uv.lock ./
-RUN uv sync
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+COPY widget/backend/pyproject.toml widget/backend/uv.lock ./widget/backend/
+COPY src ./src
+RUN cd widget/backend && uv sync
 
 # Frontend deps stage
 FROM base as frontend-deps

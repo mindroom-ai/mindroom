@@ -39,7 +39,8 @@ coverage.xml
 
 # Documentation
 docs/
-*.md
+# Keep README.md for pyproject.toml
+# *.md
 
 # Tests
 tests/
