@@ -54,7 +54,7 @@ describe('MemoryConfig', () => {
   it('shows correct provider in select', () => {
     render(<MemoryConfig />);
 
-    // The select is a combobox with the provider ID
+    // For Radix UI Select, we need to find the trigger button by its role
     const providerSelect = document.getElementById('provider');
     expect(providerSelect).toBeInTheDocument();
     expect(providerSelect).toHaveTextContent('Ollama (Local)');
