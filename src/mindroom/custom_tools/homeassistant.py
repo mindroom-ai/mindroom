@@ -60,7 +60,7 @@ class HomeAssistantTools(Toolkit):
                     with path.open() as f:
                         self._config = json.load(f)
                         return self._config
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
 
         # Check environment variables as fallback
@@ -163,15 +163,14 @@ class HomeAssistantTools(Toolkit):
             entities = [e for e in entities if e["entity_id"].startswith(f"{domain}.")]
 
         # Simplify the response
+        entity_list: list[Any] = entities[:50] if isinstance(entities, list) else []
         simplified: list[dict[str, Any]] = [
             {
                 "entity_id": e["entity_id"],
                 "state": e["state"],
                 "friendly_name": e.get("attributes", {}).get("friendly_name", e["entity_id"]),
             }
-            for e in (
-                entities[:50] if isinstance(entities, list) else []
-            )  # Limit to 50 entities to avoid huge responses
+            for e in entity_list  # Limit to 50 entities to avoid huge responses
         ]
 
         return json.dumps(simplified)
