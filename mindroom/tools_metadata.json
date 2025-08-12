@@ -2,168 +2,298 @@
   "tools": [
     {
       "category": "communication",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "SMTP server hostname",
+          "label": "SMTP Host",
+          "name": "SMTP_HOST",
+          "options": null,
+          "placeholder": "smtp.gmail.com",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 587,
+          "description": "SMTP server port",
+          "label": "SMTP Port",
+          "name": "SMTP_PORT",
+          "options": null,
+          "placeholder": "587",
+          "required": true,
+          "type": "number",
+          "validation": {
+            "max": 65535,
+            "min": 1
+          }
+        },
+        {
+          "default": null,
+          "description": "Email account username",
+          "label": "Username",
+          "name": "SMTP_USERNAME",
+          "options": null,
+          "placeholder": "your-email@example.com",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Email account password",
+          "label": "Password",
+          "name": "SMTP_PASSWORD",
+          "options": null,
+          "placeholder": "Enter password or app-specific password",
+          "required": true,
+          "type": "password",
+          "validation": null
+        }
+      ],
       "dependencies": null,
       "description": "Send emails via SMTP",
       "display_name": "Email",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/email",
+      "helper_text": null,
       "icon": "Mail",
       "icon_color": "text-blue-600",
       "name": "email",
-      "requires_config": [
-        "SMTP_HOST",
-        "SMTP_PORT",
-        "SMTP_USERNAME",
-        "SMTP_PASSWORD"
-      ],
       "setup_type": "api_key",
       "status": "requires_config"
     },
     {
       "category": "communication",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Your Slack bot token",
+          "label": "Slack Token",
+          "name": "SLACK_TOKEN",
+          "options": null,
+          "placeholder": "xoxb-...",
+          "required": true,
+          "type": "password",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "slack-sdk"
       ],
       "description": "Send messages and manage channels",
       "display_name": "Slack",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/slack",
+      "helper_text": null,
       "icon": "FaSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
-      "requires_config": [
-        "SLACK_TOKEN"
-      ],
       "setup_type": "api_key",
       "status": "requires_config"
     },
     {
       "category": "communication",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Your Telegram bot API token",
+          "label": "Bot Token",
+          "name": "TELEGRAM_TOKEN",
+          "options": null,
+          "placeholder": "123456:ABC-DEF...",
+          "required": true,
+          "type": "password",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "httpx"
       ],
       "description": "Send and receive Telegram messages",
       "display_name": "Telegram",
-      "docs_url": null,
+      "docs_url": "https://core.telegram.org/bots/api",
+      "helper_text": null,
       "icon": "FaTelegram",
       "icon_color": "text-blue-500",
       "name": "telegram",
-      "requires_config": [
-        "TELEGRAM_TOKEN"
-      ],
       "setup_type": "api_key",
       "status": "requires_config"
     },
     {
       "category": "development",
+      "config_fields": null,
       "dependencies": null,
       "description": "Mathematical calculations and expressions",
       "display_name": "Calculator",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/calculator",
+      "helper_text": null,
       "icon": "Calculator",
-      "icon_color": null,
+      "icon_color": "text-gray-600",
       "name": "calculator",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "development",
+      "config_fields": null,
       "dependencies": [
         "docker"
       ],
       "description": "Manage Docker containers and images",
       "display_name": "Docker",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/docker",
+      "helper_text": null,
       "icon": "FaDocker",
       "icon_color": "text-blue-400",
       "name": "docker",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "development",
+      "config_fields": null,
       "dependencies": null,
       "description": "File storage and sharing",
       "display_name": "Dropbox",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaDropbox",
       "icon_color": "text-blue-600",
       "name": "dropbox",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "development",
+      "config_fields": null,
       "dependencies": null,
       "description": "Read, write, and manage files",
       "display_name": "File Operations",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/file",
+      "helper_text": null,
       "icon": "Folder",
       "icon_color": "text-yellow-600",
       "name": "file",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "GitHub personal access token with required permissions",
+          "label": "GitHub Access Token",
+          "name": "GITHUB_ACCESS_TOKEN",
+          "options": null,
+          "placeholder": "ghp_...",
+          "required": true,
+          "type": "password",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "PyGithub"
       ],
       "description": "Repository and issue management",
       "display_name": "GitHub",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/github",
+      "helper_text": null,
       "icon": "FaGithub",
-      "icon_color": null,
+      "icon_color": "text-gray-800",
       "name": "github",
-      "requires_config": [
-        "GITHUB_ACCESS_TOKEN"
-      ],
       "setup_type": "api_key",
       "status": "requires_config"
     },
     {
       "category": "development",
+      "config_fields": null,
       "dependencies": null,
       "description": "Code and CI/CD management",
       "display_name": "GitLab",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaGitlab",
       "icon_color": "text-orange-600",
       "name": "gitlab",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "development",
+      "config_fields": null,
       "dependencies": null,
       "description": "Execute Python code in a sandboxed environment",
       "display_name": "Python Execution",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/python",
+      "helper_text": null,
       "icon": "Code",
       "icon_color": "text-blue-500",
       "name": "python",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "development",
+      "config_fields": null,
       "dependencies": null,
       "description": "Execute shell commands and scripts",
       "display_name": "Shell Commands",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/shell",
+      "helper_text": null,
       "icon": "Terminal",
       "icon_color": "text-green-500",
       "name": "shell",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "email",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Google OAuth client ID",
+          "label": "Client ID",
+          "name": "GOOGLE_CLIENT_ID",
+          "options": null,
+          "placeholder": "123456789.apps.googleusercontent.com",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Google OAuth client secret",
+          "label": "Client Secret",
+          "name": "GOOGLE_CLIENT_SECRET",
+          "options": null,
+          "placeholder": "GOCSPX-...",
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Google Cloud project ID",
+          "label": "Project ID",
+          "name": "GOOGLE_PROJECT_ID",
+          "options": null,
+          "placeholder": "my-project-123456",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "OAuth redirect URI",
+          "label": "Redirect URI",
+          "name": "GOOGLE_REDIRECT_URI",
+          "options": null,
+          "placeholder": "http://localhost:8080/callback",
+          "required": true,
+          "type": "url",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "google-api-python-client",
         "google-auth",
@@ -173,152 +303,170 @@
       "description": "Read, search, and manage Gmail emails",
       "display_name": "Gmail",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/gmail",
+      "helper_text": null,
       "icon": "FaGoogle",
       "icon_color": "text-red-500",
       "name": "gmail",
-      "requires_config": [
-        "GOOGLE_CLIENT_ID",
-        "GOOGLE_CLIENT_SECRET",
-        "GOOGLE_PROJECT_ID",
-        "GOOGLE_REDIRECT_URI"
-      ],
       "setup_type": "oauth",
       "status": "requires_config"
     },
     {
       "category": "email",
+      "config_fields": null,
       "dependencies": null,
       "description": "Manage calendar events and schedules",
       "display_name": "Google Calendar",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
       "name": "google_calendar",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "email",
+      "config_fields": null,
       "dependencies": null,
       "description": "Email and calendar integration",
       "display_name": "Microsoft Outlook",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaMicrosoft",
       "icon_color": "text-blue-600",
       "name": "outlook",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "email",
+      "config_fields": null,
       "dependencies": null,
       "description": "Email and calendar access",
       "display_name": "Yahoo Mail",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaYahoo",
       "icon_color": "text-purple-600",
       "name": "yahoo_mail",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "entertainment",
+      "config_fields": null,
       "dependencies": null,
       "description": "Library and playlist management",
       "display_name": "Apple Music",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaApple",
       "icon_color": "text-gray-800",
       "name": "apple_music",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "entertainment",
+      "config_fields": null,
       "dependencies": null,
       "description": "Watch history and content discovery",
       "display_name": "HBO Max",
       "docs_url": null,
+      "helper_text": null,
       "icon": "SiHbo",
-      "icon_color": null,
+      "icon_color": "text-purple-600",
       "name": "hbo",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "entertainment",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Your OMDb API key for movie and TV show information",
+          "label": "OMDb API Key",
+          "name": "OMDB_API_KEY",
+          "options": null,
+          "placeholder": "Enter your OMDb API key",
+          "required": true,
+          "type": "password",
+          "validation": null
+        }
+      ],
       "dependencies": null,
       "description": "Movie and TV show information",
       "display_name": "IMDb",
-      "docs_url": null,
+      "docs_url": "http://www.omdbapi.com/",
+      "helper_text": "Get a free API key from [OMDb API website](http://www.omdbapi.com/apikey.aspx)",
       "icon": "Film",
       "icon_color": "text-yellow-500",
       "name": "imdb",
-      "requires_config": null,
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "entertainment",
+      "config_fields": null,
       "dependencies": null,
       "description": "Track watch history and get recommendations",
       "display_name": "Netflix",
       "docs_url": null,
+      "helper_text": null,
       "icon": "SiNetflix",
       "icon_color": "text-red-600",
       "name": "netflix",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "entertainment",
+      "config_fields": null,
       "dependencies": null,
       "description": "Music streaming and playlist management",
       "display_name": "Spotify",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaSpotify",
       "icon_color": "text-green-500",
       "name": "spotify",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "entertainment",
+      "config_fields": null,
       "dependencies": [
         "youtube-transcript-api"
       ],
       "description": "Search videos and get transcripts",
       "display_name": "YouTube",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/youtube",
+      "helper_text": null,
       "icon": "FaYoutube",
       "icon_color": "text-red-600",
       "name": "youtube",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "information",
+      "config_fields": null,
       "dependencies": null,
       "description": "Book tracking and recommendations",
       "display_name": "Goodreads",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaGoodreads",
       "icon_color": "text-amber-700",
       "name": "goodreads",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "research",
+      "config_fields": null,
       "dependencies": [
         "arxiv",
         "pypdf"
@@ -326,45 +474,48 @@
       "description": "Search and retrieve academic papers",
       "display_name": "arXiv",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/arxiv",
+      "helper_text": null,
       "icon": "Book",
       "icon_color": "text-red-600",
       "name": "arxiv",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "research",
+      "config_fields": null,
       "dependencies": [
         "duckdb"
       ],
       "description": "Read and analyze CSV data with DuckDB",
       "display_name": "CSV Files",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/csv",
+      "helper_text": null,
       "icon": "FileText",
       "icon_color": "text-blue-600",
       "name": "csv",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "research",
+      "config_fields": null,
       "dependencies": [
         "duckduckgo-search"
       ],
       "description": "Web search without tracking",
       "display_name": "DuckDuckGo",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/duckduckgo",
+      "helper_text": null,
       "icon": "Search",
       "icon_color": "text-orange-500",
       "name": "duckduckgo",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "research",
+      "config_fields": null,
       "dependencies": [
         "googlesearch-python",
         "pycountry"
@@ -372,267 +523,414 @@
       "description": "Search the web using Google",
       "display_name": "Google Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/googlesearch",
+      "helper_text": null,
       "icon": "Search",
       "icon_color": "text-blue-500",
       "name": "googlesearch",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Your Jina API key for web content extraction",
+          "label": "Jina API Key",
+          "name": "JINA_API_KEY",
+          "options": null,
+          "placeholder": "jina_...",
+          "required": true,
+          "type": "password",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "httpx"
       ],
       "description": "Advanced content extraction and processing",
       "display_name": "Jina Reader",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
+      "helper_text": null,
       "icon": "FileText",
       "icon_color": "text-pink-500",
       "name": "jina",
-      "requires_config": [
-        "JINA_API_KEY"
-      ],
       "setup_type": "api_key",
       "status": "requires_config"
     },
     {
       "category": "research",
+      "config_fields": null,
       "dependencies": [
         "newspaper3k"
       ],
       "description": "Extract and analyze news articles from URLs",
       "display_name": "News Articles",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper",
+      "helper_text": null,
       "icon": "Newspaper",
       "icon_color": "text-gray-600",
       "name": "newspaper",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "research",
+      "config_fields": null,
       "dependencies": [
         "pandas"
       ],
       "description": "Pandas data manipulation and analysis",
       "display_name": "Data Analysis",
       "docs_url": "https://docs.agno.com/tools/toolkits/database/pandas",
+      "helper_text": null,
       "icon": "Database",
       "icon_color": "text-purple-600",
       "name": "pandas",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Your Tavily API key for AI-powered search",
+          "label": "Tavily API Key",
+          "name": "TAVILY_API_KEY",
+          "options": null,
+          "placeholder": "tvly-...",
+          "required": true,
+          "type": "password",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "tavily-python"
       ],
       "description": "Advanced AI-powered web search engine",
       "display_name": "Tavily Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/tavily",
+      "helper_text": null,
       "icon": "Search",
       "icon_color": "text-purple-500",
       "name": "tavily",
-      "requires_config": [
-        "TAVILY_API_KEY"
-      ],
       "setup_type": "api_key",
       "status": "requires_config"
     },
     {
       "category": "research",
+      "config_fields": null,
       "dependencies": null,
       "description": "Extract and analyze content from websites",
       "display_name": "Website Reader",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/website",
+      "helper_text": null,
       "icon": "Globe",
       "icon_color": "text-indigo-500",
       "name": "website",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "research",
+      "config_fields": null,
       "dependencies": [
         "wikipedia"
       ],
       "description": "Search encyclopedia articles",
       "display_name": "Wikipedia",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/wikipedia",
+      "helper_text": null,
       "icon": "Globe",
       "icon_color": "text-gray-700",
       "name": "wikipedia",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "research",
+      "config_fields": null,
       "dependencies": [
         "yfinance"
       ],
       "description": "Stock market data and financial information",
       "display_name": "Yahoo Finance",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/yfinance",
+      "helper_text": null,
       "icon": "TrendingUp",
       "icon_color": "text-green-600",
       "name": "yfinance",
-      "requires_config": null,
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "shopping",
+      "config_fields": null,
       "dependencies": null,
       "description": "Search products and track orders",
       "display_name": "Amazon",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaAmazon",
       "icon_color": "text-orange-500",
       "name": "amazon",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "shopping",
+      "config_fields": null,
       "dependencies": null,
       "description": "Auction monitoring and bidding",
       "display_name": "eBay",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaEbay",
-      "icon_color": null,
+      "icon_color": "text-blue-500",
       "name": "ebay",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "shopping",
+      "config_fields": null,
       "dependencies": null,
       "description": "Product search and availability",
       "display_name": "Target",
       "docs_url": null,
+      "helper_text": null,
       "icon": "SiTarget",
       "icon_color": "text-red-600",
       "name": "target",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "shopping",
+      "config_fields": null,
       "dependencies": null,
       "description": "Product search and price tracking",
       "display_name": "Walmart",
       "docs_url": null,
+      "helper_text": null,
       "icon": "SiWalmart",
       "icon_color": "text-blue-500",
       "name": "walmart",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "smart_home",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "URL to your Home Assistant instance",
+          "label": "Home Assistant URL",
+          "name": "HOMEASSISTANT_URL",
+          "options": null,
+          "placeholder": "http://homeassistant.local:8123",
+          "required": true,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Long-lived access token from Home Assistant",
+          "label": "Access Token",
+          "name": "HOMEASSISTANT_TOKEN",
+          "options": null,
+          "placeholder": "Bearer token",
+          "required": true,
+          "type": "password",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "httpx"
       ],
       "description": "Control and monitor smart home devices",
       "display_name": "Home Assistant",
       "docs_url": "https://www.home-assistant.io/integrations/",
+      "helper_text": null,
       "icon": "Home",
       "icon_color": "text-blue-500",
       "name": "homeassistant",
-      "requires_config": [
-        "HOMEASSISTANT_URL",
-        "HOMEASSISTANT_TOKEN"
-      ],
       "setup_type": "special",
       "status": "requires_config"
     },
     {
       "category": "social",
+      "config_fields": null,
       "dependencies": null,
       "description": "Access posts and pages",
       "display_name": "Facebook",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaFacebook",
       "icon_color": "text-blue-600",
       "name": "facebook",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "social",
+      "config_fields": null,
       "dependencies": null,
       "description": "View posts and stories",
       "display_name": "Instagram",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaInstagram",
       "icon_color": "text-pink-600",
       "name": "instagram",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "social",
+      "config_fields": null,
       "dependencies": null,
       "description": "Professional network access",
       "display_name": "LinkedIn",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaLinkedin",
       "icon_color": "text-blue-700",
       "name": "linkedin",
-      "requires_config": null,
       "setup_type": "coming_soon",
       "status": "coming_soon"
     },
     {
       "category": "social",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Reddit application client ID",
+          "label": "Client ID",
+          "name": "REDDIT_CLIENT_ID",
+          "options": null,
+          "placeholder": "Reddit app client ID",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Reddit application client secret",
+          "label": "Client Secret",
+          "name": "REDDIT_CLIENT_SECRET",
+          "options": null,
+          "placeholder": "Reddit app client secret",
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Your Reddit username",
+          "label": "Username",
+          "name": "REDDIT_USERNAME",
+          "options": null,
+          "placeholder": "your_reddit_username",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Your Reddit password",
+          "label": "Password",
+          "name": "REDDIT_PASSWORD",
+          "options": null,
+          "placeholder": "Your Reddit password",
+          "required": true,
+          "type": "password",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "praw"
       ],
       "description": "Browse subreddits and search posts",
       "display_name": "Reddit",
       "docs_url": null,
+      "helper_text": null,
       "icon": "FaReddit",
       "icon_color": "text-orange-600",
       "name": "reddit",
-      "requires_config": [
-        "REDDIT_CLIENT_ID",
-        "REDDIT_CLIENT_SECRET",
-        "REDDIT_USERNAME",
-        "REDDIT_PASSWORD"
-      ],
       "setup_type": "api_key",
       "status": "requires_config"
     },
     {
       "category": "social",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "X/Twitter API Bearer token",
+          "label": "Bearer Token",
+          "name": "X_BEARER_TOKEN",
+          "options": null,
+          "placeholder": "Bearer token from X/Twitter",
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "X/Twitter API consumer key",
+          "label": "Consumer Key",
+          "name": "X_CONSUMER_KEY",
+          "options": null,
+          "placeholder": "Consumer key from X/Twitter",
+          "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "X/Twitter API consumer secret",
+          "label": "Consumer Secret",
+          "name": "X_CONSUMER_SECRET",
+          "options": null,
+          "placeholder": "Consumer secret from X/Twitter",
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "X/Twitter API access token",
+          "label": "Access Token",
+          "name": "X_ACCESS_TOKEN",
+          "options": null,
+          "placeholder": "Access token from X/Twitter",
+          "required": true,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "X/Twitter API access token secret",
+          "label": "Access Token Secret",
+          "name": "X_ACCESS_TOKEN_SECRET",
+          "options": null,
+          "placeholder": "Access token secret from X/Twitter",
+          "required": true,
+          "type": "password",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "tweepy"
       ],
       "description": "Post tweets and search Twitter",
       "display_name": "Twitter/X",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/x",
+      "helper_text": null,
       "icon": "FaTwitter",
       "icon_color": "text-blue-400",
       "name": "twitter",
-      "requires_config": [
-        "X_BEARER_TOKEN",
-        "X_CONSUMER_KEY",
-        "X_CONSUMER_SECRET",
-        "X_ACCESS_TOKEN",
-        "X_ACCESS_TOKEN_SECRET"
-      ],
       "setup_type": "api_key",
       "status": "requires_config"
     }

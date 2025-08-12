@@ -8,10 +8,13 @@ export interface Integration {
   description: string;
   category: string;
   icon: React.ReactNode;
+  iconColor?: string | null;
   status: 'connected' | 'not_connected' | 'available' | 'coming_soon';
-  setup_type: 'oauth' | 'api_key' | 'special' | 'coming_soon';
+  setup_type: 'oauth' | 'api_key' | 'special' | 'coming_soon' | 'none';
   connected?: boolean;
   details?: any;
+  docs_url?: string | null;
+  helper_text?: string | null;
 }
 
 export interface IntegrationConfig {

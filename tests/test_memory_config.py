@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -84,12 +85,15 @@ class TestMemoryConfig:
         # Verify embedder config
         assert result["embedder"]["provider"] == "openai"
         assert result["embedder"]["config"]["model"] == "text-embedding-ada-002"
-        assert result["embedder"]["config"]["api_key"] == "test-key"
+        # API key is now set as environment variable, not in config
 
         # Verify LLM config
         assert result["llm"]["provider"] == "openai"
         assert result["llm"]["config"]["model"] == "gpt-4"
-        assert result["llm"]["config"]["api_key"] == "test-key"
+        # API key is now set as environment variable, not in config
+
+        # Verify the environment variable was set
+        assert os.environ.get("OPENAI_API_KEY") == "test-key"
 
     @patch.dict("os.environ", {}, clear=True)
     def test_get_memory_config_no_model_fallback(self) -> None:

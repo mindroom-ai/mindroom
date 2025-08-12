@@ -14,6 +14,7 @@ from watchdog.observers import Observer
 from mindroom.config import Config
 
 # Import routers
+from src.api.credentials import router as credentials_router
 from src.api.google_integration import router as google_router
 from src.api.homeassistant_integration import router as homeassistant_router
 from src.api.integrations import router as integrations_router
@@ -93,10 +94,17 @@ observer.schedule(ConfigFileHandler(), path=str(CONFIG_PATH.parent), recursive=F
 observer.start()
 
 # Include routers
+app.include_router(credentials_router)
 app.include_router(google_router)
 app.include_router(homeassistant_router)
 app.include_router(integrations_router)
 app.include_router(tools_router)
+
+
+@app.get("/api/health")
+async def health_check() -> dict[str, str]:
+    """Health check endpoint for testing."""
+    return {"status": "healthy"}
 
 
 @app.on_event("startup")
@@ -111,12 +119,6 @@ async def shutdown_event() -> None:
     """Clean up on shutdown."""
     observer.stop()
     observer.join()
-
-
-@app.get("/health")
-async def health_check() -> dict[str, Any]:
-    """Health check endpoint."""
-    return {"status": "healthy", "config_loaded": bool(config)}
 
 
 @app.post("/api/config/load")
