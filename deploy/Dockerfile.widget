@@ -1,6 +1,6 @@
 FROM node:20-slim
 
-WORKDIR /app
+WORKDIR /app/widget
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -22,23 +22,23 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 COPY . /app/
 
 # Install backend dependencies
-RUN cd widget/backend && uv sync
+RUN cd /app/widget/backend && uv sync
 
 # Install frontend dependencies
-RUN cd widget/frontend && pnpm install
+RUN cd /app/widget/frontend && pnpm install
 
 # Build frontend
-RUN cd widget/frontend && pnpm run build
+RUN cd /app/widget/frontend && pnpm run build
 
 # Create necessary directories
 RUN mkdir -p /app/logs /app/config
 
-# Copy the widget run script
-COPY widget/run.sh /app/run.sh
-RUN chmod +x /app/run.sh
+# Copy the widget run script to widget directory
+COPY widget/run.sh /app/widget/run.sh
+RUN chmod +x /app/widget/run.sh
 
 # Expose ports
 EXPOSE 3003 8001
 
 # Run the widget (both frontend and backend)
-CMD ["/app/run.sh"]
+CMD ["./run.sh"]
