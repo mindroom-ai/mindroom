@@ -17,6 +17,7 @@ import { toast } from '@/components/ui/toaster';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
+import { ApiKeyConfig } from '@/components/ApiKeyConfig';
 
 interface ModelFormData {
   provider: string;
@@ -549,6 +550,28 @@ export function ModelConfig() {
             })}
           </div>
         )}
+
+        {/* API Key Configuration Section */}
+        <div className="space-y-4 pt-6 border-t border-border">
+          <h3 className="text-lg font-semibold mb-4">Provider API Keys</h3>
+          <div className="grid gap-4 md:grid-cols-2">
+            <ApiKeyConfig
+              service="openai"
+              displayName="OpenAI"
+              description="Configure your OpenAI API key for GPT models"
+            />
+            <ApiKeyConfig
+              service="anthropic"
+              displayName="Anthropic"
+              description="Configure your Anthropic API key for Claude models"
+            />
+            <ApiKeyConfig
+              service="openrouter"
+              displayName="OpenRouter"
+              description="Configure your OpenRouter API key"
+            />
+          </div>
+        </div>
 
         {/* Save All Changes Button */}
         <div className="pt-6 border-t border-border">
