@@ -64,12 +64,12 @@ export function RoomList() {
       showSearch={true}
       searchPlaceholder="Search rooms..."
       creationMode="inline-form"
-      createButtonText="New Room"
+      createButtonText="Add"
       createPlaceholder="Room name..."
       emptyIcon={Settings2}
       emptyMessage="No rooms found"
-      emptySubtitle={'Click "New Room" to create one'}
-      variant="panel"
+      emptySubtitle={'Click "Add" to create one'}
+      variant="card"
     />
   );
 }
