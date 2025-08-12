@@ -17,13 +17,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 
 const queryClient = new QueryClient();
 
@@ -90,34 +83,8 @@ function AppContent() {
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">
           <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
-            {/* Mobile Navigation Dropdown */}
-            <div className="md:hidden px-2 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10">
-              <Select value={currentTab} onValueChange={handleTabChange}>
-                <SelectTrigger className="w-full">
-                  <SelectValue>
-                    {currentTab === 'dashboard' && '📊 Dashboard'}
-                    {currentTab === 'agents' && '👥 Agents'}
-                    {currentTab === 'teams' && '👫 Teams'}
-                    {currentTab === 'rooms' && '🏠 Rooms'}
-                    {currentTab === 'models' && '🔧 Models & API Keys'}
-                    {currentTab === 'memory' && '🧠 Memory'}
-                    {currentTab === 'integrations' && '🔌 Integrations'}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="dashboard">📊 Dashboard</SelectItem>
-                  <SelectItem value="agents">👥 Agents</SelectItem>
-                  <SelectItem value="teams">👫 Teams</SelectItem>
-                  <SelectItem value="rooms">🏠 Rooms</SelectItem>
-                  <SelectItem value="models">🔧 Models & API Keys</SelectItem>
-                  <SelectItem value="memory">🧠 Memory</SelectItem>
-                  <SelectItem value="integrations">🔌 Integrations</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Desktop Tab Navigation */}
-            <TabsList className="hidden md:flex px-2 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto">
+            {/* Tab Navigation - now visible on all screen sizes */}
+            <TabsList className="px-2 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto">
               <TabsTrigger
                 value="dashboard"
                 className="rounded-lg min-h-[44px] px-2 sm:px-3 data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all"
