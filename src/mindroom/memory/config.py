@@ -13,7 +13,7 @@ from mindroom.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def get_memory_config(storage_path: Path, config: Config) -> dict:
+def get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901, PLR0912, PLR0915
     """Get Mem0 configuration with ChromaDB backend.
 
     Args:
@@ -40,15 +40,22 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
 
     # Add provider-specific configuration
     if app_config.memory.embedder.provider == "openai":
-        # Try CredentialsManager first, then environment
+        # Set environment variable from CredentialsManager for Mem0 to use
         creds_manager = get_credentials_manager()
-        api_key = creds_manager.get_api_key("openai") or os.environ.get("OPENAI_API_KEY")
-        embedder_config["config"]["api_key"] = api_key
+        api_key = creds_manager.get_api_key("openai")
+        if api_key:
+            os.environ["OPENAI_API_KEY"] = api_key
+        # Let Mem0 handle the API key from environment
+        if "OPENAI_API_KEY" in os.environ:
+            embedder_config["config"]["api_key"] = os.environ["OPENAI_API_KEY"]
     elif app_config.memory.embedder.provider == "ollama":
-        # Add Ollama host if specified
-        host = app_config.memory.embedder.config.host
-        if not host:
-            host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        # Check CredentialsManager for Ollama host
+        creds_manager = get_credentials_manager()
+        ollama_creds = creds_manager.load_credentials("ollama")
+        if ollama_creds and "host" in ollama_creds:
+            host = ollama_creds["host"]
+        else:
+            host = app_config.memory.embedder.config.host or "http://localhost:11434"
         embedder_config["config"]["ollama_base_url"] = host
 
     # Build LLM config from memory configuration
@@ -61,22 +68,30 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
         # Copy config but handle provider-specific field names
         for key, value in app_config.memory.llm.config.items():
             if key == "host" and app_config.memory.llm.provider == "ollama":
-                # mem0 expects ollama_base_url, not host
-                llm_config["config"]["ollama_base_url"] = value or os.environ.get(
-                    "OLLAMA_HOST",
-                    "http://localhost:11434",
-                )
+                # Check CredentialsManager for Ollama host
+                creds_manager = get_credentials_manager()
+                ollama_creds = creds_manager.load_credentials("ollama")
+                if ollama_creds and "host" in ollama_creds:
+                    llm_config["config"]["ollama_base_url"] = ollama_creds["host"]
+                else:
+                    llm_config["config"]["ollama_base_url"] = value or "http://localhost:11434"
             elif key != "host":  # Skip host for other fields
                 llm_config["config"][key] = value
 
-        # Add API keys for providers that need them
+        # Set environment variables from CredentialsManager for Mem0 to use
         creds_manager = get_credentials_manager()
         if app_config.memory.llm.provider == "openai":
-            api_key = creds_manager.get_api_key("openai") or os.environ.get("OPENAI_API_KEY")
-            llm_config["config"]["api_key"] = api_key
+            api_key = creds_manager.get_api_key("openai")
+            if api_key:
+                os.environ["OPENAI_API_KEY"] = api_key
+            if "OPENAI_API_KEY" in os.environ:
+                llm_config["config"]["api_key"] = os.environ["OPENAI_API_KEY"]
         elif app_config.memory.llm.provider == "anthropic":
-            api_key = creds_manager.get_api_key("anthropic") or os.environ.get("ANTHROPIC_API_KEY")
-            llm_config["config"]["api_key"] = api_key
+            api_key = creds_manager.get_api_key("anthropic")
+            if api_key:
+                os.environ["ANTHROPIC_API_KEY"] = api_key
+            if "ANTHROPIC_API_KEY" in os.environ:
+                llm_config["config"]["api_key"] = os.environ["ANTHROPIC_API_KEY"]
 
         logger.info(
             f"Using {app_config.memory.llm.provider} model '{app_config.memory.llm.config.get('model')}' for memory",
@@ -84,11 +99,16 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
     else:
         # Fallback if no LLM configured
         logger.warning("No memory LLM configured, using default ollama/llama3.2")
+        # Check CredentialsManager for Ollama host
+        creds_manager = get_credentials_manager()
+        ollama_creds = creds_manager.load_credentials("ollama")
+        ollama_host = ollama_creds["host"] if ollama_creds and "host" in ollama_creds else "http://localhost:11434"
+
         llm_config = {
             "provider": "ollama",
             "config": {
                 "model": "llama3.2",
-                "ollama_base_url": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
+                "ollama_base_url": ollama_host,
                 "temperature": 0.1,
                 "top_p": 1,
             },
