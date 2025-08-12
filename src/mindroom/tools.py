@@ -160,7 +160,7 @@ def docker_tools() -> type[DockerTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="FaGithub",
-    icon_color=None,  # Default gray/black
+    icon_color="text-gray-800",  # GitHub black
     config_fields=[
         ConfigField(
             name="GITHUB_ACCESS_TOKEN",
@@ -825,7 +825,7 @@ def walmart_tools() -> type[Toolkit]:
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
     icon="FaEbay",
-    icon_color=None,  # Default color
+    icon_color="text-blue-500",  # eBay blue
 )
 def ebay_tools() -> type[Toolkit]:
     """EBay integration - coming soon."""
@@ -906,7 +906,7 @@ def apple_music_tools() -> type[Toolkit]:
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
     icon="SiHbo",
-    icon_color=None,  # Default color
+    icon_color="text-purple-600",  # HBO purple
 )
 def hbo_tools() -> type[Toolkit]:
     """HBO Max integration - coming soon."""
