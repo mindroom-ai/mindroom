@@ -1,5 +1,5 @@
 import { useConfigStore } from '@/store/configStore';
-import { Settings2, Bot, Brain } from 'lucide-react';
+import { Home, Bot, Brain } from 'lucide-react';
 import { ListPanel, ListItem } from '@/components/shared/ListPanel';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 
@@ -55,7 +55,7 @@ export function RoomList() {
   return (
     <ListPanel<RoomListItem>
       title="Rooms"
-      icon={Settings2}
+      icon={Home}
       items={rooms as RoomListItem[]}
       selectedId={selectedRoomId || undefined}
       onItemSelect={selectRoom}
@@ -66,7 +66,7 @@ export function RoomList() {
       creationMode="inline-form"
       createButtonText="Add"
       createPlaceholder="Room name..."
-      emptyIcon={Settings2}
+      emptyIcon={Home}
       emptyMessage="No rooms found"
       emptySubtitle={'Click "Add" to create one'}
     />

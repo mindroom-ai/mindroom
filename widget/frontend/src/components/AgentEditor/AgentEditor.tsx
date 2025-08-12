@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Plus, X, FileCode, Settings } from 'lucide-react';
+import { Plus, X, Bot, Settings } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
 import { AVAILABLE_TOOLS } from '@/types/config';
 import { useForm, Controller } from 'react-hook-form';
@@ -81,12 +81,12 @@ export function AgentEditor() {
   };
 
   if (!selectedAgent) {
-    return <EditorPanelEmptyState icon={FileCode} message="Select an agent to edit" />;
+    return <EditorPanelEmptyState icon={Bot} message="Select an agent to edit" />;
   }
 
   return (
     <EditorPanel
-      icon={FileCode}
+      icon={Bot}
       title="Agent Details"
       isDirty={isDirty}
       onSave={handleSave}

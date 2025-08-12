@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { Settings2, Bot } from 'lucide-react';
+import { Home, Bot } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
@@ -25,7 +25,7 @@ export function RoomEditor() {
   }, [selectedRoom]);
 
   if (!selectedRoom || !localRoom) {
-    return <EditorPanelEmptyState icon={Settings2} message="Select a room to edit" />;
+    return <EditorPanelEmptyState icon={Home} message="Select a room to edit" />;
   }
 
   const handleFieldChange = (field: string, value: any) => {
@@ -52,7 +52,7 @@ export function RoomEditor() {
 
   return (
     <EditorPanel
-      icon={Settings2}
+      icon={Home}
       title="Room Details"
       isDirty={isDirty}
       onSave={saveConfig}
