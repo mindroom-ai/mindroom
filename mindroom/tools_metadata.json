@@ -127,7 +127,7 @@
       "docs_url": "https://docs.agno.com/tools/toolkits/local/calculator",
       "helper_text": null,
       "icon": "Calculator",
-      "icon_color": null,
+      "icon_color": "text-gray-600",
       "name": "calculator",
       "setup_type": "none",
       "status": "available"
@@ -199,7 +199,7 @@
       "docs_url": "https://docs.agno.com/tools/toolkits/others/github",
       "helper_text": null,
       "icon": "FaGithub",
-      "icon_color": null,
+      "icon_color": "text-gray-800",
       "name": "github",
       "setup_type": "api_key",
       "status": "requires_config"
@@ -375,7 +375,7 @@
       "docs_url": null,
       "helper_text": null,
       "icon": "SiHbo",
-      "icon_color": null,
+      "icon_color": "text-purple-600",
       "name": "hbo",
       "setup_type": "coming_soon",
       "status": "coming_soon"
@@ -687,7 +687,7 @@
       "docs_url": null,
       "helper_text": null,
       "icon": "FaEbay",
-      "icon_color": null,
+      "icon_color": "text-blue-500",
       "name": "ebay",
       "setup_type": "coming_soon",
       "status": "coming_soon"

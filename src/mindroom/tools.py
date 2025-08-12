@@ -77,7 +77,7 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
     description="Mathematical calculations and expressions",
     category=ToolCategory.DEVELOPMENT,
     icon="Calculator",
-    icon_color=None,  # Default gray
+    icon_color="text-gray-600",  # Calculator gray
     docs_url="https://docs.agno.com/tools/toolkits/local/calculator",
 )
 def calculator_tools() -> type[CalculatorTools]:
