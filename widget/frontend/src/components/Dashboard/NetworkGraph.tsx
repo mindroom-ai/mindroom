@@ -1,6 +1,6 @@
 import { Agent, Room, Team } from '@/types/config';
 import { Bot, Home, Users, Link, Activity, Trophy, Zap, BarChart3, X } from 'lucide-react';
-import { sharedStyles, getSelectionStyles } from '@/components/shared/styles';
+import { getSelectionStyles } from '@/components/shared/styles';
 
 interface NetworkGraphProps {
   agents: Agent[];
@@ -107,7 +107,7 @@ export function NetworkGraph({
 
           {mostConnectedRoom && (
             <div
-              className={`p-4 rounded-lg ${sharedStyles.item.containerCard} ${getSelectionStyles(
+              className={`p-4 rounded-lg cursor-pointer transition-all hover:shadow-md ${getSelectionStyles(
                 selectedRoomId === mostConnectedRoom.room.id,
                 'card'
               )} ${
@@ -133,7 +133,7 @@ export function NetworkGraph({
 
           {mostActiveAgent && (
             <div
-              className={`p-4 rounded-lg ${sharedStyles.item.containerCard} ${getSelectionStyles(
+              className={`p-4 rounded-lg cursor-pointer transition-all hover:shadow-md ${getSelectionStyles(
                 selectedAgentId === mostActiveAgent.id,
                 'card'
               )} ${

@@ -32,8 +32,8 @@ export const sharedStyles = {
   // Item components
   item: {
     container: 'w-full text-left px-3 py-2 rounded-lg transition-all duration-200',
-    containerHover: 'hover:bg-gray-100 dark:hover:bg-white/5 hover:shadow-sm hover:scale-[1.01]',
-    containerCard: 'cursor-pointer transition-all hover:shadow-md hover:scale-[1.01]',
+    containerHover: 'hover:bg-gray-100 dark:hover:bg-white/5 hover:shadow-sm',
+    containerCard: 'cursor-pointer transition-all hover:shadow-md',
     selected:
       'bg-amber-50 dark:bg-gradient-to-r dark:from-primary/20 dark:to-primary/10 hover:bg-amber-100 dark:hover:from-primary/30 dark:hover:to-primary/20 shadow-sm dark:shadow-lg backdrop-blur-xl',
     selectedCard: 'ring-2 ring-orange-500 bg-gradient-to-r from-orange-500/10 to-amber-500/10',
