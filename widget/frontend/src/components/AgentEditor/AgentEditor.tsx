@@ -198,8 +198,8 @@ export function AgentEditor() {
                   config?.tools?.[tool] && Object.keys(config.tools[tool]).length > 0;
 
                 return (
-                  <div className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 transition-colors">
-                    <div className="flex items-center space-x-2">
+                  <div className="flex items-center justify-between p-3 sm:p-2 rounded-lg hover:bg-gray-50 transition-colors">
+                    <div className="flex items-center space-x-3 sm:space-x-2">
                       <Checkbox
                         id={tool}
                         checked={isChecked}
@@ -210,10 +210,11 @@ export function AgentEditor() {
                           field.onChange(newTools);
                           handleFieldChange('tools', newTools);
                         }}
+                        className="h-5 w-5 sm:h-4 sm:w-4"
                       />
                       <label
                         htmlFor={tool}
-                        className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer"
+                        className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
                       >
                         {TOOL_SCHEMAS[tool]?.name || tool}
                       </label>
@@ -233,10 +234,10 @@ export function AgentEditor() {
                         variant="ghost"
                         size="sm"
                         onClick={() => setConfigDialogTool(tool)}
-                        className="h-7 px-2"
+                        className="h-8 px-2"
                       >
-                        <Settings className="h-3 w-3 mr-1" />
-                        Configure
+                        <Settings className="h-4 w-4 sm:mr-1" />
+                        <span className="hidden sm:inline">Configure</span>
                       </Button>
                     )}
                   </div>
@@ -257,9 +258,10 @@ export function AgentEditor() {
             size="sm"
             onClick={handleAddInstruction}
             data-testid="add-instruction-button"
+            className="h-9 px-3"
           >
-            <Plus className="h-3 w-3 mr-1" />
-            Add
+            <Plus className="h-4 w-4 sm:mr-1" />
+            <span className="hidden sm:inline">Add</span>
           </Button>
         }
       >
@@ -279,11 +281,13 @@ export function AgentEditor() {
                       handleFieldChange('instructions', updated);
                     }}
                     placeholder="Instruction..."
+                    className="min-h-[40px]"
                   />
                   <Button
                     variant="ghost"
                     size="icon"
                     onClick={() => handleRemoveInstruction(index)}
+                    className="h-10 w-10 flex-shrink-0"
                   >
                     <X className="h-4 w-4" />
                   </Button>
