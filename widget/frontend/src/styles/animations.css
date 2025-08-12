@@ -1,9 +1,60 @@
 /**
- * Animations & Interactions - Consistent animation patterns across components
+ * Animations & Interactions - Essential animation patterns only
  *
- * This file defines reusable animation classes and interaction patterns
- * that provide consistent user experience throughout the application.
+ * This file contains only the animation classes and patterns that are
+ * actually used in the application to keep bundle size minimal.
  */
+
+/* === ANIMATION TOKENS === */
+:root {
+  --animation-duration-short: 150ms;
+  --animation-duration-medium: 300ms;
+  --animation-duration-long: 500ms;
+  --animation-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --animation-ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --animation-ease-in: cubic-bezier(0.4, 0, 1, 1);
+}
+
+/* === KEYFRAME DEFINITIONS === */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fadeOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideDown {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
 
 /* === CORE ANIMATION CLASSES === */
 
@@ -16,14 +67,6 @@
   animation: fadeOut var(--animation-duration-medium) var(--animation-ease-in-out);
 }
 
-.animate-fade-in-fast {
-  animation: fadeIn var(--animation-duration-short) var(--animation-ease-in-out);
-}
-
-.animate-fade-out-fast {
-  animation: fadeOut var(--animation-duration-short) var(--animation-ease-in-out);
-}
-
 /* Slide animations */
 .animate-slide-up {
   animation: slideUp var(--animation-duration-medium) var(--animation-ease-in-out);
@@ -33,560 +76,30 @@
   animation: slideDown var(--animation-duration-medium) var(--animation-ease-in-out);
 }
 
-.animate-slide-left {
-  animation: slideLeft var(--animation-duration-medium) var(--animation-ease-in-out);
-}
+/* === UTILITY CLASSES === */
 
-.animate-slide-right {
-  animation: slideRight var(--animation-duration-medium) var(--animation-ease-in-out);
-}
-
-/* Scale animations */
-.animate-scale-up {
-  animation: scaleUp var(--animation-duration-short) var(--animation-ease-spring);
-}
-
-.animate-scale-down {
-  animation: scaleDown var(--animation-duration-short) var(--animation-ease-spring);
-}
-
-/* Pulse animation */
-.animate-pulse-soft {
-  animation: pulseSoft 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-
-/* Bounce animation */
-.animate-bounce-soft {
-  animation: bounceSoft var(--animation-duration-long) var(--animation-ease-bounce);
-}
-
-/* === HOVER ANIMATIONS === */
-
-/* Button hover effects */
+/* Basic hover effects that complement Tailwind */
 .hover-lift {
-  transition: var(--transition-transform), var(--transition-shadow);
+  transition: transform var(--animation-duration-short) var(--animation-ease-out);
 }
 
 .hover-lift:hover {
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-button-hover);
-}
-
-.hover-lift-card {
-  transition: var(--transition-transform), var(--transition-shadow);
-}
-
-.hover-lift-card:hover {
   transform: translateY(-2px);
-  box-shadow: var(--shadow-card-hover);
 }
 
-/* Glow effect on hover */
-.hover-glow {
-  transition: var(--transition-shadow), var(--transition-colors);
-}
-
-.hover-glow:hover {
-  box-shadow: 0 0 20px rgba(var(--primary), 0.3);
-}
-
-/* Scale on hover */
-.hover-scale {
-  transition: var(--transition-transform);
-}
-
-.hover-scale:hover {
-  transform: scale(1.02);
-}
-
-.hover-scale-sm {
-  transition: var(--transition-transform);
-}
-
-.hover-scale-sm:hover {
-  transform: scale(1.01);
-}
-
-/* Color transitions */
-.hover-brighten {
-  transition: var(--transition-colors);
-}
-
-.hover-brighten:hover {
-  filter: brightness(1.1);
-}
-
-/* === FOCUS ANIMATIONS === */
-
-.focus-ring-primary {
-  transition: var(--transition-colors);
-}
-
+/* Focus ring for accessibility */
 .focus-ring-primary:focus {
-  outline: none;
-  box-shadow: 0 0 0 2px hsl(var(--primary)) !important;
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 2px;
 }
 
-.focus-ring-secondary {
-  transition: var(--transition-colors);
-}
-
-.focus-ring-secondary:focus {
-  outline: none;
-  box-shadow: 0 0 0 2px hsl(var(--secondary)) !important;
-}
-
-/* === LOADING ANIMATIONS === */
-
+/* Loading states */
 .loading-spinner {
   animation: spin 1s linear infinite;
 }
 
-.loading-dots {
-  animation: loadingDots 1.4s ease-in-out infinite both;
-}
-
-.loading-pulse {
-  animation: loadingPulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-
-/* Loading bar animation */
-.loading-bar {
-  position: relative;
-  background-color: hsl(var(--muted));
-  border-radius: var(--radius-full);
-  overflow: hidden;
-}
-
-.loading-bar::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  width: 40%;
-  background: linear-gradient(90deg, transparent, hsl(var(--primary)), transparent);
-  animation: loadingBar 2s ease-in-out infinite;
-}
-
-/* === INTERACTION FEEDBACK === */
-
-/* Click feedback */
-.click-feedback {
-  transition: var(--transition-transform);
-  user-select: none;
-}
-
+/* Basic interaction feedback */
 .click-feedback:active {
   transform: scale(0.98);
-}
-
-/* Ripple effect */
-.ripple {
-  position: relative;
-  overflow: hidden;
-}
-
-.ripple::before {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 0;
-  height: 0;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.3);
-  transform: translate(-50%, -50%);
-  transition:
-    width var(--animation-duration-fast) ease-out,
-    height var(--animation-duration-fast) ease-out;
-  pointer-events: none;
-}
-
-.ripple:active::before {
-  width: 300px;
-  height: 300px;
-}
-
-/* === STATE TRANSITIONS === */
-
-/* Disabled state */
-.disabled-fade {
-  transition: var(--transition-opacity);
-}
-
-.disabled-fade:disabled {
-  opacity: var(--opacity-disabled);
-  cursor: not-allowed;
-}
-
-/* Success state */
-.success-flash {
-  animation: successFlash var(--animation-duration-medium) ease-in-out;
-}
-
-/* Error state */
-.error-shake {
-  animation: errorShake var(--animation-duration-fast) ease-in-out;
-}
-
-/* === COMPONENT-SPECIFIC ANIMATIONS === */
-
-/* Card animations */
-.card-enter {
-  animation: cardEnter var(--animation-duration-medium) var(--animation-ease-spring);
-}
-
-.card-exit {
-  animation: cardExit var(--animation-duration-short) var(--animation-ease-in-out);
-}
-
-/* Modal animations */
-.modal-backdrop-enter {
-  animation: backdropEnter var(--animation-duration-fast) ease-out;
-}
-
-.modal-backdrop-exit {
-  animation: backdropExit var(--animation-duration-fast) ease-in;
-}
-
-.modal-content-enter {
-  animation: modalEnter var(--animation-duration-medium) var(--animation-ease-spring);
-}
-
-.modal-content-exit {
-  animation: modalExit var(--animation-duration-fast) var(--animation-ease-in-out);
-}
-
-/* Dropdown animations */
-.dropdown-enter {
-  animation: dropdownEnter var(--animation-duration-fast) var(--animation-ease-out);
-}
-
-.dropdown-exit {
-  animation: dropdownExit var(--animation-duration-fast) var(--animation-ease-in);
-}
-
-/* Toast animations */
-.toast-enter {
-  animation: toastEnter var(--animation-duration-medium) var(--animation-ease-spring);
-}
-
-.toast-exit {
-  animation: toastExit var(--animation-duration-fast) var(--animation-ease-in-out);
-}
-
-/* === KEYFRAME DEFINITIONS === */
-
-/* Additional keyframes not defined in tailwind.config.js */
-
-@keyframes slideLeft {
-  0% {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-  100% {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
-
-@keyframes slideRight {
-  0% {
-    transform: translateX(-100%);
-    opacity: 0;
-  }
-  100% {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
-
-@keyframes pulseSoft {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.7;
-  }
-}
-
-@keyframes bounceSoft {
-  0%,
-  100% {
-    transform: translateY(0);
-    animation-timing-function: cubic-bezier(0.8, 0, 1, 1);
-  }
-  50% {
-    transform: translateY(-5px);
-    animation-timing-function: cubic-bezier(0, 0, 0.2, 1);
-  }
-}
-
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes loadingDots {
-  0%,
-  80%,
-  100% {
-    transform: scale(0);
-  }
-  40% {
-    transform: scale(1);
-  }
-}
-
-@keyframes loadingPulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
-}
-
-@keyframes loadingBar {
-  0% {
-    transform: translateX(-100%);
-  }
-  50% {
-    transform: translateX(100%);
-  }
-  100% {
-    transform: translateX(100%);
-  }
-}
-
-@keyframes successFlash {
-  0%,
-  100% {
-    background-color: transparent;
-  }
-  50% {
-    background-color: rgba(34, 197, 94, 0.2);
-  }
-}
-
-@keyframes errorShake {
-  0%,
-  100% {
-    transform: translateX(0);
-  }
-  25% {
-    transform: translateX(-4px);
-  }
-  75% {
-    transform: translateX(4px);
-  }
-}
-
-@keyframes cardEnter {
-  0% {
-    transform: translateY(10px) scale(0.95);
-    opacity: 0;
-  }
-  100% {
-    transform: translateY(0) scale(1);
-    opacity: 1;
-  }
-}
-
-@keyframes cardExit {
-  0% {
-    transform: translateY(0) scale(1);
-    opacity: 1;
-  }
-  100% {
-    transform: translateY(-10px) scale(0.95);
-    opacity: 0;
-  }
-}
-
-@keyframes backdropEnter {
-  0% {
-    opacity: 0;
-  }
-  100% {
-    opacity: 1;
-  }
-}
-
-@keyframes backdropExit {
-  0% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-  }
-}
-
-@keyframes modalEnter {
-  0% {
-    transform: translate(-50%, -50%) scale(0.9);
-    opacity: 0;
-  }
-  100% {
-    transform: translate(-50%, -50%) scale(1);
-    opacity: 1;
-  }
-}
-
-@keyframes modalExit {
-  0% {
-    transform: translate(-50%, -50%) scale(1);
-    opacity: 1;
-  }
-  100% {
-    transform: translate(-50%, -50%) scale(0.9);
-    opacity: 0;
-  }
-}
-
-@keyframes dropdownEnter {
-  0% {
-    transform: translateY(-4px);
-    opacity: 0;
-  }
-  100% {
-    transform: translateY(0);
-    opacity: 1;
-  }
-}
-
-@keyframes dropdownExit {
-  0% {
-    transform: translateY(0);
-    opacity: 1;
-  }
-  100% {
-    transform: translateY(-4px);
-    opacity: 0;
-  }
-}
-
-@keyframes toastEnter {
-  0% {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-  100% {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
-
-@keyframes toastExit {
-  0% {
-    transform: translateX(0) scale(1);
-    opacity: 1;
-  }
-  100% {
-    transform: translateX(100%) scale(0.95);
-    opacity: 0;
-  }
-}
-
-/* === ACCESSIBILITY PREFERENCES === */
-
-/* Respect user's motion preferences */
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-
-  /* Keep essential loading indicators but make them static */
-  .loading-spinner {
-    animation: none;
-    border-left-color: transparent;
-  }
-
-  .loading-dots {
-    animation: none;
-  }
-
-  .loading-pulse {
-    animation: none;
-    opacity: var(--opacity-hover);
-  }
-}
-
-/* High contrast mode adjustments */
-@media (prefers-contrast: high) {
-  .hover-glow:hover {
-    box-shadow: 0 0 0 2px currentColor;
-  }
-
-  .focus-ring-primary:focus,
-  .focus-ring-secondary:focus {
-    box-shadow: 0 0 0 3px currentColor !important;
-  }
-}
-
-/* === UTILITY CLASSES === */
-
-/* Quick animation control */
-.no-animation {
-  animation: none !important;
-  transition: none !important;
-}
-
-.fast-animation {
-  animation-duration: var(--animation-duration-short) !important;
-  transition-duration: var(--transition-duration-fast) !important;
-}
-
-.slow-animation {
-  animation-duration: var(--animation-duration-long) !important;
-  transition-duration: var(--transition-duration-slow) !important;
-}
-
-/* Animation delay utilities */
-.delay-0 {
-  animation-delay: 0ms;
-}
-.delay-75 {
-  animation-delay: 75ms;
-}
-.delay-100 {
-  animation-delay: 100ms;
-}
-.delay-150 {
-  animation-delay: 150ms;
-}
-.delay-200 {
-  animation-delay: 200ms;
-}
-.delay-300 {
-  animation-delay: 300ms;
-}
-.delay-500 {
-  animation-delay: 500ms;
-}
-
-/* Animation fill mode utilities */
-.fill-none {
-  animation-fill-mode: none;
-}
-.fill-forwards {
-  animation-fill-mode: forwards;
-}
-.fill-backwards {
-  animation-fill-mode: backwards;
-}
-.fill-both {
-  animation-fill-mode: both;
+  transition: transform var(--animation-duration-short) var(--animation-ease-in-out);
 }

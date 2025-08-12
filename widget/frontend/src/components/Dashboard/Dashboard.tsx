@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { NetworkGraph } from './NetworkGraph';
+import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
+import { sharedStyles } from '@/components/shared/styles';
 import { Bot, Home, Users, Settings, RefreshCw, FileText, BarChart3, User } from 'lucide-react';
 
 export function Dashboard() {
@@ -356,60 +358,62 @@ export function Dashboard() {
                 Click an agent to see details
               </CardDescription>
             </CardHeader>
-            <CardContent className="p-0">
+            <CardContent className={sharedStyles.panel.content}>
               <ScrollArea className="h-96">
-                <div className="p-4 space-y-3">
-                  {filteredData.agents.map(agent => (
-                    <Card
-                      key={agent.id}
-                      className={`cursor-pointer transition-all hover:shadow-md ${
-                        selectedAgentId === agent.id
-                          ? 'ring-2 ring-orange-500 bg-gradient-to-r from-orange-500/10 to-amber-500/10'
-                          : ''
-                      }`}
-                      onClick={() => {
-                        selectAgent(agent.id);
-                        selectRoom(null); // Clear room selection when selecting agent
-                      }}
-                    >
-                      <CardContent className="p-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <h3 className="font-semibold text-sm">{agent.display_name}</h3>
-                          <div className="flex items-center gap-2">
-                            {teams.some(team => team.agents.includes(agent.id)) && (
-                              <Badge variant="secondary" className="text-xs px-1 py-0">
-                                <Users className="w-3 h-3" />
-                              </Badge>
-                            )}
-                            <div
-                              className={`w-2 h-2 rounded-full ${getStatusColor(
-                                getAgentStatus(agent.id)
-                              )}`}
-                              title={getStatusLabel(getAgentStatus(agent.id))}
-                            />
-                          </div>
-                        </div>
-                        <div className="text-xs text-amber-700 dark:text-amber-300 space-y-1">
-                          <div>Model: {agent.model || 'Default'}</div>
-                          <div>
-                            Rooms: {agent.rooms.length} | Tools: {agent.tools.length}
-                          </div>
-                          <div className="flex flex-wrap gap-1 mt-2">
+                <div className={sharedStyles.list.containerWithSpacing}>
+                  {filteredData.agents.map(agent => {
+                    const badges: ItemCardBadge[] = [];
+
+                    if (teams.some(team => team.agents.includes(agent.id))) {
+                      badges.push({
+                        content: '',
+                        variant: 'secondary' as const,
+                        icon: Users,
+                      });
+                    }
+
+                    return (
+                      <ItemCard
+                        key={agent.id}
+                        id={agent.id}
+                        title={agent.display_name}
+                        description={`Model: ${agent.model || 'Default'} • ${
+                          agent.rooms.length
+                        } rooms • ${agent.tools.length} tools`}
+                        isSelected={selectedAgentId === agent.id}
+                        onClick={id => {
+                          selectAgent(id);
+                          selectRoom(null);
+                        }}
+                        badges={badges}
+                      >
+                        <div className="flex items-center justify-between mt-2">
+                          <div className="flex flex-wrap gap-1">
                             {agent.rooms.slice(0, 2).map(room => (
-                              <Badge key={room} variant="secondary" className="text-xs px-1 py-0">
+                              <Badge
+                                key={room}
+                                variant="secondary"
+                                className={sharedStyles.badge.secondary}
+                              >
                                 {room}
                               </Badge>
                             ))}
                             {agent.rooms.length > 2 && (
-                              <Badge variant="outline" className="text-xs px-1 py-0">
+                              <Badge variant="outline" className={sharedStyles.badge.outline}>
                                 +{agent.rooms.length - 2}
                               </Badge>
                             )}
                           </div>
+                          <div
+                            className={`w-2 h-2 rounded-full ${getStatusColor(
+                              getAgentStatus(agent.id)
+                            )}`}
+                            title={getStatusLabel(getAgentStatus(agent.id))}
+                          />
                         </div>
-                      </CardContent>
-                    </Card>
-                  ))}
+                      </ItemCard>
+                    );
+                  })}
                 </div>
               </ScrollArea>
             </CardContent>
@@ -428,79 +432,92 @@ export function Dashboard() {
                 Click a room to see details
               </CardDescription>
             </CardHeader>
-            <CardContent className="p-0">
+            <CardContent className={sharedStyles.panel.content}>
               <ScrollArea className="h-96">
-                <div className="p-4 space-y-3">
-                  {filteredData.rooms.map(room => (
-                    <Card
-                      key={room.id}
-                      className={`cursor-pointer transition-all hover:shadow-md ${
-                        selectedRoomId === room.id
-                          ? 'ring-2 ring-orange-500 bg-gradient-to-r from-orange-500/10 to-amber-500/10'
-                          : ''
-                      }`}
-                      onClick={() => {
-                        selectRoom(room.id);
-                        selectAgent(null); // Clear agent selection when selecting room
-                      }}
-                    >
-                      <CardContent className="p-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <h3 className="font-semibold">{room.display_name}</h3>
-                          <Badge variant="outline" className="text-xs">
-                            {room.agents.length} agents
-                          </Badge>
-                        </div>
-                        {room.model && (
-                          <div className="text-xs text-amber-700 dark:text-amber-300 mb-2">
-                            Model: {room.model}
-                          </div>
-                        )}
-                        <div className="flex flex-wrap gap-1">
+                <div className={sharedStyles.list.containerWithSpacing}>
+                  {filteredData.rooms.map(room => {
+                    const badges: ItemCardBadge[] = [
+                      {
+                        content: `${room.agents.length} agents`,
+                        variant: 'outline' as const,
+                        icon: Bot,
+                      },
+                    ];
+
+                    if (room.model) {
+                      badges.push({
+                        content: `Model: ${room.model}`,
+                        variant: 'secondary' as const,
+                      });
+                    }
+
+                    const roomTeams = teams.filter(team => team.rooms.includes(room.id));
+                    if (roomTeams.length > 0) {
+                      badges.push({
+                        content: `${roomTeams.length} teams`,
+                        variant: 'outline' as const,
+                        icon: Users,
+                      });
+                    }
+
+                    return (
+                      <ItemCard
+                        key={room.id}
+                        id={room.id}
+                        title={room.display_name}
+                        description={
+                          room.model
+                            ? `Model: ${room.model} • ${room.agents.length} agents`
+                            : `${room.agents.length} agents`
+                        }
+                        isSelected={selectedRoomId === room.id}
+                        onClick={id => {
+                          selectRoom(id);
+                          selectAgent(null);
+                        }}
+                        badges={badges}
+                      >
+                        <div className="flex flex-wrap gap-1 mt-2">
                           {room.agents.slice(0, 3).map(agentId => {
                             const agent = agents.find(a => a.id === agentId);
                             return (
                               <Badge
                                 key={agentId}
                                 variant="secondary"
-                                className="text-xs px-1 py-0"
+                                className={sharedStyles.badge.secondary}
                               >
                                 {agent?.display_name || agentId}
                               </Badge>
                             );
                           })}
                           {room.agents.length > 3 && (
-                            <Badge variant="outline" className="text-xs px-1 py-0">
+                            <Badge variant="outline" className={sharedStyles.badge.outline}>
                               +{room.agents.length - 3}
                             </Badge>
                           )}
                         </div>
 
-                        {/* Show teams in this room */}
-                        {(() => {
-                          const roomTeams = teams.filter(team => team.rooms.includes(room.id));
-                          return roomTeams.length > 0 ? (
-                            <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
-                              <div className="text-xs text-amber-600 dark:text-amber-400 mb-1">
-                                Teams:
-                              </div>
-                              <div className="flex flex-wrap gap-1">
-                                {roomTeams.map(team => (
-                                  <Badge
-                                    key={team.id}
-                                    variant="outline"
-                                    className="text-xs px-1 py-0 bg-purple-50 dark:bg-purple-950 flex items-center gap-1"
-                                  >
-                                    <Users className="w-3 h-3" /> {team.display_name}
-                                  </Badge>
-                                ))}
-                              </div>
+                        {roomTeams.length > 0 && (
+                          <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                            <div className="text-xs text-amber-600 dark:text-amber-400 mb-1">
+                              Teams:
                             </div>
-                          ) : null;
-                        })()}
-                      </CardContent>
-                    </Card>
-                  ))}
+                            <div className="flex flex-wrap gap-1">
+                              {roomTeams.map(team => (
+                                <Badge
+                                  key={team.id}
+                                  variant="outline"
+                                  className="text-xs px-1 py-0 bg-purple-50 dark:bg-purple-950 flex items-center gap-1"
+                                >
+                                  <Users className="w-3 h-3" /> {team.display_name}
+                                </Badge>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </ItemCard>
+                    );
+                  })}
                 </div>
               </ScrollArea>
             </CardContent>
