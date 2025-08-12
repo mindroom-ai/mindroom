@@ -28,7 +28,7 @@ echo "Using uv for Python dependencies..."
 if [ ! -d ".venv" ]; then
     uv sync
 fi
-uv run uvicorn src.main:app --reload --port $BACKEND_PORT &
+uv run uvicorn src.main:app --reload --host 0.0.0.0 --port $BACKEND_PORT &
 BACKEND_PID=$!
 
 cd ..
@@ -44,7 +44,7 @@ if [ ! -d "node_modules" ]; then
     pnpm install
 fi
 
-BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev &
+BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev -- --host 0.0.0.0 --port $FRONTEND_PORT &
 FRONTEND_PID=$!
 cd ..
 
