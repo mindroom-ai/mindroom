@@ -45,13 +45,12 @@ export function GoogleIntegration() {
 
   const checkGoogleStatus = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/gmail/status`);
+      const response = await fetch(`${API_BASE}/api/google/status`);
       const data = await response.json();
-      // Transform the response to match the expected format
       setStatus({
-        connected: data.configured,
+        connected: data.connected,
         email: data.email,
-        services: data.configured ? ['gmail'] : [],
+        services: data.services || [],
       });
     } catch (error) {
       console.error('Failed to check Google status:', error);
@@ -61,7 +60,7 @@ export function GoogleIntegration() {
   const connectGoogle = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/api/gmail/oauth/start`, {
+      const response = await fetch(`${API_BASE}/api/google/connect`, {
         method: 'POST',
       });
 
@@ -121,7 +120,7 @@ export function GoogleIntegration() {
   const disconnectGoogle = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/api/gmail/reset`, {
+      const response = await fetch(`${API_BASE}/api/google/disconnect`, {
         method: 'POST',
       });
 

@@ -14,9 +14,7 @@ from watchdog.observers import Observer
 from mindroom.config import Config
 
 # Import routers
-from src.api.gmail_config import router as gmail_config_router
-from src.api.google_auth import router as google_router
-from src.api.google_setup_wizard import router as google_setup_router
+from src.api.google_integration import router as google_router
 from src.api.integrations import router as integrations_router
 from src.api.tools import router as tools_router
 
@@ -94,9 +92,7 @@ observer.schedule(ConfigFileHandler(), path=str(CONFIG_PATH.parent), recursive=F
 observer.start()
 
 # Include routers
-app.include_router(gmail_config_router)
 app.include_router(google_router)
-app.include_router(google_setup_router)
 app.include_router(integrations_router)
 app.include_router(tools_router)
 
