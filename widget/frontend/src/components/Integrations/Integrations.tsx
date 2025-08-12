@@ -9,13 +9,10 @@ import {
   ExternalLink,
   Star,
 } from 'lucide-react';
-// Brand icons from react-icons
-import { FaGoogle } from 'react-icons/fa';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import {
   Dialog,
@@ -23,221 +20,73 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
 } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { GoogleIntegration } from '@/components/GoogleIntegration/GoogleIntegration';
-import { API_BASE } from '@/lib/api';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { getIconForTool } from './iconMapping';
-
-interface UnifiedIntegration {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-  icon: React.ReactNode;
-  status: 'connected' | 'not_connected' | 'available' | 'coming_soon';
-  setup_type: 'oauth' | 'api_key' | 'special' | 'coming_soon';
-  connected?: boolean;
-  details?: any;
-}
-
-// Special handling for integrations that require custom configuration
-// These override the backend metadata with special frontend requirements
-const SPECIAL_INTEGRATIONS: UnifiedIntegration[] = [
-  {
-    id: 'google',
-    name: 'Google Services',
-    description: 'Gmail, Calendar, and Drive integration',
-    category: 'email',
-    icon: <FaGoogle className="h-5 w-5" />,
-    status: 'available',
-    setup_type: 'special',
-  },
-  // Only Google has special handling - it's the only OAuth integration actually implemented
-];
+import {
+  Integration,
+  IntegrationConfig,
+  integrationProviders,
+  getAllIntegrations,
+} from './integrations';
 
 export function Integrations() {
   // Fetch tools from backend
   const { tools: backendTools, loading: toolsLoading } = useTools();
 
-  // Map backend tools to frontend format
-  const toolIntegrations = useMemo(() => {
-    return backendTools.map(tool => {
-      const mapped = mapToolToIntegration(tool);
-      return {
-        ...mapped,
-        icon: getIconForTool(tool.icon),
-        connected: false, // Will be updated by loadServicesStatus
-      } as UnifiedIntegration;
-    });
-  }, [backendTools]);
-
-  // Combine with special integrations (Google)
-  const [integrations, setIntegrations] = useState<UnifiedIntegration[]>([]);
+  // State
+  const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [loading, setLoading] = useState(false);
-
-  // Update integrations when tools are loaded
-  useEffect(() => {
-    if (toolIntegrations.length > 0) {
-      // Start with backend tools
-      let merged = [...toolIntegrations];
-
-      // Override or add special integrations
-      SPECIAL_INTEGRATIONS.forEach(special => {
-        const existingIndex = merged.findIndex(ti => ti.id === special.id);
-        if (existingIndex >= 0) {
-          // Override existing with special configuration
-          merged[existingIndex] = {
-            ...merged[existingIndex],
-            ...special,
-            icon: special.icon || getIconForTool(merged[existingIndex].icon as string),
-          };
-        } else {
-          // Add new special integration
-          merged.push({
-            ...special,
-            icon: special.icon || getIconForTool(special.id),
-          });
-        }
-      });
-
-      setIntegrations(merged);
-    }
-  }, [toolIntegrations]);
-  const [configDialog, setConfigDialog] = useState<{ open: boolean; service?: string }>({
-    open: false,
-  });
-  const [googleDialog, setGoogleDialog] = useState(false);
-  const [apiKey, setApiKey] = useState('');
+  const [activeDialog, setActiveDialog] = useState<{
+    integrationId: string;
+    config: IntegrationConfig;
+  } | null>(null);
   const [showOnlyAvailable, setShowOnlyAvailable] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
   const { toast } = useToast();
 
+  // Load integrations from providers and backend tools
   useEffect(() => {
-    loadServicesStatus();
-  }, []);
+    loadIntegrations();
+  }, [backendTools]);
 
-  const loadServicesStatus = async () => {
-    try {
-      // Check Gmail/Google status through the actual Gmail config endpoint
-      const gmailResponse = await fetch(`${API_BASE}/api/gmail/status`);
-      if (gmailResponse.ok) {
-        const gmailData = await gmailResponse.json();
-        if (gmailData.configured) {
-          setIntegrations(prev =>
-            prev.map(integration =>
-              integration.id === 'google'
-                ? { ...integration, status: 'connected', connected: true }
-                : integration
-            )
-          );
-        }
-      }
-
-      // Check IMDb status
-      const imdbCreds = localStorage.getItem('imdb_configured');
-      if (imdbCreds) {
-        setIntegrations(prev =>
-          prev.map(integration =>
-            integration.id === 'imdb'
-              ? { ...integration, status: 'connected', connected: true }
-              : integration
-          )
-        );
-      }
-
-      // Check Spotify status
-      const spotifyCreds = localStorage.getItem('spotify_configured');
-      if (spotifyCreds) {
-        setIntegrations(prev =>
-          prev.map(integration =>
-            integration.id === 'spotify'
-              ? { ...integration, status: 'connected', connected: true }
-              : integration
-          )
-        );
-      }
-    } catch (error) {
-      console.error('Failed to load services status:', error);
-    }
-  };
-
-  const connectSpotify = async () => {
+  const loadIntegrations = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/api/integrations/spotify/connect`, {
-        method: 'POST',
-      });
+      const loadedIntegrations: Integration[] = [];
 
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || 'Failed to connect Spotify');
+      // Load special integrations from providers
+      for (const provider of getAllIntegrations()) {
+        const config = provider.getConfig();
+        const status = provider.loadStatus ? await provider.loadStatus() : {};
+        loadedIntegrations.push({
+          ...config.integration,
+          ...status,
+        });
       }
 
-      const data = await response.json();
-      const authWindow = window.open(data.auth_url, '_blank', 'width=500,height=600');
+      // Load backend tools and map them to integrations
+      // (excluding those already handled by providers)
+      const providerIds = Object.keys(integrationProviders);
+      const backendIntegrations = backendTools
+        .filter(tool => !providerIds.includes(tool.name))
+        .map(tool => {
+          const mapped = mapToolToIntegration(tool);
+          return {
+            ...mapped,
+            icon: getIconForTool(tool.icon),
+            connected: false,
+          } as Integration;
+        });
 
-      const pollInterval = setInterval(async () => {
-        if (authWindow?.closed) {
-          clearInterval(pollInterval);
-          setLoading(false);
-          localStorage.setItem('spotify_configured', 'true');
-          await loadServicesStatus();
-        }
-      }, 2000);
+      setIntegrations([...loadedIntegrations, ...backendIntegrations]);
     } catch (error) {
-      console.error('Failed to connect Spotify:', error);
+      console.error('Failed to load integrations:', error);
       toast({
-        title: 'Connection Failed',
-        description: error instanceof Error ? error.message : 'Failed to connect Spotify',
-        variant: 'destructive',
-      });
-      setLoading(false);
-    }
-  };
-
-  const configureImdb = async () => {
-    if (!apiKey) {
-      toast({
-        title: 'Missing API Key',
-        description: 'Please enter your OMDb API key',
-        variant: 'destructive',
-      });
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const response = await fetch(`${API_BASE}/api/integrations/imdb/configure`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          service: 'imdb',
-          api_key: apiKey,
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || 'Failed to configure IMDb');
-      }
-
-      toast({
-        title: 'Success!',
-        description: 'IMDb has been configured. Agents can now search for movies and TV shows.',
-      });
-
-      localStorage.setItem('imdb_configured', 'true');
-      setConfigDialog({ open: false });
-      setApiKey('');
-      await loadServicesStatus();
-    } catch (error) {
-      console.error('Failed to configure IMDb:', error);
-      toast({
-        title: 'Configuration Failed',
-        description: error instanceof Error ? error.message : 'Failed to configure IMDb',
+        title: 'Error',
+        description: 'Failed to load integrations',
         variant: 'destructive',
       });
     } finally {
@@ -245,49 +94,91 @@ export function Integrations() {
     }
   };
 
-  const disconnectService = async (serviceId: string) => {
-    // Remove from localStorage
-    localStorage.removeItem(`${serviceId}_configured`);
+  const handleIntegrationAction = async (integration: Integration) => {
+    // Check if we have a provider for this integration
+    const provider = integrationProviders[integration.id];
 
-    // Update UI
-    setIntegrations(prev =>
-      prev.map(integration =>
-        integration.id === serviceId
-          ? { ...integration, status: 'available', connected: false }
-          : integration
-      )
-    );
+    if (provider) {
+      const config = provider.getConfig();
 
-    toast({
-      title: 'Disconnected',
-      description: `${serviceId} has been disconnected.`,
-    });
-  };
+      // If there's a custom config component, show it in a dialog
+      if (config.ConfigComponent) {
+        setActiveDialog({ integrationId: integration.id, config });
+        return;
+      }
 
-  const handleServiceAction = (integration: UnifiedIntegration) => {
-    if (integration.id === 'google') {
-      setGoogleDialog(true);
-      return;
-    }
-
-    if (integration.setup_type === 'coming_soon') {
+      // Otherwise, execute the action directly
+      if (config.onAction) {
+        setLoading(true);
+        try {
+          await config.onAction(integration);
+          await loadIntegrations(); // Reload status
+        } catch (error) {
+          toast({
+            title: 'Action Failed',
+            description: error instanceof Error ? error.message : 'Failed to perform action',
+            variant: 'destructive',
+          });
+        } finally {
+          setLoading(false);
+        }
+      }
+    } else if (integration.setup_type === 'coming_soon') {
       toast({
         title: 'Coming Soon',
         description: `${integration.name} integration is in development and will be available soon.`,
       });
-      return;
-    }
-
-    if (integration.status === 'connected') {
-      disconnectService(integration.id);
-    } else if (integration.id === 'spotify') {
-      connectSpotify();
-    } else if (integration.id === 'imdb') {
-      setConfigDialog({ open: true, service: 'imdb' });
+    } else {
+      // Fallback for integrations without providers yet
+      toast({
+        title: 'Not Implemented',
+        description: `${integration.name} integration is not yet implemented.`,
+        variant: 'destructive',
+      });
     }
   };
 
-  const getActionButton = (integration: UnifiedIntegration) => {
+  const handleDisconnect = async (integration: Integration) => {
+    const provider = integrationProviders[integration.id];
+
+    if (provider?.getConfig().onDisconnect) {
+      setLoading(true);
+      try {
+        await provider.getConfig().onDisconnect!(integration.id);
+        await loadIntegrations(); // Reload status
+        toast({
+          title: 'Disconnected',
+          description: `${integration.name} has been disconnected.`,
+        });
+      } catch (error) {
+        toast({
+          title: 'Disconnect Failed',
+          description: error instanceof Error ? error.message : 'Failed to disconnect',
+          variant: 'destructive',
+        });
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  const getActionButton = (integration: Integration) => {
+    // Check if there's a custom action button
+    const provider = integrationProviders[integration.id];
+    const config = provider?.getConfig();
+
+    if (config?.ActionButton) {
+      const ActionButton = config.ActionButton;
+      return (
+        <ActionButton
+          integration={integration}
+          loading={loading}
+          onAction={() => handleIntegrationAction(integration)}
+        />
+      );
+    }
+
+    // Default button rendering
     if (integration.setup_type === 'coming_soon') {
       return (
         <Button disabled size="sm" variant="outline">
@@ -300,7 +191,7 @@ export function Integrations() {
     if (integration.status === 'connected') {
       return (
         <Button
-          onClick={() => handleServiceAction(integration)}
+          onClick={() => handleDisconnect(integration)}
           disabled={loading}
           variant="destructive"
           size="sm"
@@ -311,13 +202,14 @@ export function Integrations() {
     }
 
     const buttonText =
-      integration.id === 'google'
+      integration.setup_type === 'special'
         ? 'Setup'
         : integration.setup_type === 'oauth'
           ? 'Connect'
           : 'Configure';
+
     const icon =
-      integration.id === 'google' ? (
+      integration.setup_type === 'special' ? (
         <Settings className="h-4 w-4" />
       ) : integration.setup_type === 'oauth' ? (
         <ExternalLink className="h-4 w-4" />
@@ -327,7 +219,7 @@ export function Integrations() {
 
     return (
       <Button
-        onClick={() => handleServiceAction(integration)}
+        onClick={() => handleIntegrationAction(integration)}
         disabled={loading}
         size="sm"
         className="flex items-center gap-2"
@@ -338,7 +230,7 @@ export function Integrations() {
     );
   };
 
-  const IntegrationCard = ({ integration }: { integration: UnifiedIntegration }) => (
+  const IntegrationCard = ({ integration }: { integration: Integration }) => (
     <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
       <CardHeader>
         <div className="flex items-center justify-between">
@@ -374,7 +266,7 @@ export function Integrations() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setGoogleDialog(true)}
+                onClick={() => handleIntegrationAction(integration)}
                 className="flex items-center gap-1"
               >
                 <ArrowRight className="h-3 w-3" />
@@ -407,47 +299,64 @@ export function Integrations() {
     </Card>
   );
 
-  // Filter integrations based on availability
-  const filteredIntegrations = showOnlyAvailable
-    ? integrations.filter(i => i.status === 'available' || i.status === 'connected')
-    : integrations;
+  // Filter integrations
+  const filteredIntegrations = useMemo(() => {
+    let filtered = integrations;
 
-  const allCategories = [
-    { id: 'all', name: 'All', count: filteredIntegrations.length },
-    {
-      id: 'email',
-      name: 'Email & Calendar',
-      count: filteredIntegrations.filter(i => i.category === 'email').length,
-    },
-    {
-      id: 'shopping',
-      name: 'Shopping',
-      count: filteredIntegrations.filter(i => i.category === 'shopping').length,
-    },
-    {
-      id: 'entertainment',
-      name: 'Entertainment',
-      count: filteredIntegrations.filter(i => i.category === 'entertainment').length,
-    },
-    {
-      id: 'social',
-      name: 'Social',
-      count: filteredIntegrations.filter(i => i.category === 'social').length,
-    },
-    {
-      id: 'development',
-      name: 'Development',
-      count: filteredIntegrations.filter(i => i.category === 'development').length,
-    },
-    {
-      id: 'information',
-      name: 'Information',
-      count: filteredIntegrations.filter(i => i.category === 'information').length,
-    },
-  ];
+    // Filter by availability
+    if (showOnlyAvailable) {
+      filtered = filtered.filter(i => i.status === 'available' || i.status === 'connected');
+    }
 
-  // Filter out empty categories when showing only available
-  const categories = showOnlyAvailable ? allCategories.filter(cat => cat.count > 0) : allCategories;
+    // Filter by search term
+    if (searchTerm) {
+      filtered = filtered.filter(
+        i =>
+          i.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          i.description.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+    }
+
+    return filtered;
+  }, [integrations, showOnlyAvailable, searchTerm]);
+
+  const categories = useMemo(() => {
+    const allCategories = [
+      { id: 'all', name: 'All', count: filteredIntegrations.length },
+      {
+        id: 'email',
+        name: 'Email & Calendar',
+        count: filteredIntegrations.filter(i => i.category === 'email').length,
+      },
+      {
+        id: 'shopping',
+        name: 'Shopping',
+        count: filteredIntegrations.filter(i => i.category === 'shopping').length,
+      },
+      {
+        id: 'entertainment',
+        name: 'Entertainment',
+        count: filteredIntegrations.filter(i => i.category === 'entertainment').length,
+      },
+      {
+        id: 'social',
+        name: 'Social',
+        count: filteredIntegrations.filter(i => i.category === 'social').length,
+      },
+      {
+        id: 'development',
+        name: 'Development',
+        count: filteredIntegrations.filter(i => i.category === 'development').length,
+      },
+      {
+        id: 'information',
+        name: 'Information',
+        count: filteredIntegrations.filter(i => i.category === 'information').length,
+      },
+    ];
+
+    return showOnlyAvailable ? allCategories.filter(cat => cat.count > 0) : allCategories;
+  }, [filteredIntegrations, showOnlyAvailable]);
 
   const getIntegrationsForCategory = (categoryId: string) => {
     if (categoryId === 'all') return filteredIntegrations;
@@ -472,36 +381,37 @@ export function Integrations() {
         <div className="flex-shrink-0 mb-4">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-2xl font-bold">Service Integrations</h2>
-            <ToggleGroup
-              type="single"
-              value={showOnlyAvailable ? 'available' : 'all'}
-              onValueChange={(value: string) => setShowOnlyAvailable(value === 'available')}
-              className="backdrop-blur-md bg-white/50 dark:bg-white/10 border border-white/20 dark:border-white/10 rounded-lg"
-            >
-              <ToggleGroupItem value="all" aria-label="Show all services">
-                <span className="text-xs font-medium">Show All</span>
-              </ToggleGroupItem>
-              <ToggleGroupItem value="available" aria-label="Show available only">
-                <span className="text-xs font-medium">Available Only</span>
-              </ToggleGroupItem>
-            </ToggleGroup>
+            <div className="flex items-center gap-2">
+              <Input
+                type="search"
+                placeholder="Search integrations..."
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                className="w-64"
+              />
+              <ToggleGroup
+                type="single"
+                value={showOnlyAvailable ? 'available' : 'all'}
+                onValueChange={(value: string) => setShowOnlyAvailable(value === 'available')}
+                className="backdrop-blur-md bg-white/50 dark:bg-white/10 border border-white/20 dark:border-white/10 rounded-lg"
+              >
+                <ToggleGroupItem value="all" aria-label="Show all services">
+                  <span className="text-xs font-medium">Show All</span>
+                </ToggleGroupItem>
+                <ToggleGroupItem value="available" aria-label="Show available only">
+                  <span className="text-xs font-medium">Available Only</span>
+                </ToggleGroupItem>
+              </ToggleGroup>
+            </div>
           </div>
           <p className="text-gray-600 dark:text-gray-400">
             Connect external services to enable agent capabilities
           </p>
           <div className="mt-2 p-3 backdrop-blur-md bg-gradient-to-r from-amber-500/10 to-orange-500/10 dark:from-amber-500/20 dark:to-orange-500/20 rounded-lg border border-white/20 dark:border-white/10">
             <p className="text-sm text-amber-700 dark:text-amber-300">
-              {showOnlyAvailable ? (
-                <>
-                  <strong>Available Services:</strong> Gmail (via Google), IMDb, Spotify
-                </>
-              ) : (
-                <>
-                  <strong>Currently Available:</strong> Gmail (via Google), IMDb, Spotify •{' '}
-                  <strong>Coming Soon:</strong> 20+ services across shopping, social, entertainment
-                  & more
-                </>
-              )}
+              <strong>Currently Available:</strong> Gmail (via Google), IMDb, Spotify •{' '}
+              <strong>Coming Soon:</strong> 20+ services across shopping, social, entertainment &
+              more
             </p>
           </div>
         </div>
@@ -538,67 +448,29 @@ export function Integrations() {
         </div>
       </div>
 
-      {/* Google Integration Dialog */}
-      <Dialog open={googleDialog} onOpenChange={setGoogleDialog}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <img src="https://www.google.com/favicon.ico" alt="Google" className="w-5 h-5" />
-              Google Services Setup
-            </DialogTitle>
-            <DialogDescription>Configure Gmail, Calendar, and Drive integration</DialogDescription>
-          </DialogHeader>
-          <GoogleIntegration />
-        </DialogContent>
-      </Dialog>
-
-      {/* IMDb Configuration Dialog */}
-      <Dialog
-        open={configDialog.open && configDialog.service === 'imdb'}
-        onOpenChange={open => setConfigDialog({ open })}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Configure IMDb (OMDb API)</DialogTitle>
-            <DialogDescription>
-              Enter your OMDb API key to enable movie and TV show searches
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-4">
-            <div>
-              <Label htmlFor="api-key">API Key</Label>
-              <Input
-                id="api-key"
-                type="password"
-                value={apiKey}
-                onChange={e => setApiKey(e.target.value)}
-                placeholder="Enter your OMDb API key"
+      {/* Dynamic Configuration Dialog */}
+      {activeDialog && (
+        <Dialog open={true} onOpenChange={open => !open && setActiveDialog(null)}>
+          <DialogContent className="max-w-4xl max-h-[90vh] overflow-auto">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                {activeDialog.config.integration.icon}
+                {activeDialog.config.integration.name} Setup
+              </DialogTitle>
+              <DialogDescription>{activeDialog.config.integration.description}</DialogDescription>
+            </DialogHeader>
+            {activeDialog.config.ConfigComponent && (
+              <activeDialog.config.ConfigComponent
+                onClose={() => setActiveDialog(null)}
+                onSuccess={async () => {
+                  setActiveDialog(null);
+                  await loadIntegrations();
+                }}
               />
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                Get a free API key from{' '}
-                <a
-                  href="http://www.omdbapi.com/apikey.aspx"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-blue-500 dark:text-blue-400 underline"
-                >
-                  OMDb API website
-                </a>
-              </p>
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfigDialog({ open: false })}>
-              Cancel
-            </Button>
-            <Button onClick={configureImdb} disabled={!apiKey || loading}>
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Configure'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            )}
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }
