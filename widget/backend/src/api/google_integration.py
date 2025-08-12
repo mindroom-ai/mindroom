@@ -101,7 +101,7 @@ def get_google_credentials() -> Credentials | None:
 
         return creds if creds and creds.valid else None
     except Exception:
-        return None  # noqa: TRY300
+        return None
 
 
 def save_credentials(creds: Credentials) -> None:
@@ -295,7 +295,7 @@ async def disconnect() -> dict[str, str]:
                 token_path.unlink()
 
         return {"status": "disconnected"}
-    except Exception as e:  # noqa: TRY300
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
 
 
@@ -316,7 +316,7 @@ async def configure(credentials: dict[str, str]) -> dict[str, Any]:
         # Save to environment
         save_env_credentials(client_id, client_secret, project_id)
         return {"success": True, "message": "Google OAuth credentials configured successfully"}
-    except Exception as e:  # noqa: TRY300
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save credentials: {e!s}") from e
 
 
@@ -347,5 +347,5 @@ async def reset() -> dict[str, Any]:
                 f.writelines(filtered_lines)
 
         return {"success": True, "message": "Google integration reset successfully"}
-    except Exception as e:  # noqa: TRY300
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset: {e!s}") from e
