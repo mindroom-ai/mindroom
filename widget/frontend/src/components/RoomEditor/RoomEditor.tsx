@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useConfigStore } from '@/store/configStore';
+import { useSwipeBack } from '@/hooks/useSwipeBack';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Home, Bot } from 'lucide-react';
@@ -28,6 +29,12 @@ export function RoomEditor() {
 
   const selectedRoom = rooms.find(r => r.id === selectedRoomId);
   const [localRoom, setLocalRoom] = useState(selectedRoom);
+
+  // Enable swipe back on mobile
+  useSwipeBack({
+    onSwipeBack: () => selectRoom(null),
+    enabled: !!selectedRoomId && window.innerWidth < 1024,
+  });
 
   useEffect(() => {
     setLocalRoom(selectedRoom);

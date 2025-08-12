@@ -262,7 +262,7 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl max-h-[80vh]">
+      <DialogContent className="w-[95vw] max-w-2xl sm:w-full max-h-[85vh] overflow-hidden">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Settings className="h-5 w-5" />
@@ -271,7 +271,7 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
           <DialogDescription>{schema.description}</DialogDescription>
         </DialogHeader>
 
-        <ScrollArea className="max-h-[50vh] pr-4">
+        <ScrollArea className="max-h-[50vh] pr-2 sm:pr-4">
           {schema.fields.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
               This tool does not require any configuration.
@@ -296,11 +296,19 @@ export function ToolConfigDialog({ toolId, open, onOpenChange }: ToolConfigDialo
           )}
         </ScrollArea>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+        <DialogFooter className="flex-col sm:flex-row gap-2">
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            className="w-full sm:w-auto"
+          >
             Cancel
           </Button>
-          <Button onClick={handleSave} disabled={schema.fields.length === 0}>
+          <Button
+            onClick={handleSave}
+            disabled={schema.fields.length === 0}
+            className="w-full sm:w-auto"
+          >
             Save Configuration
           </Button>
         </DialogFooter>

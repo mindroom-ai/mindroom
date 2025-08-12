@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from 'react';
 import { useConfigStore } from '@/store/configStore';
+import { useSwipeBack } from '@/hooks/useSwipeBack';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -30,6 +31,12 @@ export function TeamEditor() {
   } = useConfigStore();
 
   const selectedTeam = teams.find(t => t.id === selectedTeamId);
+
+  // Enable swipe back on mobile
+  useSwipeBack({
+    onSwipeBack: () => selectTeam(null),
+    enabled: !!selectedTeamId && window.innerWidth < 1024,
+  });
 
   const { control, reset } = useForm<Team>({
     defaultValues: selectedTeam || {

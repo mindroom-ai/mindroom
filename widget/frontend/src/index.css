@@ -139,4 +139,33 @@
   .dark * {
     scrollbar-color: rgba(68, 64, 60, 0.5) transparent;
   }
+
+  /* Mobile optimizations */
+  @media (max-width: 768px) {
+    /* Improve scrolling performance on mobile */
+    * {
+      -webkit-overflow-scrolling: touch;
+    }
+
+    /* Prevent text selection on interactive elements */
+    button,
+    .cursor-pointer {
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* Ensure inputs zoom properly on iOS */
+    input,
+    textarea,
+    select {
+      font-size: 16px;
+    }
+
+    /* Hide scrollbars on mobile for cleaner look */
+    ::-webkit-scrollbar {
+      width: 0px;
+      height: 0px;
+    }
+  }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useCallback, useState } from 'react';
 import { useConfigStore } from '@/store/configStore';
+import { useSwipeBack } from '@/hooks/useSwipeBack';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -35,6 +36,12 @@ export function AgentEditor() {
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
+
+  // Enable swipe back on mobile
+  useSwipeBack({
+    onSwipeBack: () => selectAgent(null),
+    enabled: !!selectedAgentId && window.innerWidth < 1024, // Only on mobile when agent is selected
+  });
 
   const { control, reset, setValue, getValues } = useForm<Agent>({
     defaultValues: selectedAgent || {
