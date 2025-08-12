@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from .credentials_manager import CredentialsManager
+from mindroom.credentials import CredentialsManager
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
 

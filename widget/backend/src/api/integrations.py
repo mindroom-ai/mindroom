@@ -11,7 +11,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from spotipy import Spotify, SpotifyOAuth
 
-from .credentials_manager import CredentialsManager
+from mindroom.credentials import CredentialsManager
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 

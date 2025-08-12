@@ -20,7 +20,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from pydantic import BaseModel
 
-from .credentials_manager import CredentialsManager
+from mindroom.credentials import CredentialsManager
 
 router = APIRouter(prefix="/api/google", tags=["google-integration"])
 
