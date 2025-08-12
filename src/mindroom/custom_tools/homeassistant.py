@@ -162,7 +162,7 @@ class HomeAssistantTools(Toolkit):
             entities = [e for e in entities if e["entity_id"].startswith(f"{domain}.")]
 
         # Simplify the response
-        simplified = [
+        simplified: list[dict[str, Any]] = [
             {
                 "entity_id": e["entity_id"],
                 "state": e["state"],

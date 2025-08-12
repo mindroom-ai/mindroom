@@ -282,7 +282,8 @@ def yfinance_tools() -> type[YFinanceTools]:
     icon_color="text-blue-500",
     dependencies=["httpx"],
     status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.OAUTH,
+    setup_type=SetupType.SPECIAL,
+    requires_config=["HOMEASSISTANT_URL", "HOMEASSISTANT_TOKEN"],
     docs_url="https://www.home-assistant.io/integrations/",
 )
 def homeassistant_tools() -> type[Toolkit]:
