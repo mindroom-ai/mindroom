@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -19,7 +19,7 @@ from mindroom.workflow_scheduling import (
 
 
 @pytest.fixture
-def mock_config():
+def mock_config() -> MagicMock:
     """Create a mock config with test agents."""
     config = MagicMock()
     config.agents = {
@@ -38,22 +38,22 @@ def mock_config():
 class TestCronSchedule:
     """Test CronSchedule model."""
 
-    def test_to_cron_string_default(self):
+    def test_to_cron_string_default(self) -> None:
         """Test converting default schedule to cron string."""
         schedule = CronSchedule()
         assert schedule.to_cron_string() == "* * * * *"
 
-    def test_to_cron_string_daily(self):
+    def test_to_cron_string_daily(self) -> None:
         """Test daily schedule at 9am."""
         schedule = CronSchedule(minute="0", hour="9")
         assert schedule.to_cron_string() == "0 9 * * *"
 
-    def test_to_cron_string_weekly(self):
+    def test_to_cron_string_weekly(self) -> None:
         """Test weekly schedule on Monday at 3pm."""
         schedule = CronSchedule(minute="0", hour="15", weekday="1")
         assert schedule.to_cron_string() == "0 15 * * 1"
 
-    def test_to_cron_string_hourly(self):
+    def test_to_cron_string_hourly(self) -> None:
         """Test hourly schedule."""
         schedule = CronSchedule(minute="0")
         assert schedule.to_cron_string() == "0 * * * *"
@@ -62,7 +62,7 @@ class TestCronSchedule:
 class TestScheduledWorkflow:
     """Test ScheduledWorkflow model."""
 
-    def test_once_workflow(self):
+    def test_once_workflow(self) -> None:
         """Test creating a one-time workflow."""
         exec_time = datetime.now(UTC) + timedelta(hours=1)
         workflow = ScheduledWorkflow(
@@ -75,7 +75,7 @@ class TestScheduledWorkflow:
         assert workflow.execute_at == exec_time
         assert "@research" in workflow.message
 
-    def test_cron_workflow(self):
+    def test_cron_workflow(self) -> None:
         """Test creating a recurring workflow."""
         cron = CronSchedule(minute="0", hour="9")
         workflow = ScheduledWorkflow(
@@ -94,7 +94,12 @@ class TestParseWorkflowSchedule:
 
     @patch("mindroom.workflow_scheduling.get_model_instance")
     @patch("mindroom.workflow_scheduling.Agent")
-    async def test_parse_research_email_workflow(self, mock_agent_class, mock_get_model, mock_config):
+    async def test_parse_research_email_workflow(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
         """Test parsing research + email workflow."""
         # Setup mock agent response
         mock_agent = AsyncMock()
@@ -122,7 +127,12 @@ class TestParseWorkflowSchedule:
 
     @patch("mindroom.workflow_scheduling.get_model_instance")
     @patch("mindroom.workflow_scheduling.Agent")
-    async def test_parse_simple_reminder(self, mock_agent_class, mock_get_model, mock_config):
+    async def test_parse_simple_reminder(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
         """Test parsing simple reminder without agents."""
         mock_agent = AsyncMock()
         mock_response = MagicMock()
@@ -146,7 +156,7 @@ class TestParseWorkflowSchedule:
 
     @patch("mindroom.workflow_scheduling.get_model_instance")
     @patch("mindroom.workflow_scheduling.Agent")
-    async def test_parse_daily_task(self, mock_agent_class, mock_get_model, mock_config):
+    async def test_parse_daily_task(self, mock_agent_class: Mock, mock_get_model: Mock, mock_config: MagicMock) -> None:  # noqa: ARG002
         """Test parsing daily recurring task."""
         mock_agent = AsyncMock()
         mock_response = MagicMock()
@@ -171,7 +181,12 @@ class TestParseWorkflowSchedule:
 
     @patch("mindroom.workflow_scheduling.get_model_instance")
     @patch("mindroom.workflow_scheduling.Agent")
-    async def test_parse_error_handling(self, mock_agent_class, mock_get_model, mock_config):
+    async def test_parse_error_handling(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
         """Test error handling in parse_workflow_schedule."""
         mock_agent = AsyncMock()
         mock_agent.arun.side_effect = Exception("AI service error")
@@ -191,9 +206,10 @@ class TestParseWorkflowSchedule:
 class TestExecuteScheduledWorkflow:
     """Test execute_scheduled_workflow function."""
 
-    async def test_execute_workflow_with_agents(self):
+    async def test_execute_workflow_with_agents(self) -> None:
         """Test executing a workflow that mentions agents."""
         client = AsyncMock()
+        config = MagicMock()  # Add a mock config
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -204,12 +220,12 @@ class TestExecuteScheduledWorkflow:
             created_by="@user:server",
         )
 
-        await execute_scheduled_workflow(client, workflow)
+        await execute_scheduled_workflow(client, workflow, config)
 
         # Verify message was sent
 
         with patch("mindroom.workflow_scheduling.send_message", new=AsyncMock()) as mock_send:
-            await execute_scheduled_workflow(client, workflow)
+            await execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_called_once()
 
             # Check the message content
@@ -221,9 +237,10 @@ class TestExecuteScheduledWorkflow:
             assert "@analyst" in content["body"]
             assert content["m.relates_to"]["event_id"] == "$thread123"
 
-    async def test_execute_workflow_simple_reminder(self):
+    async def test_execute_workflow_simple_reminder(self) -> None:
         """Test executing a simple reminder without agents."""
         client = AsyncMock()
+        config = MagicMock()  # Add a mock config
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -233,7 +250,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch("mindroom.workflow_scheduling.send_message", new=AsyncMock()) as mock_send:
-            await execute_scheduled_workflow(client, workflow)
+            await execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_called_once()
 
             # Check the message content
@@ -242,9 +259,10 @@ class TestExecuteScheduledWorkflow:
             assert "Check the server status" in content["body"]
             assert "m.relates_to" not in content  # No thread
 
-    async def test_execute_workflow_error_handling(self):
+    async def test_execute_workflow_error_handling(self) -> None:
         """Test error handling in execute_scheduled_workflow."""
         client = AsyncMock()
+        config = MagicMock()  # Add a mock config
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -259,7 +277,7 @@ class TestExecuteScheduledWorkflow:
 
         with patch("mindroom.workflow_scheduling.send_message", new=mock_send):
             # Should not raise, but log error
-            await execute_scheduled_workflow(client, workflow)
+            await execute_scheduled_workflow(client, workflow, config)
 
             # Should have tried to send original and error message
             assert mock_send.call_count == 2
@@ -269,9 +287,10 @@ class TestExecuteScheduledWorkflow:
             error_content = error_call[0][2]
             assert "failed" in error_content["body"].lower()
 
-    async def test_execute_workflow_no_room_id(self):
+    async def test_execute_workflow_no_room_id(self) -> None:
         """Test that workflow without room_id doesn't execute."""
         client = AsyncMock()
+        config = MagicMock()  # Add a mock config
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -281,14 +300,14 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch("mindroom.workflow_scheduling.send_message", new=AsyncMock()) as mock_send:
-            await execute_scheduled_workflow(client, workflow)
+            await execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_not_called()
 
 
 class TestWorkflowSerialization:
     """Test workflow serialization for Matrix state storage."""
 
-    def test_workflow_json_serialization(self):
+    def test_workflow_json_serialization(self) -> None:
         """Test that workflows can be serialized to JSON and back."""
         workflow = ScheduledWorkflow(
             schedule_type="cron",

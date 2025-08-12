@@ -216,8 +216,8 @@ class TestBotTaskRestoration:
                 # Now have the bot join its configured rooms
                 await bot.join_configured_rooms()
 
-                # Verify restore was called for the room
-                mock_restore.assert_called_once_with(bot.client, "!test:server")
+                # Verify restore was called for the room with config
+                mock_restore.assert_called_once_with(bot.client, "!test:server", config)
 
                 # Just verify restore was called - logger testing is complex with the bind() method
                 assert mock_restore.called

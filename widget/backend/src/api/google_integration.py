@@ -284,9 +284,10 @@ async def disconnect() -> dict[str, str]:
     try:
         # Remove credentials using the manager
         creds_manager.delete_credentials("google")
-        return {"status": "disconnected"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
+    else:
+        return {"status": "disconnected"}
 
 
 @router.post("/configure")
@@ -305,9 +306,10 @@ async def configure(credentials: dict[str, str]) -> dict[str, Any]:
     try:
         # Save to environment
         save_env_credentials(client_id, client_secret, project_id)
-        return {"success": True, "message": "Google OAuth credentials configured successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save credentials: {e!s}") from e
+    else:
+        return {"success": True, "message": "Google OAuth credentials configured successfully"}
 
 
 @router.post("/reset")
@@ -333,7 +335,7 @@ async def reset() -> dict[str, Any]:
 
             with ENV_PATH.open("w") as f:
                 f.writelines(filtered_lines)
-
-        return {"success": True, "message": "Google integration reset successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset: {e!s}") from e
+    else:
+        return {"success": True, "message": "Google integration reset successfully"}
