@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:docker": "vite --host 0.0.0.0",
+    "dev:docker": "vite --host",
     "preview:docker": "vite preview --host 0.0.0.0",
     "build": "tsc && vite build",
     "preview": "vite preview",
