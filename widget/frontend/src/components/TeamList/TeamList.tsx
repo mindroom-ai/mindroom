@@ -68,7 +68,6 @@ export function TeamList() {
       emptyIcon={Users}
       emptyMessage="No teams found"
       emptySubtitle={'Click "Add" to create one'}
-      variant="card"
       creationBorderVariant="orange"
     />
   );

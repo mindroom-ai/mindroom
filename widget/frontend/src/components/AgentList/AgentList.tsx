@@ -70,7 +70,6 @@ export function AgentList() {
       emptyIcon={Bot}
       emptyMessage="No agents found"
       emptySubtitle={'Click "Add" to create one'}
-      variant="card"
     />
   );
 }

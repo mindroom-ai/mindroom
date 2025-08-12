@@ -169,7 +169,7 @@ export function ModelConfig() {
 
         {/* New Model Form */}
         {isAddingModel && (
-          <Card className="shadow-card hover-lift-card">
+          <Card className="shadow-md">
             <CardHeader className="pb-4">
               <CardTitle className="text-lg font-semibold">Add New Model</CardTitle>
             </CardHeader>
@@ -433,11 +433,7 @@ export function ModelConfig() {
 
         {/* Save All Changes Button */}
         <div className="pt-6 border-t border-border">
-          <Button
-            onClick={() => saveConfig()}
-            variant="default"
-            className="w-full hover-lift shadow-button"
-          >
+          <Button onClick={() => saveConfig()} variant="default" className="w-full hover-lift">
             <Save className="h-4 w-4 mr-2" />
             Save All Changes
           </Button>

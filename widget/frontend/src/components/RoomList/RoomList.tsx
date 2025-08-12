@@ -69,7 +69,6 @@ export function RoomList() {
       emptyIcon={Settings2}
       emptyMessage="No rooms found"
       emptySubtitle={'Click "Add" to create one'}
-      variant="card"
     />
   );
 }

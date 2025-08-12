@@ -7,9 +7,7 @@ export const sharedStyles = {
   panel: {
     container: 'h-full flex flex-col overflow-hidden',
     header: 'pb-3 flex-shrink-0',
-    headerWithBorder: 'p-4 border-b',
     content: 'p-2 flex-1 overflow-y-auto min-h-0',
-    contentWithPadding: 'flex-1 overflow-y-auto p-4 space-y-2',
   },
 
   // Header components

@@ -98,10 +98,6 @@ export interface ListPanelProps<T extends ListItem> {
    */
   showCreateButton?: boolean;
   /**
-   * Custom container variant
-   */
-  variant?: 'card' | 'panel';
-  /**
    * Creation form border color variant
    */
   creationBorderVariant?: 'blue' | 'orange';
@@ -141,7 +137,6 @@ export function ListPanel<T extends ListItem>({
   emptySubtitle,
   className = '',
   showCreateButton = true,
-  variant = 'card',
   creationBorderVariant = 'blue',
 }: ListPanelProps<T>) {
   const [searchTerm, setSearchTerm] = useState('');
@@ -174,36 +169,24 @@ export function ListPanel<T extends ListItem>({
     }
   };
 
-  const containerClass = variant === 'card' ? sharedStyles.panel.container : 'h-full flex flex-col';
-  const headerClass =
-    variant === 'card' ? sharedStyles.panel.header : sharedStyles.panel.headerWithBorder;
-  const contentClass =
-    variant === 'card' ? sharedStyles.panel.content : sharedStyles.panel.contentWithPadding;
+  const containerClass = sharedStyles.panel.container;
+  const headerClass = sharedStyles.panel.header;
+  const contentClass = sharedStyles.panel.content;
 
   const creationBorderClass =
     creationBorderVariant === 'orange' ? 'border-2 border-orange-500' : 'border-2 border-blue-500';
 
-  const ContainerComponent = variant === 'card' ? Card : 'div';
-  const HeaderComponent = variant === 'card' ? CardHeader : 'div';
-
   const headerContent = (
     <>
       <div className={sharedStyles.header.titleContainer}>
-        {variant === 'card' ? (
-          <CardTitle className={Icon ? sharedStyles.header.titleWithIcon : undefined}>
-            {Icon && <Icon className="h-5 w-5" />}
-            {title}
-          </CardTitle>
-        ) : (
-          <h2 className={sharedStyles.header.title}>
-            {Icon && <Icon className="h-5 w-5" />}
-            {title}
-          </h2>
-        )}
+        <CardTitle className={Icon ? sharedStyles.header.titleWithIcon : undefined}>
+          {Icon && <Icon className="h-5 w-5" />}
+          {title}
+        </CardTitle>
         {showCreateButton && onCreateItem && (
           <Button
             size="sm"
-            variant={variant === 'card' ? 'default' : 'outline'}
+            variant="default"
             onClick={() => {
               if (creationMode === 'inline-form') {
                 setIsCreating(true);
@@ -211,11 +194,7 @@ export function ListPanel<T extends ListItem>({
                 handleCreateItem();
               }
             }}
-            className={
-              variant === 'card'
-                ? sharedStyles.header.createButton
-                : `gap-1 ${sharedStyles.header.createButton}`
-            }
+            className={sharedStyles.header.createButton}
             data-testid="create-button"
           >
             <Plus className="h-4 w-4 mr-1" />
@@ -224,15 +203,13 @@ export function ListPanel<T extends ListItem>({
         )}
       </div>
       {showSearch && (
-        <div className={variant === 'card' ? `${sharedStyles.search.container} mt-3` : 'mt-2'}>
-          {variant === 'card' && <Search className={sharedStyles.search.icon} />}
+        <div className={`${sharedStyles.search.container} mt-3`}>
+          <Search className={sharedStyles.search.icon} />
           <Input
             placeholder={searchPlaceholder || `Search ${title.toLowerCase()}...`}
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
-            className={
-              variant === 'card' ? sharedStyles.search.input : sharedStyles.search.inputFullWidth
-            }
+            className={sharedStyles.search.input}
           />
         </div>
       )}
@@ -298,19 +275,10 @@ export function ListPanel<T extends ListItem>({
     </div>
   );
 
-  if (variant === 'card') {
-    return (
-      <ContainerComponent className={cn(containerClass, className)}>
-        <HeaderComponent className={headerClass}>{headerContent}</HeaderComponent>
-        {contentArea}
-      </ContainerComponent>
-    );
-  }
-
   return (
-    <div className={cn(containerClass, className)}>
-      <div className={headerClass}>{headerContent}</div>
+    <Card className={cn(containerClass, className)}>
+      <CardHeader className={headerClass}>{headerContent}</CardHeader>
       {contentArea}
-    </div>
+    </Card>
   );
 }
