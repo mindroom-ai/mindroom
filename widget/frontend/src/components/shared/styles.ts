@@ -6,30 +6,31 @@ export const sharedStyles = {
   // Panel layouts
   panel: {
     container: 'h-full flex flex-col overflow-hidden',
-    header: 'pb-3 flex-shrink-0',
-    content: 'p-2 flex-1 overflow-y-auto min-h-0',
+    header: 'pb-2 sm:pb-3 flex-shrink-0',
+    content: 'p-1 sm:p-2 flex-1 overflow-y-auto min-h-0',
   },
 
   // Header components
   header: {
     titleContainer: 'flex items-center justify-between',
-    title: 'text-xl font-semibold flex items-center gap-2',
+    title: 'text-lg sm:text-xl font-semibold flex items-center gap-2',
     titleWithIcon: 'flex items-center gap-2',
-    createButton: 'h-8',
-    createButtonCompact: 'h-8 w-8 p-0',
+    createButton: 'h-10 sm:h-8 px-3 sm:px-4',
+    createButtonCompact: 'h-10 w-10 sm:h-8 sm:w-8 p-0',
   },
 
   // Search components
   search: {
     container: 'relative mt-2',
-    input: 'pl-8 h-9',
-    icon: 'absolute left-2 top-2.5 h-4 w-4 text-gray-400',
+    input: 'pl-8 h-10 sm:h-9',
+    icon: 'absolute left-2 top-3 sm:top-2.5 h-4 w-4 text-gray-400',
     inputFullWidth: 'w-full',
   },
 
   // Item components
   item: {
-    container: 'w-full text-left px-3 py-2 rounded-lg transition-all duration-200',
+    container:
+      'w-full text-left px-3 py-3 sm:py-2 rounded-lg transition-all duration-200 min-h-[44px] sm:min-h-0',
     containerHover: 'hover:bg-gray-100 dark:hover:bg-white/5 hover:shadow-sm',
     containerCard: 'cursor-pointer transition-all hover:shadow-md',
     selected:
@@ -42,7 +43,7 @@ export const sharedStyles = {
     content: 'flex-1 min-w-0',
     title: 'font-medium text-sm',
     subtitle: 'text-xs text-gray-500 dark:text-gray-400 truncate',
-    cardContent: 'p-4',
+    cardContent: 'p-3 sm:p-4',
     cardTitle: 'font-medium text-sm',
     cardDescription: 'text-xs text-muted-foreground mt-1',
     badgeContainer: 'flex items-center gap-2 mt-2',

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useConfigStore } from '@/store/configStore';
+import { useSwipeBack } from '@/hooks/useSwipeBack';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Home, Bot } from 'lucide-react';
@@ -14,11 +15,26 @@ import {
 } from '@/components/ui/select';
 
 export function RoomEditor() {
-  const { rooms, agents, config, selectedRoomId, updateRoom, deleteRoom, saveConfig, isDirty } =
-    useConfigStore();
+  const {
+    rooms,
+    agents,
+    config,
+    selectedRoomId,
+    updateRoom,
+    deleteRoom,
+    saveConfig,
+    isDirty,
+    selectRoom,
+  } = useConfigStore();
 
   const selectedRoom = rooms.find(r => r.id === selectedRoomId);
   const [localRoom, setLocalRoom] = useState(selectedRoom);
+
+  // Enable swipe back on mobile
+  useSwipeBack({
+    onSwipeBack: () => selectRoom(null),
+    enabled: !!selectedRoomId && window.innerWidth < 1024,
+  });
 
   useEffect(() => {
     setLocalRoom(selectedRoom);
@@ -57,6 +73,7 @@ export function RoomEditor() {
       isDirty={isDirty}
       onSave={saveConfig}
       onDelete={handleDelete}
+      onBack={() => selectRoom(null)}
     >
       {/* Display Name */}
       <FieldGroup
@@ -126,14 +143,15 @@ export function RoomEditor() {
             agents.map(agent => (
               <div
                 key={agent.id}
-                className="flex items-center space-x-3 p-2 rounded-lg hover:bg-muted/50"
+                className="flex items-center space-x-3 p-3 sm:p-2 rounded-lg hover:bg-muted/50"
               >
                 <Checkbox
                   id={`agent-${agent.id}`}
                   checked={localRoom.agents.includes(agent.id)}
                   onCheckedChange={checked => handleAgentToggle(agent.id, checked as boolean)}
+                  className="h-5 w-5 sm:h-4 sm:w-4"
                 />
-                <label htmlFor={`agent-${agent.id}`} className="flex-1 cursor-pointer">
+                <label htmlFor={`agent-${agent.id}`} className="flex-1 cursor-pointer select-none">
                   <div className="flex items-center gap-2">
                     <Bot className="h-4 w-4 text-muted-foreground" />
                     <div>

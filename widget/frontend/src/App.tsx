@@ -21,7 +21,8 @@ import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
 const queryClient = new QueryClient();
 
 function AppContent() {
-  const { loadConfig, syncStatus, error } = useConfigStore();
+  const { loadConfig, syncStatus, error, selectedAgentId, selectedTeamId, selectedRoomId } =
+    useConfigStore();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -60,14 +61,14 @@ function AppContent() {
       <div className="relative z-10 flex flex-col h-full">
         {/* Header */}
         <header className="bg-white/80 dark:bg-stone-900/50 backdrop-blur-xl border-b border-gray-200/50 dark:border-white/10 shadow-sm dark:shadow-2xl">
-          <div className="px-6 py-4 flex items-center justify-between">
-            <h1 className="flex items-center gap-3">
-              <span className="text-4xl">🧠</span>
+          <div className="px-3 sm:px-6 py-3 sm:py-4 flex items-center justify-between">
+            <h1 className="flex items-center gap-2 sm:gap-3">
+              <span className="text-3xl sm:text-4xl">🧠</span>
               <div className="flex flex-col">
-                <span className="text-3xl font-bold tracking-tight text-gray-900 dark:text-white">
+                <span className="text-2xl sm:text-3xl font-bold tracking-tight text-gray-900 dark:text-white">
                   MindRoom
                 </span>
-                <span className="text-sm font-normal text-gray-600 dark:text-gray-400 -mt-1">
+                <span className="text-xs sm:text-sm font-normal text-gray-600 dark:text-gray-400 -mt-1">
                   Configuration
                 </span>
               </div>
@@ -82,103 +83,128 @@ function AppContent() {
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">
           <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
-            <TabsList className="px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0">
+            {/* Tab Navigation */}
+            <TabsList className="px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto">
               <TabsTrigger
                 value="dashboard"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all"
+                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
               >
                 📊 Dashboard
               </TabsTrigger>
               <TabsTrigger
                 value="agents"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all"
+                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
               >
                 👥 Agents
               </TabsTrigger>
               <TabsTrigger
                 value="teams"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all"
+                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
               >
                 👫 Teams
               </TabsTrigger>
               <TabsTrigger
                 value="rooms"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all"
+                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
               >
                 🏠 Rooms
               </TabsTrigger>
               <TabsTrigger
                 value="models"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all"
+                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
               >
                 🔧 Models & API Keys
               </TabsTrigger>
               <TabsTrigger
                 value="memory"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all"
+                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
               >
                 🧠 Memory
               </TabsTrigger>
               <TabsTrigger
                 value="integrations"
-                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all"
+                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
               >
                 🔌 Integrations
               </TabsTrigger>
             </TabsList>
 
-            <TabsContent value="dashboard" className="flex-1 p-4 overflow-auto min-h-0">
+            <TabsContent value="dashboard" className="flex-1 p-2 sm:p-4 overflow-auto min-h-0">
               <div className="min-h-full">
                 <Dashboard />
               </div>
             </TabsContent>
 
-            <TabsContent value="agents" className="flex-1 p-4 overflow-hidden min-h-0">
-              <div className="grid grid-cols-12 gap-4 h-full">
-                <div className="col-span-4 h-full overflow-hidden">
+            <TabsContent value="agents" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
+                <div
+                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                    selectedAgentId ? 'hidden lg:block' : 'block'
+                  }`}
+                >
                   <AgentList />
                 </div>
-                <div className="col-span-8 h-full overflow-hidden">
+                <div
+                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                    selectedAgentId ? 'block' : 'hidden lg:block'
+                  }`}
+                >
                   <AgentEditor />
                 </div>
               </div>
             </TabsContent>
 
-            <TabsContent value="teams" className="flex-1 p-4 overflow-hidden min-h-0">
-              <div className="grid grid-cols-12 gap-4 h-full">
-                <div className="col-span-4 h-full overflow-hidden">
+            <TabsContent value="teams" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
+                <div
+                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                    selectedTeamId ? 'hidden lg:block' : 'block'
+                  }`}
+                >
                   <TeamList />
                 </div>
-                <div className="col-span-8 h-full overflow-hidden">
+                <div
+                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                    selectedTeamId ? 'block' : 'hidden lg:block'
+                  }`}
+                >
                   <TeamEditor />
                 </div>
               </div>
             </TabsContent>
 
-            <TabsContent value="rooms" className="flex-1 p-4 overflow-hidden min-h-0">
-              <div className="grid grid-cols-12 gap-4 h-full">
-                <div className="col-span-4 h-full overflow-hidden">
+            <TabsContent value="rooms" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
+                <div
+                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                    selectedRoomId ? 'hidden lg:block' : 'block'
+                  }`}
+                >
                   <RoomList />
                 </div>
-                <div className="col-span-8 h-full overflow-hidden">
+                <div
+                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                    selectedRoomId ? 'block' : 'hidden lg:block'
+                  }`}
+                >
                   <RoomEditor />
                 </div>
               </div>
             </TabsContent>
 
-            <TabsContent value="models" className="flex-1 p-4 overflow-hidden min-h-0">
+            <TabsContent value="models" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
               <div className="h-full overflow-hidden">
                 <ModelConfig />
               </div>
             </TabsContent>
 
-            <TabsContent value="memory" className="flex-1 p-4 overflow-hidden min-h-0">
+            <TabsContent value="memory" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
               <div className="h-full overflow-hidden">
                 <MemoryConfig />
               </div>
             </TabsContent>
 
-            <TabsContent value="integrations" className="flex-1 p-4 overflow-hidden min-h-0">
+            <TabsContent value="integrations" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
               <div className="h-full overflow-hidden">
                 <Integrations />
               </div>

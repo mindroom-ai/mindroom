@@ -155,32 +155,37 @@ export function Dashboard() {
   return (
     <div className="flex flex-col gap-4">
       {/* Header with Quick Actions */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3">
         <div>
-          <h2 className="text-2xl font-bold">System Overview</h2>
-          <p className="text-amber-700 dark:text-amber-300">
+          <h2 className="text-xl sm:text-2xl font-bold">System Overview</h2>
+          <p className="text-sm sm:text-base text-amber-700 dark:text-amber-300">
             Monitor your MindRoom configuration and status
           </p>
           <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
             <RefreshCw className="w-3 h-3" /> Last updated: {lastUpdated.toLocaleTimeString()}
           </p>
         </div>
-        <div className="flex gap-2 items-center">
+        <div className="flex flex-wrap gap-2 items-center">
           <Input
-            placeholder="Search agents, rooms, teams..."
+            placeholder="Search..."
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
-            className="w-64"
+            className="w-32 sm:w-48 md:w-64"
           />
-          <ToggleGroup type="multiple" value={showTypes} onValueChange={setShowTypes}>
+          <ToggleGroup
+            type="multiple"
+            value={showTypes}
+            onValueChange={setShowTypes}
+            className="hidden md:flex"
+          >
             <ToggleGroupItem value="agents" className="flex items-center gap-1">
-              <Bot className="w-4 h-4" /> Agents
+              <Bot className="w-4 h-4" /> <span className="hidden lg:inline">Agents</span>
             </ToggleGroupItem>
             <ToggleGroupItem value="rooms" className="flex items-center gap-1">
-              <Home className="w-4 h-4" /> Rooms
+              <Home className="w-4 h-4" /> <span className="hidden lg:inline">Rooms</span>
             </ToggleGroupItem>
             <ToggleGroupItem value="teams" className="flex items-center gap-1">
-              <Users className="w-4 h-4" /> Teams
+              <Users className="w-4 h-4" /> <span className="hidden lg:inline">Teams</span>
             </ToggleGroupItem>
           </ToggleGroup>
           <Button
@@ -190,6 +195,7 @@ export function Dashboard() {
               selectAgent(null);
               selectRoom(null);
             }}
+            className="hidden sm:flex"
           >
             Clear Selection
           </Button>
@@ -199,13 +205,13 @@ export function Dashboard() {
             onClick={exportConfiguration}
             className="flex items-center gap-1"
           >
-            <FileText className="w-4 h-4" /> Export Config
+            <FileText className="w-4 h-4" /> <span className="hidden sm:inline">Export Config</span>
           </Button>
         </div>
       </div>
 
       {/* System Stats Cards - Top Bar */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center gap-3">
@@ -309,7 +315,7 @@ export function Dashboard() {
       </div>
 
       {/* Network Graph Section */}
-      <div className="mb-4">
+      <div className="mb-4 hidden lg:block">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
@@ -345,9 +351,9 @@ export function Dashboard() {
       </div>
 
       {/* Main Content Grid */}
-      <div className="grid grid-cols-12 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         {/* Agent Cards - Left Sidebar */}
-        <div className="col-span-4">
+        <div className="col-span-1 lg:col-span-4">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
@@ -360,7 +366,7 @@ export function Dashboard() {
             </CardHeader>
             <CardContent className="p-0 flex-1 overflow-y-auto min-h-0">
               <ScrollArea className="h-96">
-                <div className={`${sharedStyles.list.containerWithSpacing} p-4`}>
+                <div className={`${sharedStyles.list.containerWithSpacing} p-3 sm:p-4`}>
                   {filteredData.agents.map(agent => {
                     const badges: ItemCardBadge[] = [];
                     const agentTeams = teams.filter(team => team.agents.includes(agent.id));
@@ -422,7 +428,7 @@ export function Dashboard() {
         </div>
 
         {/* Center - Rooms Overview */}
-        <div className="col-span-5">
+        <div className="col-span-1 lg:col-span-5">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
@@ -435,7 +441,7 @@ export function Dashboard() {
             </CardHeader>
             <CardContent className="p-0 flex-1 overflow-y-auto min-h-0">
               <ScrollArea className="h-96">
-                <div className={`${sharedStyles.list.containerWithSpacing} p-4`}>
+                <div className={`${sharedStyles.list.containerWithSpacing} p-3 sm:p-4`}>
                   {filteredData.rooms.map(room => {
                     const badges: ItemCardBadge[] = [
                       {
@@ -526,7 +532,7 @@ export function Dashboard() {
         </div>
 
         {/* Right Panel - Selected Details */}
-        <div className="col-span-3">
+        <div className="col-span-1 lg:col-span-3">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">

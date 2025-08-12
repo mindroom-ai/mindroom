@@ -35,8 +35,8 @@ export function FieldGroup({
 }: FieldGroupProps) {
   return (
     <div className={`space-y-2 ${className}`}>
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+        <div className="flex-1">
           <Label htmlFor={htmlFor} className="text-sm font-medium">
             {label}
             {required && <span className="text-destructive ml-1">*</span>}
@@ -48,7 +48,7 @@ export function FieldGroup({
 
       <div className="space-y-1">
         {children}
-        {error && <p className="text-xs text-destructive">{error}</p>}
+        {error && <p className="text-xs text-destructive mt-1">{error}</p>}
       </div>
     </div>
   );

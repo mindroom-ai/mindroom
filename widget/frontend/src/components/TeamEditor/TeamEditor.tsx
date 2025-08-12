@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from 'react';
 import { useConfigStore } from '@/store/configStore';
+import { useSwipeBack } from '@/hooks/useSwipeBack';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -26,9 +27,16 @@ export function TeamEditor() {
     saveConfig,
     config,
     isDirty,
+    selectTeam,
   } = useConfigStore();
 
   const selectedTeam = teams.find(t => t.id === selectedTeamId);
+
+  // Enable swipe back on mobile
+  useSwipeBack({
+    onSwipeBack: () => selectTeam(null),
+    enabled: !!selectedTeamId && window.innerWidth < 1024,
+  });
 
   const { control, reset } = useForm<Team>({
     defaultValues: selectedTeam || {
@@ -79,6 +87,7 @@ export function TeamEditor() {
       isDirty={isDirty}
       onSave={handleSave}
       onDelete={handleDelete}
+      onBack={() => selectTeam(null)}
     >
       {/* Display Name */}
       <FieldGroup
@@ -206,7 +215,7 @@ export function TeamEditor() {
               render={({ field }) => {
                 const isChecked = field.value.includes(agent.id);
                 return (
-                  <div className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
+                  <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
                     <Checkbox
                       id={`agent-${agent.id}`}
                       checked={isChecked}
@@ -217,8 +226,12 @@ export function TeamEditor() {
                         field.onChange(newAgents);
                         handleFieldChange('agents', newAgents);
                       }}
+                      className="h-5 w-5 sm:h-4 sm:w-4"
                     />
-                    <label htmlFor={`agent-${agent.id}`} className="flex-1 cursor-pointer">
+                    <label
+                      htmlFor={`agent-${agent.id}`}
+                      className="flex-1 cursor-pointer select-none"
+                    >
                       <div className="font-medium">{agent.display_name}</div>
                       <div className="text-sm text-gray-500 dark:text-gray-400">{agent.role}</div>
                     </label>
@@ -247,7 +260,7 @@ export function TeamEditor() {
                   return (
                     <div
                       key={room.id}
-                      className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
+                      className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
                     >
                       <Checkbox
                         id={`room-${room.id}`}
@@ -259,8 +272,12 @@ export function TeamEditor() {
                           field.onChange(newRooms);
                           handleFieldChange('rooms', newRooms);
                         }}
+                        className="h-5 w-5 sm:h-4 sm:w-4"
                       />
-                      <label htmlFor={`room-${room.id}`} className="flex-1 cursor-pointer">
+                      <label
+                        htmlFor={`room-${room.id}`}
+                        className="flex-1 cursor-pointer select-none"
+                      >
                         <div className="font-medium text-sm">{room.display_name}</div>
                         {room.description && (
                           <div className="text-xs text-gray-500 dark:text-gray-400">
