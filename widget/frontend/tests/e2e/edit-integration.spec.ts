@@ -8,10 +8,10 @@ test.describe('Edit Integration Configuration', () => {
   let configDialog: ConfigDialog;
   let apiHelper: ApiHelper;
 
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page, request }) => {
     integrationsPage = new IntegrationsPage(page);
     configDialog = new ConfigDialog(page);
-    apiHelper = new ApiHelper(page);
+    apiHelper = new ApiHelper(request);
 
     // Clear all credentials before each test
     await apiHelper.clearAllCredentials();
