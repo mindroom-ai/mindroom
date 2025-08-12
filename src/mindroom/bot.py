@@ -84,6 +84,23 @@ SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
 
 
+def _should_skip_mentions(event_source: dict) -> bool:
+    """Check if mentions in this message should be ignored for agent responses.
+
+    This is used for messages like scheduling confirmations that contain mentions
+    but should not trigger agent responses.
+
+    Args:
+        event_source: The Matrix event source dict
+
+    Returns:
+        True if mentions should be ignored, False otherwise
+
+    """
+    content = event_source.get("content", {})
+    return bool(content.get("com.mindroom.skip_mentions", False))
+
+
 def create_bot_for_entity(
     entity_name: str,
     agent_user: AgentMatrixUser,
@@ -508,7 +525,16 @@ class AgentBot:
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
         assert self.thread_invite_manager is not None
-        mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name, self.config)
+
+        # Check if mentions should be ignored for this message
+        skip_mentions = _should_skip_mentions(event.source)
+
+        if skip_mentions:
+            # Don't detect mentions if the message has skip_mentions metadata
+            mentioned_agents: list[str] = []
+            am_i_mentioned = False
+        else:
+            mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name, self.config)
 
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
@@ -698,6 +724,7 @@ class AgentBot:
         response_text: str,
         thread_id: str | None,
         reply_to_event: nio.RoomMessageText | None = None,
+        skip_mentions: bool = False,
     ) -> str | None:
         """Send a response message to a room.
 
@@ -707,6 +734,7 @@ class AgentBot:
             response_text: The text to send
             thread_id: The thread ID if already in a thread
             reply_to_event: Optional event object for the message we're replying to (used to check for safe thread root)
+            skip_mentions: If True, add metadata to indicate mentions should not trigger responses
 
         Returns:
             Event ID if message was sent successfully, None otherwise.
@@ -726,6 +754,10 @@ class AgentBot:
             thread_event_id=effective_thread_id,
             reply_to_event_id=reply_to_event_id,
         )
+
+        # Add metadata to indicate mentions should be ignored for responses
+        if skip_mentions:
+            content["com.mindroom.skip_mentions"] = True
 
         assert self.client is not None
         event_id = await send_message(self.client, room.room_id, content)
@@ -906,7 +938,16 @@ class AgentBot:
             )
 
         if response_text:
-            await self._send_response(room, event.event_id, response_text, thread_id, reply_to_event=event)
+            # Schedule confirmations should not trigger agent responses from mentions
+            skip_mentions = command.type == CommandType.SCHEDULE
+            await self._send_response(
+                room,
+                event.event_id,
+                response_text,
+                thread_id,
+                reply_to_event=event,
+                skip_mentions=skip_mentions,
+            )
             self.response_tracker.mark_responded(event.event_id)
 
     async def _periodic_cleanup(self) -> None:
