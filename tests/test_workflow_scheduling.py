@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.scheduling import schedule_task
 from mindroom.workflow_scheduling import (
     CronSchedule,
     ScheduledWorkflow,
@@ -318,10 +319,8 @@ class TestIntegrationWithScheduling:
     """Test integration with the main scheduling module."""
 
     @patch("mindroom.scheduling.parse_workflow_schedule")
-    async def test_schedule_task_workflow_path(self, mock_parse_workflow):
+    async def test_schedule_task_workflow_path(self, mock_parse_workflow: AsyncMock) -> None:
         """Test that schedule_task uses workflow parsing for complex requests."""
-        from mindroom.scheduling import schedule_task
-
         client = AsyncMock()
         mock_parse_workflow.return_value = ScheduledWorkflow(
             schedule_type="cron",

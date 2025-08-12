@@ -93,11 +93,11 @@ async def schedule_task(
     # Start the appropriate async task
     if workflow_result.schedule_type == "once":
         task = asyncio.create_task(
-            run_once_task(client, task_id, workflow_result),
+            run_once_task(client, task_id, workflow_result, config),
         )
     else:  # cron
         task = asyncio.create_task(
-            run_cron_task(client, task_id, workflow_result, _running_tasks),
+            run_cron_task(client, task_id, workflow_result, _running_tasks, config),
         )
 
     _running_tasks[task_id] = task
@@ -227,7 +227,7 @@ async def cancel_scheduled_task(
     return f"✅ Cancelled task `{task_id}`"
 
 
-async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str) -> int:
+async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config: Config) -> int:
     """Restore scheduled tasks from Matrix state after bot restart.
 
     Returns:
@@ -248,7 +248,7 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str) -> int:
             continue
 
         try:
-            task_id = event["state_key"]
+            task_id: str = event["state_key"]
 
             # Parse the workflow
             workflow_data = json.loads(content["workflow"])
@@ -260,9 +260,9 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str) -> int:
 
             # Start the appropriate task
             if workflow.schedule_type == "once":
-                task = asyncio.create_task(run_once_task(client, task_id, workflow))
+                task = asyncio.create_task(run_once_task(client, task_id, workflow, config))
             else:
-                task = asyncio.create_task(run_cron_task(client, task_id, workflow, _running_tasks))
+                task = asyncio.create_task(run_cron_task(client, task_id, workflow, _running_tasks, config))
 
             _running_tasks[task_id] = task
             restored_count += 1

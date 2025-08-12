@@ -499,6 +499,19 @@ wheels = [
 ]
 
 [[package]]
+name = "croniter"
+version = "6.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+    { name = "pytz" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ad/2f/44d1ae153a0e27be56be43465e5cb39b9650c781e001e7864389deb25090/croniter-6.0.0.tar.gz", hash = "sha256:37c504b313956114a983ece2c2b07790b1f1094fe9d81cc94739214748255577", size = 64481, upload-time = "2024-12-17T17:17:47.32Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/4b/290b4c3efd6417a8b0c284896de19b1d5855e6dbdb97d2a35e68fa42de85/croniter-6.0.0-py2.py3-none-any.whl", hash = "sha256:2f878c3856f17896979b2a4379ba1f09c83e374931ea15cc835c5dd2eee9b368", size = 25468, upload-time = "2024-12-17T17:17:45.359Z" },
+]
+
+[[package]]
 name = "cryptography"
 version = "45.0.6"
 source = { registry = "https://pypi.org/simple" }
@@ -1486,6 +1499,7 @@ dependencies = [
     { name = "agno", extra = ["anthropic", "arxiv", "ddg", "docker", "duckdb", "github", "google", "newspaper", "ollama", "openai", "sql", "yfinance"] },
     { name = "arxiv" },
     { name = "chromadb" },
+    { name = "croniter" },
     { name = "diskcache" },
     { name = "fastapi" },
     { name = "google-api-python-client" },
@@ -1525,6 +1539,7 @@ requires-dist = [
     { name = "agno", extras = ["anthropic", "google", "ollama", "openai", "sql", "ddg", "arxiv", "wikipedia", "yfinance", "newspaper", "github", "docker", "duckdb"], specifier = ">=1.7.6" },
     { name = "arxiv" },
     { name = "chromadb", specifier = ">=1.0.15" },
+    { name = "croniter", specifier = ">=6" },
     { name = "diskcache", specifier = ">=5.6.3" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "google-api-python-client", specifier = ">=2.178" },

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from .ai import get_model_instance
 from .logging_config import get_logger
 from .matrix.client import send_message
+from .matrix.mentions import create_mention_content_from_text
 
 if TYPE_CHECKING:
     import nio
@@ -189,6 +190,7 @@ Important rules:
 async def execute_scheduled_workflow(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
+    config: Config,
 ) -> None:
     """Execute a scheduled workflow by posting its message to the thread.
 
@@ -214,7 +216,11 @@ async def execute_scheduled_workflow(
                 "rel_type": "m.thread",
                 "event_id": workflow.thread_id,
             }
-
+        content = create_mention_content_from_text(
+            config,
+            f"⏰ Scheduled task: {workflow.message}",
+            thread_event_id=workflow.thread_id,
+        )
         # Send the message - agents will see their mentions and respond naturally!
         await send_message(client, workflow.room_id, content)
 
@@ -245,6 +251,7 @@ async def run_cron_task(
     task_id: str,
     workflow: ScheduledWorkflow,
     running_tasks: dict[str, asyncio.Task],
+    config: Config,
 ) -> None:
     """Run a recurring task based on cron schedule."""
     if not workflow.cron_schedule:
@@ -270,7 +277,7 @@ async def run_cron_task(
                 await asyncio.sleep(delay)
 
             # Execute the workflow
-            await execute_scheduled_workflow(client, workflow)
+            await execute_scheduled_workflow(client, workflow, config)
 
             # Check if task still exists (might have been cancelled)
             if task_id not in running_tasks:
@@ -288,6 +295,7 @@ async def run_once_task(
     client: nio.AsyncClient,
     task_id: str,
     workflow: ScheduledWorkflow,
+    config: Config,
 ) -> None:
     """Run a one-time scheduled task."""
     if not workflow.execute_at:
@@ -306,7 +314,7 @@ async def run_once_task(
             await asyncio.sleep(delay)
 
         # Execute the workflow
-        await execute_scheduled_workflow(client, workflow)
+        await execute_scheduled_workflow(client, workflow, config)
 
     except asyncio.CancelledError:
         logger.info(f"One-time task {task_id} was cancelled")

@@ -204,7 +204,7 @@ class AgentBot:
             if await join_room(self.client, room_id):
                 self.logger.info("Joined room", room_id=room_id)
                 # Restore scheduled tasks for this room
-                restored = await restore_scheduled_tasks(self.client, room_id)
+                restored = await restore_scheduled_tasks(self.client, room_id, self.config)
                 if restored > 0:
                     self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
             else:
@@ -938,15 +938,13 @@ class AgentBot:
             )
 
         if response_text:
-            # Schedule confirmations should not trigger agent responses from mentions
-            skip_mentions = command.type == CommandType.SCHEDULE
             await self._send_response(
                 room,
                 event.event_id,
                 response_text,
                 thread_id,
                 reply_to_event=event,
-                skip_mentions=skip_mentions,
+                skip_mentions=True,
             )
             self.response_tracker.mark_responded(event.event_id)
 
