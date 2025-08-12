@@ -274,6 +274,25 @@ def yfinance_tools() -> type[YFinanceTools]:
 
 
 @register_tool_with_metadata(
+    name="homeassistant",
+    display_name="Home Assistant",
+    description="Control and monitor smart home devices",
+    category=ToolCategory.SMART_HOME,
+    icon="Home",
+    icon_color="text-blue-500",
+    dependencies=["httpx"],
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.OAUTH,
+    docs_url="https://www.home-assistant.io/integrations/",
+)
+def homeassistant_tools() -> type[Toolkit]:
+    """Return Home Assistant tools for smart home control."""
+    from mindroom.custom_tools.homeassistant import HomeAssistantTools  # noqa: PLC0415
+
+    return HomeAssistantTools
+
+
+@register_tool_with_metadata(
     name="pandas",
     display_name="Data Analysis",
     description="Pandas data manipulation and analysis",

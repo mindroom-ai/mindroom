@@ -22,6 +22,8 @@ class ToolCategory(str, Enum):
     INFORMATION = "information"
     PRODUCTIVITY = "productivity"
     COMMUNICATION = "communication"
+    INTEGRATIONS = "integrations"
+    SMART_HOME = "smart_home"
 
 
 class ToolStatus(str, Enum):

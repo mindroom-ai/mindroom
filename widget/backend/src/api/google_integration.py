@@ -98,10 +98,10 @@ def get_google_credentials() -> Credentials | None:
             creds.refresh(GoogleRequest())
             # Save refreshed credentials
             save_credentials(creds)
-
-        return creds if creds and creds.valid else None
     except Exception:
         return None
+    else:
+        return creds if creds and creds.valid else None
 
 
 def save_credentials(creds: Credentials) -> None:
@@ -210,7 +210,7 @@ async def get_status() -> GoogleStatus:
                 decoded = jwt.decode(creds._id_token, options={"verify_signature": False})
                 email = decoded.get("email")
         except Exception:
-            pass
+            email = None
 
         return GoogleStatus(
             connected=True,

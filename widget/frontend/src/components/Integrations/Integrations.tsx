@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 // Brand icons from react-icons
 import { FaGoogle } from 'react-icons/fa';
+import { SiHomeassistant } from 'react-icons/si';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -28,6 +29,7 @@ import {
 import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { GoogleIntegration } from '@/components/GoogleIntegration/GoogleIntegration';
+import { HomeAssistantIntegration } from '@/components/HomeAssistantIntegration/HomeAssistantIntegration';
 import { API_BASE } from '@/lib/api';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { getIconForTool } from './iconMapping';
@@ -56,7 +58,16 @@ const SPECIAL_INTEGRATIONS: UnifiedIntegration[] = [
     status: 'available',
     setup_type: 'special',
   },
-  // Only Google has special handling - it's the only OAuth integration actually implemented
+  {
+    id: 'homeassistant',
+    name: 'Home Assistant',
+    description: 'Control and monitor your smart home devices',
+    category: 'smart_home',
+    icon: <SiHomeassistant className="h-5 w-5" />,
+    status: 'available',
+    setup_type: 'special',
+  },
+  // Google and Home Assistant have special OAuth/token handling
 ];
 
 export function Integrations() {
@@ -111,6 +122,7 @@ export function Integrations() {
     open: false,
   });
   const [googleDialog, setGoogleDialog] = useState(false);
+  const [homeAssistantDialog, setHomeAssistantDialog] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [showOnlyAvailable, setShowOnlyAvailable] = useState(false);
   const { toast } = useToast();
@@ -158,6 +170,21 @@ export function Integrations() {
               : integration
           )
         );
+      }
+
+      // Check Home Assistant status
+      const haResponse = await fetch(`${API_BASE}/api/homeassistant/status`);
+      if (haResponse.ok) {
+        const haData = await haResponse.json();
+        if (haData.connected) {
+          setIntegrations(prev =>
+            prev.map(integration =>
+              integration.id === 'homeassistant'
+                ? { ...integration, status: 'connected', connected: true }
+                : integration
+            )
+          );
+        }
       }
     } catch (error) {
       console.error('Failed to load services status:', error);
@@ -267,6 +294,11 @@ export function Integrations() {
   const handleServiceAction = (integration: UnifiedIntegration) => {
     if (integration.id === 'google') {
       setGoogleDialog(true);
+      return;
+    }
+
+    if (integration.id === 'homeassistant') {
+      setHomeAssistantDialog(true);
       return;
     }
 
@@ -415,6 +447,11 @@ export function Integrations() {
   const allCategories = [
     { id: 'all', name: 'All', count: filteredIntegrations.length },
     {
+      id: 'smart_home',
+      name: 'Smart Home',
+      count: filteredIntegrations.filter(i => i.category === 'smart_home').length,
+    },
+    {
       id: 'email',
       name: 'Email & Calendar',
       count: filteredIntegrations.filter(i => i.category === 'email').length,
@@ -549,6 +586,20 @@ export function Integrations() {
             <DialogDescription>Configure Gmail, Calendar, and Drive integration</DialogDescription>
           </DialogHeader>
           <GoogleIntegration />
+        </DialogContent>
+      </Dialog>
+
+      {/* Home Assistant Integration Dialog */}
+      <Dialog open={homeAssistantDialog} onOpenChange={setHomeAssistantDialog}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <SiHomeassistant className="h-5 w-5 text-blue-500" />
+              Home Assistant Setup
+            </DialogTitle>
+            <DialogDescription>Connect to your Home Assistant instance</DialogDescription>
+          </DialogHeader>
+          <HomeAssistantIntegration />
         </DialogContent>
       </Dialog>
 
