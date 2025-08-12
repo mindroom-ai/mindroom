@@ -156,6 +156,35 @@ class TestBotScheduleCommands:
             mock_cancel.assert_called_once_with(client=mock_agent_bot.client, room_id="!test:server", task_id="task123")
 
     @pytest.mark.asyncio
+    async def test_handle_cancel_all_scheduled_tasks(self, mock_agent_bot: AgentBot) -> None:
+        """Test bot handles cancel all scheduled tasks command."""
+        mock_agent_bot.response_tracker = MagicMock()
+        room = MagicMock()
+        room.room_id = "!test:server"
+
+        event = MagicMock()
+        event.event_id = "$event123"
+        event.body = "!cancel_schedule all"
+        event.source = {"content": {}}
+
+        command = Command(
+            type=CommandType.CANCEL_SCHEDULE,
+            args={"task_id": "all", "cancel_all": True},
+            raw_text=event.body,
+        )
+
+        with patch("mindroom.bot.cancel_all_scheduled_tasks") as mock_cancel_all:
+            mock_cancel_all.return_value = "✅ Cancelled 3 scheduled task(s)"
+
+            await mock_agent_bot._handle_command(room, event, command)
+
+            mock_cancel_all.assert_called_once_with(client=mock_agent_bot.client, room_id="!test:server")
+
+        mock_agent_bot._send_response.assert_called_once()  # type: ignore[attr-defined]
+        call_args = mock_agent_bot._send_response.call_args  # type: ignore[attr-defined]
+        assert "✅ Cancelled 3 scheduled task(s)" in call_args[0][2]
+
+    @pytest.mark.asyncio
     async def test_schedule_command_auto_creates_thread(self, mock_agent_bot: AgentBot) -> None:
         """Test that schedule commands auto-create threads when used in main room."""
         mock_agent_bot.response_tracker = MagicMock()

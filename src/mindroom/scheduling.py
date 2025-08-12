@@ -233,6 +233,56 @@ async def cancel_scheduled_task(
     return f"✅ Cancelled task `{task_id}`"
 
 
+async def cancel_all_scheduled_tasks(
+    client: nio.AsyncClient,
+    room_id: str,
+) -> str:
+    """Cancel all scheduled tasks in a room."""
+    # Get all scheduled tasks
+    response = await client.room_get_state(room_id)
+
+    if not isinstance(response, nio.RoomGetStateResponse):
+        logger.error("Failed to get room state", response=str(response))
+        return "❌ Unable to retrieve scheduled tasks."
+
+    cancelled_count = 0
+    failed_count = 0
+
+    for event in response.events:
+        if event["type"] == SCHEDULED_TASK_EVENT_TYPE:
+            content = event["content"]
+            if content.get("status") == "pending":
+                task_id = event["state_key"]
+
+                # Cancel the asyncio task if running
+                if task_id in _running_tasks:
+                    _running_tasks[task_id].cancel()
+                    del _running_tasks[task_id]
+
+                # Update to cancelled in Matrix state
+                try:
+                    await client.room_put_state(
+                        room_id=room_id,
+                        event_type=SCHEDULED_TASK_EVENT_TYPE,
+                        content={"status": "cancelled"},
+                        state_key=task_id,
+                    )
+                    cancelled_count += 1
+                    logger.info(f"Cancelled task {task_id}")
+                except Exception:
+                    logger.exception(f"Failed to cancel task {task_id}")
+                    failed_count += 1
+
+    if cancelled_count == 0:
+        return "No scheduled tasks to cancel."
+
+    result = f"✅ Cancelled {cancelled_count} scheduled task(s)"
+    if failed_count > 0:
+        result += f"\n⚠️ Failed to cancel {failed_count} task(s)"
+
+    return result
+
+
 async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config: Config) -> int:  # noqa: C901, PLR0912
     """Restore scheduled tasks from Matrix state after bot restart.
 

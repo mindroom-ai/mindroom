@@ -139,9 +139,11 @@ class CommandParser:
         match = self.CANCEL_SCHEDULE_PATTERN.match(message)
         if match:
             task_id = match.group(1).strip()
+            # Check if user wants to cancel all tasks
+            cancel_all = task_id.lower() == "all"
             return Command(
                 type=CommandType.CANCEL_SCHEDULE,
-                args={"task_id": task_id},
+                args={"task_id": task_id, "cancel_all": cancel_all},
                 raw_text=message,
             )
 
@@ -238,9 +240,11 @@ Shows all pending scheduled tasks in this thread."""
         return """**Cancel Schedule Command**
 
 Usage: `!cancel_schedule <id>` - Cancel a scheduled task
+       `!cancel_schedule all` - Cancel ALL scheduled tasks in this room
 
-Example:
+Examples:
 - `!cancel_schedule abc123` - Cancel the task with ID abc123
+- `!cancel_schedule all` - Cancel all scheduled tasks (requires confirmation)
 
 Use `!list_schedules` to see task IDs."""
 
@@ -266,7 +270,7 @@ Note: Widget support requires Element Desktop or self-hosted Element Web."""
 - `!list_invites` - List all invited agents
 - `!schedule <time> <message>` - Schedule tasks, reminders, or agent workflows
 - `!list_schedules` - List scheduled tasks
-- `!cancel_schedule <id>` - Cancel a scheduled task
+- `!cancel_schedule <id|all>` - Cancel a scheduled task or all tasks
 - `!widget [url]` - Add configuration widget to the room
 - `!help [topic]` - Show this help or help for a specific command
 

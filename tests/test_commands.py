@@ -151,17 +151,34 @@ def test_cancel_schedule_command() -> None:
     assert command is not None
     assert command.type == CommandType.CANCEL_SCHEDULE
     assert command.args["task_id"] == "abc123"
+    assert command.args["cancel_all"] is False
 
     # With hyphen
     command = command_parser.parse("!cancel-schedule xyz789")
     assert command is not None
     assert command.type == CommandType.CANCEL_SCHEDULE
     assert command.args["task_id"] == "xyz789"
+    assert command.args["cancel_all"] is False
 
     # Case insensitive
     command = command_parser.parse("!CANCEL_SCHEDULE task456")
     assert command is not None
     assert command.type == CommandType.CANCEL_SCHEDULE
+    assert command.args["cancel_all"] is False
+
+    # Cancel all tasks
+    command = command_parser.parse("!cancel_schedule all")
+    assert command is not None
+    assert command.type == CommandType.CANCEL_SCHEDULE
+    assert command.args["task_id"] == "all"
+    assert command.args["cancel_all"] is True
+
+    # Cancel all with different case
+    command = command_parser.parse("!cancel_schedule ALL")
+    assert command is not None
+    assert command.type == CommandType.CANCEL_SCHEDULE
+    assert command.args["task_id"] == "ALL"
+    assert command.args["cancel_all"] is True
 
 
 def test_get_command_help() -> None:
