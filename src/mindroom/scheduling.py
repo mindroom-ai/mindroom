@@ -59,6 +59,12 @@ async def schedule_task(
         return (None, error_msg)
 
     # Handle workflow task
+    # Validate workflow before proceeding
+    if workflow_result.schedule_type == "once" and not workflow_result.execute_at:
+        return (None, "❌ Failed to schedule: One-time task missing execution time")
+    if workflow_result.schedule_type == "cron" and not workflow_result.cron_schedule:
+        return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
+
     # Add metadata to workflow
     workflow_result.created_by = scheduled_by
     workflow_result.thread_id = thread_id
@@ -227,7 +233,7 @@ async def cancel_scheduled_task(
     return f"✅ Cancelled task `{task_id}`"
 
 
-async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config: Config) -> int:
+async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config: Config) -> int:  # noqa: C901, PLR0912
     """Restore scheduled tasks from Matrix state after bot restart.
 
     Returns:
@@ -254,9 +260,22 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config:
             workflow_data = json.loads(content["workflow"])
             workflow = ScheduledWorkflow(**workflow_data)
 
-            # Only restore if still relevant
-            if workflow.schedule_type == "once" and workflow.execute_at and workflow.execute_at <= datetime.now(UTC):
-                continue  # Skip past one-time tasks
+            # Validate workflow has required fields
+            if workflow.schedule_type == "once":
+                if not workflow.execute_at:
+                    logger.warning(f"Skipping one-time task {task_id} without execution time")
+                    continue
+                # Skip past one-time tasks
+                if workflow.execute_at <= datetime.now(UTC):
+                    logger.debug(f"Skipping past one-time task {task_id}")
+                    continue
+            elif workflow.schedule_type == "cron":
+                if not workflow.cron_schedule:
+                    logger.warning(f"Skipping recurring task {task_id} without cron schedule")
+                    continue
+            else:
+                logger.warning(f"Unknown schedule type for task {task_id}: {workflow.schedule_type}")
+                continue
 
             # Start the appropriate task
             if workflow.schedule_type == "once":

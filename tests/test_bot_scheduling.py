@@ -169,7 +169,10 @@ class TestBotScheduleCommands:
 
         command = Command(type=CommandType.SCHEDULE, args={"full_text": "in 5 minutes Test"}, raw_text=event.body)
 
-        await mock_agent_bot._handle_command(room, event, command)
+        with patch("mindroom.bot.schedule_task") as mock_schedule:
+            mock_schedule.return_value = ("task123", "✅ Scheduled: 5 minutes from now")
+
+            await mock_agent_bot._handle_command(room, event, command)
 
         # Should successfully schedule the task (auto-creates thread)
         mock_agent_bot._send_response.assert_called_once()  # type: ignore[attr-defined]
