@@ -4,14 +4,14 @@ This module provides a wrapper around Agno's GmailTools that properly handles
 credentials stored in MindRoom's unified credentials location.
 """
 
-import json
-from pathlib import Path
 from typing import Any
 
 from agno.tools.gmail import GmailTools as AgnoGmailTools
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from loguru import logger
+
+from mindroom.credentials import get_credentials_manager
 
 
 class GmailTools(AgnoGmailTools):
@@ -21,18 +21,15 @@ class GmailTools(AgnoGmailTools):
         """Initialize Gmail tools with MindRoom credentials.
 
         This wrapper automatically loads credentials from MindRoom's
-        unified credential storage at ~/.mindroom/credentials/google_credentials.json
-        and passes them to the Agno GmailTools.
+        unified credential storage and passes them to the Agno GmailTools.
         """
-        # Load credentials from MindRoom's location
-        creds_path = Path.home() / ".mindroom" / "credentials" / "google_credentials.json"
+        # Load credentials using the credentials manager
+        creds_manager = get_credentials_manager()
+        token_data = creds_manager.load_credentials("google")
         creds = None
 
-        if creds_path.exists():
+        if token_data:
             try:
-                with creds_path.open() as f:
-                    token_data = json.load(f)
-
                 # Create Google Credentials object from stored data
                 creds = Credentials(
                     token=token_data.get("token"),
@@ -47,7 +44,7 @@ class GmailTools(AgnoGmailTools):
                 logger.error(f"Failed to load Gmail credentials: {e}")
                 creds = None
         else:
-            logger.warning(f"Gmail credentials not found at {creds_path}")
+            logger.warning("Gmail credentials not found in MindRoom storage")
 
         # Pass credentials to parent class
         super().__init__(creds=creds, **kwargs)
@@ -61,14 +58,12 @@ class GmailTools(AgnoGmailTools):
         if self.creds and self.creds.valid:
             return
 
-        # Reload credentials from MindRoom's location in case they've been updated
-        creds_path = Path.home() / ".mindroom" / "credentials" / "google_credentials.json"
+        # Reload credentials from MindRoom's storage in case they've been updated
+        creds_manager = get_credentials_manager()
+        token_data = creds_manager.load_credentials("google")
 
-        if creds_path.exists():
+        if token_data:
             try:
-                with creds_path.open() as f:
-                    token_data = json.load(f)
-
                 self.creds = Credentials(
                     token=token_data.get("token"),
                     refresh_token=token_data.get("refresh_token"),
@@ -84,8 +79,7 @@ class GmailTools(AgnoGmailTools):
 
                     # Save the refreshed credentials back
                     token_data["token"] = self.creds.token
-                    with creds_path.open("w") as f:
-                        json.dump(token_data, f, indent=2)
+                    creds_manager.save_credentials("google", token_data)
 
                 logger.info("Gmail authentication successful")
             except Exception as e:
