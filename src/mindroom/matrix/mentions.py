@@ -120,14 +120,24 @@ def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tup
     if name.startswith("user_"):
         return None
 
-    # Try to find the agent
+    # Try to find the agent (case-insensitive)
     agent_name = None
-    if name in config.agents:
-        # Direct match: @calculator
-        agent_name = name
-    elif prefix and name.replace("mindroom_", "") in config.agents:
-        # Handle @mindroom_mindroom_calculator
-        agent_name = name.replace("mindroom_", "")
+    name_lower = name.lower()
+
+    # Check for direct match (case-insensitive)
+    for config_agent_name in config.agents:
+        if config_agent_name.lower() == name_lower:
+            agent_name = config_agent_name
+            break
+
+    # If not found, try with mindroom_ prefix removed
+    if not agent_name and prefix:
+        name_without_prefix = name.replace("mindroom_", "")
+        name_without_prefix_lower = name_without_prefix.lower()
+        for config_agent_name in config.agents:
+            if config_agent_name.lower() == name_without_prefix_lower:
+                agent_name = config_agent_name
+                break
 
     if agent_name:
         agent_config = config.agents[agent_name]
