@@ -16,72 +16,18 @@ router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 # Base path for storing credentials
 CREDS_PATH = Path(__file__).parent.parent.parent.parent.parent
 
-# Service configurations
-SERVICES = {
-    "amazon": {
-        "name": "Amazon Shopping",
-        "requires_oauth": False,
-        "requires_api_key": True,
-        "icon": "🛒",
-        "category": "shopping",
-    },
-    "imdb": {
-        "name": "IMDb",
-        "requires_oauth": False,
-        "requires_api_key": True,
-        "icon": "🎬",
-        "category": "entertainment",
-    },
-    "spotify": {
-        "name": "Spotify",
-        "requires_oauth": True,
-        "requires_api_key": False,
-        "icon": "🎵",
-        "category": "entertainment",
-    },
-    "walmart": {
-        "name": "Walmart",
-        "requires_oauth": False,
-        "requires_api_key": True,
-        "icon": "🏪",
-        "category": "shopping",
-    },
-    "telegram": {
-        "name": "Telegram",
-        "requires_oauth": False,
-        "requires_api_key": True,
-        "icon": "✈️",
-        "category": "social",
-    },
-    "facebook": {
-        "name": "Facebook",
-        "requires_oauth": True,
-        "requires_api_key": False,
-        "icon": "👥",
-        "category": "social",
-    },
-    "reddit": {
-        "name": "Reddit",
-        "requires_oauth": True,
-        "requires_api_key": False,
-        "icon": "🤖",
-        "category": "social",
-    },
-    "dropbox": {
-        "name": "Dropbox",
-        "requires_oauth": True,
-        "requires_api_key": False,
-        "icon": "📦",
-        "category": "storage",
-    },
-    "github": {
-        "name": "GitHub",
-        "requires_oauth": True,
-        "requires_api_key": False,
-        "icon": "🐙",
-        "category": "development",
-    },
-}
+
+# Load tool metadata from the single source of truth
+def get_tools_metadata() -> dict[str, Any]:
+    """Load tool metadata from JSON file."""
+    json_path = Path(__file__).parent.parent.parent.parent.parent / "mindroom/tools_metadata.json"
+    if not json_path.exists():
+        return {}
+
+    with json_path.open() as f:
+        data = json.load(f)
+        # Convert to dict keyed by tool name for easy lookup
+        return {tool["name"]: tool for tool in data.get("tools", [])}
 
 
 class ServiceStatus(BaseModel):
@@ -131,15 +77,23 @@ async def get_all_services_status() -> list[ServiceStatus]:
     """Get connection status for all services."""
     statuses = []
 
-    for service_id, config in SERVICES.items():
+    # Get tool metadata from single source of truth
+    tools_metadata = get_tools_metadata()
+
+    # Filter to only services that support OAuth or API key
+    service_tools = {
+        name: tool for name, tool in tools_metadata.items() if tool.get("setup_type") in ["oauth", "api_key", "special"]
+    }
+
+    for service_id, tool in service_tools.items():
         status = ServiceStatus(
             service=service_id,
             connected=False,
-            display_name=config["name"],
-            icon=config["icon"],
-            category=config.get("category", "other"),
-            requires_oauth=config["requires_oauth"],
-            requires_api_key=config["requires_api_key"],
+            display_name=tool.get("display_name", service_id),
+            icon=tool.get("icon", "📦"),
+            category=tool.get("category", "other"),
+            requires_oauth=tool.get("setup_type") == "oauth",
+            requires_api_key=tool.get("setup_type") == "api_key",
         )
 
         # Check if service is configured
@@ -164,18 +118,21 @@ async def get_all_services_status() -> list[ServiceStatus]:
 @router.get("/{service}/status")
 async def get_service_status(service: str) -> ServiceStatus:
     """Get connection status for a specific service."""
-    if service not in SERVICES:
+    # Get tool metadata from single source of truth
+    tools_metadata = get_tools_metadata()
+
+    if service not in tools_metadata:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
 
-    config = SERVICES[service]
+    tool = tools_metadata[service]
     status = ServiceStatus(
         service=service,
         connected=False,
-        display_name=config["name"],
-        icon=config["icon"],
-        category=config.get("category", "other"),
-        requires_oauth=config["requires_oauth"],
-        requires_api_key=config["requires_api_key"],
+        display_name=tool.get("display_name", service),
+        icon=tool.get("icon", "📦"),
+        category=tool.get("category", "other"),
+        requires_oauth=tool.get("setup_type") == "oauth",
+        requires_api_key=tool.get("setup_type") == "api_key",
     )
 
     creds = get_service_credentials(service)
@@ -498,7 +455,10 @@ async def search_walmart(query: str, max_results: int = 5) -> dict[str, Any]:
 @router.post("/{service}/disconnect")
 async def disconnect_service(service: str) -> dict[str, str]:
     """Disconnect a service by removing stored credentials."""
-    if service not in SERVICES:
+    # Get tool metadata from single source of truth
+    tools_metadata = get_tools_metadata()
+
+    if service not in tools_metadata:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
 
     creds_file = CREDS_PATH / f"{service}_credentials.json"
