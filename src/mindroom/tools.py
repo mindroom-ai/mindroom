@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from .tools_metadata import (
+    ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -76,7 +77,7 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
     description="Mathematical calculations and expressions",
     category=ToolCategory.DEVELOPMENT,
     icon="Calculator",
-    icon_color=None,  # Default gray
+    icon_color="text-gray-600",  # Calculator gray
     docs_url="https://docs.agno.com/tools/toolkits/local/calculator",
 )
 def calculator_tools() -> type[CalculatorTools]:
@@ -159,8 +160,17 @@ def docker_tools() -> type[DockerTools]:
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="FaGithub",
-    icon_color=None,  # Default gray/black
-    requires_config=["GITHUB_ACCESS_TOKEN"],
+    icon_color="text-gray-800",  # GitHub black
+    config_fields=[
+        ConfigField(
+            name="GITHUB_ACCESS_TOKEN",
+            label="GitHub Access Token",
+            type="password",
+            required=True,
+            placeholder="ghp_...",
+            description="GitHub personal access token with required permissions",
+        ),
+    ],
     dependencies=["PyGithub"],
     docs_url="https://docs.agno.com/tools/toolkits/others/github",
 )
@@ -284,7 +294,24 @@ def yfinance_tools() -> type[YFinanceTools]:
     dependencies=["httpx"],
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
-    requires_config=["HOMEASSISTANT_URL", "HOMEASSISTANT_TOKEN"],
+    config_fields=[
+        ConfigField(
+            name="HOMEASSISTANT_URL",
+            label="Home Assistant URL",
+            type="url",
+            required=True,
+            placeholder="http://homeassistant.local:8123",
+            description="URL to your Home Assistant instance",
+        ),
+        ConfigField(
+            name="HOMEASSISTANT_TOKEN",
+            label="Access Token",
+            type="password",
+            required=True,
+            placeholder="Bearer token",
+            description="Long-lived access token from Home Assistant",
+        ),
+    ],
     docs_url="https://www.home-assistant.io/integrations/",
 )
 def homeassistant_tools() -> type[Toolkit]:
@@ -320,7 +347,16 @@ def pandas_tools() -> type[PandasTools]:
     setup_type=SetupType.API_KEY,
     icon="Search",
     icon_color="text-purple-500",
-    requires_config=["TAVILY_API_KEY"],
+    config_fields=[
+        ConfigField(
+            name="TAVILY_API_KEY",
+            label="Tavily API Key",
+            type="password",
+            required=True,
+            placeholder="tvly-...",
+            description="Your Tavily API key for AI-powered search",
+        ),
+    ],
     dependencies=["tavily-python"],
     docs_url="https://docs.agno.com/tools/toolkits/search/tavily",
 )
@@ -373,7 +409,16 @@ def website_tools() -> type[WebsiteTools]:
     setup_type=SetupType.API_KEY,
     icon="FileText",
     icon_color="text-pink-500",
-    requires_config=["JINA_API_KEY"],
+    config_fields=[
+        ConfigField(
+            name="JINA_API_KEY",
+            label="Jina API Key",
+            type="password",
+            required=True,
+            placeholder="jina_...",
+            description="Your Jina API key for web content extraction",
+        ),
+    ],
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
 )
@@ -394,7 +439,42 @@ def jina_tools() -> type[JinaReaderTools]:
     setup_type=SetupType.API_KEY,
     icon="Mail",
     icon_color="text-blue-600",
-    requires_config=["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD"],
+    config_fields=[
+        ConfigField(
+            name="SMTP_HOST",
+            label="SMTP Host",
+            type="text",
+            required=True,
+            placeholder="smtp.gmail.com",
+            description="SMTP server hostname",
+        ),
+        ConfigField(
+            name="SMTP_PORT",
+            label="SMTP Port",
+            type="number",
+            required=True,
+            default=587,
+            placeholder="587",
+            description="SMTP server port",
+            validation={"min": 1, "max": 65535},
+        ),
+        ConfigField(
+            name="SMTP_USERNAME",
+            label="Username",
+            type="text",
+            required=True,
+            placeholder="your-email@example.com",
+            description="Email account username",
+        ),
+        ConfigField(
+            name="SMTP_PASSWORD",
+            label="Password",
+            type="password",
+            required=True,
+            placeholder="Enter password or app-specific password",
+            description="Email account password",
+        ),
+    ],
     docs_url="https://docs.agno.com/tools/toolkits/social/email",
 )
 def email_tools() -> type[EmailTools]:
@@ -413,9 +493,18 @@ def email_tools() -> type[EmailTools]:
     setup_type=SetupType.API_KEY,
     icon="FaTelegram",
     icon_color="text-blue-500",
-    requires_config=["TELEGRAM_TOKEN"],
+    config_fields=[
+        ConfigField(
+            name="TELEGRAM_TOKEN",
+            label="Bot Token",
+            type="password",
+            required=True,
+            placeholder="123456:ABC-DEF...",
+            description="Your Telegram bot API token",
+        ),
+    ],
     dependencies=["httpx"],
-    docs_url=None,
+    docs_url="https://core.telegram.org/bots/api",
 )
 def telegram_tools() -> type[TelegramTools]:
     """Return Telegram tools for messaging integration."""
@@ -433,7 +522,16 @@ def telegram_tools() -> type[TelegramTools]:
     setup_type=SetupType.API_KEY,
     icon="FaSlack",
     icon_color="text-purple-600",
-    requires_config=["SLACK_TOKEN"],
+    config_fields=[
+        ConfigField(
+            name="SLACK_TOKEN",
+            label="Slack Token",
+            type="password",
+            required=True,
+            placeholder="xoxb-...",
+            description="Your Slack bot token",
+        ),
+    ],
     dependencies=["slack-sdk"],
     docs_url="https://docs.agno.com/tools/toolkits/social/slack",
 )
@@ -454,7 +552,40 @@ def slack_tools() -> type[SlackTools]:
     setup_type=SetupType.OAUTH,
     icon="FaGoogle",
     icon_color="text-red-500",
-    requires_config=["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_PROJECT_ID", "GOOGLE_REDIRECT_URI"],
+    config_fields=[
+        ConfigField(
+            name="GOOGLE_CLIENT_ID",
+            label="Client ID",
+            type="text",
+            required=True,
+            placeholder="123456789.apps.googleusercontent.com",
+            description="Google OAuth client ID",
+        ),
+        ConfigField(
+            name="GOOGLE_CLIENT_SECRET",
+            label="Client Secret",
+            type="password",
+            required=True,
+            placeholder="GOCSPX-...",
+            description="Google OAuth client secret",
+        ),
+        ConfigField(
+            name="GOOGLE_PROJECT_ID",
+            label="Project ID",
+            type="text",
+            required=True,
+            placeholder="my-project-123456",
+            description="Google Cloud project ID",
+        ),
+        ConfigField(
+            name="GOOGLE_REDIRECT_URI",
+            label="Redirect URI",
+            type="url",
+            required=True,
+            placeholder="http://localhost:8080/callback",
+            description="OAuth redirect URI",
+        ),
+    ],
     dependencies=["google-api-python-client", "google-auth", "google-auth-oauthlib", "google-auth-httplib2"],
     docs_url="https://docs.agno.com/tools/toolkits/social/gmail",
 )
@@ -476,7 +607,40 @@ def gmail_tools() -> type[GmailTools]:
     setup_type=SetupType.API_KEY,
     icon="FaReddit",
     icon_color="text-orange-600",
-    requires_config=["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_USERNAME", "REDDIT_PASSWORD"],
+    config_fields=[
+        ConfigField(
+            name="REDDIT_CLIENT_ID",
+            label="Client ID",
+            type="text",
+            required=True,
+            placeholder="Reddit app client ID",
+            description="Reddit application client ID",
+        ),
+        ConfigField(
+            name="REDDIT_CLIENT_SECRET",
+            label="Client Secret",
+            type="password",
+            required=True,
+            placeholder="Reddit app client secret",
+            description="Reddit application client secret",
+        ),
+        ConfigField(
+            name="REDDIT_USERNAME",
+            label="Username",
+            type="text",
+            required=True,
+            placeholder="your_reddit_username",
+            description="Your Reddit username",
+        ),
+        ConfigField(
+            name="REDDIT_PASSWORD",
+            label="Password",
+            type="password",
+            required=True,
+            placeholder="Your Reddit password",
+            description="Your Reddit password",
+        ),
+    ],
     dependencies=["praw"],
     docs_url=None,
 )
@@ -496,12 +660,47 @@ def reddit_tools() -> type[RedditTools]:
     setup_type=SetupType.API_KEY,
     icon="FaTwitter",
     icon_color="text-blue-400",
-    requires_config=[
-        "X_BEARER_TOKEN",
-        "X_CONSUMER_KEY",
-        "X_CONSUMER_SECRET",
-        "X_ACCESS_TOKEN",
-        "X_ACCESS_TOKEN_SECRET",
+    config_fields=[
+        ConfigField(
+            name="X_BEARER_TOKEN",
+            label="Bearer Token",
+            type="password",
+            required=True,
+            placeholder="Bearer token from X/Twitter",
+            description="X/Twitter API Bearer token",
+        ),
+        ConfigField(
+            name="X_CONSUMER_KEY",
+            label="Consumer Key",
+            type="text",
+            required=True,
+            placeholder="Consumer key from X/Twitter",
+            description="X/Twitter API consumer key",
+        ),
+        ConfigField(
+            name="X_CONSUMER_SECRET",
+            label="Consumer Secret",
+            type="password",
+            required=True,
+            placeholder="Consumer secret from X/Twitter",
+            description="X/Twitter API consumer secret",
+        ),
+        ConfigField(
+            name="X_ACCESS_TOKEN",
+            label="Access Token",
+            type="password",
+            required=True,
+            placeholder="Access token from X/Twitter",
+            description="X/Twitter API access token",
+        ),
+        ConfigField(
+            name="X_ACCESS_TOKEN_SECRET",
+            label="Access Token Secret",
+            type="password",
+            required=True,
+            placeholder="Access token secret from X/Twitter",
+            description="X/Twitter API access token secret",
+        ),
     ],
     dependencies=["tweepy"],
     docs_url="https://docs.agno.com/tools/toolkits/social/x",
@@ -626,7 +825,7 @@ def walmart_tools() -> type[Toolkit]:
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
     icon="FaEbay",
-    icon_color=None,  # Default color
+    icon_color="text-blue-500",  # eBay blue
 )
 def ebay_tools() -> type[Toolkit]:
     """EBay integration - coming soon."""
@@ -707,7 +906,7 @@ def apple_music_tools() -> type[Toolkit]:
     status=ToolStatus.COMING_SOON,
     setup_type=SetupType.COMING_SOON,
     icon="SiHbo",
-    icon_color=None,  # Default color
+    icon_color="text-purple-600",  # HBO purple
 )
 def hbo_tools() -> type[Toolkit]:
     """HBO Max integration - coming soon."""
@@ -819,10 +1018,22 @@ def goodreads_tools() -> type[Toolkit]:
     display_name="IMDb",
     description="Movie and TV show information",
     category=ToolCategory.ENTERTAINMENT,
-    status=ToolStatus.COMING_SOON,
-    setup_type=SetupType.COMING_SOON,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
     icon="Film",
     icon_color="text-yellow-500",
+    config_fields=[
+        ConfigField(
+            name="OMDB_API_KEY",
+            label="OMDb API Key",
+            type="password",
+            required=True,
+            placeholder="Enter your OMDb API key",
+            description="Your OMDb API key for movie and TV show information",
+        ),
+    ],
+    helper_text="Get a free API key from [OMDb API website](http://www.omdbapi.com/apikey.aspx)",
+    docs_url="http://www.omdbapi.com/",
 )
 def imdb_tools() -> type[Toolkit]:
     """IMDb integration - coming soon."""

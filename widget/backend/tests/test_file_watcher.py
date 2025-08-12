@@ -54,7 +54,7 @@ def test_config_format_validation(test_client: TestClient, temp_config_file: Pat
         f.write("invalid: yaml: content: [")
 
     # The app should handle this gracefully
-    response = test_client.get("/health")
+    response = test_client.get("/api/health")
     assert response.status_code == 200
 
     # Fix the config

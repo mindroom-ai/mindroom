@@ -5,14 +5,12 @@
 import { IntegrationProvider } from './types';
 import { googleIntegration } from './google';
 import { spotifyIntegration } from './spotify';
-import { imdbIntegration } from './imdb';
 import { homeAssistantIntegration } from './homeassistant';
 
 // Export all integration providers
 export const integrationProviders: Record<string, IntegrationProvider> = {
   google: googleIntegration,
   spotify: spotifyIntegration,
-  imdb: imdbIntegration,
   homeassistant: homeAssistantIntegration,
 };
 

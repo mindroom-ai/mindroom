@@ -25,16 +25,18 @@ import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { getIconForTool } from './iconMapping';
+import { API_BASE } from '@/lib/api';
 import {
   Integration,
   IntegrationConfig,
   integrationProviders,
   getAllIntegrations,
 } from './integrations';
+import { EnhancedConfigDialog } from './EnhancedConfigDialog';
 
 export function Integrations() {
   // Fetch tools from backend
-  const { tools: backendTools, loading: toolsLoading } = useTools();
+  const { tools: backendTools, loading: toolsLoading, refetch: refetchTools } = useTools();
 
   // State
   const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -43,7 +45,20 @@ export function Integrations() {
     integrationId: string;
     config: IntegrationConfig;
   } | null>(null);
-  const [showOnlyAvailable, setShowOnlyAvailable] = useState(false);
+  const [configDialog, setConfigDialog] = useState<{
+    service: string;
+    displayName: string;
+    description: string;
+    configFields: any[];
+    isEditing?: boolean;
+    docsUrl?: string | null;
+    helperText?: string | null;
+    icon?: any;
+    iconColor?: string;
+  } | null>(null);
+  const [filterMode, setFilterMode] = useState<
+    'all' | 'available' | 'unconfigured' | 'configured' | 'coming_soon'
+  >('all');
   const [searchTerm, setSearchTerm] = useState('');
   const { toast } = useToast();
 
@@ -128,6 +143,41 @@ export function Integrations() {
         title: 'Coming Soon',
         description: `${integration.name} integration is in development and will be available soon.`,
       });
+    } else if (integration.setup_type === 'api_key') {
+      // Show generic config dialog for tools with config_fields
+      const tool = integration as any; // Cast to access config_fields
+      if (tool.config_fields && tool.config_fields.length > 0) {
+        // Get the icon component
+        const iconName = tool.icon || integration.icon;
+        let IconComponent = null;
+        if (iconName && typeof iconName === 'string') {
+          // Try to get icon from react-icons
+          try {
+            const icons = require('react-icons/fa');
+            IconComponent = icons[iconName];
+          } catch (e) {
+            console.log('Icon not found:', iconName);
+          }
+        }
+
+        setConfigDialog({
+          service: integration.id,
+          displayName: integration.name,
+          description: integration.description,
+          configFields: tool.config_fields,
+          isEditing: integration.status === 'connected',
+          docsUrl: tool.docs_url || null,
+          helperText: tool.helper_text || null,
+          icon: IconComponent,
+          iconColor: tool.icon_color || integration.iconColor,
+        });
+      } else {
+        toast({
+          title: 'Configuration Error',
+          description: `${integration.name} requires configuration but no fields are specified.`,
+          variant: 'destructive',
+        });
+      }
     } else {
       // Fallback for integrations without providers yet
       toast({
@@ -141,24 +191,37 @@ export function Integrations() {
   const handleDisconnect = async (integration: Integration) => {
     const provider = integrationProviders[integration.id];
 
-    if (provider?.getConfig().onDisconnect) {
-      setLoading(true);
-      try {
+    setLoading(true);
+    try {
+      if (provider?.getConfig().onDisconnect) {
+        // Use provider's disconnect method if available
         await provider.getConfig().onDisconnect!(integration.id);
-        await loadIntegrations(); // Reload status
-        toast({
-          title: 'Disconnected',
-          description: `${integration.name} has been disconnected.`,
+      } else {
+        // For generic tools, delete credentials via API
+        const response = await fetch(`${API_BASE}/api/credentials/${integration.id}`, {
+          method: 'DELETE',
         });
-      } catch (error) {
-        toast({
-          title: 'Disconnect Failed',
-          description: error instanceof Error ? error.message : 'Failed to disconnect',
-          variant: 'destructive',
-        });
-      } finally {
-        setLoading(false);
+
+        if (!response.ok) {
+          throw new Error('Failed to disconnect');
+        }
       }
+
+      // Refetch tools to update status
+      await refetchTools();
+
+      toast({
+        title: 'Disconnected',
+        description: `${integration.name} has been disconnected.`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Disconnect Failed',
+        description: error instanceof Error ? error.message : 'Failed to disconnect',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -188,16 +251,36 @@ export function Integrations() {
       );
     }
 
+    // Tools with no setup required - just show available status
+    if (integration.setup_type === 'none') {
+      return (
+        <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+          <CheckCircle2 className="h-3 w-3 mr-1" />
+          Ready to Use
+        </Badge>
+      );
+    }
+
     if (integration.status === 'connected') {
       return (
-        <Button
-          onClick={() => handleDisconnect(integration)}
-          disabled={loading}
-          variant="destructive"
-          size="sm"
-        >
-          Disconnect
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            onClick={() => handleIntegrationAction(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Edit
+          </Button>
+          <Button
+            onClick={() => handleDisconnect(integration)}
+            disabled={loading}
+            variant="destructive"
+            size="sm"
+          >
+            Disconnect
+          </Button>
+        </div>
       );
     }
 
@@ -274,26 +357,6 @@ export function Integrations() {
               </Button>
             )}
           </div>
-
-          {/* Service-specific help text */}
-          {integration.id === 'imdb' && integration.status !== 'connected' && (
-            <div className="text-xs text-gray-500 dark:text-gray-400">
-              Get a free API key from{' '}
-              <a
-                href="http://www.omdbapi.com/apikey.aspx"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-blue-500 dark:text-blue-400 underline"
-              >
-                OMDb API
-              </a>
-            </div>
-          )}
-          {integration.id === 'spotify' && integration.status !== 'connected' && (
-            <div className="text-xs text-gray-500 dark:text-gray-400">
-              Requires Spotify app credentials from the Developer Dashboard
-            </div>
-          )}
         </div>
       </CardContent>
     </Card>
@@ -303,9 +366,23 @@ export function Integrations() {
   const filteredIntegrations = useMemo(() => {
     let filtered = integrations;
 
-    // Filter by availability
-    if (showOnlyAvailable) {
-      filtered = filtered.filter(i => i.status === 'available' || i.status === 'connected');
+    // Filter by mode
+    switch (filterMode) {
+      case 'available':
+        filtered = filtered.filter(i => i.status === 'available' || i.status === 'connected');
+        break;
+      case 'unconfigured':
+        filtered = filtered.filter(
+          i => i.status !== 'connected' && i.setup_type !== 'coming_soon' && i.setup_type !== 'none'
+        );
+        break;
+      case 'configured':
+        filtered = filtered.filter(i => i.status === 'connected');
+        break;
+      case 'coming_soon':
+        filtered = filtered.filter(i => i.setup_type === 'coming_soon');
+        break;
+      // 'all' - no filtering needed
     }
 
     // Filter by search term
@@ -318,7 +395,7 @@ export function Integrations() {
     }
 
     return filtered;
-  }, [integrations, showOnlyAvailable, searchTerm]);
+  }, [integrations, filterMode, searchTerm]);
 
   const categories = useMemo(() => {
     const allCategories = [
@@ -327,6 +404,11 @@ export function Integrations() {
         id: 'email',
         name: 'Email & Calendar',
         count: filteredIntegrations.filter(i => i.category === 'email').length,
+      },
+      {
+        id: 'communication',
+        name: 'Communication',
+        count: filteredIntegrations.filter(i => i.category === 'communication').length,
       },
       {
         id: 'shopping',
@@ -349,14 +431,24 @@ export function Integrations() {
         count: filteredIntegrations.filter(i => i.category === 'development').length,
       },
       {
+        id: 'research',
+        name: 'Research',
+        count: filteredIntegrations.filter(i => i.category === 'research').length,
+      },
+      {
+        id: 'smart_home',
+        name: 'Smart Home',
+        count: filteredIntegrations.filter(i => i.category === 'smart_home').length,
+      },
+      {
         id: 'information',
         name: 'Information',
         count: filteredIntegrations.filter(i => i.category === 'information').length,
       },
     ];
 
-    return showOnlyAvailable ? allCategories.filter(cat => cat.count > 0) : allCategories;
-  }, [filteredIntegrations, showOnlyAvailable]);
+    return filterMode !== 'all' ? allCategories.filter(cat => cat.count > 0) : allCategories;
+  }, [filteredIntegrations, filterMode]);
 
   const getIntegrationsForCategory = (categoryId: string) => {
     if (categoryId === 'all') return filteredIntegrations;
@@ -391,15 +483,28 @@ export function Integrations() {
               />
               <ToggleGroup
                 type="single"
-                value={showOnlyAvailable ? 'available' : 'all'}
-                onValueChange={(value: string) => setShowOnlyAvailable(value === 'available')}
+                value={filterMode}
+                onValueChange={(value: string) =>
+                  setFilterMode(
+                    value as 'all' | 'available' | 'unconfigured' | 'configured' | 'coming_soon'
+                  )
+                }
                 className="backdrop-blur-md bg-white/50 dark:bg-white/10 border border-white/20 dark:border-white/10 rounded-lg"
               >
                 <ToggleGroupItem value="all" aria-label="Show all services">
                   <span className="text-xs font-medium">Show All</span>
                 </ToggleGroupItem>
                 <ToggleGroupItem value="available" aria-label="Show available only">
-                  <span className="text-xs font-medium">Available Only</span>
+                  <span className="text-xs font-medium">Available</span>
+                </ToggleGroupItem>
+                <ToggleGroupItem value="unconfigured" aria-label="Show unconfigured only">
+                  <span className="text-xs font-medium">Unconfigured</span>
+                </ToggleGroupItem>
+                <ToggleGroupItem value="configured" aria-label="Show configured only">
+                  <span className="text-xs font-medium">Configured</span>
+                </ToggleGroupItem>
+                <ToggleGroupItem value="coming_soon" aria-label="Show coming soon only">
+                  <span className="text-xs font-medium">Coming Soon</span>
                 </ToggleGroupItem>
               </ToggleGroup>
             </div>
@@ -407,13 +512,6 @@ export function Integrations() {
           <p className="text-gray-600 dark:text-gray-400">
             Connect external services to enable agent capabilities
           </p>
-          <div className="mt-2 p-3 backdrop-blur-md bg-gradient-to-r from-amber-500/10 to-orange-500/10 dark:from-amber-500/20 dark:to-orange-500/20 rounded-lg border border-white/20 dark:border-white/10">
-            <p className="text-sm text-amber-700 dark:text-amber-300">
-              <strong>Currently Available:</strong> Gmail (via Google), IMDb, Spotify •{' '}
-              <strong>Coming Soon:</strong> 20+ services across shopping, social, entertainment &
-              more
-            </p>
-          </div>
         </div>
 
         <div className="flex-1 overflow-auto">
@@ -470,6 +568,28 @@ export function Integrations() {
             )}
           </DialogContent>
         </Dialog>
+      )}
+
+      {/* Enhanced Configuration Dialog */}
+      {configDialog && (
+        <EnhancedConfigDialog
+          open={true}
+          onClose={() => setConfigDialog(null)}
+          service={configDialog.service}
+          displayName={configDialog.displayName}
+          description={configDialog.description}
+          configFields={configDialog.configFields}
+          isEditing={configDialog.isEditing}
+          docsUrl={configDialog.docsUrl}
+          helperText={configDialog.helperText}
+          icon={configDialog.icon}
+          iconColor={configDialog.iconColor}
+          onSuccess={async () => {
+            setConfigDialog(null);
+            // Refetch tools to get updated status
+            await refetchTools();
+          }}
+        />
       )}
     </>
   );

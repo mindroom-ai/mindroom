@@ -13,6 +13,9 @@ vi.mock('@/components/ui/toaster', () => ({
   toast: vi.fn(),
 }));
 
+// Mock fetch globally for ApiKeyConfig component
+global.fetch = vi.fn();
+
 describe('ModelConfig', () => {
   const mockConfig = {
     models: {
@@ -37,6 +40,11 @@ describe('ModelConfig', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (useConfigStore as any).mockReturnValue(mockStore);
+    // Mock fetch responses for ApiKeyConfig component
+    (global.fetch as any).mockResolvedValue({
+      ok: true,
+      json: async () => ({ has_key: false }),
+    });
   });
 
   it('renders existing models', () => {

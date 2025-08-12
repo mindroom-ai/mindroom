@@ -20,7 +20,8 @@ def test_all_tools_can_be_imported() -> None:
     for tool_name in TOOL_REGISTRY:
         # Check if tool requires configuration based on metadata
         metadata = TOOL_METADATA.get(tool_name)
-        requires_config = metadata and (metadata.status == ToolStatus.REQUIRES_CONFIG or metadata.requires_config)
+        requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
+        is_coming_soon = metadata and metadata.status == ToolStatus.COMING_SOON
 
         try:
             tool_instance = get_tool_by_name(tool_name)
@@ -29,11 +30,15 @@ def test_all_tools_can_be_imported() -> None:
             successful.append(tool_name)
             print(f"✓ {tool_name}")
         except Exception as e:
-            if requires_config:
+            if is_coming_soon:
+                # Skip coming soon tools - they're expected to fail
+                print(f"⏳ {tool_name}: Coming soon")
+            elif requires_config:
                 config_required.append(tool_name)
                 # Build a helpful message from metadata
-                if metadata and metadata.requires_config:
-                    config_msg = f"Requires: {', '.join(metadata.requires_config)}"
+                if metadata and metadata.config_fields:
+                    field_names = [field.name for field in metadata.config_fields]
+                    config_msg = f"Requires: {', '.join(field_names)}"
                 else:
                     config_msg = "Requires configuration"
                 print(f"⚠ {tool_name}: {config_msg}")
@@ -249,32 +254,33 @@ def test_no_unused_dependencies() -> None:  # noqa: C901, PLR0912
 
 def test_tools_requiring_config_metadata() -> None:
     """Test that tools requiring configuration are properly marked in metadata."""
-    tools_with_env_vars = []
+    tools_with_config_fields = []
     tools_with_status = []
     inconsistent_tools = []
 
     for tool_name, metadata in TOOL_METADATA.items():
-        has_requires_config = bool(metadata.requires_config)
+        has_config_fields = bool(metadata.config_fields)
         has_config_status = metadata.status == ToolStatus.REQUIRES_CONFIG
 
-        if has_requires_config:
-            tools_with_env_vars.append((tool_name, metadata.requires_config))
+        if has_config_fields:
+            field_names = [field.name for field in metadata.config_fields]
+            tools_with_config_fields.append((tool_name, field_names))
 
         if has_config_status:
             tools_with_status.append(tool_name)
 
         # Check for inconsistencies
-        if has_requires_config and not has_config_status:
-            inconsistent_tools.append((tool_name, "has requires_config but status is not REQUIRES_CONFIG"))
-        elif has_config_status and not has_requires_config:
-            inconsistent_tools.append((tool_name, "status is REQUIRES_CONFIG but no requires_config specified"))
+        if has_config_fields and not has_config_status:
+            inconsistent_tools.append((tool_name, "has config_fields but status is not REQUIRES_CONFIG"))
+        elif has_config_status and not has_config_fields:
+            inconsistent_tools.append((tool_name, "status is REQUIRES_CONFIG but no config_fields specified"))
 
     # Report findings
     print("\nTools requiring configuration:")
-    for tool_name, env_vars in sorted(tools_with_env_vars):
-        print(f"  {tool_name}: {', '.join(env_vars)}")
+    for tool_name, field_names in sorted(tools_with_config_fields):
+        print(f"  {tool_name}: {', '.join(field_names)}")
 
-    print(f"\nTotal tools with config requirements: {len(tools_with_env_vars)}")
+    print(f"\nTotal tools with config fields: {len(tools_with_config_fields)}")
     print(f"Tools marked with REQUIRES_CONFIG status: {len(tools_with_status)}")
 
     if inconsistent_tools:

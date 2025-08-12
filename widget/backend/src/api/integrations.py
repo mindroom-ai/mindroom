@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
@@ -106,31 +105,6 @@ async def get_service_status(service: str) -> ServiceStatus:
             status.connected = "api_key" in creds
 
     return status
-
-
-# IMDb
-@router.post("/imdb/configure")
-async def configure_imdb(request: ApiKeyRequest) -> dict[str, str]:
-    """Configure IMDb/OMDB API key."""
-    if request.service != "imdb":
-        raise HTTPException(status_code=400, detail="Invalid service")
-
-    # Test the API key
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"http://www.omdbapi.com/?apikey={request.api_key}&t=Inception",
-                timeout=10,  # Add timeout for security
-            )
-        data = response.json()
-        if data.get("Response") == "False":
-            raise HTTPException(status_code=400, detail="Invalid API key")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=400, detail=f"Failed to validate API key: {e!s}") from e
-
-    credentials = {"api_key": request.api_key}
-    save_service_credentials("imdb", credentials)
-    return {"status": "configured"}
 
 
 # Spotify
