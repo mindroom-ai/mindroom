@@ -1,9 +1,7 @@
 import { useEffect, useCallback, useState } from 'react';
 import { useConfigStore } from '@/store/configStore';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
@@ -13,7 +11,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Save, Trash2, Plus, X, FileCode, Settings } from 'lucide-react';
+import { Plus, X, FileCode, Settings } from 'lucide-react';
+import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
 import { AVAILABLE_TOOLS } from '@/types/config';
 import { useForm, Controller } from 'react-hook-form';
 import { Agent } from '@/types/config';
@@ -82,304 +81,281 @@ export function AgentEditor() {
   };
 
   if (!selectedAgent) {
-    return (
-      <Card className="h-full flex items-center justify-center">
-        <div className="text-gray-500 dark:text-gray-400 text-center">
-          <FileCode className="h-12 w-12 mx-auto mb-2 text-gray-300" />
-          <p>Select an agent to edit</p>
-        </div>
-      </Card>
-    );
+    return <EditorPanelEmptyState icon={FileCode} message="Select an agent to edit" />;
   }
 
   return (
-    <Card className="h-full flex flex-col overflow-hidden">
-      <CardHeader className="pb-3 flex-shrink-0">
-        <div className="flex items-center justify-between">
-          <CardTitle>Agent Details</CardTitle>
-          <div className="flex gap-2">
-            <Button variant="destructive" size="sm" onClick={handleDelete}>
-              <Trash2 className="h-4 w-4 mr-1" />
-              Delete
-            </Button>
-            <Button variant="default" size="sm" onClick={handleSave} disabled={!isDirty}>
-              <Save className="h-4 w-4 mr-1" />
-              Save
-            </Button>
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent className="flex-1 overflow-y-auto min-h-0">
-        <div className="space-y-4">
-          {/* Display Name */}
-          <div>
-            <Label htmlFor="display_name">Display Name</Label>
-            <p className="text-xs text-muted-foreground mb-1">Human-readable name for the agent</p>
-            <Controller
-              name="display_name"
-              control={control}
-              render={({ field }) => (
-                <Input
-                  {...field}
-                  id="display_name"
-                  placeholder="Agent display name"
-                  onChange={e => {
-                    field.onChange(e);
-                    handleFieldChange('display_name', e.target.value);
-                  }}
-                />
-              )}
+    <EditorPanel
+      icon={FileCode}
+      title="Agent Details"
+      isDirty={isDirty}
+      onSave={handleSave}
+      onDelete={handleDelete}
+    >
+      {/* Display Name */}
+      <FieldGroup
+        label="Display Name"
+        helperText="Human-readable name for the agent"
+        htmlFor="display_name"
+      >
+        <Controller
+          name="display_name"
+          control={control}
+          render={({ field }) => (
+            <Input
+              {...field}
+              id="display_name"
+              placeholder="Agent display name"
+              onChange={e => {
+                field.onChange(e);
+                handleFieldChange('display_name', e.target.value);
+              }}
             />
-          </div>
+          )}
+        />
+      </FieldGroup>
 
-          {/* Role */}
-          <div>
-            <Label htmlFor="role">Role Description</Label>
-            <p className="text-xs text-muted-foreground mb-1">
-              Description of the agent's purpose and capabilities
-            </p>
-            <Controller
-              name="role"
-              control={control}
-              render={({ field }) => (
-                <Textarea
-                  {...field}
-                  id="role"
-                  placeholder="What this agent does..."
-                  rows={2}
-                  onChange={e => {
-                    field.onChange(e);
-                    handleFieldChange('role', e.target.value);
-                  }}
-                />
-              )}
+      {/* Role */}
+      <FieldGroup
+        label="Role Description"
+        helperText="Description of the agent's purpose and capabilities"
+        htmlFor="role"
+      >
+        <Controller
+          name="role"
+          control={control}
+          render={({ field }) => (
+            <Textarea
+              {...field}
+              id="role"
+              placeholder="What this agent does..."
+              rows={2}
+              onChange={e => {
+                field.onChange(e);
+                handleFieldChange('role', e.target.value);
+              }}
             />
-          </div>
+          )}
+        />
+      </FieldGroup>
 
-          {/* Model Selection */}
-          <div>
-            <Label htmlFor="model">Model</Label>
-            <p className="text-xs text-muted-foreground mb-1">
-              AI model to use (defaults to 'default' model if not specified)
-            </p>
+      {/* Model Selection */}
+      <FieldGroup
+        label="Model"
+        helperText="AI model to use (defaults to 'default' model if not specified)"
+        htmlFor="model"
+      >
+        <Controller
+          name="model"
+          control={control}
+          render={({ field }) => (
+            <Select
+              value={field.value || 'default'}
+              onValueChange={value => {
+                field.onChange(value);
+                handleFieldChange('model', value);
+              }}
+            >
+              <SelectTrigger id="model">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {config &&
+                  Object.keys(config.models).map(modelId => (
+                    <SelectItem key={modelId} value={modelId}>
+                      {modelId}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+          )}
+        />
+      </FieldGroup>
+
+      {/* Tools */}
+      <FieldGroup label="Tools" helperText="Available tools this agent can use">
+        <div className="space-y-2">
+          {AVAILABLE_TOOLS.map(tool => (
             <Controller
-              name="model"
+              key={tool}
+              name="tools"
               control={control}
-              render={({ field }) => (
-                <Select
-                  value={field.value || 'default'}
-                  onValueChange={value => {
-                    field.onChange(value);
-                    handleFieldChange('model', value);
-                  }}
-                >
-                  <SelectTrigger id="model">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {config &&
-                      Object.keys(config.models).map(modelId => (
-                        <SelectItem key={modelId} value={modelId}>
-                          {modelId}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-              )}
-            />
-          </div>
+              render={({ field }) => {
+                const isChecked = field.value.includes(tool);
+                const hasSchema = !!TOOL_SCHEMAS[tool];
+                const needsConfig = toolNeedsConfiguration(tool);
+                const isConfigured =
+                  config?.tools?.[tool] && Object.keys(config.tools[tool]).length > 0;
 
-          {/* Tools */}
-          <div>
-            <Label>Tools</Label>
-            <p className="text-xs text-muted-foreground mb-1">Available tools this agent can use</p>
-            <div className="space-y-2 mt-2">
-              {AVAILABLE_TOOLS.map(tool => (
-                <Controller
-                  key={tool}
-                  name="tools"
-                  control={control}
-                  render={({ field }) => {
-                    const isChecked = field.value.includes(tool);
-                    const hasSchema = !!TOOL_SCHEMAS[tool];
-                    const needsConfig = toolNeedsConfiguration(tool);
-                    const isConfigured =
-                      config?.tools?.[tool] && Object.keys(config.tools[tool]).length > 0;
-
-                    return (
-                      <div className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 transition-colors">
-                        <div className="flex items-center space-x-2">
-                          <Checkbox
-                            id={tool}
-                            checked={isChecked}
-                            onCheckedChange={checked => {
-                              const newTools = checked
-                                ? [...field.value, tool]
-                                : field.value.filter(t => t !== tool);
-                              field.onChange(newTools);
-                              handleFieldChange('tools', newTools);
-                            }}
-                          />
-                          <label
-                            htmlFor={tool}
-                            className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer"
-                          >
-                            {TOOL_SCHEMAS[tool]?.name || tool}
-                          </label>
-                          {isChecked && needsConfig && !isConfigured && (
-                            <Badge variant="destructive" className="text-xs">
-                              Needs Config
-                            </Badge>
-                          )}
-                          {isChecked && isConfigured && (
-                            <Badge
-                              variant="default"
-                              className="text-xs bg-green-100 text-green-800"
-                            >
-                              Configured
-                            </Badge>
-                          )}
-                        </div>
-                        {isChecked && hasSchema && (needsConfig || isConfigured) && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setConfigDialogTool(tool)}
-                            className="h-7 px-2"
-                          >
-                            <Settings className="h-3 w-3 mr-1" />
-                            Configure
-                          </Button>
-                        )}
-                      </div>
-                    );
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-
-          {/* Instructions */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <div>
-                <Label>Instructions</Label>
-                <p className="text-xs text-muted-foreground">Custom instructions for this agent</p>
-              </div>
-              <Button variant="outline" size="sm" onClick={handleAddInstruction}>
-                <Plus className="h-3 w-3 mr-1" />
-                Add
-              </Button>
-            </div>
-            <Controller
-              name="instructions"
-              control={control}
-              render={({ field }) => (
-                <div className="space-y-2">
-                  {field.value.map((instruction, index) => (
-                    <div key={index} className="flex gap-2">
-                      <Input
-                        value={instruction}
-                        onChange={e => {
-                          const updated = [...field.value];
-                          updated[index] = e.target.value;
-                          field.onChange(updated);
-                          handleFieldChange('instructions', updated);
+                return (
+                  <div className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 transition-colors">
+                    <div className="flex items-center space-x-2">
+                      <Checkbox
+                        id={tool}
+                        checked={isChecked}
+                        onCheckedChange={checked => {
+                          const newTools = checked
+                            ? [...field.value, tool]
+                            : field.value.filter(t => t !== tool);
+                          field.onChange(newTools);
+                          handleFieldChange('tools', newTools);
                         }}
-                        placeholder="Instruction..."
                       />
+                      <label
+                        htmlFor={tool}
+                        className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer"
+                      >
+                        {TOOL_SCHEMAS[tool]?.name || tool}
+                      </label>
+                      {isChecked && needsConfig && !isConfigured && (
+                        <Badge variant="destructive" className="text-xs">
+                          Needs Config
+                        </Badge>
+                      )}
+                      {isChecked && isConfigured && (
+                        <Badge variant="default" className="text-xs bg-green-100 text-green-800">
+                          Configured
+                        </Badge>
+                      )}
+                    </div>
+                    {isChecked && hasSchema && (needsConfig || isConfigured) && (
                       <Button
                         variant="ghost"
-                        size="icon"
-                        onClick={() => handleRemoveInstruction(index)}
+                        size="sm"
+                        onClick={() => setConfigDialogTool(tool)}
+                        className="h-7 px-2"
                       >
-                        <X className="h-4 w-4" />
+                        <Settings className="h-3 w-3 mr-1" />
+                        Configure
                       </Button>
-                    </div>
-                  ))}
-                </div>
-              )}
+                    )}
+                  </div>
+                );
+              }}
             />
-          </div>
-
-          {/* Rooms */}
-          <div>
-            <Label>Agent Rooms</Label>
-            <p className="text-xs text-muted-foreground mb-2">
-              Select rooms where this agent can operate
-            </p>
-            <Controller
-              name="rooms"
-              control={control}
-              render={({ field }) => (
-                <div className="space-y-2 mt-2 max-h-48 overflow-y-auto border rounded-lg p-2">
-                  {rooms.length === 0 ? (
-                    <p className="text-sm text-muted-foreground text-center py-2">
-                      No rooms available. Create rooms in the Rooms tab.
-                    </p>
-                  ) : (
-                    rooms.map(room => {
-                      const isChecked = field.value.includes(room.id);
-                      return (
-                        <div
-                          key={room.id}
-                          className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
-                        >
-                          <Checkbox
-                            id={`room-${room.id}`}
-                            checked={isChecked}
-                            onCheckedChange={checked => {
-                              const newRooms = checked
-                                ? [...field.value, room.id]
-                                : field.value.filter(r => r !== room.id);
-                              field.onChange(newRooms);
-                              handleFieldChange('rooms', newRooms);
-                            }}
-                          />
-                          <label htmlFor={`room-${room.id}`} className="flex-1 cursor-pointer">
-                            <div className="font-medium text-sm">{room.display_name}</div>
-                            {room.description && (
-                              <div className="text-xs text-gray-500 dark:text-gray-400">
-                                {room.description}
-                              </div>
-                            )}
-                          </label>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              )}
-            />
-          </div>
-
-          {/* History Runs */}
-          <div>
-            <Label htmlFor="num_history_runs">History Runs</Label>
-            <p className="text-xs text-muted-foreground mb-1">
-              Number of previous conversation turns to include as context
-            </p>
-            <Controller
-              name="num_history_runs"
-              control={control}
-              render={({ field }) => (
-                <Input
-                  {...field}
-                  id="num_history_runs"
-                  type="number"
-                  min={1}
-                  max={20}
-                  onChange={e => {
-                    const value = parseInt(e.target.value) || 5;
-                    field.onChange(value);
-                    handleFieldChange('num_history_runs', value);
-                  }}
-                />
-              )}
-            />
-          </div>
+          ))}
         </div>
-      </CardContent>
+      </FieldGroup>
+
+      {/* Instructions */}
+      <FieldGroup
+        label="Instructions"
+        helperText="Custom instructions for this agent"
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleAddInstruction}
+            data-testid="add-instruction-button"
+          >
+            <Plus className="h-3 w-3 mr-1" />
+            Add
+          </Button>
+        }
+      >
+        <Controller
+          name="instructions"
+          control={control}
+          render={({ field }) => (
+            <div className="space-y-2">
+              {field.value.map((instruction, index) => (
+                <div key={index} className="flex gap-2">
+                  <Input
+                    value={instruction}
+                    onChange={e => {
+                      const updated = [...field.value];
+                      updated[index] = e.target.value;
+                      field.onChange(updated);
+                      handleFieldChange('instructions', updated);
+                    }}
+                    placeholder="Instruction..."
+                  />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => handleRemoveInstruction(index)}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        />
+      </FieldGroup>
+
+      {/* Rooms */}
+      <FieldGroup label="Agent Rooms" helperText="Select rooms where this agent can operate">
+        <Controller
+          name="rooms"
+          control={control}
+          render={({ field }) => (
+            <div className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2">
+              {rooms.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-2">
+                  No rooms available. Create rooms in the Rooms tab.
+                </p>
+              ) : (
+                rooms.map(room => {
+                  const isChecked = field.value.includes(room.id);
+                  return (
+                    <div
+                      key={room.id}
+                      className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
+                    >
+                      <Checkbox
+                        id={`room-${room.id}`}
+                        checked={isChecked}
+                        onCheckedChange={checked => {
+                          const newRooms = checked
+                            ? [...field.value, room.id]
+                            : field.value.filter(r => r !== room.id);
+                          field.onChange(newRooms);
+                          handleFieldChange('rooms', newRooms);
+                        }}
+                      />
+                      <label htmlFor={`room-${room.id}`} className="flex-1 cursor-pointer">
+                        <div className="font-medium text-sm">{room.display_name}</div>
+                        {room.description && (
+                          <div className="text-xs text-gray-500 dark:text-gray-400">
+                            {room.description}
+                          </div>
+                        )}
+                      </label>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+        />
+      </FieldGroup>
+
+      {/* History Runs */}
+      <FieldGroup
+        label="History Runs"
+        helperText="Number of previous conversation turns to include as context"
+        htmlFor="num_history_runs"
+      >
+        <Controller
+          name="num_history_runs"
+          control={control}
+          render={({ field }) => (
+            <Input
+              {...field}
+              id="num_history_runs"
+              type="number"
+              min={1}
+              max={20}
+              onChange={e => {
+                const value = parseInt(e.target.value) || 5;
+                field.onChange(value);
+                handleFieldChange('num_history_runs', value);
+              }}
+            />
+          )}
+        />
+      </FieldGroup>
 
       {/* Tool Configuration Dialog */}
       {configDialogTool && (
@@ -391,6 +367,6 @@ export function AgentEditor() {
           }}
         />
       )}
-    </Card>
+    </EditorPanel>
   );
 }
