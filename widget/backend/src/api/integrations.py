@@ -18,9 +18,6 @@ router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 # Initialize credentials manager
 creds_manager = CredentialsManager()
 
-# Base path for storing credentials (kept for backward compatibility)
-CREDS_PATH = Path(__file__).parent.parent.parent.parent.parent
-
 
 # Load tool metadata from the single source of truth
 def get_tools_metadata() -> dict[str, Any]:

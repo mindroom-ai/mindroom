@@ -5,7 +5,6 @@ allowing agents to control devices, query states, and execute automations.
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
@@ -19,7 +18,7 @@ class HomeAssistantTools(Toolkit):
 
     def __init__(self) -> None:
         """Initialize Home Assistant tools."""
-        # Token storage path - use unified location
+        # Token storage path - unified location only
         self.token_path = Path.home() / ".mindroom" / "credentials" / "homeassistant_credentials.json"
         self._config: dict[str, Any] | None = None
 
@@ -42,38 +41,18 @@ class HomeAssistantTools(Toolkit):
         )
 
     def _load_config(self) -> dict[str, Any] | None:
-        """Load Home Assistant configuration."""
+        """Load Home Assistant configuration from unified location."""
         if self._config:
             return self._config
 
-        # Try multiple paths for the token file (including legacy locations)
-        paths = [
-            self.token_path,  # Unified location
-            Path.home() / ".mindroom" / "homeassistant_token.json",  # Old location
-            Path(__file__).parent.parent.parent.parent / "homeassistant_token.json",  # Root
-            Path.cwd() / "homeassistant_token.json",  # Current directory
-        ]
-
-        for path in paths:
-            if path.exists():
-                try:
-                    with path.open() as f:
-                        self._config = json.load(f)
-                        return self._config
-                except Exception:  # noqa: S110
-                    pass
-
-        # Check environment variables as fallback
-        url = os.getenv("HOMEASSISTANT_URL")
-        token = os.getenv("HOMEASSISTANT_TOKEN")
-
-        if url and token:
-            self._config = {
-                "instance_url": url,
-                "long_lived_token": token,
-            }
-            return self._config
-
+        # Load from unified location only
+        if self.token_path.exists():
+            try:
+                with self.token_path.open() as f:
+                    self._config = json.load(f)
+                    return self._config
+            except Exception:
+                return None
         return None
 
     async def _api_request(  # noqa: PLR0911
