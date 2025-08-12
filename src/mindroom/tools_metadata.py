@@ -74,6 +74,7 @@ class ToolMetadata:
     config_fields: list[ConfigField] | None = None  # Detailed field definitions
     dependencies: list[str] | None = None  # Required pip packages
     docs_url: str | None = None  # Documentation URL
+    helper_text: str | None = None  # Additional helper text (markdown) for configuration
     factory: Callable[[], type] | None = None  # Tool factory function
 
 
@@ -93,6 +94,7 @@ def register_tool_with_metadata(
     config_fields: list[ConfigField] | None = None,
     dependencies: list[str] | None = None,
     docs_url: str | None = None,
+    helper_text: str | None = None,
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
     """Enhanced decorator to register a tool with full metadata.
 
@@ -108,6 +110,7 @@ def register_tool_with_metadata(
         config_fields: Configuration field definitions
         dependencies: Required pip packages
         docs_url: Documentation URL
+        helper_text: Additional helper text (markdown) for configuration
 
     Returns:
         Decorator function
@@ -128,6 +131,7 @@ def register_tool_with_metadata(
             config_fields=config_fields,
             dependencies=dependencies,
             docs_url=docs_url,
+            helper_text=helper_text,
             factory=func,
         )
 

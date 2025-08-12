@@ -13,6 +13,7 @@ export interface ToolInfo {
   config_fields: any[] | null;
   dependencies: string[] | null;
   docs_url?: string | null;
+  helper_text?: string | null;
 }
 
 export interface ToolsResponse {
@@ -107,5 +108,6 @@ export function mapToolToIntegration(tool: ToolInfo) {
     config_fields: tool.config_fields,
     dependencies: tool.dependencies,
     docs_url: tool.docs_url,
+    helper_text: tool.helper_text,
   };
 }

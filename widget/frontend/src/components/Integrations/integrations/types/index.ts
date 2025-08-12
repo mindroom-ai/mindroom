@@ -14,6 +14,7 @@ export interface Integration {
   connected?: boolean;
   details?: any;
   docs_url?: string | null;
+  helper_text?: string | null;
 }
 
 export interface IntegrationConfig {

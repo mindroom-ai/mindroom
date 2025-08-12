@@ -45,13 +45,14 @@ export function Integrations() {
     integrationId: string;
     config: IntegrationConfig;
   } | null>(null);
-  const [genericConfigDialog, setGenericConfigDialog] = useState<{
+  const [configDialog, setConfigDialog] = useState<{
     service: string;
     displayName: string;
     description: string;
     configFields: any[];
     isEditing?: boolean;
     docsUrl?: string | null;
+    helperText?: string | null;
     icon?: any;
     iconColor?: string;
   } | null>(null);
@@ -157,13 +158,14 @@ export function Integrations() {
           }
         }
 
-        setGenericConfigDialog({
+        setConfigDialog({
           service: integration.id,
           displayName: integration.name,
           description: integration.description,
           configFields: tool.config_fields,
           isEditing: integration.status === 'connected',
           docsUrl: tool.docs_url || null,
+          helperText: tool.helper_text || null,
           icon: IconComponent,
           iconColor: tool.icon_color || integration.iconColor,
         });
@@ -353,26 +355,6 @@ export function Integrations() {
               </Button>
             )}
           </div>
-
-          {/* Service-specific help text */}
-          {integration.id === 'imdb' && integration.status !== 'connected' && (
-            <div className="text-xs text-gray-500 dark:text-gray-400">
-              Get a free API key from{' '}
-              <a
-                href="http://www.omdbapi.com/apikey.aspx"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-blue-500 dark:text-blue-400 underline"
-              >
-                OMDb API
-              </a>
-            </div>
-          )}
-          {integration.id === 'spotify' && integration.status !== 'connected' && (
-            <div className="text-xs text-gray-500 dark:text-gray-400">
-              Requires Spotify app credentials from the Developer Dashboard
-            </div>
-          )}
         </div>
       </CardContent>
     </Card>
@@ -567,20 +549,21 @@ export function Integrations() {
       )}
 
       {/* Enhanced Configuration Dialog */}
-      {genericConfigDialog && (
+      {configDialog && (
         <EnhancedConfigDialog
           open={true}
-          onClose={() => setGenericConfigDialog(null)}
-          service={genericConfigDialog.service}
-          displayName={genericConfigDialog.displayName}
-          description={genericConfigDialog.description}
-          configFields={genericConfigDialog.configFields}
-          isEditing={genericConfigDialog.isEditing}
-          docsUrl={genericConfigDialog.docsUrl}
-          icon={genericConfigDialog.icon}
-          iconColor={genericConfigDialog.iconColor}
+          onClose={() => setConfigDialog(null)}
+          service={configDialog.service}
+          displayName={configDialog.displayName}
+          description={configDialog.description}
+          configFields={configDialog.configFields}
+          isEditing={configDialog.isEditing}
+          docsUrl={configDialog.docsUrl}
+          helperText={configDialog.helperText}
+          icon={configDialog.icon}
+          iconColor={configDialog.iconColor}
           onSuccess={async () => {
-            setGenericConfigDialog(null);
+            setConfigDialog(null);
             // Refetch tools to get updated status
             await refetchTools();
           }}

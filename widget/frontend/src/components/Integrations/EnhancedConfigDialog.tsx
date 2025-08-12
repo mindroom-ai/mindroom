@@ -53,6 +53,7 @@ interface EnhancedConfigDialogProps {
   onSuccess?: () => void;
   isEditing?: boolean;
   docsUrl?: string | null;
+  helperText?: string | null;
   icon?: any;
   iconColor?: string;
 }
@@ -67,6 +68,7 @@ export function EnhancedConfigDialog({
   onSuccess,
   isEditing = false,
   docsUrl,
+  helperText,
   icon: Icon,
   iconColor,
 }: EnhancedConfigDialogProps) {
@@ -76,6 +78,30 @@ export function EnhancedConfigDialog({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [showPassword, setShowPassword] = useState<Record<string, boolean>>({});
   const { toast } = useToast();
+
+  // Function to render markdown links in helper text
+  const renderHelperText = (text: string) => {
+    // Simple markdown link parser for [text](url)
+    const parts = text.split(/(\[.*?\]\(.*?\))/g);
+    return parts.map((part, index) => {
+      const linkMatch = part.match(/\[(.*?)\]\((.*?)\)/);
+      if (linkMatch) {
+        const [, linkText, url] = linkMatch;
+        return (
+          <a
+            key={index}
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-500 dark:text-blue-400 underline hover:text-blue-600 dark:hover:text-blue-300"
+          >
+            {linkText}
+          </a>
+        );
+      }
+      return part;
+    });
+  };
 
   // Initialize default values and load existing credentials
   useEffect(() => {
@@ -273,6 +299,16 @@ export function EnhancedConfigDialog({
               parties.
             </AlertDescription>
           </Alert>
+
+          {/* Helper Text */}
+          {helperText && (
+            <Alert className="border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/30">
+              <Info className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+              <AlertDescription className="text-xs text-blue-900 dark:text-blue-100">
+                {renderHelperText(helperText)}
+              </AlertDescription>
+            </Alert>
+          )}
         </DialogHeader>
 
         <Separator className="my-4" />
