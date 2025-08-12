@@ -54,29 +54,34 @@ describe('MemoryConfig', () => {
   it('shows correct provider in select', () => {
     render(<MemoryConfig />);
 
-    const providerSelect = screen.getByLabelText('Embedder Provider');
+    // The select is a combobox with the provider ID
+    const providerSelect = document.getElementById('provider');
+    expect(providerSelect).toBeInTheDocument();
     expect(providerSelect).toHaveTextContent('Ollama (Local)');
   });
 
   it('shows correct model in select', () => {
     render(<MemoryConfig />);
 
-    const modelSelect = screen.getByLabelText('Embedding Model');
+    const modelSelect = document.getElementById('model');
+    expect(modelSelect).toBeInTheDocument();
     expect(modelSelect).toHaveTextContent('nomic-embed-text');
   });
 
   it('shows host input for ollama provider', () => {
     render(<MemoryConfig />);
 
-    const hostInput = screen.getByLabelText('Ollama Host URL');
+    const hostInput = document.getElementById('host') as HTMLInputElement;
+    expect(hostInput).toBeInTheDocument();
     expect(hostInput).toHaveValue('http://localhost:11434');
   });
 
   it('changes provider and updates model options', async () => {
     render(<MemoryConfig />);
 
-    const providerSelect = screen.getByLabelText('Embedder Provider');
-    fireEvent.click(providerSelect);
+    const providerSelect = document.getElementById('provider');
+    expect(providerSelect).toBeInTheDocument();
+    fireEvent.click(providerSelect!);
 
     const openaiOption = await screen.findByText('OpenAI');
     fireEvent.click(openaiOption);
@@ -93,8 +98,8 @@ describe('MemoryConfig', () => {
   it('shows API key notice for OpenAI', async () => {
     render(<MemoryConfig />);
 
-    const providerSelect = screen.getByLabelText('Embedder Provider');
-    fireEvent.click(providerSelect);
+    const providerSelect = document.getElementById('provider');
+    fireEvent.click(providerSelect!);
 
     const openaiOption = await screen.findByText('OpenAI');
     fireEvent.click(openaiOption);
@@ -107,8 +112,8 @@ describe('MemoryConfig', () => {
   it('shows API key notice for HuggingFace', async () => {
     render(<MemoryConfig />);
 
-    const providerSelect = screen.getByLabelText('Embedder Provider');
-    fireEvent.click(providerSelect);
+    const providerSelect = document.getElementById('provider');
+    fireEvent.click(providerSelect!);
 
     const hfOption = await screen.findByText('HuggingFace');
     fireEvent.click(hfOption);
@@ -121,22 +126,23 @@ describe('MemoryConfig', () => {
   it('does not show host input for non-ollama providers', async () => {
     render(<MemoryConfig />);
 
-    const providerSelect = screen.getByLabelText('Embedder Provider');
-    fireEvent.click(providerSelect);
+    const providerSelect = document.getElementById('provider');
+    fireEvent.click(providerSelect!);
 
     const openaiOption = await screen.findByText('OpenAI');
     fireEvent.click(openaiOption);
 
     await waitFor(() => {
-      expect(screen.queryByLabelText('Ollama Host URL')).not.toBeInTheDocument();
+      const hostInput = document.getElementById('host');
+      expect(hostInput).not.toBeInTheDocument();
     });
   });
 
   it('shows correct model options for ollama', async () => {
     render(<MemoryConfig />);
 
-    const modelSelect = screen.getByLabelText('Embedding Model');
-    fireEvent.click(modelSelect);
+    const modelSelect = document.getElementById('model');
+    fireEvent.click(modelSelect!);
 
     // Wait for options to appear
     await waitFor(() => {
@@ -155,14 +161,14 @@ describe('MemoryConfig', () => {
     // First switch to OpenAI
     render(<MemoryConfig />);
 
-    const providerSelect = screen.getByLabelText('Embedder Provider');
-    fireEvent.click(providerSelect);
+    const providerSelect = document.getElementById('provider');
+    fireEvent.click(providerSelect!);
     const openaiOptions = await screen.findAllByText('OpenAI');
     fireEvent.click(openaiOptions[0]);
 
     // Then check model options
-    const modelSelect = screen.getByLabelText('Embedding Model');
-    fireEvent.click(modelSelect);
+    const modelSelect = document.getElementById('model');
+    fireEvent.click(modelSelect!);
 
     // Wait for options and check they exist
     await waitFor(() => {
@@ -179,8 +185,8 @@ describe('MemoryConfig', () => {
   it('updates model when selection changes', async () => {
     render(<MemoryConfig />);
 
-    const modelSelect = screen.getByLabelText('Embedding Model');
-    fireEvent.click(modelSelect);
+    const modelSelect = document.getElementById('model');
+    fireEvent.click(modelSelect!);
 
     const newModel = await screen.findByText('all-minilm');
     fireEvent.click(newModel);
@@ -195,7 +201,7 @@ describe('MemoryConfig', () => {
   it('updates host when input changes', async () => {
     render(<MemoryConfig />);
 
-    const hostInput = screen.getByLabelText('Ollama Host URL');
+    const hostInput = document.getElementById('host') as HTMLInputElement;
     fireEvent.change(hostInput, { target: { value: 'http://localhost:8000' } });
 
     await waitFor(() => {
@@ -257,8 +263,8 @@ describe('MemoryConfig', () => {
   it('shows provider description for openai', async () => {
     render(<MemoryConfig />);
 
-    const providerSelect = screen.getByLabelText('Embedder Provider');
-    fireEvent.click(providerSelect);
+    const providerSelect = document.getElementById('provider');
+    fireEvent.click(providerSelect!);
     const openaiOption = await screen.findByText('OpenAI');
     fireEvent.click(openaiOption);
 
@@ -270,8 +276,8 @@ describe('MemoryConfig', () => {
   it('shows provider description for sentence-transformers', async () => {
     render(<MemoryConfig />);
 
-    const providerSelect = screen.getByLabelText('Embedder Provider');
-    fireEvent.click(providerSelect);
+    const providerSelect = document.getElementById('provider');
+    fireEvent.click(providerSelect!);
     const stOption = await screen.findByText('Sentence Transformers');
     fireEvent.click(stOption);
 
@@ -291,7 +297,9 @@ describe('MemoryConfig', () => {
     render(<MemoryConfig />);
 
     // Should show default values
-    expect(screen.getByLabelText('Embedder Provider')).toHaveTextContent('Ollama (Local)');
-    expect(screen.getByLabelText('Embedding Model')).toHaveTextContent('nomic-embed-text');
+    const providerSelect = document.getElementById('provider');
+    expect(providerSelect).toHaveTextContent('Ollama (Local)');
+    const modelSelect = document.getElementById('model');
+    expect(modelSelect).toHaveTextContent('nomic-embed-text');
   });
 });
