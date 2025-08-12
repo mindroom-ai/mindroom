@@ -1,0 +1,18 @@
+# Multi-stage build for fast rebuilds
+FROM python:3.13-slim as base
+RUN apt-get update && apt-get install -y git curl build-essential && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+# Dependencies stage - only rebuild if deps change
+FROM base as deps
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --all-extras --no-dev
+
+# Final stage
+FROM base as final
+WORKDIR /app
+COPY --from=deps /app/.venv /app/.venv
+COPY . .
+RUN mkdir -p /app/tmp /app/logs /app/config
+CMD ["/app/.venv/bin/python", "-m", "mindroom.cli", "run", "--log-level", "INFO", "--storage-path", "/app/tmp"]

@@ -14,7 +14,14 @@ fi
 BACKEND_PORT=${BACKEND_PORT:-8765}
 FRONTEND_PORT=${FRONTEND_PORT:-3003}
 
-echo -e "${BLUE}Starting MindRoom Configuration Widget...${NC}"
+# Detect if running in Docker
+if [ -f /.dockerenv ] || [ -n "$DOCKER_CONTAINER" ]; then
+    HOST="0.0.0.0"
+    echo -e "${BLUE}Starting MindRoom Configuration Widget (Docker mode)...${NC}"
+else
+    HOST="localhost"
+    echo -e "${BLUE}Starting MindRoom Configuration Widget...${NC}"
+fi
 
 # Function to kill background processes on exit
 cleanup() {
@@ -33,7 +40,7 @@ echo "Using uv for Python dependencies..."
 if [ ! -d ".venv" ]; then
     uv sync
 fi
-uv run uvicorn src.main:app --reload --port $BACKEND_PORT &
+uv run uvicorn src.main:app --reload --host $HOST --port $BACKEND_PORT &
 BACKEND_PID=$!
 
 cd ..
@@ -49,13 +56,17 @@ if [ ! -d "node_modules" ]; then
     pnpm install
 fi
 
-VITE_BACKEND_PORT=$BACKEND_PORT BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev &
+if [ "$HOST" = "0.0.0.0" ]; then
+    VITE_BACKEND_PORT=$BACKEND_PORT BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev:docker &
+else
+    VITE_BACKEND_PORT=$BACKEND_PORT BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev &
+fi
 FRONTEND_PID=$!
 cd ..
 
 echo -e "${GREEN}Widget is running!${NC}"
-echo -e "Frontend: http://localhost:$FRONTEND_PORT"
-echo -e "Backend: http://localhost:$BACKEND_PORT"
+echo -e "Frontend: http://$HOST:$FRONTEND_PORT"
+echo -e "Backend: http://$HOST:$BACKEND_PORT"
 echo -e "\nPress Ctrl+C to stop both servers"
 
 # Wait for both processes

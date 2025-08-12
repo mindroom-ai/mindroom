@@ -1,0 +1,37 @@
+# Multi-stage build for fast rebuilds
+FROM node:20-slim as base
+RUN apt-get update && apt-get install -y git curl python3 python3-pip python3-venv build-essential && rm -rf /var/lib/apt/lists/*
+RUN npm install -g pnpm
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+# Backend deps stage
+FROM base as backend-deps
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+COPY widget/backend/pyproject.toml widget/backend/uv.lock ./widget/backend/
+COPY src ./src
+RUN cd widget/backend && uv sync
+
+# Frontend deps stage
+FROM base as frontend-deps
+WORKDIR /app/widget/frontend
+COPY widget/frontend/package.json widget/frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+# Build frontend
+FROM frontend-deps as frontend-build
+COPY widget/frontend .
+RUN pnpm run build
+
+# Final stage
+FROM base as final
+WORKDIR /app/widget
+COPY --from=backend-deps /app/widget/backend/.venv /app/widget/backend/.venv
+COPY --from=frontend-deps /app/widget/frontend/node_modules /app/widget/frontend/node_modules
+COPY --from=frontend-build /app/widget/frontend/dist /app/widget/frontend/dist
+COPY . /app/
+RUN mkdir -p /app/logs /app/config
+RUN chmod +x /app/widget/run.sh
+EXPOSE 3003 8001
+ENV DOCKER_CONTAINER=1
+CMD ["./run.sh"]
