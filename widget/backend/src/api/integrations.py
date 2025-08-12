@@ -11,9 +11,14 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from spotipy import Spotify, SpotifyOAuth
 
+from .credentials_manager import CredentialsManager
+
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
-# Base path for storing credentials
+# Initialize credentials manager
+creds_manager = CredentialsManager()
+
+# Base path for storing credentials (kept for backward compatibility)
 CREDS_PATH = Path(__file__).parent.parent.parent.parent.parent
 
 
@@ -54,22 +59,13 @@ class ApiKeyRequest(BaseModel):
 
 def get_service_credentials(service: str) -> dict[str, Any]:
     """Get stored credentials for a service."""
-    creds_file = CREDS_PATH / f"{service}_credentials.json"
-    if not creds_file.exists():
-        return {}
-
-    try:
-        with creds_file.open() as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    credentials = creds_manager.load_credentials(service)
+    return credentials if credentials else {}
 
 
 def save_service_credentials(service: str, credentials: dict[str, Any]) -> None:
     """Save service credentials."""
-    creds_file = CREDS_PATH / f"{service}_credentials.json"
-    with creds_file.open("w") as f:
-        json.dump(credentials, f, indent=2)
+    creds_manager.save_credentials(service, credentials)
 
 
 @router.get("/status")
@@ -461,8 +457,7 @@ async def disconnect_service(service: str) -> dict[str, str]:
     if service not in tools_metadata:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
 
-    creds_file = CREDS_PATH / f"{service}_credentials.json"
-    if creds_file.exists():
-        creds_file.unlink()
+    # Delete credentials using the manager
+    creds_manager.delete_credentials(service)
 
     return {"status": "disconnected"}

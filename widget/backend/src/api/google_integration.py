@@ -8,7 +8,6 @@ This module provides a single, comprehensive Google OAuth integration supporting
 Replaces the previous fragmented gmail_config.py, google_auth.py, and google_setup_wizard.py
 """
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -21,7 +20,12 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from pydantic import BaseModel
 
+from .credentials_manager import CredentialsManager
+
 router = APIRouter(prefix="/api/google", tags=["google-integration"])
+
+# Initialize credentials manager
+creds_manager = CredentialsManager()
 
 # OAuth scopes for all Google services needed by MindRoom
 SCOPES = [
@@ -39,9 +43,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
 
-# Token storage paths
-TOKEN_PATH = Path(__file__).parent.parent.parent.parent.parent / "google_token.json"
-LEGACY_TOKEN_PATH = Path(__file__).parent.parent.parent.parent.parent / "token.json"  # For agno compatibility
+# Environment path for OAuth credentials
 ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
 
 # Get configuration from environment
@@ -87,11 +89,19 @@ def get_oauth_credentials() -> dict[str, Any] | None:
 
 def get_google_credentials() -> Credentials | None:
     """Get Google credentials from stored token."""
-    if not TOKEN_PATH.exists():
+    token_data = creds_manager.load_credentials("google")
+    if not token_data:
         return None
 
     try:
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+        creds = Credentials(
+            token=token_data.get("token"),
+            refresh_token=token_data.get("refresh_token"),
+            token_uri=token_data.get("token_uri"),
+            client_id=token_data.get("client_id"),
+            client_secret=token_data.get("client_secret"),
+            scopes=token_data.get("scopes", SCOPES),
+        )
 
         # Refresh token if expired
         if creds and creds.expired and creds.refresh_token:
@@ -105,7 +115,7 @@ def get_google_credentials() -> Credentials | None:
 
 
 def save_credentials(creds: Credentials) -> None:
-    """Save credentials to both token files for compatibility."""
+    """Save credentials using the unified credentials manager."""
     # Full token with all scopes
     token_data = {
         "token": creds.token,
@@ -120,25 +130,8 @@ def save_credentials(creds: Credentials) -> None:
     if hasattr(creds, "_id_token") and creds._id_token:
         token_data["_id_token"] = creds._id_token
 
-    # Save main token file
-    with TOKEN_PATH.open("w") as token:
-        json.dump(token_data, token, indent=2)
-
-    # Save legacy token file for agno compatibility (Gmail scopes only)
-    legacy_token_data = {
-        "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "scopes": [
-            "https://www.googleapis.com/auth/gmail.readonly",
-            "https://www.googleapis.com/auth/gmail.modify",
-            "https://www.googleapis.com/auth/gmail.compose",
-        ],
-    }
-    with LEGACY_TOKEN_PATH.open("w") as legacy_token:
-        json.dump(legacy_token_data, legacy_token, indent=2)
+    # Save using credentials manager (handles backward compatibility)
+    creds_manager.save_credentials("google", token_data)
 
 
 def save_env_credentials(client_id: str, client_secret: str, project_id: str | None = None) -> None:
@@ -289,11 +282,8 @@ async def callback(request: Request) -> RedirectResponse:
 async def disconnect() -> dict[str, str]:
     """Disconnect Google services by removing stored tokens."""
     try:
-        # Remove token files
-        for token_path in [TOKEN_PATH, LEGACY_TOKEN_PATH]:
-            if token_path.exists():
-                token_path.unlink()
-
+        # Remove credentials using the manager
+        creds_manager.delete_credentials("google")
         return {"status": "disconnected"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
@@ -324,10 +314,8 @@ async def configure(credentials: dict[str, str]) -> dict[str, Any]:
 async def reset() -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
     try:
-        # Remove token files
-        for token_path in [TOKEN_PATH, LEGACY_TOKEN_PATH]:
-            if token_path.exists():
-                token_path.unlink()
+        # Remove credentials using the manager
+        creds_manager.delete_credentials("google")
 
         # Remove from environment variables
         if ENV_PATH.exists():

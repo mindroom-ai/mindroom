@@ -19,8 +19,8 @@ class HomeAssistantTools(Toolkit):
 
     def __init__(self) -> None:
         """Initialize Home Assistant tools."""
-        # Token storage path
-        self.token_path = Path.home() / ".mindroom" / "homeassistant_token.json"
+        # Token storage path - use unified location
+        self.token_path = Path.home() / ".mindroom" / "credentials" / "homeassistant_credentials.json"
         self._config: dict[str, Any] | None = None
 
         # Initialize the toolkit with all available methods
@@ -46,11 +46,12 @@ class HomeAssistantTools(Toolkit):
         if self._config:
             return self._config
 
-        # Try multiple paths for the token file
+        # Try multiple paths for the token file (including legacy locations)
         paths = [
-            self.token_path,
-            Path(__file__).parent.parent.parent.parent / "homeassistant_token.json",
-            Path.cwd() / "homeassistant_token.json",
+            self.token_path,  # Unified location
+            Path.home() / ".mindroom" / "homeassistant_token.json",  # Old location
+            Path(__file__).parent.parent.parent.parent / "homeassistant_token.json",  # Root
+            Path.cwd() / "homeassistant_token.json",  # Current directory
         ]
 
         for path in paths:

@@ -10,7 +10,6 @@ This module provides OAuth2 integration with Home Assistant, supporting:
 Uses the official Home Assistant REST API.
 """
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -21,14 +20,18 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from .credentials_manager import CredentialsManager
+
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
+
+# Initialize credentials manager
+creds_manager = CredentialsManager()
 
 # OAuth scopes for Home Assistant
 # Home Assistant doesn't use traditional OAuth scopes, but we request full API access
 SCOPES = []
 
-# Token storage paths
-TOKEN_PATH = Path(__file__).parent.parent.parent.parent.parent / "homeassistant_token.json"
+# Environment path for OAuth configuration
 ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
 
 # Get configuration from environment
@@ -64,20 +67,12 @@ class HomeAssistantConfig(BaseModel):
 
 def get_stored_config() -> dict[str, Any] | None:
     """Get stored Home Assistant configuration."""
-    if not TOKEN_PATH.exists():
-        return None
-
-    try:
-        with TOKEN_PATH.open() as f:
-            return json.load(f)
-    except Exception:
-        return None
+    return creds_manager.load_credentials("homeassistant")
 
 
 def save_config(config: dict[str, Any]) -> None:
     """Save Home Assistant configuration."""
-    with TOKEN_PATH.open("w") as f:
-        json.dump(config, f, indent=2)
+    creds_manager.save_credentials("homeassistant", config)
 
 
 def save_env_config(instance_url: str, client_id: str | None = None) -> None:
@@ -368,9 +363,8 @@ async def callback(request: Request) -> RedirectResponse:
 async def disconnect() -> dict[str, str]:
     """Disconnect Home Assistant by removing stored tokens."""
     try:
-        # Remove token file
-        if TOKEN_PATH.exists():
-            TOKEN_PATH.unlink()
+        # Remove credentials using the manager
+        creds_manager.delete_credentials("homeassistant")
 
         # Remove from environment variables
         if ENV_PATH.exists():
