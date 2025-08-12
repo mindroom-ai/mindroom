@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { NetworkGraph } from './NetworkGraph';
+import { Bot, Home, Users, Settings, RefreshCw, FileText, BarChart3, User } from 'lucide-react';
 
 export function Dashboard() {
   const { agents, rooms, teams, config, selectedRoomId, selectedAgentId, selectRoom, selectAgent } =
@@ -155,11 +156,11 @@ export function Dashboard() {
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-2xl font-bold">System Overview</h2>
-          <p className="text-gray-600 dark:text-gray-400">
+          <p className="text-amber-700 dark:text-amber-300">
             Monitor your MindRoom configuration and status
           </p>
-          <p className="text-xs text-gray-500 mt-1">
-            🔄 Last updated: {lastUpdated.toLocaleTimeString()}
+          <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
+            <RefreshCw className="w-3 h-3" /> Last updated: {lastUpdated.toLocaleTimeString()}
           </p>
         </div>
         <div className="flex gap-2 items-center">
@@ -170,9 +171,15 @@ export function Dashboard() {
             className="w-64"
           />
           <ToggleGroup type="multiple" value={showTypes} onValueChange={setShowTypes}>
-            <ToggleGroupItem value="agents">🤖 Agents</ToggleGroupItem>
-            <ToggleGroupItem value="rooms">🏠 Rooms</ToggleGroupItem>
-            <ToggleGroupItem value="teams">👥 Teams</ToggleGroupItem>
+            <ToggleGroupItem value="agents" className="flex items-center gap-1">
+              <Bot className="w-4 h-4" /> Agents
+            </ToggleGroupItem>
+            <ToggleGroupItem value="rooms" className="flex items-center gap-1">
+              <Home className="w-4 h-4" /> Rooms
+            </ToggleGroupItem>
+            <ToggleGroupItem value="teams" className="flex items-center gap-1">
+              <Users className="w-4 h-4" /> Teams
+            </ToggleGroupItem>
           </ToggleGroup>
           <Button
             variant="outline"
@@ -184,76 +191,117 @@ export function Dashboard() {
           >
             Clear Selection
           </Button>
-          <Button variant="outline" size="sm" onClick={exportConfiguration}>
-            📄 Export Config
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={exportConfiguration}
+            className="flex items-center gap-1"
+          >
+            <FileText className="w-4 h-4" /> Export Config
           </Button>
         </div>
       </div>
 
       {/* System Stats Cards - Top Bar */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Card className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-950 dark:to-blue-900 border-blue-200 dark:border-blue-800">
+        <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-2xl font-bold text-blue-700 dark:text-blue-300">
-              {stats.totalAgents}
-            </CardTitle>
-            <CardDescription className="text-blue-600 dark:text-blue-400">
-              🤖 Agents
-            </CardDescription>
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-amber-100 dark:bg-yellow-900/30">
+                <Bot className="w-5 h-5 text-amber-700 dark:text-amber-300" />
+              </div>
+              <div>
+                <CardTitle className="text-2xl font-bold text-amber-900 dark:text-amber-100">
+                  {stats.totalAgents}
+                </CardTitle>
+                <CardDescription className="text-amber-700 dark:text-amber-300">
+                  Agents
+                </CardDescription>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="flex items-center gap-4 text-sm text-blue-600 dark:text-blue-400">
-              <span>🟢 {stats.agentsOnline}</span>
-              <span>🟠 {stats.agentsBusy}</span>
-              <span>🟡 {stats.agentsIdle}</span>
-              <span>⚫ {stats.agentsOffline}</span>
+            <div className="flex items-center gap-3 text-xs text-amber-700 dark:text-amber-300">
+              <span className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-full bg-green-500"></div> {stats.agentsOnline}
+              </span>
+              <span className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-full bg-orange-500"></div> {stats.agentsBusy}
+              </span>
+              <span className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-full bg-yellow-500"></div> {stats.agentsIdle}
+              </span>
+              <span className="flex items-center gap-1">
+                <div className="w-2 h-2 rounded-full bg-gray-400"></div> {stats.agentsOffline}
+              </span>
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-950 dark:to-green-900 border-green-200 dark:border-green-800">
+        <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-2xl font-bold text-green-700 dark:text-green-300">
-              {stats.totalRooms}
-            </CardTitle>
-            <CardDescription className="text-green-600 dark:text-green-400">
-              🏠 Rooms
-            </CardDescription>
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-orange-100 dark:bg-orange-900/30">
+                <Home className="w-5 h-5 text-orange-700 dark:text-orange-300" />
+              </div>
+              <div>
+                <CardTitle className="text-2xl font-bold text-orange-900 dark:text-orange-100">
+                  {stats.totalRooms}
+                </CardTitle>
+                <CardDescription className="text-orange-700 dark:text-orange-300">
+                  Rooms
+                </CardDescription>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-green-600 dark:text-green-400">
+            <p className="text-xs text-orange-700 dark:text-orange-300">
               {stats.activeConnections} configured
             </p>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-950 dark:to-purple-900 border-purple-200 dark:border-purple-800">
+        <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-2xl font-bold text-purple-700 dark:text-purple-300">
-              {stats.totalTeams}
-            </CardTitle>
-            <CardDescription className="text-purple-600 dark:text-purple-400">
-              👥 Teams
-            </CardDescription>
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-yellow-100 dark:bg-yellow-900/30">
+                <Users className="w-5 h-5 text-yellow-700 dark:text-yellow-300" />
+              </div>
+              <div>
+                <CardTitle className="text-2xl font-bold text-yellow-900 dark:text-yellow-100">
+                  {stats.totalTeams}
+                </CardTitle>
+                <CardDescription className="text-yellow-700 dark:text-yellow-300">
+                  Teams
+                </CardDescription>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-purple-600 dark:text-purple-400">
+            <p className="text-xs text-yellow-700 dark:text-yellow-300">
               {teams.reduce((acc, team) => acc + team.agents.length, 0)} members
             </p>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-orange-50 to-orange-100 dark:from-orange-950 dark:to-orange-900 border-orange-200 dark:border-orange-800">
+        <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-2xl font-bold text-orange-700 dark:text-orange-300">
-              {stats.modelsInUse}
-            </CardTitle>
-            <CardDescription className="text-orange-600 dark:text-orange-400">
-              🔧 Models
-            </CardDescription>
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-stone-100 dark:bg-stone-900/30">
+                <Settings className="w-5 h-5 text-stone-700 dark:text-stone-300" />
+              </div>
+              <div>
+                <CardTitle className="text-2xl font-bold text-stone-900 dark:text-stone-100">
+                  {stats.modelsInUse}
+                </CardTitle>
+                <CardDescription className="text-stone-700 dark:text-stone-300">
+                  Models
+                </CardDescription>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-orange-600 dark:text-orange-400">in configuration</p>
+            <p className="text-xs text-stone-700 dark:text-stone-300">in configuration</p>
           </CardContent>
         </Card>
       </div>
@@ -262,11 +310,11 @@ export function Dashboard() {
       <div className="mb-4">
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <span className="text-2xl">📊</span>
+            <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
+              <BarChart3 className="w-6 h-6 text-amber-700 dark:text-amber-300" />
               System Insights
             </CardTitle>
-            <CardDescription>
+            <CardDescription className="text-amber-700 dark:text-amber-300">
               Key metrics and actionable insights about your MindRoom configuration
             </CardDescription>
           </CardHeader>
@@ -300,11 +348,13 @@ export function Dashboard() {
         <div className="col-span-4">
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <span className="text-2xl">🤖</span>
+              <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
+                <Bot className="w-6 h-6 text-amber-700 dark:text-amber-300" />
                 Agents
               </CardTitle>
-              <CardDescription>Click an agent to see details</CardDescription>
+              <CardDescription className="text-amber-700 dark:text-amber-300">
+                Click an agent to see details
+              </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
               <ScrollArea className="h-96">
@@ -314,8 +364,8 @@ export function Dashboard() {
                       key={agent.id}
                       className={`cursor-pointer transition-all hover:shadow-md ${
                         selectedAgentId === agent.id
-                          ? 'ring-2 ring-primary bg-primary/5'
-                          : 'hover:bg-gray-50 dark:hover:bg-gray-800'
+                          ? 'ring-2 ring-orange-500 bg-gradient-to-r from-orange-500/10 to-amber-500/10'
+                          : ''
                       }`}
                       onClick={() => {
                         selectAgent(agent.id);
@@ -328,7 +378,7 @@ export function Dashboard() {
                           <div className="flex items-center gap-2">
                             {teams.some(team => team.agents.includes(agent.id)) && (
                               <Badge variant="secondary" className="text-xs px-1 py-0">
-                                👥
+                                <Users className="w-3 h-3" />
                               </Badge>
                             )}
                             <div
@@ -339,7 +389,7 @@ export function Dashboard() {
                             />
                           </div>
                         </div>
-                        <div className="text-xs text-gray-600 dark:text-gray-400 space-y-1">
+                        <div className="text-xs text-amber-700 dark:text-amber-300 space-y-1">
                           <div>Model: {agent.model || 'Default'}</div>
                           <div>
                             Rooms: {agent.rooms.length} | Tools: {agent.tools.length}
@@ -370,11 +420,13 @@ export function Dashboard() {
         <div className="col-span-5">
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <span className="text-2xl">🏠</span>
+              <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
+                <Home className="w-6 h-6 text-amber-700 dark:text-amber-300" />
                 Rooms Overview
               </CardTitle>
-              <CardDescription>Click a room to see details</CardDescription>
+              <CardDescription className="text-amber-700 dark:text-amber-300">
+                Click a room to see details
+              </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
               <ScrollArea className="h-96">
@@ -384,8 +436,8 @@ export function Dashboard() {
                       key={room.id}
                       className={`cursor-pointer transition-all hover:shadow-md ${
                         selectedRoomId === room.id
-                          ? 'ring-2 ring-primary bg-primary/5'
-                          : 'hover:bg-gray-50 dark:hover:bg-gray-800'
+                          ? 'ring-2 ring-orange-500 bg-gradient-to-r from-orange-500/10 to-amber-500/10'
+                          : ''
                       }`}
                       onClick={() => {
                         selectRoom(room.id);
@@ -400,7 +452,7 @@ export function Dashboard() {
                           </Badge>
                         </div>
                         {room.model && (
-                          <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+                          <div className="text-xs text-amber-700 dark:text-amber-300 mb-2">
                             Model: {room.model}
                           </div>
                         )}
@@ -429,15 +481,17 @@ export function Dashboard() {
                           const roomTeams = teams.filter(team => team.rooms.includes(room.id));
                           return roomTeams.length > 0 ? (
                             <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
-                              <div className="text-xs text-gray-500 mb-1">Teams:</div>
+                              <div className="text-xs text-amber-600 dark:text-amber-400 mb-1">
+                                Teams:
+                              </div>
                               <div className="flex flex-wrap gap-1">
                                 {roomTeams.map(team => (
                                   <Badge
                                     key={team.id}
                                     variant="outline"
-                                    className="text-xs px-1 py-0 bg-purple-50 dark:bg-purple-950"
+                                    className="text-xs px-1 py-0 bg-purple-50 dark:bg-purple-950 flex items-center gap-1"
                                   >
-                                    👥 {team.display_name}
+                                    <Users className="w-3 h-3" /> {team.display_name}
                                   </Badge>
                                 ))}
                               </div>
@@ -457,8 +511,8 @@ export function Dashboard() {
         <div className="col-span-3">
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <span className="text-2xl">ℹ️</span>
+              <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
+                <User className="w-6 h-6 text-amber-700 dark:text-amber-300" />
                 Details
               </CardTitle>
             </CardHeader>
@@ -468,7 +522,7 @@ export function Dashboard() {
                   <div>
                     <h3 className="font-semibold text-lg mb-2">{selectedRoom.display_name}</h3>
                     {selectedRoom.description && (
-                      <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+                      <p className="text-sm text-amber-700 dark:text-amber-300 mb-3">
                         {selectedRoom.description}
                       </p>
                     )}
@@ -521,8 +575,10 @@ export function Dashboard() {
                               key={team.id}
                               className="p-2 bg-purple-50 dark:bg-purple-950 rounded text-sm"
                             >
-                              <div className="font-medium">👥 {team.display_name}</div>
-                              <div className="text-xs text-gray-600 dark:text-gray-400">
+                              <div className="font-medium flex items-center gap-1">
+                                <Users className="w-4 h-4" /> {team.display_name}
+                              </div>
+                              <div className="text-xs text-amber-700 dark:text-amber-300">
                                 {team.mode} mode • {team.agents.length} members
                               </div>
                             </div>
@@ -536,7 +592,7 @@ export function Dashboard() {
                 <div className="space-y-4">
                   <div>
                     <h3 className="font-semibold text-lg mb-2">{selectedAgent.display_name}</h3>
-                    <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+                    <p className="text-sm text-amber-700 dark:text-amber-300 mb-3">
                       {selectedAgent.role}
                     </p>
                   </div>
@@ -580,8 +636,12 @@ export function Dashboard() {
                         <h4 className="font-medium mb-2">Team Memberships:</h4>
                         <div className="space-y-1">
                           {agentTeams.map(team => (
-                            <Badge key={team.id} variant="outline" className="text-xs block w-fit">
-                              👥 {team.display_name}
+                            <Badge
+                              key={team.id}
+                              variant="outline"
+                              className="text-xs block w-fit flex items-center gap-1"
+                            >
+                              <Users className="w-3 h-3" /> {team.display_name}
                             </Badge>
                           ))}
                         </div>
@@ -590,7 +650,7 @@ export function Dashboard() {
                   })()}
                 </div>
               ) : (
-                <div className="text-center text-gray-500 dark:text-gray-400 mt-8">
+                <div className="text-center text-amber-600 dark:text-amber-400 dark:text-gray-400 mt-8">
                   <p>Select a room or agent to see details</p>
                 </div>
               )}
