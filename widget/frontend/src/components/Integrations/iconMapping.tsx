@@ -22,7 +22,20 @@ import {
   FaDocker,
   FaSlack,
   FaYoutube,
+  FaAmazon,
+  FaApple,
+  FaDropbox,
+  FaEbay,
+  FaFacebook,
+  FaGitlab,
+  FaGoodreads,
+  FaInstagram,
+  FaLinkedin,
+  FaMicrosoft,
+  FaSpotify,
+  FaYahoo,
 } from 'react-icons/fa';
+import { SiHbo, SiNetflix, SiTarget, SiWalmart } from 'react-icons/si';
 
 // Map icon names from backend to React components with their brand colors
 export const iconMap: Record<string, React.ReactNode> = {
@@ -50,6 +63,24 @@ export const iconMap: Record<string, React.ReactNode> = {
   FaDocker: <FaDocker className="h-5 w-5 text-blue-400" />,
   FaSlack: <FaSlack className="h-5 w-5 text-purple-600" />,
   FaYoutube: <FaYoutube className="h-5 w-5 text-red-600" />,
+  FaAmazon: <FaAmazon className="h-5 w-5 text-orange-500" />,
+  FaApple: <FaApple className="h-5 w-5 text-gray-800" />,
+  FaDropbox: <FaDropbox className="h-5 w-5 text-blue-600" />,
+  FaEbay: <FaEbay className="h-5 w-5 text-blue-500" />,
+  FaFacebook: <FaFacebook className="h-5 w-5 text-blue-600" />,
+  FaGitlab: <FaGitlab className="h-5 w-5 text-orange-600" />,
+  FaGoodreads: <FaGoodreads className="h-5 w-5 text-amber-700" />,
+  FaInstagram: <FaInstagram className="h-5 w-5 text-pink-600" />,
+  FaLinkedin: <FaLinkedin className="h-5 w-5 text-blue-700" />,
+  FaMicrosoft: <FaMicrosoft className="h-5 w-5 text-blue-600" />,
+  FaSpotify: <FaSpotify className="h-5 w-5 text-green-500" />,
+  FaYahoo: <FaYahoo className="h-5 w-5 text-purple-600" />,
+
+  // Simple Icons with brand colors
+  SiHbo: <SiHbo className="h-5 w-5 text-purple-600" />,
+  SiNetflix: <SiNetflix className="h-5 w-5 text-red-600" />,
+  SiTarget: <SiTarget className="h-5 w-5 text-red-600" />,
+  SiWalmart: <SiWalmart className="h-5 w-5 text-blue-500" />,
 
   // Additional mappings for tools that might use different icon names
   'Search-indigo': <Search className="h-5 w-5 text-indigo-600" />, // Tavily
