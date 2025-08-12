@@ -1,0 +1,105 @@
+/**
+ * Animations & Interactions - Essential animation patterns only
+ *
+ * This file contains only the animation classes and patterns that are
+ * actually used in the application to keep bundle size minimal.
+ */
+
+/* === ANIMATION TOKENS === */
+:root {
+  --animation-duration-short: 150ms;
+  --animation-duration-medium: 300ms;
+  --animation-duration-long: 500ms;
+  --animation-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --animation-ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --animation-ease-in: cubic-bezier(0.4, 0, 1, 1);
+}
+
+/* === KEYFRAME DEFINITIONS === */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fadeOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideDown {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* === CORE ANIMATION CLASSES === */
+
+/* Fade animations */
+.animate-fade-in {
+  animation: fadeIn var(--animation-duration-medium) var(--animation-ease-in-out);
+}
+
+.animate-fade-out {
+  animation: fadeOut var(--animation-duration-medium) var(--animation-ease-in-out);
+}
+
+/* Slide animations */
+.animate-slide-up {
+  animation: slideUp var(--animation-duration-medium) var(--animation-ease-in-out);
+}
+
+.animate-slide-down {
+  animation: slideDown var(--animation-duration-medium) var(--animation-ease-in-out);
+}
+
+/* === UTILITY CLASSES === */
+
+/* Basic hover effects that complement Tailwind */
+.hover-lift {
+  transition: transform var(--animation-duration-short) var(--animation-ease-out);
+}
+
+.hover-lift:hover {
+  transform: translateY(-2px);
+}
+
+/* Focus ring for accessibility */
+.focus-ring-primary:focus {
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 2px;
+}
+
+/* Loading states */
+.loading-spinner {
+  animation: spin 1s linear infinite;
+}
+
+/* Basic interaction feedback */
+.click-feedback:active {
+  transform: scale(0.98);
+  transition: transform var(--animation-duration-short) var(--animation-ease-in-out);
+}

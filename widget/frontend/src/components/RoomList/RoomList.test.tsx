@@ -103,11 +103,11 @@ describe('RoomList', () => {
     expect(lobbyCard).toHaveClass('ring-2', 'ring-orange-500');
   });
 
-  it('shows create room form when New Room button is clicked', () => {
+  it('shows create room form when Add button is clicked', () => {
     render(<RoomList />);
 
-    const newRoomButton = screen.getByText('New Room');
-    fireEvent.click(newRoomButton);
+    const addButton = screen.getByText('Add');
+    fireEvent.click(addButton);
 
     expect(screen.getByPlaceholderText('Room name...')).toBeInTheDocument();
   });
@@ -115,8 +115,8 @@ describe('RoomList', () => {
   it('creates new room with correct data', async () => {
     render(<RoomList />);
 
-    const newRoomButton = screen.getByText('New Room');
-    fireEvent.click(newRoomButton);
+    const addButton = screen.getByText('Add');
+    fireEvent.click(addButton);
 
     const input = screen.getByPlaceholderText('Room name...');
     fireEvent.change(input, { target: { value: 'Test Room' } });
@@ -138,8 +138,8 @@ describe('RoomList', () => {
   it('cancels room creation when X button is clicked', () => {
     render(<RoomList />);
 
-    const newRoomButton = screen.getByText('New Room');
-    fireEvent.click(newRoomButton);
+    const addButton = screen.getByText('Add');
+    fireEvent.click(addButton);
 
     expect(screen.getByPlaceholderText('Room name...')).toBeInTheDocument();
 
@@ -152,8 +152,8 @@ describe('RoomList', () => {
   it('cancels room creation when Escape key is pressed', () => {
     render(<RoomList />);
 
-    const newRoomButton = screen.getByText('New Room');
-    fireEvent.click(newRoomButton);
+    const addButton = screen.getByText('Add');
+    fireEvent.click(addButton);
 
     const input = screen.getByPlaceholderText('Room name...');
     fireEvent.keyDown(input, { key: 'Escape' });
@@ -164,8 +164,8 @@ describe('RoomList', () => {
   it('creates room when Enter key is pressed', async () => {
     render(<RoomList />);
 
-    const newRoomButton = screen.getByText('New Room');
-    fireEvent.click(newRoomButton);
+    const addButton = screen.getByText('Add');
+    fireEvent.click(addButton);
 
     const input = screen.getByPlaceholderText('Room name...');
     fireEvent.change(input, { target: { value: 'Enter Test Room' } });
@@ -191,6 +191,6 @@ describe('RoomList', () => {
     render(<RoomList />);
 
     expect(screen.getByText('No rooms found')).toBeInTheDocument();
-    expect(screen.getByText('Click "New Room" to create one')).toBeInTheDocument();
+    expect(screen.getByText('Click "Add" to create one')).toBeInTheDocument();
   });
 });

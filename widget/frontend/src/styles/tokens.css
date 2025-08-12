@@ -1,0 +1,17 @@
+/**
+ * Design Tokens - Essential CSS Custom Properties
+ *
+ * Minimal design system values for components that require custom properties.
+ * Most styling is handled by Tailwind CSS, this file only contains tokens
+ * that are actually referenced in the codebase.
+ */
+
+:root {
+  /* Animation tokens used by animations.css */
+  --animation-duration-short: 150ms;
+  --animation-duration-medium: 300ms;
+  --animation-duration-long: 500ms;
+  --animation-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --animation-ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --animation-ease-in: cubic-bezier(0.4, 0, 1, 1);
+}
