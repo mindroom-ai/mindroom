@@ -387,6 +387,7 @@ export function ModelConfig() {
                               onClick={handleSaveModel}
                               className="h-8 w-8 hover:bg-green-500/10"
                               title="Save"
+                              aria-label="Save"
                             >
                               <Save className="h-4 w-4 text-green-600 dark:text-green-400" />
                             </Button>
@@ -396,6 +397,7 @@ export function ModelConfig() {
                               onClick={handleCancelEdit}
                               className="h-8 w-8 hover:bg-gray-500/10"
                               title="Cancel"
+                              aria-label="Cancel"
                             >
                               <span className="text-sm">✕</span>
                             </Button>
@@ -415,6 +417,7 @@ export function ModelConfig() {
                               }}
                               className="h-8 w-8 hover:bg-primary/10"
                               title="Edit"
+                              aria-label="Edit"
                             >
                               <Settings className="h-4 w-4" />
                             </Button>
