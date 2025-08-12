@@ -54,6 +54,7 @@ from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
 from .scheduling import (
+    cancel_all_scheduled_tasks,
     cancel_scheduled_task,
     list_scheduled_tasks,
     restore_scheduled_tasks,
@@ -183,7 +184,7 @@ class AgentBot:
         return self.agent_user.agent_name
 
     @cached_property
-    def logger(self) -> structlog.BoundLogger:
+    def logger(self) -> structlog.stdlib.BoundLogger:
         """Get a logger with agent context bound."""
         return logger.bind(agent=emoji(self.agent_name))
 
@@ -204,7 +205,7 @@ class AgentBot:
             if await join_room(self.client, room_id):
                 self.logger.info("Joined room", room_id=room_id)
                 # Restore scheduled tasks for this room
-                restored = await restore_scheduled_tasks(self.client, room_id)
+                restored = await restore_scheduled_tasks(self.client, room_id, self.config)
                 if restored > 0:
                     self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
             else:
@@ -847,7 +848,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901
+    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912
         self.logger.info("Handling command", command_type=command.type.value)
 
         is_thread, thread_id = extract_thread_info(event.source)
@@ -929,24 +930,32 @@ class AgentBot:
             )
 
         elif command.type == CommandType.CANCEL_SCHEDULE:
-            task_id = command.args["task_id"]
             assert self.client is not None
-            response_text = await cancel_scheduled_task(
-                client=self.client,
-                room_id=room.room_id,
-                task_id=task_id,
-            )
+            cancel_all = command.args.get("cancel_all", False)
+
+            if cancel_all:
+                # Cancel all scheduled tasks
+                response_text = await cancel_all_scheduled_tasks(
+                    client=self.client,
+                    room_id=room.room_id,
+                )
+            else:
+                # Cancel specific task
+                task_id = command.args["task_id"]
+                response_text = await cancel_scheduled_task(
+                    client=self.client,
+                    room_id=room.room_id,
+                    task_id=task_id,
+                )
 
         if response_text:
-            # Schedule confirmations should not trigger agent responses from mentions
-            skip_mentions = command.type == CommandType.SCHEDULE
             await self._send_response(
                 room,
                 event.event_id,
                 response_text,
                 thread_id,
                 reply_to_event=event,
-                skip_mentions=skip_mentions,
+                skip_mentions=True,
             )
             self.response_tracker.mark_responded(event.event_id)
 

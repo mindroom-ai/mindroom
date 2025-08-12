@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import sys
+import logging.config
+from datetime import UTC, datetime
+from pathlib import Path
 
 import structlog
 
@@ -50,40 +52,111 @@ def emoji(agent_name: str) -> str:
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """Configure structlog for mindroom.
+    """Configure structlog for mindroom with file and console output.
 
     Args:
         level: Minimum logging level (e.g., "DEBUG", "INFO", "WARNING", "ERROR")
 
     """
-    # Configure structlog with built-in console renderer
+    # Create logs directory if it doesn't exist
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+
+    # Create timestamped log file
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    log_file = logs_dir / f"mindroom_{timestamp}.log"
+
+    # Shared processors that don't affect output format
+    timestamper = structlog.processors.TimeStamper(fmt="iso")
+    pre_chain = [
+        structlog.stdlib.add_log_level,
+        timestamper,
+    ]
+
+    # Configure logging with both console and file handlers
+    logging.config.dictConfig(
+        {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "plain": {
+                    "()": structlog.stdlib.ProcessorFormatter,
+                    "processors": [
+                        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                        structlog.dev.ConsoleRenderer(colors=False),
+                    ],
+                    "foreign_pre_chain": pre_chain,
+                },
+                "colored": {
+                    "()": structlog.stdlib.ProcessorFormatter,
+                    "processors": [
+                        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                        structlog.dev.ConsoleRenderer(colors=True),
+                    ],
+                    "foreign_pre_chain": pre_chain,
+                },
+            },
+            "handlers": {
+                "console": {
+                    "level": level.upper(),
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stderr",
+                    "formatter": "colored",
+                },
+                "file": {
+                    "level": level.upper(),
+                    "class": "logging.FileHandler",
+                    "filename": str(log_file),
+                    "mode": "a",
+                    "encoding": "utf-8",
+                    "formatter": "plain",
+                },
+            },
+            "loggers": {
+                "": {  # Root logger
+                    "handlers": ["console", "file"],
+                    "level": level.upper(),
+                    "propagate": False,
+                },
+                # Reduce verbosity of nio (Matrix) library
+                "nio": {
+                    "level": "WARNING",
+                },
+                "nio.client": {
+                    "level": "WARNING",
+                },
+                "nio.responses": {
+                    "level": "WARNING",
+                },
+            },
+        },
+    )
+
+    # Configure structlog to use stdlib logging
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            timestamper,
+            structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.StackInfoRenderer(),
-            structlog.dev.set_exc_info,
-            structlog.dev.ConsoleRenderer(colors=True),
+            structlog.processors.UnicodeDecoder(),
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level.upper(), logging.INFO)),
-        logger_factory=structlog.WriteLoggerFactory(),
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,
     )
 
-    # Configure standard logging
-    logging.basicConfig(
-        format="%(message)s",
-        level=getattr(logging, level.upper(), logging.INFO),
-        stream=sys.stderr,
-    )
-
-    # Reduce verbosity of nio (Matrix) library
-    logging.getLogger("nio").setLevel(logging.WARNING)
-    logging.getLogger("nio.client").setLevel(logging.WARNING)
-    logging.getLogger("nio.responses").setLevel(logging.WARNING)
+    # Log startup message
+    logger = get_logger(__name__)
+    logger.info("Logging initialized", log_file=str(log_file), level=level)
 
 
-def get_logger(name: str = __name__) -> structlog.BoundLogger:
+def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
     """Get a structlog logger instance.
 
     Args:
