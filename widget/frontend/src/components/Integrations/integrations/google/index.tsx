@@ -35,10 +35,10 @@ class GoogleIntegrationProvider implements IntegrationProvider {
 
   async loadStatus(): Promise<Partial<Integration>> {
     try {
-      const response = await fetch(`${API_BASE}/api/gmail/status`);
+      const response = await fetch(`${API_BASE}/api/google/status`);
       if (response.ok) {
         const data = await response.json();
-        if (data.configured) {
+        if (data.connected) {
           return {
             status: 'connected',
             connected: true,
@@ -56,10 +56,10 @@ class GoogleIntegrationProvider implements IntegrationProvider {
 
   private async checkConnection(): Promise<boolean> {
     try {
-      const response = await fetch(`${API_BASE}/api/gmail/status`);
+      const response = await fetch(`${API_BASE}/api/google/status`);
       if (response.ok) {
         const data = await response.json();
-        return data.configured === true;
+        return data.connected === true;
       }
     } catch (error) {
       console.error('Failed to check Google connection:', error);

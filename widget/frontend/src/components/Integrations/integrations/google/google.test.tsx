@@ -45,20 +45,20 @@ describe('GoogleIntegrationProvider', () => {
     it('should return connected status when configured', async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ configured: true }),
+        json: async () => ({ connected: true }),
       });
 
       const status = await googleIntegration.loadStatus();
 
       expect(status.status).toBe('connected');
       expect(status.connected).toBe(true);
-      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/api/gmail/status'));
+      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/api/google/status'));
     });
 
     it('should return available status when not configured', async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ configured: false }),
+        json: async () => ({ connected: false }),
       });
 
       const status = await googleIntegration.loadStatus();
@@ -81,7 +81,7 @@ describe('GoogleIntegrationProvider', () => {
     it('should return true when configured', async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ configured: true }),
+        json: async () => ({ connected: true }),
       });
 
       const config = googleIntegration.getConfig();
@@ -93,7 +93,7 @@ describe('GoogleIntegrationProvider', () => {
     it('should return false when not configured', async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ configured: false }),
+        json: async () => ({ connected: false }),
       });
 
       const config = googleIntegration.getConfig();
