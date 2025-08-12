@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -12,8 +12,11 @@ import {
 } from '@/components/ui/select';
 import { EditorPanel } from '@/components/shared/EditorPanel';
 import { FieldGroup } from '@/components/shared/FieldGroup';
-import { Eye, EyeOff, TestTube, Save, Plus, Trash2, Settings } from 'lucide-react';
+import { Eye, EyeOff, TestTube, Save, Trash2, Settings, Filter, Sparkles } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
+import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
 
 interface ModelFormData {
   provider: string;
@@ -29,6 +32,7 @@ export function ModelConfig() {
   const [testingModel, setTestingModel] = useState<string | null>(null);
   const [editingModel, setEditingModel] = useState<string | null>(null);
   const [isAddingModel, setIsAddingModel] = useState(false);
+  const [selectedProvider, setSelectedProvider] = useState<string>('all');
   const [modelForm, setModelForm] = useState<ModelFormData>({
     provider: 'ollama',
     id: '',
@@ -36,6 +40,46 @@ export function ModelConfig() {
   });
 
   if (!config) return null;
+
+  // Get unique providers and filter models
+  const providers = useMemo(() => {
+    const providerSet = new Set(Object.values(config.models).map(m => m.provider));
+    return ['all', ...Array.from(providerSet)];
+  }, [config.models]);
+
+  const filteredModels = useMemo(() => {
+    if (selectedProvider === 'all') {
+      return Object.entries(config.models);
+    }
+    return Object.entries(config.models).filter(
+      ([_, model]) => model.provider === selectedProvider
+    );
+  }, [config.models, selectedProvider]);
+
+  // Provider display names and colors
+  const getProviderInfo = (provider: string) => {
+    const info: Record<string, { name: string; color: string; icon?: any }> = {
+      openai: {
+        name: 'OpenAI',
+        color: 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20',
+      },
+      anthropic: {
+        name: 'Anthropic',
+        color: 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20',
+      },
+      ollama: {
+        name: 'Ollama',
+        color: 'bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20',
+      },
+      openrouter: {
+        name: 'OpenRouter',
+        color: 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
+      },
+    };
+    return (
+      info[provider] || { name: provider, color: 'bg-gray-500/10 text-gray-600 dark:text-gray-400' }
+    );
+  };
 
   const handleTestModel = async (modelId: string) => {
     setTestingModel(modelId);
@@ -156,16 +200,52 @@ export function ModelConfig() {
       className="h-full"
     >
       <div className="space-y-6">
-        {/* Add New Model Button */}
-        {!isAddingModel && (
-          <Button
-            onClick={handleAddModel}
-            className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-md transition-all hover:shadow-lg hover-lift"
-          >
-            <Plus className="h-4 w-4 mr-2" />
-            Add New Model
-          </Button>
-        )}
+        {/* Header with Add Button and Provider Filter */}
+        <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
+          {/* Add New Model Button */}
+          {!isAddingModel && (
+            <Button
+              onClick={handleAddModel}
+              className="glass-card hover:glass px-4 py-2 transition-all duration-200 hover:scale-105 shadow-lg hover:shadow-xl"
+              variant="outline"
+            >
+              <Sparkles className="h-4 w-4 mr-2 text-primary" />
+              <span className="font-medium">Add New Model</span>
+            </Button>
+          )}
+
+          {/* Provider Filter Tabs */}
+          {!isAddingModel && providers.length > 1 && (
+            <Tabs
+              value={selectedProvider}
+              onValueChange={setSelectedProvider}
+              className="w-full sm:w-auto"
+            >
+              <TabsList className="glass-subtle grid grid-flow-col auto-cols-fr sm:auto-cols-auto">
+                {providers.map(provider => {
+                  const providerInfo = provider === 'all' ? null : getProviderInfo(provider);
+                  return (
+                    <TabsTrigger
+                      key={provider}
+                      value={provider}
+                      className="capitalize data-[state=active]:glass-card"
+                    >
+                      <Filter
+                        className={cn('h-3 w-3 mr-1.5', provider === 'all' && 'text-primary')}
+                      />
+                      {provider === 'all' ? 'All' : providerInfo?.name}
+                      {provider !== 'all' && (
+                        <Badge variant="secondary" className="ml-1.5 px-1 py-0 text-xs">
+                          {Object.values(config.models).filter(m => m.provider === provider).length}
+                        </Badge>
+                      )}
+                    </TabsTrigger>
+                  );
+                })}
+              </TabsList>
+            </Tabs>
+          )}
+        </div>
 
         {/* New Model Form */}
         {isAddingModel && (
@@ -254,182 +334,218 @@ export function ModelConfig() {
           </Card>
         )}
 
-        {/* Existing Models */}
-        {Object.entries(config.models).map(([modelId, modelConfig]) => (
-          <Card key={modelId} className="shadow-card hover-lift-card">
-            <CardHeader className="pb-4">
-              <CardTitle className="text-lg font-semibold flex items-center justify-between">
-                {modelId}
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => handleTestModel(modelId)}
-                    disabled={testingModel === modelId}
-                    className="hover-lift"
-                  >
-                    <TestTube className="h-4 w-4 mr-1" />
-                    {testingModel === modelId ? 'Testing...' : 'Test'}
-                  </Button>
-                  {editingModel === modelId ? (
-                    <>
-                      <Button size="sm" onClick={handleSaveModel} className="hover-lift">
-                        Save
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={handleCancelEdit}
-                        className="hover-lift"
-                      >
-                        Cancel
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => {
-                          setEditingModel(modelId);
-                          setModelForm({
-                            provider: modelConfig.provider,
-                            id: modelConfig.id,
-                            host: modelConfig.host,
-                          });
-                        }}
-                        className="hover-lift"
-                      >
-                        Edit
-                      </Button>
-                      {modelId !== 'default' && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => handleDeleteModel(modelId)}
-                          className="hover-lift text-destructive hover:bg-destructive/10"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      )}
-                    </>
-                  )}
-                </div>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {editingModel === modelId ? (
-                <>
-                  <FieldGroup
-                    label="Provider"
-                    helperText="The AI provider for this model"
-                    required
-                    htmlFor={`provider-${modelId}`}
-                  >
-                    <Select
-                      value={modelForm.provider}
-                      onValueChange={value => setModelForm({ ...modelForm, provider: value })}
-                    >
-                      <SelectTrigger id={`provider-${modelId}`}>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="openai">OpenAI</SelectItem>
-                        <SelectItem value="anthropic">Anthropic</SelectItem>
-                        <SelectItem value="ollama">Ollama</SelectItem>
-                        <SelectItem value="openrouter">OpenRouter</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </FieldGroup>
-
-                  <FieldGroup
-                    label="Model ID"
-                    helperText="The actual model identifier used by the provider"
-                    required
-                    htmlFor={`model-id-${modelId}`}
-                  >
-                    <Input
-                      id={`model-id-${modelId}`}
-                      value={modelForm.id}
-                      onChange={e => setModelForm({ ...modelForm, id: e.target.value })}
-                      placeholder="e.g., gpt-4, claude-3, llama2"
-                    />
-                  </FieldGroup>
-
-                  {modelForm.provider === 'ollama' && (
-                    <FieldGroup
-                      label="Host"
-                      helperText="The URL where your Ollama server is running"
-                      htmlFor={`host-${modelId}`}
-                    >
-                      <Input
-                        id={`host-${modelId}`}
-                        value={modelForm.host || ''}
-                        onChange={e => setModelForm({ ...modelForm, host: e.target.value })}
-                        placeholder="http://localhost:11434"
-                      />
-                    </FieldGroup>
-                  )}
-                </>
-              ) : (
-                <>
-                  <div className="grid grid-cols-2 gap-2 text-sm">
-                    <div>
-                      <span className="text-gray-500 dark:text-gray-400">Provider:</span>{' '}
-                      {modelConfig.provider}
-                    </div>
-                    <div>
-                      <span className="text-gray-500 dark:text-gray-400">Model:</span>{' '}
-                      {modelConfig.id}
-                    </div>
-                    {modelConfig.host && (
-                      <div className="col-span-2">
-                        <span className="text-gray-500 dark:text-gray-400">Host:</span>{' '}
-                        {modelConfig.host}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* API Key Management */}
-                  {modelConfig.provider !== 'ollama' && (
-                    <FieldGroup
-                      label="API Key"
-                      helperText={`Enter your ${modelConfig.provider.toUpperCase()} API key`}
-                      required
-                      htmlFor={`api-key-${modelId}`}
-                      actions={
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() =>
-                            setShowKeys({
-                              ...showKeys,
-                              [modelConfig.provider]: !showKeys[modelConfig.provider],
-                            })
-                          }
-                        >
-                          {showKeys[modelConfig.provider] ? (
-                            <EyeOff className="h-4 w-4" />
-                          ) : (
-                            <Eye className="h-4 w-4" />
-                          )}
-                        </Button>
-                      }
-                    >
-                      <Input
-                        id={`api-key-${modelId}`}
-                        type={showKeys[modelConfig.provider] ? 'text' : 'password'}
-                        value={apiKeys[modelConfig.provider]?.key || ''}
-                        onChange={e => setAPIKey(modelConfig.provider, e.target.value)}
-                        placeholder="Enter API key..."
-                      />
-                    </FieldGroup>
-                  )}
-                </>
-              )}
-            </CardContent>
+        {/* Existing Models Grid */}
+        {filteredModels.length === 0 ? (
+          <Card className="glass-subtle p-8 text-center">
+            <div className="text-muted-foreground">
+              <Sparkles className="h-12 w-12 mx-auto mb-3 opacity-30" />
+              <p className="text-sm">No models found for the selected provider.</p>
+              <p className="text-xs mt-1">Try selecting a different provider or add a new model.</p>
+            </div>
           </Card>
-        ))}
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {filteredModels.map(([modelId, modelConfig]) => {
+              const providerInfo = getProviderInfo(modelConfig.provider);
+              return (
+                <Card
+                  key={modelId}
+                  className={cn(
+                    'glass-card hover:glass transition-all duration-200 hover:scale-[1.02]',
+                    'relative overflow-hidden'
+                  )}
+                >
+                  <CardHeader className="pb-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <CardTitle className="text-base font-semibold truncate">
+                          {modelId}
+                        </CardTitle>
+                        <Badge
+                          variant="outline"
+                          className={cn('mt-1.5 text-xs', providerInfo.color)}
+                        >
+                          {providerInfo.name}
+                        </Badge>
+                      </div>
+                      <div className="flex gap-1">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => handleTestModel(modelId)}
+                          disabled={testingModel === modelId}
+                          className="h-8 w-8 hover:bg-primary/10"
+                          title="Test Connection"
+                        >
+                          <TestTube className="h-4 w-4" />
+                        </Button>
+                        {editingModel === modelId ? (
+                          <>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={handleSaveModel}
+                              className="h-8 w-8 hover:bg-green-500/10"
+                              title="Save"
+                            >
+                              <Save className="h-4 w-4 text-green-600 dark:text-green-400" />
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={handleCancelEdit}
+                              className="h-8 w-8 hover:bg-gray-500/10"
+                              title="Cancel"
+                            >
+                              <span className="text-sm">✕</span>
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={() => {
+                                setEditingModel(modelId);
+                                setModelForm({
+                                  provider: modelConfig.provider,
+                                  id: modelConfig.id,
+                                  host: modelConfig.host,
+                                });
+                              }}
+                              className="h-8 w-8 hover:bg-primary/10"
+                              title="Edit"
+                            >
+                              <Settings className="h-4 w-4" />
+                            </Button>
+                            {modelId !== 'default' && (
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                onClick={() => handleDeleteModel(modelId)}
+                                className="h-8 w-8 hover:bg-destructive/10"
+                                title="Delete"
+                              >
+                                <Trash2 className="h-4 w-4 text-destructive" />
+                              </Button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-3 pt-2">
+                    {editingModel === modelId ? (
+                      <>
+                        <FieldGroup
+                          label="Provider"
+                          helperText=""
+                          required
+                          htmlFor={`provider-${modelId}`}
+                        >
+                          <Select
+                            value={modelForm.provider}
+                            onValueChange={value => setModelForm({ ...modelForm, provider: value })}
+                          >
+                            <SelectTrigger id={`provider-${modelId}`} className="h-9">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="openai">OpenAI</SelectItem>
+                              <SelectItem value="anthropic">Anthropic</SelectItem>
+                              <SelectItem value="ollama">Ollama</SelectItem>
+                              <SelectItem value="openrouter">OpenRouter</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </FieldGroup>
+
+                        <FieldGroup
+                          label="Model ID"
+                          helperText=""
+                          required
+                          htmlFor={`model-id-${modelId}`}
+                        >
+                          <Input
+                            id={`model-id-${modelId}`}
+                            value={modelForm.id}
+                            onChange={e => setModelForm({ ...modelForm, id: e.target.value })}
+                            placeholder="e.g., gpt-4, claude-3, llama2"
+                            className="h-9"
+                          />
+                        </FieldGroup>
+
+                        {modelForm.provider === 'ollama' && (
+                          <FieldGroup label="Host" helperText="" htmlFor={`host-${modelId}`}>
+                            <Input
+                              id={`host-${modelId}`}
+                              value={modelForm.host || ''}
+                              onChange={e => setModelForm({ ...modelForm, host: e.target.value })}
+                              placeholder="http://localhost:11434"
+                              className="h-9"
+                            />
+                          </FieldGroup>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <div className="space-y-1.5 text-sm">
+                          <div className="flex items-center gap-2">
+                            <span className="text-muted-foreground">Model:</span>
+                            <code className="text-xs bg-muted px-1.5 py-0.5 rounded">
+                              {modelConfig.id}
+                            </code>
+                          </div>
+                          {modelConfig.host && (
+                            <div className="flex items-center gap-2">
+                              <span className="text-muted-foreground">Host:</span>
+                              <code className="text-xs bg-muted px-1.5 py-0.5 rounded truncate max-w-[150px]">
+                                {modelConfig.host}
+                              </code>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* API Key Management */}
+                        {modelConfig.provider !== 'ollama' && (
+                          <div className="space-y-1">
+                            <label className="text-xs text-muted-foreground">API Key</label>
+                            <div className="flex gap-1">
+                              <Input
+                                id={`api-key-${modelId}`}
+                                type={showKeys[modelConfig.provider] ? 'text' : 'password'}
+                                value={apiKeys[modelConfig.provider]?.key || ''}
+                                onChange={e => setAPIKey(modelConfig.provider, e.target.value)}
+                                placeholder="Enter API key..."
+                                className="h-9 text-sm"
+                              />
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                onClick={() =>
+                                  setShowKeys({
+                                    ...showKeys,
+                                    [modelConfig.provider]: !showKeys[modelConfig.provider],
+                                  })
+                                }
+                                className="h-9 w-9 shrink-0"
+                              >
+                                {showKeys[modelConfig.provider] ? (
+                                  <EyeOff className="h-3.5 w-3.5" />
+                                ) : (
+                                  <Eye className="h-3.5 w-3.5" />
+                                )}
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        )}
 
         {/* Save All Changes Button */}
         <div className="pt-6 border-t border-border">
