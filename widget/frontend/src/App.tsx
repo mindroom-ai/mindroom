@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { BrowserRouter, useNavigate, useLocation } from 'react-router-dom';
 import { useConfigStore } from '@/store/configStore';
 import { AgentList } from '@/components/AgentList/AgentList';
 import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
@@ -21,11 +22,21 @@ const queryClient = new QueryClient();
 
 function AppContent() {
   const { loadConfig, syncStatus, error } = useConfigStore();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  // Get the current tab from URL or default to 'dashboard'
+  const currentTab = location.pathname.slice(1) || 'dashboard';
 
   useEffect(() => {
     // Load configuration on mount
     loadConfig();
   }, [loadConfig]);
+
+  // Handle tab change - update the URL
+  const handleTabChange = (value: string) => {
+    navigate(`/${value}`);
+  };
 
   if (error) {
     return (
@@ -70,7 +81,7 @@ function AppContent() {
 
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">
-          <Tabs defaultValue="dashboard" className="h-full flex flex-col">
+          <Tabs value={currentTab} onValueChange={handleTabChange} className="h-full flex flex-col">
             <TabsList className="px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0">
               <TabsTrigger
                 value="dashboard"
@@ -183,10 +194,12 @@ function AppContent() {
 
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
-        <AppContent />
-      </ThemeProvider>
-    </QueryClientProvider>
+    <BrowserRouter>
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider>
+          <AppContent />
+        </ThemeProvider>
+      </QueryClientProvider>
+    </BrowserRouter>
   );
 }
