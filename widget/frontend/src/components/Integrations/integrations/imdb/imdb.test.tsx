@@ -92,8 +92,8 @@ describe('IMDbIntegrationProvider', () => {
 
       expect(localStorageMock.removeItem).toHaveBeenCalledWith('imdb_configured');
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/integrations/imdb/disconnect'),
-        expect.objectContaining({ method: 'POST' })
+        expect.stringContaining('/api/credentials/imdb'),
+        expect.objectContaining({ method: 'DELETE' })
       );
     });
 
@@ -123,7 +123,7 @@ describe('IMDbIntegrationProvider', () => {
       localStorageMock.getItem.mockReturnValue(null);
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ connected: true }),
+        json: async () => ({ has_key: true }),
       });
 
       const config = imdbIntegration.getConfig();
@@ -131,7 +131,7 @@ describe('IMDbIntegrationProvider', () => {
 
       expect(isConnected).toBe(true);
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/integrations/imdb/status')
+        expect.stringContaining('/api/credentials/imdb/api-key')
       );
     });
 

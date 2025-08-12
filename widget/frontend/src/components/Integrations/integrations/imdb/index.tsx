@@ -1,7 +1,7 @@
 import { FaImdb } from 'react-icons/fa';
 import { Integration, IntegrationProvider, IntegrationConfig } from '../types';
 import { API_BASE } from '@/lib/api';
-import { IMDbConfigDialog } from './IMDbConfigDialog';
+import { IMDbConfigWrapper } from './IMDbConfigWrapper';
 
 class IMDbIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
@@ -22,7 +22,7 @@ class IMDbIntegrationProvider implements IntegrationProvider {
         // Parent component will handle showing the config dialog
       },
       onDisconnect: this.disconnect.bind(this),
-      ConfigComponent: IMDbConfigDialog,
+      ConfigComponent: IMDbConfigWrapper,
       checkConnection: this.checkConnection.bind(this),
     };
   }
@@ -37,10 +37,10 @@ class IMDbIntegrationProvider implements IntegrationProvider {
 
   private async disconnect(_integrationId: string): Promise<void> {
     localStorage.removeItem('imdb_configured');
-    // Optionally call backend to remove stored credentials
+    // Remove credentials using unified API
     try {
-      await fetch(`${API_BASE}/api/integrations/imdb/disconnect`, {
-        method: 'POST',
+      await fetch(`${API_BASE}/api/credentials/imdb`, {
+        method: 'DELETE',
       });
     } catch (error) {
       console.error('Failed to disconnect IMDb:', error);
@@ -48,16 +48,20 @@ class IMDbIntegrationProvider implements IntegrationProvider {
   }
 
   private async checkConnection(): Promise<boolean> {
-    // Check localStorage first
+    // Check localStorage first (for backward compatibility)
     const localConfig = localStorage.getItem('imdb_configured');
     if (localConfig) return true;
 
-    // Then check backend
+    // Check using unified credentials API
     try {
-      const response = await fetch(`${API_BASE}/api/integrations/imdb/status`);
+      const response = await fetch(`${API_BASE}/api/credentials/imdb/api-key`);
       if (response.ok) {
         const data = await response.json();
-        return data.connected === true;
+        if (data.has_key) {
+          // Update localStorage for consistency
+          localStorage.setItem('imdb_configured', 'true');
+          return true;
+        }
       }
     } catch (error) {
       console.error('Failed to check IMDb connection:', error);
