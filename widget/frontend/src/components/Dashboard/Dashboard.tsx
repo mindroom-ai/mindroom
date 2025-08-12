@@ -358,9 +358,9 @@ export function Dashboard() {
                 Click an agent to see details
               </CardDescription>
             </CardHeader>
-            <CardContent className="p-2 flex-1 overflow-y-auto min-h-0">
+            <CardContent className="p-0 flex-1 overflow-y-auto min-h-0">
               <ScrollArea className="h-96">
-                <div className={sharedStyles.list.containerWithSpacing}>
+                <div className={`${sharedStyles.list.containerWithSpacing} p-4`}>
                   {filteredData.agents.map(agent => {
                     const badges: ItemCardBadge[] = [];
                     const agentTeams = teams.filter(team => team.agents.includes(agent.id));
@@ -433,9 +433,9 @@ export function Dashboard() {
                 Click a room to see details
               </CardDescription>
             </CardHeader>
-            <CardContent className="p-2 flex-1 overflow-y-auto min-h-0">
+            <CardContent className="p-0 flex-1 overflow-y-auto min-h-0">
               <ScrollArea className="h-96">
-                <div className={sharedStyles.list.containerWithSpacing}>
+                <div className={`${sharedStyles.list.containerWithSpacing} p-4`}>
                   {filteredData.rooms.map(room => {
                     const badges: ItemCardBadge[] = [
                       {
