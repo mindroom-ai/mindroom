@@ -196,6 +196,28 @@ agents:
     - research
     - docs
     tools: []
+  email_assistant:
+    display_name: EmailAssistant
+    role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's intelligence
+    tools:
+    - gmail
+    - file
+    instructions:
+    - Search and retrieve emails based on user queries
+    - Provide concise summaries of important unread emails
+    - Draft professional and contextually appropriate email responses
+    - Help organize and manage the inbox efficiently
+    - Extract key information, action items, and deadlines from emails
+    - Identify urgent or high-priority messages
+    - Never send emails without explicit user confirmation
+    - Respect privacy - only access emails when specifically requested
+    - When summarizing, focus on sender, subject, and key points
+    - For email drafts, maintain appropriate tone and formality based on context
+    rooms:
+    - lobby
+    - productivity
+    num_history_runs: 5
+    model: sonnet
 defaults:
   add_history_to_messages: true
   markdown: true
@@ -242,7 +264,7 @@ models:
     id: claude-3-5-haiku-latest
     provider: anthropic
   sonnet:
-    id: claude-3-5-haiku-latest
+    id: claude-3-5-sonnet-latest
     provider: anthropic
 room_models:
   research: haiku

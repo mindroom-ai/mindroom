@@ -1,11 +1,10 @@
 import { useConfigStore } from '@/store/configStore';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Plus, Users, Search } from 'lucide-react';
 import { useState } from 'react';
-import { cn } from '@/lib/utils';
 
 export function TeamList() {
   const { teams, selectedTeamId, selectTeam, createTeam } = useConfigStore();
@@ -60,99 +59,81 @@ export function TeamList() {
           />
         </div>
       </CardHeader>
-      <CardContent className="flex-1 overflow-hidden p-0">
-        <ScrollArea className="h-full px-4">
-          {isCreating && (
-            <div className="mb-2 p-3 border rounded-lg bg-blue-50">
-              <Input
-                placeholder="Team name..."
-                value={newTeamName}
-                onChange={e => setNewTeamName(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') handleCreateTeam();
-                  if (e.key === 'Escape') {
-                    setIsCreating(false);
-                    setNewTeamName('');
-                  }
-                }}
-                autoFocus
-                className="mb-2"
-              />
-              <div className="flex gap-2">
-                <Button size="sm" onClick={handleCreateTeam}>
+      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+        {isCreating && (
+          <Card className="border-2 border-orange-500">
+            <CardContent className="p-3">
+              <div className="flex items-center gap-2">
+                <Input
+                  placeholder="Team name..."
+                  value={newTeamName}
+                  onChange={e => setNewTeamName(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') handleCreateTeam();
+                    if (e.key === 'Escape') {
+                      setIsCreating(false);
+                      setNewTeamName('');
+                    }
+                  }}
+                  autoFocus
+                  className="flex-1"
+                />
+                <Button size="sm" onClick={handleCreateTeam} variant="default">
                   Create
                 </Button>
                 <Button
                   size="sm"
-                  variant="ghost"
                   onClick={() => {
                     setIsCreating(false);
                     setNewTeamName('');
                   }}
+                  variant="ghost"
                 >
                   Cancel
                 </Button>
               </div>
-            </div>
-          )}
-          <div className="space-y-2 pb-4">
-            {filteredTeams.map(team => (
-              <button
-                key={team.id}
-                onClick={() => selectTeam(team.id)}
-                className={cn(
-                  'w-full text-left p-3 rounded-lg transition-all duration-200',
-                  'hover:shadow-md hover:scale-[1.02]',
-                  selectedTeamId === team.id
-                    ? 'bg-gradient-to-r from-blue-500 to-purple-500 text-white shadow-lg'
-                    : 'bg-white border border-gray-200 hover:border-blue-300'
-                )}
-              >
+            </CardContent>
+          </Card>
+        )}
+
+        {filteredTeams.length === 0 && !isCreating ? (
+          <div className="text-center py-8 text-muted-foreground">
+            <Users className="h-12 w-12 mx-auto mb-3 opacity-20" />
+            <p className="text-sm">No teams found</p>
+            <p className="text-xs mt-1">Click "+" to create one</p>
+          </div>
+        ) : (
+          filteredTeams.map(team => (
+            <Card
+              key={team.id}
+              className={`cursor-pointer transition-all hover:shadow-md hover:scale-[1.01] ${
+                selectedTeamId === team.id
+                  ? 'ring-2 ring-orange-500 bg-gradient-to-r from-orange-500/10 to-amber-500/10'
+                  : ''
+              }`}
+              onClick={() => selectTeam(team.id)}
+            >
+              <CardContent className="p-4">
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
-                    <h3
-                      className={cn(
-                        'font-semibold',
-                        selectedTeamId === team.id ? 'text-white' : 'text-gray-900'
-                      )}
-                    >
-                      {team.display_name}
-                    </h3>
-                    <p
-                      className={cn(
-                        'text-sm mt-1 line-clamp-2',
-                        selectedTeamId === team.id ? 'text-blue-100' : 'text-gray-600'
-                      )}
-                    >
-                      {team.role}
-                    </p>
-                    <div className="flex items-center gap-4 mt-2">
-                      <span
-                        className={cn(
-                          'text-xs',
-                          selectedTeamId === team.id ? 'text-blue-100' : 'text-gray-500'
-                        )}
-                      >
+                    <h3 className="font-medium text-sm">{team.display_name}</h3>
+                    <p className="text-xs text-muted-foreground mt-1">{team.role}</p>
+                    <div className="flex items-center gap-2 mt-2">
+                      <Badge variant="secondary" className="text-xs">
+                        <Users className="h-3 w-3 mr-1" />
                         {team.agents.length} agents
-                      </span>
-                      <span
-                        className={cn(
-                          'text-xs px-2 py-0.5 rounded-full',
-                          selectedTeamId === team.id
-                            ? 'bg-white/20 text-white'
-                            : 'bg-gray-100 text-gray-600'
-                        )}
-                      >
-                        {team.mode}
-                      </span>
+                      </Badge>
+                      <Badge variant="outline" className="text-xs">
+                        Mode: {team.mode}
+                      </Badge>
                     </div>
                   </div>
                 </div>
-              </button>
-            ))}
-          </div>
-        </ScrollArea>
-      </CardContent>
+              </CardContent>
+            </Card>
+          ))
+        )}
+      </div>
     </Card>
   );
 }

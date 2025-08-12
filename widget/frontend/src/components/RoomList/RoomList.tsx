@@ -101,9 +101,9 @@ export function RoomList() {
           filteredRooms.map(room => (
             <Card
               key={room.id}
-              className={`cursor-pointer transition-all hover:shadow-md ${
+              className={`cursor-pointer transition-all hover:shadow-md hover:scale-[1.01] ${
                 selectedRoomId === room.id
-                  ? 'ring-2 ring-blue-500 bg-gradient-to-r from-blue-500/10 to-purple-500/10'
+                  ? 'ring-2 ring-orange-500 bg-gradient-to-r from-orange-500/10 to-amber-500/10'
                   : ''
               }`}
               onClick={() => selectRoom(room.id)}

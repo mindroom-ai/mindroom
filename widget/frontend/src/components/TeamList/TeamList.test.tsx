@@ -56,8 +56,8 @@ describe('TeamList', () => {
     // Both teams have 2 agents, so there should be 2 elements with "2 agents"
     const agentCounts = screen.getAllByText('2 agents');
     expect(agentCounts).toHaveLength(2);
-    expect(screen.getAllByText('coordinate')[0]).toBeInTheDocument();
-    expect(screen.getAllByText('collaborate')[0]).toBeInTheDocument();
+    expect(screen.getByText('Mode: coordinate')).toBeInTheDocument();
+    expect(screen.getByText('Mode: collaborate')).toBeInTheDocument();
   });
 
   it('filters teams based on search input', () => {
@@ -83,8 +83,8 @@ describe('TeamList', () => {
   it('calls selectTeam when a team is clicked', () => {
     render(<TeamList />);
 
-    const devTeamButton = screen.getByText('Dev Team').closest('button');
-    fireEvent.click(devTeamButton!);
+    const devTeamCard = screen.getByText('Dev Team').closest('.rounded-xl');
+    fireEvent.click(devTeamCard!);
 
     expect(mockSelectTeam).toHaveBeenCalledWith('dev_team');
   });
@@ -99,8 +99,8 @@ describe('TeamList', () => {
 
     render(<TeamList />);
 
-    const devTeamButton = screen.getByText('Dev Team').closest('button');
-    expect(devTeamButton).toHaveClass('bg-gradient-to-r', 'from-blue-500', 'to-purple-500');
+    const devTeamCard = screen.getByText('Dev Team').closest('.rounded-xl');
+    expect(devTeamCard).toHaveClass('ring-2', 'ring-orange-500');
   });
 
   it('shows create team form when plus button is clicked', () => {

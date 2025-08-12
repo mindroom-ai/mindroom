@@ -10,15 +10,25 @@ classifiers = [
 ]
 dependencies = [
   "cryptography>=42",
+  "dropbox>=12.0.2",
   "fastapi>=0.109",
+  "google-api-python-client>=2.178",
+  "google-auth>=2.40.3",
+  "google-auth-httplib2>=0.2",
+  "google-auth-oauthlib>=1.2.2",
   "httpx>=0.26",
+  "imdbpy>=2022.7.9",
   "mindroom",
+  "praw>=7.8.1",
   "pydantic>=2.5.3",
   "pydantic-settings>=2.1",
   "python-jose[cryptography]>=3.3",
   "python-multipart>=0.0.6",
+  "python-telegram-bot>=22.3",
   "pyyaml>=6.0.1",
   "redis>=5.0.1",
+  "requests>=2.32.4",
+  "spotipy>=2.25.1",
   "uvicorn>=0.27",
   "watchdog>=3",
 ]
@@ -27,6 +37,7 @@ dependencies = [
 dev = [
   "pytest>=7.4",
   "pytest-asyncio>=0.21",
+  "types-requests>=2.32.4.20250611",
 ]
 
 [tool.uv.sources]

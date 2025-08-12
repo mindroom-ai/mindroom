@@ -13,18 +13,22 @@
     "screenshot": "node scripts/screenshot.cjs",
     "test": "vitest",
     "test:ui": "vitest --ui",
-    "test:coverage": "vitest --coverage"
+    "test:coverage": "vitest --coverage",
+    "test:e2e": "node ../e2e-tests/gmail-oauth.test.js",
+    "test:unit": "vitest run --reporter=verbose"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.2",
     "@radix-ui/react-checkbox": "^1.0.4",
     "@radix-ui/react-dialog": "^1.1.14",
+    "@radix-ui/react-dropdown-menu": "^2.1.15",
     "@radix-ui/react-label": "^2.1.7",
     "@radix-ui/react-scroll-area": "^1.2.9",
     "@radix-ui/react-select": "^2.0.0",
     "@radix-ui/react-slot": "^1.2.3",
     "@radix-ui/react-tabs": "^1.0.4",
     "@radix-ui/react-toast": "^1.1.5",
+    "@radix-ui/react-toggle-group": "^1.1.10",
     "@tanstack/react-query": "^5.12.2",
     "@types/js-yaml": "^4.0.9",
     "class-variance-authority": "^0.7.1",
@@ -35,6 +39,7 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hook-form": "^7.48.2",
+    "react-icons": "^5.5.0",
     "tailwind-merge": "^2.2.0",
     "zod": "^3.22.4",
     "zustand": "^4.4.7"

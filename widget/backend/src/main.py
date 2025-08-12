@@ -1,9 +1,10 @@
-# ruff: noqa: INP001 D100
+# ruff: noqa: D100
 import threading
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -12,15 +13,32 @@ from watchdog.observers import Observer
 
 from mindroom.config import Config
 
+# Import routers
+from src.api.google_integration import router as google_router
+from src.api.integrations import router as integrations_router
+from src.api.tools import router as tools_router
+
+# Load environment variables from .env file
+# Look for .env in the widget directory (parent of backend)
+env_path = Path(__file__).parent.parent.parent / ".env"
+load_dotenv(env_path)
+
 app = FastAPI(title="MindRoom Widget Backend")
 
-# Configure CORS for widget
+# Configure CORS for widget - allow multiple origins including port forwarding
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3003", "http://localhost:5173"],  # Vite dev server
+    allow_origins=[
+        "http://localhost:3003",  # Frontend dev server alternative port
+        "http://localhost:5173",  # Vite dev server default
+        "http://127.0.0.1:3003",  # Alternative localhost
+        "http://127.0.0.1:5173",
+        "*",  # Allow all origins for development (remove in production)
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Path to the config.yaml file (go up to mindroom root)
@@ -72,6 +90,11 @@ load_config_from_file()
 observer = Observer()
 observer.schedule(ConfigFileHandler(), path=str(CONFIG_PATH.parent), recursive=False)
 observer.start()
+
+# Include routers
+app.include_router(google_router)
+app.include_router(integrations_router)
+app.include_router(tools_router)
 
 
 @app.on_event("startup")
@@ -372,6 +395,8 @@ async def get_available_tools() -> list[str]:
         "github",
         "email",
         "telegram",
+        "gmail",
+        "integrations",
     ]
 
 
@@ -405,4 +430,4 @@ async def encrypt_api_key(data: dict[str, str]) -> dict[str, str]:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)  # noqa: S104
+    uvicorn.run(app, host="0.0.0.0", port=8765)  # noqa: S104

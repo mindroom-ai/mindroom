@@ -24,11 +24,7 @@ export function AgentList() {
       <CardHeader className="pb-3 flex-shrink-0">
         <div className="flex items-center justify-between">
           <CardTitle>Agents</CardTitle>
-          <Button
-            size="sm"
-            onClick={handleCreateAgent}
-            className="h-8 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-sm"
-          >
+          <Button size="sm" onClick={handleCreateAgent} className="h-8">
             <Plus className="h-4 w-4 mr-1" />
             Add
           </Button>
@@ -42,20 +38,22 @@ export function AgentList() {
               onClick={() => selectAgent(agent.id)}
               className={cn(
                 'w-full text-left px-3 py-2 rounded-lg transition-all duration-200',
-                'hover:bg-gray-100 hover:shadow-sm flex items-center gap-2',
+                'hover:bg-gray-100 dark:hover:bg-white/5 hover:shadow-sm hover:scale-[1.01] flex items-center gap-2 transition-all duration-200',
                 selectedAgentId === agent.id &&
-                  'bg-gradient-to-r from-blue-50 to-purple-50 hover:from-blue-100 hover:to-purple-100 shadow-sm'
+                  'bg-amber-50 dark:bg-gradient-to-r dark:from-primary/20 dark:to-primary/10 hover:bg-amber-100 dark:hover:from-primary/30 dark:hover:to-primary/20 shadow-sm dark:shadow-lg backdrop-blur-xl'
               )}
             >
               <Bot
                 className={cn(
                   'h-4 w-4 transition-colors',
-                  selectedAgentId === agent.id ? 'text-blue-600' : 'text-gray-500'
+                  selectedAgentId === agent.id
+                    ? 'text-primary dark:text-primary'
+                    : 'text-gray-500 dark:text-gray-400'
                 )}
               />
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-sm">{agent.display_name}</div>
-                <div className="text-xs text-gray-500 truncate">
+                <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
                   {agent.tools.length} tools • {agent.rooms.length} rooms
                 </div>
               </div>

@@ -2,50 +2,74 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer utilities {
+  .glass {
+    @apply backdrop-blur-xl bg-white/70 dark:bg-stone-900/70 border border-white/20 dark:border-white/10;
+  }
+  .glass-subtle {
+    @apply backdrop-blur-md bg-white/50 dark:bg-stone-900/50 border border-white/10 dark:border-white/5;
+  }
+  .glass-card {
+    @apply backdrop-blur-xl bg-white/60 dark:bg-stone-900/60 border border-white/20 dark:border-white/10 shadow-xl;
+  }
+  .gradient-mesh {
+    background-image: radial-gradient(at 27% 37%, hsla(35, 90%, 48%, 0.25) 0px, transparent 50%),
+      radial-gradient(at 97% 21%, hsla(30, 50%, 60%, 0.2) 0px, transparent 50%),
+      radial-gradient(at 52% 99%, hsla(35, 90%, 48%, 0.15) 0px, transparent 50%);
+  }
+  .gradient-mesh-dark {
+    background-image: radial-gradient(at 27% 37%, hsla(35, 90%, 48%, 0.15) 0px, transparent 50%),
+      radial-gradient(at 97% 21%, hsla(30, 50%, 60%, 0.12) 0px, transparent 50%),
+      radial-gradient(at 52% 99%, hsla(35, 90%, 48%, 0.1) 0px, transparent 50%);
+  }
+}
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
+    /* Light mode - warm, minimal palette */
+    --background: 30 20% 98%; /* Very light warm gray */
+    --foreground: 25 25% 15%; /* Dark warm gray */
+    --card: 30 20% 100%; /* Pure white with hint of warmth */
+    --card-foreground: 25 25% 15%;
+    --popover: 30 20% 100%;
+    --popover-foreground: 25 25% 15%;
+    --primary: 35 90% 48%; /* Warm amber/orange */
+    --primary-foreground: 30 20% 98%;
+    --secondary: 30 15% 92%; /* Light warm gray */
+    --secondary-foreground: 25 25% 15%;
+    --muted: 30 10% 88%; /* Muted warm gray */
+    --muted-foreground: 25 15% 40%;
+    --accent: 35 90% 48%; /* Same as primary for consistency */
+    --accent-foreground: 30 20% 98%;
+    --destructive: 0 72% 51%; /* Warm red */
+    --destructive-foreground: 30 20% 98%;
+    --border: 30 15% 90%; /* Subtle warm gray border */
+    --input: 30 15% 90%;
+    --ring: 35 90% 48%;
     --radius: 0.5rem;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 224.3 76.3% 48%;
+    /* Dark mode - warm, minimal palette */
+    --background: 25 15% 10%; /* Very dark warm gray */
+    --foreground: 30 15% 88%; /* Light warm gray */
+    --card: 25 12% 14%; /* Slightly lighter warm gray */
+    --card-foreground: 30 15% 88%;
+    --popover: 25 12% 14%;
+    --popover-foreground: 30 15% 88%;
+    --primary: 35 90% 48%; /* Same warm amber/orange */
+    --primary-foreground: 25 15% 10%;
+    --secondary: 25 10% 20%; /* Dark warm gray */
+    --secondary-foreground: 30 15% 88%;
+    --muted: 25 8% 25%; /* Muted dark warm gray */
+    --muted-foreground: 30 10% 65%;
+    --accent: 35 90% 48%; /* Same as primary for consistency */
+    --accent-foreground: 25 15% 10%;
+    --destructive: 0 62% 45%; /* Warm red for dark mode */
+    --destructive-foreground: 30 15% 88%;
+    --border: 25 10% 22%; /* Subtle dark warm gray border */
+    --input: 25 10% 22%;
+    --ring: 35 90% 48%;
   }
 }
 
@@ -54,6 +78,62 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings:
+      'kern' 1,
+      'liga' 1,
+      'calt' 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Typography improvements */
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply tracking-tight font-semibold;
+  }
+
+  p {
+    @apply leading-relaxed;
+  }
+
+  /* Smoother animations */
+  * {
+    @apply transition-colors duration-200;
+  }
+
+  /* Custom scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300/50 dark:bg-stone-700/50 rounded-full;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400/70 dark:bg-stone-600/70;
+  }
+
+  /* Firefox scrollbar styling */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
+  }
+
+  .dark * {
+    scrollbar-color: rgba(68, 64, 60, 0.5) transparent;
   }
 }

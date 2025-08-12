@@ -84,7 +84,7 @@ export function AgentEditor() {
   if (!selectedAgent) {
     return (
       <Card className="h-full flex items-center justify-center">
-        <div className="text-gray-500 text-center">
+        <div className="text-gray-500 dark:text-gray-400 text-center">
           <FileCode className="h-12 w-12 mx-auto mb-2 text-gray-300" />
           <p>Select an agent to edit</p>
         </div>
@@ -323,7 +323,7 @@ export function AgentEditor() {
                       return (
                         <div
                           key={room.id}
-                          className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50"
+                          className="flex items-center space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200"
                         >
                           <Checkbox
                             id={`room-${room.id}`}
@@ -339,7 +339,9 @@ export function AgentEditor() {
                           <label htmlFor={`room-${room.id}`} className="flex-1 cursor-pointer">
                             <div className="font-medium text-sm">{room.display_name}</div>
                             {room.description && (
-                              <div className="text-xs text-gray-500">{room.description}</div>
+                              <div className="text-xs text-gray-500 dark:text-gray-400">
+                                {room.description}
+                              </div>
                             )}
                           </label>
                         </div>

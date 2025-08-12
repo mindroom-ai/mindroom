@@ -180,7 +180,7 @@ export function ModelConfig() {
                     onChange={e => setModelForm({ ...modelForm, configId: e.target.value })}
                     placeholder="e.g., openrouter-gpt4, anthropic-claude3"
                   />
-                  <p className="text-xs text-gray-500 mt-1">
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     A unique name to identify this model configuration
                   </p>
                 </div>
@@ -208,7 +208,7 @@ export function ModelConfig() {
                     onChange={e => setModelForm({ ...modelForm, id: e.target.value })}
                     placeholder="e.g., gpt-4, claude-3-opus, meta-llama/llama-3-70b"
                   />
-                  <p className="text-xs text-gray-500 mt-1">
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     The actual model identifier used by the provider
                   </p>
                 </div>
@@ -332,14 +332,17 @@ export function ModelConfig() {
                   <>
                     <div className="grid grid-cols-2 gap-2 text-sm">
                       <div>
-                        <span className="text-gray-500">Provider:</span> {modelConfig.provider}
+                        <span className="text-gray-500 dark:text-gray-400">Provider:</span>{' '}
+                        {modelConfig.provider}
                       </div>
                       <div>
-                        <span className="text-gray-500">Model:</span> {modelConfig.id}
+                        <span className="text-gray-500 dark:text-gray-400">Model:</span>{' '}
+                        {modelConfig.id}
                       </div>
                       {modelConfig.host && (
                         <div className="col-span-2">
-                          <span className="text-gray-500">Host:</span> {modelConfig.host}
+                          <span className="text-gray-500 dark:text-gray-400">Host:</span>{' '}
+                          {modelConfig.host}
                         </div>
                       )}
                     </div>

@@ -63,7 +63,7 @@ describe('AgentList', () => {
     render(<AgentList />);
 
     const selectedAgent = screen.getByText('Test Agent 1').closest('button');
-    expect(selectedAgent).toHaveClass('from-blue-50');
+    expect(selectedAgent).toHaveClass('bg-amber-50');
   });
 
   it('should call selectAgent when clicking an agent', () => {

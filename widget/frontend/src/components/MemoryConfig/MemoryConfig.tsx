@@ -115,7 +115,7 @@ export function MemoryConfig() {
             Save
           </Button>
         </div>
-        <p className="text-sm text-gray-600 mt-2">
+        <p className="text-sm text-gray-600 dark:text-gray-400 mt-2">
           Configure the embedder for agent memory storage and retrieval.
         </p>
       </CardHeader>
@@ -135,7 +135,7 @@ export function MemoryConfig() {
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-gray-500 mt-1">
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
             {localConfig.provider === 'ollama' && 'Local embeddings using Ollama'}
             {localConfig.provider === 'openai' && 'Cloud embeddings using OpenAI API'}
             {localConfig.provider === 'huggingface' && 'Cloud embeddings using HuggingFace API'}
@@ -159,7 +159,7 @@ export function MemoryConfig() {
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-gray-500 mt-1">
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
             The model used to generate embeddings for memory storage
           </p>
         </div>
@@ -175,7 +175,7 @@ export function MemoryConfig() {
               onChange={e => handleHostChange(e.target.value)}
               placeholder="http://localhost:11434"
             />
-            <p className="text-xs text-gray-500 mt-1">
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
               The URL where your Ollama server is running
             </p>
           </div>
@@ -183,8 +183,8 @@ export function MemoryConfig() {
 
         {/* API Key Notice */}
         {(localConfig.provider === 'openai' || localConfig.provider === 'huggingface') && (
-          <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-            <p className="text-sm text-yellow-800">
+          <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/30 rounded-lg">
+            <p className="text-sm text-yellow-800 dark:text-yellow-300">
               <strong>Note:</strong> You'll need to set the {localConfig.provider.toUpperCase()}
               _API_KEY environment variable for this provider to work.
             </p>
@@ -192,20 +192,20 @@ export function MemoryConfig() {
         )}
 
         {/* Current Configuration Display */}
-        <div className="mt-6 p-4 bg-gray-50 rounded-lg">
+        <div className="mt-6 p-4 bg-gray-50 dark:bg-stone-800/50 rounded-lg">
           <h3 className="text-sm font-medium mb-2">Current Configuration</h3>
           <div className="space-y-1 text-sm">
             <div>
-              <span className="text-gray-600">Provider:</span>{' '}
+              <span className="text-gray-600 dark:text-gray-400">Provider:</span>{' '}
               <span className="font-mono">{localConfig.provider}</span>
             </div>
             <div>
-              <span className="text-gray-600">Model:</span>{' '}
+              <span className="text-gray-600 dark:text-gray-400">Model:</span>{' '}
               <span className="font-mono">{localConfig.model}</span>
             </div>
             {localConfig.provider === 'ollama' && (
               <div>
-                <span className="text-gray-600">Host:</span>{' '}
+                <span className="text-gray-600 dark:text-gray-400">Host:</span>{' '}
                 <span className="font-mono">{localConfig.host}</span>
               </div>
             )}
