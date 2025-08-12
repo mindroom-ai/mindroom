@@ -6,7 +6,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 # Dependencies stage - only rebuild if deps change
 FROM base as deps
 WORKDIR /app
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --all-extras --no-dev
 
 # Final stage
