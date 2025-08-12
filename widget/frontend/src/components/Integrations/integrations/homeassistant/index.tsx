@@ -1,12 +1,11 @@
 import { SiHomeassistant } from 'react-icons/si';
 import { Integration, IntegrationProvider, IntegrationConfig } from '../types';
-import { API_BASE } from '@/lib/api';
 import { HomeAssistantIntegration as HomeAssistantIntegrationComponent } from '@/components/HomeAssistantIntegration/HomeAssistantIntegration';
 
 // Wrapper component to handle the dialog integration
-function HomeAssistantConfigDialog(_props: { onClose: () => void; onSuccess?: () => void }) {
-  // HomeAssistantIntegrationComponent handles its own closing logic
-  return <HomeAssistantIntegrationComponent />;
+function HomeAssistantConfigDialog(props: { onClose: () => void; onSuccess?: () => void }) {
+  // Pass the onSuccess callback to the HomeAssistantIntegrationComponent
+  return <HomeAssistantIntegrationComponent onSuccess={props.onSuccess} />;
 }
 
 class HomeAssistantIntegrationProvider implements IntegrationProvider {
@@ -28,6 +27,14 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
         // The parent component will handle showing the dialog
         // This is handled via the ConfigComponent
       },
+      onDisconnect: async () => {
+        const response = await fetch('/api/homeassistant/disconnect', {
+          method: 'POST',
+        });
+        if (!response.ok) {
+          throw new Error('Failed to disconnect Home Assistant');
+        }
+      },
       ConfigComponent: HomeAssistantConfigDialog,
       checkConnection: this.checkConnection.bind(this),
     };
@@ -35,7 +42,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
 
   async loadStatus(): Promise<Partial<Integration>> {
     try {
-      const response = await fetch(`${API_BASE}/api/homeassistant/status`);
+      const response = await fetch('/api/homeassistant/status');
       if (response.ok) {
         const data = await response.json();
         if (data.connected) {
@@ -62,7 +69,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
 
   private async checkConnection(): Promise<boolean> {
     try {
-      const response = await fetch(`${API_BASE}/api/homeassistant/status`);
+      const response = await fetch('/api/homeassistant/status');
       if (response.ok) {
         const data = await response.json();
         return data.connected === true;

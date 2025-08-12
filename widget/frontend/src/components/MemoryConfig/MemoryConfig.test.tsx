@@ -56,6 +56,7 @@ describe('MemoryConfig', () => {
 
     // For Radix UI Select, we need to find the trigger button by its role
     const providerSelect = document.getElementById('provider');
+    expect(providerSelect).toBeInTheDocument();
     expect(providerSelect).toHaveTextContent('Ollama (Local)');
   });
 
@@ -63,6 +64,7 @@ describe('MemoryConfig', () => {
     render(<MemoryConfig />);
 
     const modelSelect = document.getElementById('model');
+    expect(modelSelect).toBeInTheDocument();
     expect(modelSelect).toHaveTextContent('nomic-embed-text');
   });
 
@@ -70,6 +72,7 @@ describe('MemoryConfig', () => {
     render(<MemoryConfig />);
 
     const hostInput = document.getElementById('host') as HTMLInputElement;
+    expect(hostInput).toBeInTheDocument();
     expect(hostInput).toHaveValue('http://localhost:11434');
   });
 
@@ -77,6 +80,7 @@ describe('MemoryConfig', () => {
     render(<MemoryConfig />);
 
     const providerSelect = document.getElementById('provider');
+    expect(providerSelect).toBeInTheDocument();
     fireEvent.click(providerSelect!);
 
     const openaiOption = await screen.findByText('OpenAI');
@@ -129,7 +133,8 @@ describe('MemoryConfig', () => {
     fireEvent.click(openaiOption);
 
     await waitFor(() => {
-      expect(screen.queryByLabelText('Ollama Host URL')).not.toBeInTheDocument();
+      const hostInput = document.getElementById('host');
+      expect(hostInput).not.toBeInTheDocument();
     });
   });
 
@@ -292,7 +297,9 @@ describe('MemoryConfig', () => {
     render(<MemoryConfig />);
 
     // Should show default values
-    expect(document.getElementById('provider')).toHaveTextContent('Ollama (Local)');
-    expect(document.getElementById('model')).toHaveTextContent('nomic-embed-text');
+    const providerSelect = document.getElementById('provider');
+    expect(providerSelect).toHaveTextContent('Ollama (Local)');
+    const modelSelect = document.getElementById('model');
+    expect(modelSelect).toHaveTextContent('nomic-embed-text');
   });
 });

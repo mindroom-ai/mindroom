@@ -32,7 +32,11 @@ interface HomeAssistantStatus {
   entities_count: number;
 }
 
-export function HomeAssistantIntegration() {
+interface HomeAssistantIntegrationProps {
+  onSuccess?: () => void;
+}
+
+export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegrationProps = {}) {
   const [status, setStatus] = useState<HomeAssistantStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
@@ -106,7 +110,27 @@ export function HomeAssistantIntegration() {
         if (authWindow?.closed) {
           clearInterval(pollInterval);
           setConnecting(false);
+
+          // Check if connection was successful
+          const previousStatus = status?.connected;
           await checkStatus();
+
+          // Check the status again to see if we're now connected
+          const statusResponse = await fetch(`${API_BASE}/api/homeassistant/status`);
+          if (statusResponse.ok) {
+            const newStatus = await statusResponse.json();
+            if (newStatus.connected && !previousStatus) {
+              // Connection was successful
+              toast({
+                title: 'Success!',
+                description: 'Successfully connected to Home Assistant',
+              });
+
+              if (onSuccess) {
+                onSuccess();
+              }
+            }
+          }
         }
       }, 2000);
     } catch (error) {
@@ -165,6 +189,11 @@ export function HomeAssistantIntegration() {
       // Clear form
       setInstanceUrl('');
       setLongLivedToken('');
+
+      // Notify parent component of success
+      if (onSuccess) {
+        onSuccess();
+      }
     } catch (error) {
       console.error('Failed to connect with token:', error);
       toast({
