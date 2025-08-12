@@ -205,7 +205,7 @@ export function Dashboard() {
       </div>
 
       {/* System Stats Cards - Top Bar */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center gap-3">
@@ -345,9 +345,9 @@ export function Dashboard() {
       </div>
 
       {/* Main Content Grid */}
-      <div className="grid grid-cols-12 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         {/* Agent Cards - Left Sidebar */}
-        <div className="col-span-4">
+        <div className="col-span-1 lg:col-span-4">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
@@ -360,7 +360,7 @@ export function Dashboard() {
             </CardHeader>
             <CardContent className="p-0 flex-1 overflow-y-auto min-h-0">
               <ScrollArea className="h-96">
-                <div className={`${sharedStyles.list.containerWithSpacing} p-4`}>
+                <div className={`${sharedStyles.list.containerWithSpacing} p-3 sm:p-4`}>
                   {filteredData.agents.map(agent => {
                     const badges: ItemCardBadge[] = [];
                     const agentTeams = teams.filter(team => team.agents.includes(agent.id));
@@ -422,7 +422,7 @@ export function Dashboard() {
         </div>
 
         {/* Center - Rooms Overview */}
-        <div className="col-span-5">
+        <div className="col-span-1 lg:col-span-5">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
@@ -435,7 +435,7 @@ export function Dashboard() {
             </CardHeader>
             <CardContent className="p-0 flex-1 overflow-y-auto min-h-0">
               <ScrollArea className="h-96">
-                <div className={`${sharedStyles.list.containerWithSpacing} p-4`}>
+                <div className={`${sharedStyles.list.containerWithSpacing} p-3 sm:p-4`}>
                   {filteredData.rooms.map(room => {
                     const badges: ItemCardBadge[] = [
                       {
@@ -526,7 +526,7 @@ export function Dashboard() {
         </div>
 
         {/* Right Panel - Selected Details */}
-        <div className="col-span-3">
+        <div className="col-span-1 lg:col-span-3">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-amber-900 dark:text-amber-100">
