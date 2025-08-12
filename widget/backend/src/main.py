@@ -15,6 +15,7 @@ from mindroom.config import Config
 
 # Import routers
 from src.api.google_integration import router as google_router
+from src.api.homeassistant_integration import router as homeassistant_router
 from src.api.integrations import router as integrations_router
 from src.api.tools import router as tools_router
 
@@ -93,6 +94,7 @@ observer.start()
 
 # Include routers
 app.include_router(google_router)
+app.include_router(homeassistant_router)
 app.include_router(integrations_router)
 app.include_router(tools_router)
 
@@ -369,35 +371,6 @@ async def test_model(request: TestModelRequest) -> dict[str, Any]:
         if model_id in config.get("models", {}):
             return {"success": True, "message": f"Model {model_id} is configured"}
         return {"success": False, "message": f"Model {model_id} not found"}
-
-
-@app.get("/api/tools")
-async def get_available_tools() -> list[str]:
-    """Get list of available tools."""
-    # This should match the tools available in the MindRoom system
-    return [
-        "calculator",
-        "file",
-        "shell",
-        "python",
-        "csv",
-        "pandas",
-        "yfinance",
-        "arxiv",
-        "duckduckgo",
-        "googlesearch",
-        "tavily",
-        "wikipedia",
-        "newspaper",
-        "website",
-        "jina",
-        "docker",
-        "github",
-        "email",
-        "telegram",
-        "gmail",
-        "integrations",
-    ]
 
 
 @app.get("/api/rooms")

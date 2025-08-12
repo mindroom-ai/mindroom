@@ -539,6 +539,24 @@
       "status": "coming_soon"
     },
     {
+      "category": "smart_home",
+      "dependencies": [
+        "httpx"
+      ],
+      "description": "Control and monitor smart home devices",
+      "display_name": "Home Assistant",
+      "docs_url": "https://www.home-assistant.io/integrations/",
+      "icon": "Home",
+      "icon_color": "text-blue-500",
+      "name": "homeassistant",
+      "requires_config": [
+        "HOMEASSISTANT_URL",
+        "HOMEASSISTANT_TOKEN"
+      ],
+      "setup_type": "special",
+      "status": "requires_config"
+    },
+    {
       "category": "social",
       "dependencies": null,
       "description": "Access posts and pages",
