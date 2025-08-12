@@ -196,3 +196,7 @@ GMAIL_SETUP.md
 # OAuth tokens (contain sensitive data)
 google_token.json
 token.json
+
+# Frontend test files
+widget/frontend/test-*.js
+widget/frontend/test-*.html

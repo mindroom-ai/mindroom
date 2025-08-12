@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,6 +45,21 @@ class SetupType(str, Enum):
 
 
 @dataclass
+class ConfigField:
+    """Definition of a configuration field."""
+
+    name: str  # Environment variable name (e.g., "SMTP_HOST")
+    label: str  # Display label (e.g., "SMTP Host")
+    type: str = "text"  # Field type: text, password, number, boolean, select, url
+    required: bool = True
+    default: Any = None
+    placeholder: str | None = None
+    description: str | None = None
+    options: list[dict[str, str]] | None = None  # For select type
+    validation: dict[str, Any] | None = None  # min, max, pattern, etc.
+
+
+@dataclass
 class ToolMetadata:
     """Complete metadata for a tool."""
 
@@ -56,7 +71,7 @@ class ToolMetadata:
     setup_type: SetupType = SetupType.NONE
     icon: str | None = None  # Icon identifier for frontend
     icon_color: str | None = None  # Tailwind color class like "text-blue-500"
-    requires_config: list[str] | None = None  # Required env vars or config
+    config_fields: list[ConfigField] | None = None  # Detailed field definitions
     dependencies: list[str] | None = None  # Required pip packages
     docs_url: str | None = None  # Documentation URL
     factory: Callable[[], type] | None = None  # Tool factory function
@@ -75,7 +90,7 @@ def register_tool_with_metadata(
     setup_type: SetupType = SetupType.NONE,
     icon: str | None = None,
     icon_color: str | None = None,
-    requires_config: list[str] | None = None,
+    config_fields: list[ConfigField] | None = None,
     dependencies: list[str] | None = None,
     docs_url: str | None = None,
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
@@ -90,7 +105,7 @@ def register_tool_with_metadata(
         setup_type: Setup requirements
         icon: Icon identifier
         icon_color: Tailwind color class for icon
-        requires_config: Required configuration
+        config_fields: Configuration field definitions
         dependencies: Required pip packages
         docs_url: Documentation URL
 
@@ -110,7 +125,7 @@ def register_tool_with_metadata(
             setup_type=setup_type,
             icon=icon,
             icon_color=icon_color,
-            requires_config=requires_config,
+            config_fields=config_fields,
             dependencies=dependencies,
             docs_url=docs_url,
             factory=func,

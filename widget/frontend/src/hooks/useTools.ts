@@ -10,8 +10,9 @@ export interface ToolInfo {
   setup_type: string;
   icon: string | null;
   icon_color: string | null;
-  requires_config: string[] | null;
+  config_fields: any[] | null;
   dependencies: string[] | null;
+  docs_url?: string | null;
 }
 
 export interface ToolsResponse {
@@ -23,27 +24,27 @@ export function useTools() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function fetchTools() {
-      try {
-        setLoading(true);
-        const response = (await fetchAPI(API_ENDPOINTS.tools)) as ToolsResponse;
-        setTools(response.tools);
-        setError(null);
-      } catch (err) {
-        console.error('Failed to fetch tools:', err);
-        setError(err instanceof Error ? err.message : 'Failed to fetch tools');
-        // Fall back to empty array on error
-        setTools([]);
-      } finally {
-        setLoading(false);
-      }
+  const fetchTools = async () => {
+    try {
+      setLoading(true);
+      const response = (await fetchAPI(API_ENDPOINTS.tools)) as ToolsResponse;
+      setTools(response.tools);
+      setError(null);
+    } catch (err) {
+      console.error('Failed to fetch tools:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch tools');
+      // Fall back to empty array on error
+      setTools([]);
+    } finally {
+      setLoading(false);
     }
+  };
 
+  useEffect(() => {
     fetchTools();
   }, []);
 
-  return { tools, loading, error };
+  return { tools, loading, error, refetch: fetchTools };
 }
 
 // Helper function to map backend tool to frontend integration format
@@ -52,7 +53,16 @@ export function mapToolToIntegration(tool: ToolInfo) {
   let status: 'connected' | 'not_connected' | 'available' | 'coming_soon';
   switch (tool.status) {
     case 'available':
-      status = 'available';
+      // For tools that require configuration, 'available' means they are configured
+      if (
+        tool.setup_type === 'api_key' ||
+        tool.setup_type === 'oauth' ||
+        tool.setup_type === 'special'
+      ) {
+        status = 'connected';
+      } else {
+        status = 'available';
+      }
       break;
     case 'requires_config':
       status = 'not_connected';
@@ -94,7 +104,8 @@ export function mapToolToIntegration(tool: ToolInfo) {
     icon_color: tool.icon_color,
     status,
     setup_type,
-    requires_config: tool.requires_config,
+    config_fields: tool.config_fields,
     dependencies: tool.dependencies,
+    docs_url: tool.docs_url,
   };
 }

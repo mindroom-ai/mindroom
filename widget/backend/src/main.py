@@ -101,6 +101,12 @@ app.include_router(integrations_router)
 app.include_router(tools_router)
 
 
+@app.get("/api/health")
+async def health_check() -> dict[str, str]:
+    """Health check endpoint for testing."""
+    return {"status": "healthy"}
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     """Initialize the application."""
@@ -113,12 +119,6 @@ async def shutdown_event() -> None:
     """Clean up on shutdown."""
     observer.stop()
     observer.join()
-
-
-@app.get("/health")
-async def health_check() -> dict[str, Any]:
-    """Health check endpoint."""
-    return {"status": "healthy", "config_loaded": bool(config)}
 
 
 @app.post("/api/config/load")

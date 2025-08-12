@@ -25,16 +25,18 @@ import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { getIconForTool } from './iconMapping';
+import { API_BASE } from '@/lib/api';
 import {
   Integration,
   IntegrationConfig,
   integrationProviders,
   getAllIntegrations,
 } from './integrations';
+import { EnhancedConfigDialog } from './EnhancedConfigDialog';
 
 export function Integrations() {
   // Fetch tools from backend
-  const { tools: backendTools, loading: toolsLoading } = useTools();
+  const { tools: backendTools, loading: toolsLoading, refetch: refetchTools } = useTools();
 
   // State
   const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -42,6 +44,16 @@ export function Integrations() {
   const [activeDialog, setActiveDialog] = useState<{
     integrationId: string;
     config: IntegrationConfig;
+  } | null>(null);
+  const [genericConfigDialog, setGenericConfigDialog] = useState<{
+    service: string;
+    displayName: string;
+    description: string;
+    configFields: any[];
+    isEditing?: boolean;
+    docsUrl?: string | null;
+    icon?: any;
+    iconColor?: string;
   } | null>(null);
   const [showOnlyAvailable, setShowOnlyAvailable] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -128,6 +140,40 @@ export function Integrations() {
         title: 'Coming Soon',
         description: `${integration.name} integration is in development and will be available soon.`,
       });
+    } else if (integration.setup_type === 'api_key') {
+      // Show generic config dialog for tools with config_fields
+      const tool = integration as any; // Cast to access config_fields
+      if (tool.config_fields && tool.config_fields.length > 0) {
+        // Get the icon component
+        const iconName = tool.icon || integration.icon;
+        let IconComponent = null;
+        if (iconName && typeof iconName === 'string') {
+          // Try to get icon from react-icons
+          try {
+            const icons = require('react-icons/fa');
+            IconComponent = icons[iconName];
+          } catch (e) {
+            console.log('Icon not found:', iconName);
+          }
+        }
+
+        setGenericConfigDialog({
+          service: integration.id,
+          displayName: integration.name,
+          description: integration.description,
+          configFields: tool.config_fields,
+          isEditing: integration.status === 'connected',
+          docsUrl: tool.docs_url || null,
+          icon: IconComponent,
+          iconColor: tool.icon_color || integration.iconColor,
+        });
+      } else {
+        toast({
+          title: 'Configuration Error',
+          description: `${integration.name} requires configuration but no fields are specified.`,
+          variant: 'destructive',
+        });
+      }
     } else {
       // Fallback for integrations without providers yet
       toast({
@@ -141,24 +187,37 @@ export function Integrations() {
   const handleDisconnect = async (integration: Integration) => {
     const provider = integrationProviders[integration.id];
 
-    if (provider?.getConfig().onDisconnect) {
-      setLoading(true);
-      try {
+    setLoading(true);
+    try {
+      if (provider?.getConfig().onDisconnect) {
+        // Use provider's disconnect method if available
         await provider.getConfig().onDisconnect!(integration.id);
-        await loadIntegrations(); // Reload status
-        toast({
-          title: 'Disconnected',
-          description: `${integration.name} has been disconnected.`,
+      } else {
+        // For generic tools, delete credentials via API
+        const response = await fetch(`${API_BASE}/api/credentials/${integration.id}`, {
+          method: 'DELETE',
         });
-      } catch (error) {
-        toast({
-          title: 'Disconnect Failed',
-          description: error instanceof Error ? error.message : 'Failed to disconnect',
-          variant: 'destructive',
-        });
-      } finally {
-        setLoading(false);
+
+        if (!response.ok) {
+          throw new Error('Failed to disconnect');
+        }
       }
+
+      // Refetch tools to update status
+      await refetchTools();
+
+      toast({
+        title: 'Disconnected',
+        description: `${integration.name} has been disconnected.`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Disconnect Failed',
+        description: error instanceof Error ? error.message : 'Failed to disconnect',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -200,14 +259,24 @@ export function Integrations() {
 
     if (integration.status === 'connected') {
       return (
-        <Button
-          onClick={() => handleDisconnect(integration)}
-          disabled={loading}
-          variant="destructive"
-          size="sm"
-        >
-          Disconnect
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            onClick={() => handleIntegrationAction(integration)}
+            disabled={loading}
+            variant="outline"
+            size="sm"
+          >
+            Edit
+          </Button>
+          <Button
+            onClick={() => handleDisconnect(integration)}
+            disabled={loading}
+            variant="destructive"
+            size="sm"
+          >
+            Disconnect
+          </Button>
+        </div>
       );
     }
 
@@ -339,6 +408,11 @@ export function Integrations() {
         count: filteredIntegrations.filter(i => i.category === 'email').length,
       },
       {
+        id: 'communication',
+        name: 'Communication',
+        count: filteredIntegrations.filter(i => i.category === 'communication').length,
+      },
+      {
         id: 'shopping',
         name: 'Shopping',
         count: filteredIntegrations.filter(i => i.category === 'shopping').length,
@@ -357,6 +431,16 @@ export function Integrations() {
         id: 'development',
         name: 'Development',
         count: filteredIntegrations.filter(i => i.category === 'development').length,
+      },
+      {
+        id: 'research',
+        name: 'Research',
+        count: filteredIntegrations.filter(i => i.category === 'research').length,
+      },
+      {
+        id: 'smart_home',
+        name: 'Smart Home',
+        count: filteredIntegrations.filter(i => i.category === 'smart_home').length,
       },
       {
         id: 'information',
@@ -480,6 +564,27 @@ export function Integrations() {
             )}
           </DialogContent>
         </Dialog>
+      )}
+
+      {/* Enhanced Configuration Dialog */}
+      {genericConfigDialog && (
+        <EnhancedConfigDialog
+          open={true}
+          onClose={() => setGenericConfigDialog(null)}
+          service={genericConfigDialog.service}
+          displayName={genericConfigDialog.displayName}
+          description={genericConfigDialog.description}
+          configFields={genericConfigDialog.configFields}
+          isEditing={genericConfigDialog.isEditing}
+          docsUrl={genericConfigDialog.docsUrl}
+          icon={genericConfigDialog.icon}
+          iconColor={genericConfigDialog.iconColor}
+          onSuccess={async () => {
+            setGenericConfigDialog(null);
+            // Refetch tools to get updated status
+            await refetchTools();
+          }}
+        />
       )}
     </>
   );

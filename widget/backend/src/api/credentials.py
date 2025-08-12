@@ -26,6 +26,12 @@ class CredentialStatus(BaseModel):
     key_names: list[str] | None = None
 
 
+class SetCredentialsRequest(BaseModel):
+    """Request to set multiple credentials for a service."""
+
+    credentials: dict[str, str]
+
+
 @router.get("/list")
 async def list_services() -> list[str]:
     """List all services with stored credentials."""
@@ -47,6 +53,17 @@ async def get_credential_status(service: str) -> CredentialStatus:
         )
 
     return CredentialStatus(service=service, has_credentials=False)
+
+
+@router.post("/{service}")
+async def set_credentials(service: str, request: SetCredentialsRequest) -> dict[str, str]:
+    """Set multiple credentials for a service."""
+    manager = get_credentials_manager()
+
+    # Save all credentials for the service
+    manager.save_credentials(service, request.credentials)
+
+    return {"status": "success", "message": f"Credentials saved for {service}"}
 
 
 @router.post("/{service}/api-key")
@@ -78,6 +95,18 @@ async def get_api_key(service: str, key_name: str = "api_key") -> dict[str, Any]
         }
 
     return {"service": service, "has_key": False, "key_name": key_name}
+
+
+@router.get("/{service}")
+async def get_credentials(service: str) -> dict[str, Any]:
+    """Get credentials for a service (for editing)."""
+    manager = get_credentials_manager()
+    credentials = manager.load_credentials(service)
+
+    if not credentials:
+        return {"service": service, "credentials": {}}
+
+    return {"service": service, "credentials": credentials}
 
 
 @router.delete("/{service}")
