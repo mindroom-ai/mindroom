@@ -7,6 +7,7 @@ from typing import Any
 from mem0 import AsyncMemory
 
 from mindroom.config import Config
+from mindroom.credentials import get_credentials_manager
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -39,7 +40,10 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
 
     # Add provider-specific configuration
     if app_config.memory.embedder.provider == "openai":
-        embedder_config["config"]["api_key"] = os.environ.get("OPENAI_API_KEY")
+        # Try CredentialsManager first, then environment
+        creds_manager = get_credentials_manager()
+        api_key = creds_manager.get_api_key("openai") or os.environ.get("OPENAI_API_KEY")
+        embedder_config["config"]["api_key"] = api_key
     elif app_config.memory.embedder.provider == "ollama":
         # Add Ollama host if specified
         host = app_config.memory.embedder.config.host
@@ -66,10 +70,13 @@ def get_memory_config(storage_path: Path, config: Config) -> dict:
                 llm_config["config"][key] = value
 
         # Add API keys for providers that need them
+        creds_manager = get_credentials_manager()
         if app_config.memory.llm.provider == "openai":
-            llm_config["config"]["api_key"] = os.environ.get("OPENAI_API_KEY")
+            api_key = creds_manager.get_api_key("openai") or os.environ.get("OPENAI_API_KEY")
+            llm_config["config"]["api_key"] = api_key
         elif app_config.memory.llm.provider == "anthropic":
-            llm_config["config"]["api_key"] = os.environ.get("ANTHROPIC_API_KEY")
+            api_key = creds_manager.get_api_key("anthropic") or os.environ.get("ANTHROPIC_API_KEY")
+            llm_config["config"]["api_key"] = api_key
 
         logger.info(
             f"Using {app_config.memory.llm.provider} model '{app_config.memory.llm.config.get('model')}' for memory",

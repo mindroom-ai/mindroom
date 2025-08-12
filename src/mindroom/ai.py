@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from .agents import create_agent
 from .background_tasks import create_background_task
+from .credentials import get_credentials_manager
 from .logging_config import get_logger
 from .memory import (
     build_memory_enhanced_prompt,
@@ -100,6 +101,35 @@ def get_cache(storage_path: Path) -> diskcache.Cache | None:
     return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_CACHE else None
 
 
+def _get_api_key(provider: str) -> str | None:
+    """Get API key for a provider from CredentialsManager or environment.
+
+    Args:
+        provider: Provider name (e.g., 'openai', 'anthropic')
+
+    Returns:
+        API key if found, None otherwise
+
+    """
+    # First check CredentialsManager
+    creds_manager = get_credentials_manager()
+    api_key = creds_manager.get_api_key(provider)
+    if api_key:
+        return api_key
+
+    # Fall back to environment variables
+    env_vars = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+    }
+
+    if provider in env_vars:
+        return os.getenv(env_vars[provider])
+
+    return None
+
+
 def get_model_instance(config: Config, model_name: str = "default") -> Model:
     """Get a model instance from config.yaml.
 
@@ -129,11 +159,14 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
         host = model_config.host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         return Ollama(id=model_id, host=host)
     if provider == "openai":
-        return OpenAIChat(id=model_id)
+        api_key = _get_api_key("openai")
+        return OpenAIChat(id=model_id, api_key=api_key) if api_key else OpenAIChat(id=model_id)
     if provider == "anthropic":
-        return Claude(id=model_id)
+        api_key = _get_api_key("anthropic")
+        return Claude(id=model_id, api_key=api_key) if api_key else Claude(id=model_id)
     if provider == "openrouter":
-        return OpenRouter(id=model_id)
+        api_key = _get_api_key("openrouter")
+        return OpenRouter(id=model_id, api_key=api_key) if api_key else OpenRouter(id=model_id)
 
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)
