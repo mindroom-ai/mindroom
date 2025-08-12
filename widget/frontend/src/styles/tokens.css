@@ -14,14 +14,4 @@
   --animation-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --animation-ease-out: cubic-bezier(0, 0, 0.2, 1);
   --animation-ease-in: cubic-bezier(0.4, 0, 1, 1);
-
-  /* Primary color for focus rings and accessibility */
-  --primary: 35 95% 50%; /* Amber color in HSL */
-}
-
-/* Dark mode overrides */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --primary: 35 95% 60%; /* Slightly lighter amber for dark mode */
-  }
 }
