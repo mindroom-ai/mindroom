@@ -188,6 +188,16 @@ export function Integrations() {
       );
     }
 
+    // Tools with no setup required - just show available status
+    if (integration.setup_type === 'none') {
+      return (
+        <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+          <CheckCircle2 className="h-3 w-3 mr-1" />
+          Ready to Use
+        </Badge>
+      );
+    }
+
     if (integration.status === 'connected') {
       return (
         <Button

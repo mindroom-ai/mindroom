@@ -9,7 +9,7 @@ export interface Integration {
   category: string;
   icon: React.ReactNode;
   status: 'connected' | 'not_connected' | 'available' | 'coming_soon';
-  setup_type: 'oauth' | 'api_key' | 'special' | 'coming_soon';
+  setup_type: 'oauth' | 'api_key' | 'special' | 'coming_soon' | 'none';
   connected?: boolean;
   details?: any;
 }
