@@ -33,4 +33,5 @@ COPY . /app/
 RUN mkdir -p /app/logs /app/config
 RUN chmod +x /app/widget/run.sh
 EXPOSE 3003 8001
+ENV DOCKER_CONTAINER=1
 CMD ["./run.sh"]
