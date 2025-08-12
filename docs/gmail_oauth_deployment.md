@@ -1,6 +1,6 @@
-# Gmail OAuth Deployment Guide
+# Google Services OAuth Deployment Guide
 
-This guide explains how to deploy MindRoom with Gmail integration for your users.
+This guide explains how to deploy MindRoom with Google Services integration (Gmail, Calendar, Drive) for your users.
 
 ## Option 1: Shared OAuth App (Recommended for Teams/Products)
 
@@ -29,29 +29,31 @@ With this approach, you create ONE OAuth app that all your users share. Users ju
    - Choose "External" user type
    - Fill in app information
    - Add scopes:
+     - `https://www.googleapis.com/auth/gmail.readonly`
      - `https://www.googleapis.com/auth/gmail.modify`
+     - `https://www.googleapis.com/auth/gmail.compose`
      - `https://www.googleapis.com/auth/calendar`
      - `https://www.googleapis.com/auth/drive.file`
+     - `openid`
+     - `https://www.googleapis.com/auth/userinfo.email`
+     - `https://www.googleapis.com/auth/userinfo.profile`
    - Add test users (for testing phase)
 
-3. **Set Multiple Redirect URIs** (to support different ports):
+3. **Set Redirect URI**:
    ```
-   http://localhost:8765/api/gmail/callback
-   http://localhost:8765/api/auth/google/callback
-   http://localhost:8000/api/gmail/callback
-   http://localhost:8000/api/auth/google/callback
-   http://localhost:8001/api/gmail/callback
-   http://localhost:8001/api/auth/google/callback
+   http://localhost:8765/api/google/callback
    ```
+   Note: Change the port if using a different BACKEND_PORT
 
 4. **Configure MindRoom Backend**
 
-   Create `.env` file in `widget/` directory:
+   Create `.env` file in `widget/backend/` directory:
    ```bash
-   # Shared OAuth app credentials
-   MINDROOM_OAUTH_CLIENT_ID=your-app-client-id.apps.googleusercontent.com
-   MINDROOM_OAUTH_CLIENT_SECRET=your-app-client-secret
    BACKEND_PORT=8765
+   GOOGLE_CLIENT_ID=your-app-client-id.apps.googleusercontent.com
+   GOOGLE_CLIENT_SECRET=your-app-client-secret
+   GOOGLE_PROJECT_ID=your-project-id
+   GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
    ```
 
 5. **For Production (>100 users)**
@@ -78,7 +80,7 @@ Each user creates their own Google Cloud project and OAuth credentials.
 
 Users follow the guide in `docs/gmail_setup.md` to:
 1. Create their own Google Cloud project
-2. Enable Gmail API
+2. Enable Gmail, Calendar, and Drive APIs
 3. Create OAuth credentials
 4. Add credentials to `.env` file
 
@@ -90,14 +92,16 @@ Offer both options:
 
 ### Implementation
 
-The backend already supports this. It checks for credentials in this order:
-1. `MINDROOM_OAUTH_CLIENT_ID` (shared app)
-2. `GOOGLE_CLIENT_ID` (individual credentials)
+The backend uses credentials from environment variables:
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
 
-Users who want to use their own credentials can still do so by setting:
+Users who want to use their own credentials can set:
 ```bash
 GOOGLE_CLIENT_ID=their-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=their-client-secret
+GOOGLE_PROJECT_ID=their-project-id
+GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
 ```
 
 ## Security Considerations
@@ -128,5 +132,5 @@ GOOGLE_CLIENT_SECRET=their-client-secret
 - Or submit for OAuth verification
 
 ### "Redirect URI mismatch"
-- Add all possible redirect URIs to Google Cloud Console
-- Check that ports match (8765, 8000, 8001, etc.)
+- Ensure the redirect URI in Google Cloud Console exactly matches: `http://localhost:8765/api/google/callback`
+- Check that the port matches your BACKEND_PORT setting

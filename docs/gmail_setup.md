@@ -1,9 +1,9 @@
-# Gmail Integration Setup Guide
+# Google Services Integration Setup Guide
 
-This guide explains how to set up Gmail integration with MindRoom, allowing agents to read and search your emails.
+This guide explains how to set up Google Services integration with MindRoom, allowing agents to access Gmail, Calendar, and Drive.
 
 > **Note**: This guide is for INDIVIDUAL setup where each user creates their own OAuth credentials.
-> If you're deploying MindRoom for multiple users, see [Gmail OAuth Deployment Guide](./gmail_oauth_deployment.md) for a better approach.
+> If you're deploying MindRoom for multiple users, see [Google Services OAuth Deployment Guide](./gmail_oauth_deployment.md) for a better approach.
 
 ## Prerequisites
 
@@ -16,11 +16,14 @@ This guide explains how to set up Gmail integration with MindRoom, allowing agen
 2. Create a new project or select an existing one
 3. Note down your project ID
 
-## Step 2: Enable Gmail API
+## Step 2: Enable Required APIs
 
 1. In the Google Cloud Console, go to "APIs & Services" > "Library"
-2. Search for "Gmail API"
-3. Click on it and press "Enable"
+2. Enable the following APIs:
+   - Gmail API
+   - Google Calendar API
+   - Google Drive API
+3. Click on each and press "Enable"
 
 ## Step 3: Create OAuth 2.0 Credentials
 
@@ -31,14 +34,19 @@ This guide explains how to set up Gmail integration with MindRoom, allowing agen
    - Fill in the required fields (app name, user support email, etc.)
    - Add your email to test users
    - For scopes, add:
+     - `https://www.googleapis.com/auth/gmail.readonly`
      - `https://www.googleapis.com/auth/gmail.modify`
-     - `https://www.googleapis.com/auth/calendar` (optional)
-     - `https://www.googleapis.com/auth/drive.file` (optional)
+     - `https://www.googleapis.com/auth/gmail.compose`
+     - `https://www.googleapis.com/auth/calendar`
+     - `https://www.googleapis.com/auth/drive.file`
+     - `openid`
+     - `https://www.googleapis.com/auth/userinfo.email`
+     - `https://www.googleapis.com/auth/userinfo.profile`
 
 4. Back in credentials, create OAuth client ID:
    - Application type: "Web application"
-   - Name: "MindRoom Gmail Integration"
-   - Authorized redirect URIs: `http://localhost:8765/api/gmail/callback`
+   - Name: "MindRoom Google Services Integration"
+   - Authorized redirect URIs: `http://localhost:8765/api/google/callback`
    - Note: Change the port if you're using a different BACKEND_PORT
 
 5. Download the credentials JSON file
@@ -47,11 +55,11 @@ This guide explains how to set up Gmail integration with MindRoom, allowing agen
 
 ### Option A: Using .env File (Recommended)
 
-Create a `.env` file in the `widget` directory:
+Create a `.env` file in the `widget/backend` directory:
 
 ```bash
-cd /path/to/mindroom/widget
-cp .env.example .env
+cd /path/to/mindroom/widget/backend
+cp .env.example .env  # if it exists
 ```
 
 Edit the `.env` file and add your credentials:
@@ -59,6 +67,8 @@ Edit the `.env` file and add your credentials:
 BACKEND_PORT=8765
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
+GOOGLE_PROJECT_ID=your-project-id
+GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
 ```
 
 ### Option B: Using Environment Variables
@@ -69,9 +79,11 @@ Set these environment variables before starting the widget:
 export BACKEND_PORT=8765
 export GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
 export GOOGLE_CLIENT_SECRET="your-client-secret"
+export GOOGLE_PROJECT_ID="your-project-id"
+export GOOGLE_REDIRECT_URI="http://localhost:8765/api/google/callback"
 ```
 
-## Step 5: Connect Gmail in Widget
+## Step 5: Connect Google Services in Widget
 
 1. Start the MindRoom widget:
    ```bash
@@ -81,15 +93,15 @@ export GOOGLE_CLIENT_SECRET="your-client-secret"
 
 2. Open the widget in your browser (usually http://localhost:5173)
 
-3. Navigate to the "Gmail" tab
+3. Look for the "Google Services Integration" button
 
-4. Click "Connect Gmail"
+4. Click "Google Services Integration" to connect
 
 5. Sign in with your Google account and authorize the app
 
-6. You should see "Connected" status with your email address
+6. You should see "Connected" status with your email address and available services (Gmail, Calendar, Drive)
 
-## Step 6: Add Gmail Tool to Agents
+## Step 6: Add Google Service Tools to Agents
 
 You can now add the `gmail` tool to any agent in your configuration:
 
@@ -120,10 +132,10 @@ The Gmail integration provides three tools:
 
 ## Security Notes
 
-- MindRoom only requests **read-only** access to your Gmail
+- MindRoom requests specific scopes for Gmail (read, modify, compose), Calendar, and Drive access
 - Credentials are stored locally on your machine
 - The OAuth token can be revoked at any time from your Google account settings
-- Never share your `gmail_token.json` or credentials files
+- Never share your `google_token.json` or credentials files
 
 ## Troubleshooting
 
@@ -131,16 +143,16 @@ The Gmail integration provides three tools:
 - Make sure you've set the environment variables or placed the credentials file correctly
 
 ### "Failed to complete OAuth flow"
-- Check that the redirect URI matches exactly: `http://localhost:8000/api/gmail/callback`
-- Ensure the Gmail API is enabled in your Google Cloud project
+- Check that the redirect URI matches exactly: `http://localhost:8765/api/google/callback`
+- Ensure all required APIs (Gmail, Calendar, Drive) are enabled in your Google Cloud project
 
-### "Gmail not connected" in agents
-- The Gmail token is shared between the widget and agents
-- Make sure you've connected Gmail through the widget first
+### "Google Services not connected" in agents
+- The Google token is shared between the widget and agents
+- Make sure you've connected Google Services through the widget first
 
-## Disconnecting Gmail
+## Disconnecting Google Services
 
-To disconnect Gmail:
-1. Click "Disconnect" in the Gmail tab of the widget
+To disconnect Google Services:
+1. Click "Disconnect" in the Google Services section of the widget
 2. The stored token will be deleted
 3. Optionally, revoke access in your [Google Account settings](https://myaccount.google.com/permissions)

@@ -95,14 +95,14 @@ MindRoom connects with your favorite services through two modes:
 - Available through the widget's "✨ Simple Mode" tab
 
 #### Full Integrations (OAuth/API)
-- **Gmail**: Search and read emails
+- **Google Services**: Gmail, Calendar, and Drive access
 - **Spotify**: Control playback, access playlists
 - **GitHub**: Access private repos, manage issues
 - **Reddit, Facebook, Dropbox**: Full API access
 - **Amazon, IMDb, Walmart**: Real-time data with API keys
 - One-click OAuth connections through the widget
 
-See [docs/integrations.md](docs/integrations.md) for complete setup guide.
+See [docs/gmail_setup.md](docs/gmail_setup.md) for Google Services setup guide.
 
 ### Advanced Capabilities
 
