@@ -1,8 +1,5 @@
 import { useConfigStore } from '@/store/configStore';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import {
   Select,
   SelectContent,
@@ -10,7 +7,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Brain, Save } from 'lucide-react';
+import { EditorPanel } from '@/components/shared/EditorPanel';
+import { FieldGroup } from '@/components/shared/FieldGroup';
+import { Brain } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
 const EMBEDDER_PROVIDERS = [
@@ -103,87 +102,99 @@ export function MemoryConfig() {
   };
 
   return (
-    <Card className="h-full flex flex-col">
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <CardTitle className="flex items-center gap-2">
-            <Brain className="h-5 w-5" />
-            Memory Configuration
-          </CardTitle>
-          <Button size="sm" onClick={handleSave} disabled={!isDirty}>
-            <Save className="h-4 w-4 mr-1" />
-            Save
-          </Button>
-        </div>
-        <p className="text-sm text-gray-600 dark:text-gray-400 mt-2">
-          Configure the embedder for agent memory storage and retrieval.
-        </p>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Provider Selection */}
-        <div>
-          <Label htmlFor="provider">Embedder Provider</Label>
-          <Select value={localConfig.provider} onValueChange={handleProviderChange}>
-            <SelectTrigger id="provider">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {EMBEDDER_PROVIDERS.map(provider => (
-                <SelectItem key={provider.value} value={provider.value}>
-                  {provider.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-            {localConfig.provider === 'ollama' && 'Local embeddings using Ollama'}
-            {localConfig.provider === 'openai' && 'Cloud embeddings using OpenAI API'}
-            {localConfig.provider === 'huggingface' && 'Cloud embeddings using HuggingFace API'}
-            {localConfig.provider === 'sentence-transformers' &&
-              'Local embeddings using sentence-transformers'}
+    <EditorPanel
+      icon={Brain}
+      title="Memory Configuration"
+      isDirty={isDirty}
+      onSave={handleSave}
+      onDelete={() => {}}
+      showActions={true}
+      disableDelete={true}
+      className="h-full"
+    >
+      <div className="space-y-6">
+        {/* Description Section */}
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            Configure the embedder for agent memory storage and retrieval.
           </p>
         </div>
 
-        {/* Model Selection */}
-        <div>
-          <Label htmlFor="model">Embedding Model</Label>
-          <Select value={localConfig.model} onValueChange={handleModelChange}>
-            <SelectTrigger id="model">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {getAvailableModels().map(model => (
-                <SelectItem key={model} value={model}>
-                  {model}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-            The model used to generate embeddings for memory storage
-          </p>
-        </div>
+        {/* Configuration Fields */}
+        <div className="space-y-4">
+          <FieldGroup
+            label="Embedder Provider"
+            helperText={
+              localConfig.provider === 'ollama'
+                ? 'Local embeddings using Ollama'
+                : localConfig.provider === 'openai'
+                  ? 'Cloud embeddings using OpenAI API'
+                  : localConfig.provider === 'huggingface'
+                    ? 'Cloud embeddings using HuggingFace API'
+                    : localConfig.provider === 'sentence-transformers'
+                      ? 'Local embeddings using sentence-transformers'
+                      : 'Choose your embedding provider'
+            }
+            required
+            htmlFor="provider"
+          >
+            <Select value={localConfig.provider} onValueChange={handleProviderChange}>
+              <SelectTrigger id="provider" className="transition-colors hover:border-ring">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {EMBEDDER_PROVIDERS.map(provider => (
+                  <SelectItem key={provider.value} value={provider.value}>
+                    {provider.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </FieldGroup>
 
-        {/* Host Configuration (for Ollama) */}
-        {localConfig.provider === 'ollama' && (
-          <div>
-            <Label htmlFor="host">Ollama Host URL</Label>
-            <Input
-              id="host"
-              type="url"
-              value={localConfig.host}
-              onChange={e => handleHostChange(e.target.value)}
-              placeholder="http://localhost:11434"
-            />
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              The URL where your Ollama server is running
-            </p>
-          </div>
-        )}
+          <FieldGroup
+            label="Embedding Model"
+            helperText="The model used to generate embeddings for memory storage"
+            required
+            htmlFor="model"
+          >
+            <Select value={localConfig.model} onValueChange={handleModelChange}>
+              <SelectTrigger id="model" className="transition-colors hover:border-ring">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {getAvailableModels().map(model => (
+                  <SelectItem key={model} value={model}>
+                    {model}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </FieldGroup>
+
+          {/* Host Configuration (for Ollama) */}
+          {localConfig.provider === 'ollama' && (
+            <FieldGroup
+              label="Ollama Host URL"
+              helperText="The URL where your Ollama server is running"
+              required
+              htmlFor="host"
+            >
+              <Input
+                id="host"
+                type="url"
+                value={localConfig.host}
+                onChange={e => handleHostChange(e.target.value)}
+                placeholder="http://localhost:11434"
+                className="transition-colors hover:border-ring focus:border-ring"
+              />
+            </FieldGroup>
+          )}
+        </div>
 
         {/* API Key Notice */}
         {(localConfig.provider === 'openai' || localConfig.provider === 'huggingface') && (
-          <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/30 rounded-lg">
+          <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800/30 rounded-lg shadow-sm">
             <p className="text-sm text-yellow-800 dark:text-yellow-300">
               <strong>Note:</strong> You'll need to set the {localConfig.provider.toUpperCase()}
               _API_KEY environment variable for this provider to work.
@@ -192,26 +203,26 @@ export function MemoryConfig() {
         )}
 
         {/* Current Configuration Display */}
-        <div className="mt-6 p-4 bg-gray-50 dark:bg-stone-800/50 rounded-lg">
-          <h3 className="text-sm font-medium mb-2">Current Configuration</h3>
-          <div className="space-y-1 text-sm">
-            <div>
-              <span className="text-gray-600 dark:text-gray-400">Provider:</span>{' '}
-              <span className="font-mono">{localConfig.provider}</span>
+        <div className="p-4 bg-muted/50 rounded-lg shadow-sm border border-border">
+          <h3 className="text-sm font-medium mb-3">Current Configuration</h3>
+          <div className="space-y-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Provider:</span>
+              <span className="font-mono text-foreground">{localConfig.provider}</span>
             </div>
-            <div>
-              <span className="text-gray-600 dark:text-gray-400">Model:</span>{' '}
-              <span className="font-mono">{localConfig.model}</span>
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Model:</span>
+              <span className="font-mono text-foreground">{localConfig.model}</span>
             </div>
             {localConfig.provider === 'ollama' && (
-              <div>
-                <span className="text-gray-600 dark:text-gray-400">Host:</span>{' '}
-                <span className="font-mono">{localConfig.host}</span>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Host:</span>
+                <span className="font-mono text-foreground">{localConfig.host}</span>
               </div>
             )}
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </EditorPanel>
   );
 }

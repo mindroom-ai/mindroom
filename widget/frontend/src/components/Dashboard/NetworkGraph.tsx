@@ -1,5 +1,6 @@
 import { Agent, Room, Team } from '@/types/config';
 import { Bot, Home, Users, Link, Activity, Trophy, Zap, BarChart3, X } from 'lucide-react';
+import { getSelectionStyles } from '@/components/shared/styles';
 
 interface NetworkGraphProps {
   agents: Agent[];
@@ -106,10 +107,13 @@ export function NetworkGraph({
 
           {mostConnectedRoom && (
             <div
-              className={`p-4 rounded-lg cursor-pointer transition-all hover:shadow-md ${
-                selectedRoomId === mostConnectedRoom.room.id
-                  ? 'ring-2 ring-orange-500 bg-gradient-to-r from-orange-500/10 to-amber-500/10'
-                  : 'bg-amber-50 dark:bg-amber-900/30'
+              className={`p-4 rounded-lg cursor-pointer transition-all hover:shadow-md ${getSelectionStyles(
+                selectedRoomId === mostConnectedRoom.room.id,
+                'card'
+              )} ${
+                selectedRoomId !== mostConnectedRoom.room.id
+                  ? 'bg-amber-50 dark:bg-amber-900/30'
+                  : ''
               }`}
               onClick={() => onSelectRoom(mostConnectedRoom.room.id)}
             >
@@ -129,10 +133,11 @@ export function NetworkGraph({
 
           {mostActiveAgent && (
             <div
-              className={`p-4 rounded-lg cursor-pointer transition-all hover:shadow-md ${
-                selectedAgentId === mostActiveAgent.id
-                  ? 'ring-2 ring-orange-500 bg-gradient-to-r from-orange-500/10 to-amber-500/10'
-                  : 'bg-amber-50 dark:bg-amber-900/30'
+              className={`p-4 rounded-lg cursor-pointer transition-all hover:shadow-md ${getSelectionStyles(
+                selectedAgentId === mostActiveAgent.id,
+                'card'
+              )} ${
+                selectedAgentId !== mostActiveAgent.id ? 'bg-amber-50 dark:bg-amber-900/30' : ''
               }`}
               onClick={() => onSelectAgent(mostActiveAgent.id)}
             >

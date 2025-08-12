@@ -179,12 +179,9 @@ describe('AgentEditor', () => {
     render(<AgentEditor />);
 
     // Find add instruction button
-    const addButtons = screen.getAllByRole('button', { name: /add/i });
-    const addInstructionButton = addButtons.find(
-      btn => btn.closest('div')?.querySelector('label')?.textContent === 'Instructions'
-    );
+    const addInstructionButton = screen.getByTestId('add-instruction-button');
 
-    fireEvent.click(addInstructionButton!);
+    fireEvent.click(addInstructionButton);
 
     // Should have called updateAgent with new instruction
     expect(mockStore.updateAgent).toHaveBeenCalledWith(

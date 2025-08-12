@@ -106,28 +106,26 @@ describe('TeamList', () => {
   it('shows create team form when plus button is clicked', () => {
     render(<TeamList />);
 
-    // Find the button with the Plus icon (it's a small button in the header)
-    const buttons = screen.getAllByRole('button');
-    const plusButton = buttons.find(btn => btn.className.includes('h-8 w-8'));
-    fireEvent.click(plusButton!);
+    // Find the create button
+    const createButton = screen.getByTestId('create-button');
+    fireEvent.click(createButton);
 
     expect(screen.getByPlaceholderText('Team name...')).toBeInTheDocument();
-    expect(screen.getByText('Create')).toBeInTheDocument();
-    expect(screen.getByText('Cancel')).toBeInTheDocument();
+    expect(screen.getByTestId('form-create-button')).toBeInTheDocument();
+    expect(screen.getByTestId('form-cancel-button')).toBeInTheDocument();
   });
 
   it('creates new team with correct data', async () => {
     render(<TeamList />);
 
-    const buttons = screen.getAllByRole('button');
-    const plusButton = buttons.find(btn => btn.className.includes('h-8 w-8'));
-    fireEvent.click(plusButton!);
+    const createButton = screen.getByTestId('create-button');
+    fireEvent.click(createButton);
 
     const input = screen.getByPlaceholderText('Team name...');
     fireEvent.change(input, { target: { value: 'Test Team' } });
 
-    const createButton = screen.getByText('Create');
-    fireEvent.click(createButton);
+    const formCreateButton = screen.getByTestId('form-create-button');
+    fireEvent.click(formCreateButton);
 
     await waitFor(() => {
       expect(mockCreateTeam).toHaveBeenCalledWith({
@@ -143,13 +141,12 @@ describe('TeamList', () => {
   it('cancels team creation when cancel button is clicked', () => {
     render(<TeamList />);
 
-    const buttons = screen.getAllByRole('button');
-    const plusButton = buttons.find(btn => btn.className.includes('h-8 w-8'));
-    fireEvent.click(plusButton!);
+    const createButton = screen.getByTestId('create-button');
+    fireEvent.click(createButton);
 
     expect(screen.getByPlaceholderText('Team name...')).toBeInTheDocument();
 
-    const cancelButton = screen.getByText('Cancel');
+    const cancelButton = screen.getByTestId('form-cancel-button');
     fireEvent.click(cancelButton);
 
     expect(screen.queryByPlaceholderText('Team name...')).not.toBeInTheDocument();
@@ -158,9 +155,8 @@ describe('TeamList', () => {
   it('cancels team creation when Escape key is pressed', () => {
     render(<TeamList />);
 
-    const buttons = screen.getAllByRole('button');
-    const plusButton = buttons.find(btn => btn.className.includes('h-8 w-8'));
-    fireEvent.click(plusButton!);
+    const createButton = screen.getByTestId('create-button');
+    fireEvent.click(createButton);
 
     const input = screen.getByPlaceholderText('Team name...');
     fireEvent.keyDown(input, { key: 'Escape' });
@@ -171,9 +167,8 @@ describe('TeamList', () => {
   it('creates team when Enter key is pressed', async () => {
     render(<TeamList />);
 
-    const buttons = screen.getAllByRole('button');
-    const plusButton = buttons.find(btn => btn.className.includes('h-8 w-8'));
-    fireEvent.click(plusButton!);
+    const createButton = screen.getByTestId('create-button');
+    fireEvent.click(createButton);
 
     const input = screen.getByPlaceholderText('Team name...');
     fireEvent.change(input, { target: { value: 'Enter Test Team' } });

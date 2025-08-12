@@ -48,8 +48,10 @@ describe('AgentList', () => {
 
     expect(screen.getByText('Test Agent 1')).toBeInTheDocument();
     expect(screen.getByText('Test Agent 2')).toBeInTheDocument();
-    expect(screen.getByText('2 tools • 2 rooms')).toBeInTheDocument();
-    expect(screen.getByText('0 tools • 1 rooms')).toBeInTheDocument();
+    expect(screen.getByText('2 tools')).toBeInTheDocument();
+    expect(screen.getByText('2 rooms')).toBeInTheDocument();
+    expect(screen.getByText('0 tools')).toBeInTheDocument();
+    expect(screen.getByText('1 rooms')).toBeInTheDocument();
   });
 
   it('should highlight selected agent', () => {
@@ -62,24 +64,35 @@ describe('AgentList', () => {
 
     render(<AgentList />);
 
-    const selectedAgent = screen.getByText('Test Agent 1').closest('button');
-    expect(selectedAgent).toHaveClass('bg-amber-50');
+    const selectedAgent = screen.getByText('Test Agent 1').closest('div[role="button"]');
+    expect(selectedAgent).toHaveClass('ring-2', 'ring-orange-500');
   });
 
   it('should call selectAgent when clicking an agent', () => {
     render(<AgentList />);
 
-    const agent2Button = screen.getByText('Test Agent 2').closest('button');
+    const agent2Button = screen.getByText('Test Agent 2').closest('div[role="button"]');
     fireEvent.click(agent2Button!);
 
     expect(mockSelectAgent).toHaveBeenCalledWith('agent2');
   });
 
-  it('should call createAgent when clicking add button', () => {
+  it('should show creation form when clicking add button', () => {
     render(<AgentList />);
 
     const addButton = screen.getByText('Add');
     fireEvent.click(addButton);
+
+    // Should show the inline form with input field
+    const input = screen.getByPlaceholderText('Agent name...');
+    expect(input).toBeInTheDocument();
+
+    // Type a name and submit
+    fireEvent.change(input, { target: { value: 'Test Agent' } });
+
+    // Find and click the create button in the form
+    const createButton = screen.getByTestId('form-create-button');
+    fireEvent.click(createButton);
 
     expect(mockCreateAgent).toHaveBeenCalled();
   });

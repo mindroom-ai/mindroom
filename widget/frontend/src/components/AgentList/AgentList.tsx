@@ -1,15 +1,23 @@
 import { useConfigStore } from '@/store/configStore';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Plus, Bot } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Bot, MapPin } from 'lucide-react';
+import { ListPanel, ListItem } from '@/components/shared/ListPanel';
+import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
+
+// Extend Agent type to be compatible with ListItem
+interface AgentListItem extends ListItem {
+  role: string;
+  tools: string[];
+  rooms: string[];
+  // Add index signature to be compatible with ListItem
+  [key: string]: any;
+}
 
 export function AgentList() {
   const { agents, selectedAgentId, selectAgent, createAgent } = useConfigStore();
 
-  const handleCreateAgent = () => {
+  const handleCreateAgent = (agentName?: string) => {
     const newAgent = {
-      display_name: 'New Agent',
+      display_name: agentName || 'New Agent',
       role: 'A new agent that needs configuration',
       tools: [],
       instructions: [],
@@ -19,48 +27,49 @@ export function AgentList() {
     createAgent(newAgent);
   };
 
+  const renderAgent = (agent: AgentListItem, isSelected: boolean) => {
+    const badges: ItemCardBadge[] = [
+      {
+        content: `${agent.tools.length} tools`,
+        variant: 'secondary' as const,
+        icon: Bot,
+      },
+      {
+        content: `${agent.rooms.length} rooms`,
+        variant: 'secondary' as const,
+        icon: MapPin,
+      },
+    ];
+
+    return (
+      <ItemCard
+        id={agent.id}
+        title={agent.display_name}
+        description={agent.role}
+        isSelected={isSelected}
+        onClick={selectAgent}
+        badges={badges}
+      />
+    );
+  };
+
   return (
-    <Card className="h-full flex flex-col overflow-hidden">
-      <CardHeader className="pb-3 flex-shrink-0">
-        <div className="flex items-center justify-between">
-          <CardTitle>Agents</CardTitle>
-          <Button size="sm" onClick={handleCreateAgent} className="h-8">
-            <Plus className="h-4 w-4 mr-1" />
-            Add
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="p-2 flex-1 overflow-y-auto min-h-0">
-        <div className="space-y-1">
-          {agents.map(agent => (
-            <button
-              key={agent.id}
-              onClick={() => selectAgent(agent.id)}
-              className={cn(
-                'w-full text-left px-3 py-2 rounded-lg transition-all duration-200',
-                'hover:bg-gray-100 dark:hover:bg-white/5 hover:shadow-sm hover:scale-[1.01] flex items-center gap-2 transition-all duration-200',
-                selectedAgentId === agent.id &&
-                  'bg-amber-50 dark:bg-gradient-to-r dark:from-primary/20 dark:to-primary/10 hover:bg-amber-100 dark:hover:from-primary/30 dark:hover:to-primary/20 shadow-sm dark:shadow-lg backdrop-blur-xl'
-              )}
-            >
-              <Bot
-                className={cn(
-                  'h-4 w-4 transition-colors',
-                  selectedAgentId === agent.id
-                    ? 'text-primary dark:text-primary'
-                    : 'text-gray-500 dark:text-gray-400'
-                )}
-              />
-              <div className="flex-1 min-w-0">
-                <div className="font-medium text-sm">{agent.display_name}</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
-                  {agent.tools.length} tools • {agent.rooms.length} rooms
-                </div>
-              </div>
-            </button>
-          ))}
-        </div>
-      </CardContent>
-    </Card>
+    <ListPanel<AgentListItem>
+      title="Agents"
+      icon={Bot}
+      items={agents as AgentListItem[]}
+      selectedId={selectedAgentId || undefined}
+      onItemSelect={selectAgent}
+      onCreateItem={handleCreateAgent}
+      renderItem={renderAgent}
+      showSearch={true}
+      searchPlaceholder="Search agents..."
+      creationMode="inline-form"
+      createButtonText="Add"
+      createPlaceholder="Agent name..."
+      emptyIcon={Bot}
+      emptyMessage="No agents found"
+      emptySubtitle={'Click "Add" to create one'}
+    />
   );
 }
