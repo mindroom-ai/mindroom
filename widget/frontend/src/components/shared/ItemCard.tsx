@@ -99,7 +99,7 @@ export function ItemCard({
           : undefined
       }
     >
-      <CardContent className={sharedStyles.item.cardContent}>
+      <CardContent className="p-4">
         <div className="flex items-start justify-between">
           <div className="flex-1">
             <h3 className={sharedStyles.item.cardTitle}>{title}</h3>
@@ -110,7 +110,14 @@ export function ItemCard({
                   <Badge
                     key={index}
                     variant={badge.variant || 'secondary'}
-                    className={sharedStyles.badge.secondary}
+                    className={cn(
+                      'text-xs',
+                      badge.variant === 'secondary'
+                        ? sharedStyles.badge.secondary
+                        : badge.variant === 'outline'
+                          ? sharedStyles.badge.outline
+                          : 'text-xs'
+                    )}
                   >
                     {badge.icon && <badge.icon className={sharedStyles.badge.withIcon} />}
                     {badge.content}

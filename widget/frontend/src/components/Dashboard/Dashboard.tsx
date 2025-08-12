@@ -358,15 +358,16 @@ export function Dashboard() {
                 Click an agent to see details
               </CardDescription>
             </CardHeader>
-            <CardContent className={sharedStyles.panel.content}>
+            <CardContent className="p-2 flex-1 overflow-y-auto min-h-0">
               <ScrollArea className="h-96">
                 <div className={sharedStyles.list.containerWithSpacing}>
                   {filteredData.agents.map(agent => {
                     const badges: ItemCardBadge[] = [];
+                    const agentTeams = teams.filter(team => team.agents.includes(agent.id));
 
-                    if (teams.some(team => team.agents.includes(agent.id))) {
+                    if (agentTeams.length > 0) {
                       badges.push({
-                        content: '',
+                        content: `${agentTeams.length} team${agentTeams.length === 1 ? '' : 's'}`,
                         variant: 'secondary' as const,
                         icon: Users,
                       });
@@ -432,7 +433,7 @@ export function Dashboard() {
                 Click a room to see details
               </CardDescription>
             </CardHeader>
-            <CardContent className={sharedStyles.panel.content}>
+            <CardContent className="p-2 flex-1 overflow-y-auto min-h-0">
               <ScrollArea className="h-96">
                 <div className={sharedStyles.list.containerWithSpacing}>
                   {filteredData.rooms.map(room => {
