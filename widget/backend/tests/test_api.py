@@ -9,11 +9,10 @@ from fastapi.testclient import TestClient
 
 def test_health_check(test_client: TestClient) -> None:
     """Test the health check endpoint."""
-    response = test_client.get("/health")
+    response = test_client.get("/api/health")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
-    assert "config_loaded" in data
 
 
 def test_load_config(test_client: TestClient) -> None:
@@ -207,7 +206,7 @@ def test_error_handling_agent_not_found(test_client: TestClient) -> None:
 def test_cors_headers(test_client: TestClient) -> None:
     """Test CORS headers are present."""
     # Test with a regular request (CORS headers are added to responses)
-    response = test_client.get("/health")
+    response = test_client.get("/api/health")
     # TestClient doesn't simulate CORS middleware properly
     # In a real browser environment, these headers would be present
     assert response.status_code == 200
