@@ -77,11 +77,22 @@ describe('AgentList', () => {
     expect(mockSelectAgent).toHaveBeenCalledWith('agent2');
   });
 
-  it('should call createAgent when clicking add button', () => {
+  it('should show creation form when clicking add button', () => {
     render(<AgentList />);
 
     const addButton = screen.getByText('Add');
     fireEvent.click(addButton);
+
+    // Should show the inline form with input field
+    const input = screen.getByPlaceholderText('Agent name...');
+    expect(input).toBeInTheDocument();
+
+    // Type a name and submit
+    fireEvent.change(input, { target: { value: 'Test Agent' } });
+
+    // Find and click the create button in the form
+    const createButton = screen.getByTestId('form-create-button');
+    fireEvent.click(createButton);
 
     expect(mockCreateAgent).toHaveBeenCalled();
   });

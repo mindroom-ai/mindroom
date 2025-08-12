@@ -224,7 +224,7 @@ export function ListPanel<T extends ListItem>({
         )}
       </div>
       {showSearch && (
-        <div className={variant === 'card' ? sharedStyles.search.container : undefined}>
+        <div className={variant === 'card' ? `${sharedStyles.search.container} mt-3` : 'mt-2'}>
           {variant === 'card' && <Search className={sharedStyles.search.icon} />}
           <Input
             placeholder={searchPlaceholder || `Search ${title.toLowerCase()}...`}
@@ -289,13 +289,7 @@ export function ListPanel<T extends ListItem>({
 
       {/* Items list */}
       {filteredItems.length > 0 && (
-        <div
-          className={
-            variant === 'card'
-              ? sharedStyles.list.container
-              : sharedStyles.list.containerWithSpacing
-          }
-        >
+        <div className={sharedStyles.list.containerWithSpacing}>
           {filteredItems.map(item => (
             <div key={item.id}>{renderItem(item, selectedId === item.id)}</div>
           ))}

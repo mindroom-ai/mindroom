@@ -15,9 +15,9 @@ interface AgentListItem extends ListItem {
 export function AgentList() {
   const { agents, selectedAgentId, selectAgent, createAgent } = useConfigStore();
 
-  const handleCreateAgent = () => {
+  const handleCreateAgent = (agentName?: string) => {
     const newAgent = {
-      display_name: 'New Agent',
+      display_name: agentName || 'New Agent',
       role: 'A new agent that needs configuration',
       tools: [],
       instructions: [],
@@ -62,8 +62,11 @@ export function AgentList() {
       onItemSelect={selectAgent}
       onCreateItem={handleCreateAgent}
       renderItem={renderAgent}
-      creationMode="instant"
+      showSearch={true}
+      searchPlaceholder="Search agents..."
+      creationMode="inline-form"
       createButtonText="Add"
+      createPlaceholder="Agent name..."
       emptyIcon={Bot}
       emptyMessage="No agents found"
       emptySubtitle={'Click "Add" to create one'}
