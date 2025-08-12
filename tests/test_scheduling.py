@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.scheduling import list_scheduled_tasks
+from mindroom.workflow_scheduling import ScheduledWorkflow
 
 
 @pytest.mark.asyncio
@@ -17,6 +18,34 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
     # Create mock client
     client = AsyncMock()
 
+    # Create workflows
+    workflow1 = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="Test message 1",
+        description="Test task 1",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+
+    workflow2 = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=10),
+        message="Test message 2",
+        description="Test task 2",
+        thread_id="$thread456",
+        room_id="!test:server",
+    )
+
+    workflow3 = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(hours=1),
+        message="Test message 3",
+        description="Test task 3",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+
     # Create a proper RoomGetStateResponse with scheduled tasks
     mock_response = nio.RoomGetStateResponse.from_dict(
         [
@@ -24,14 +53,7 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task1",
                 "content": {
-                    "task_id": "task1",
-                    "room_id": "!test:server",
-                    "thread_id": "$thread123",
-                    "agent_user_id": "@bot:server",
-                    "scheduled_by": "@user:server",
-                    "scheduled_at": datetime.now(UTC).isoformat(),
-                    "execute_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
-                    "message": "Test message 1",
+                    "workflow": workflow1.model_dump_json(),
                     "status": "pending",
                 },
                 "event_id": "$state_task1",
@@ -42,14 +64,7 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task2",
                 "content": {
-                    "task_id": "task2",
-                    "room_id": "!test:server",
-                    "thread_id": "$thread456",  # Different thread
-                    "agent_user_id": "@bot:server",
-                    "scheduled_by": "@user:server",
-                    "scheduled_at": datetime.now(UTC).isoformat(),
-                    "execute_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
-                    "message": "Test message 2",
+                    "workflow": workflow2.model_dump_json(),
                     "status": "pending",
                 },
                 "event_id": "$state_task2",
@@ -60,14 +75,7 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task3",
                 "content": {
-                    "task_id": "task3",
-                    "room_id": "!test:server",
-                    "thread_id": "$thread123",  # Same thread as task1
-                    "agent_user_id": "@bot:server",
-                    "scheduled_by": "@user:server",
-                    "scheduled_at": datetime.now(UTC).isoformat(),
-                    "execute_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-                    "message": "Test message 3",
+                    "workflow": workflow3.model_dump_json(),
                     "status": "pending",
                 },
                 "event_id": "$state_task3",
@@ -78,9 +86,6 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task4",
                 "content": {
-                    "task_id": "task4",
-                    "room_id": "!test:server",
-                    "thread_id": "$thread123",
                     "status": "completed",  # This one is completed, should not appear
                 },
                 "event_id": "$state_task4",
@@ -99,8 +104,10 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
     # Should show 2 tasks from thread123, not task2 (different thread) or task4 (completed)
     assert "**Scheduled Tasks:**" in result
     assert "task1" in result
+    assert "Test task 1" in result
     assert "Test message 1" in result
     assert "task3" in result
+    assert "Test task 3" in result
     assert "Test message 3" in result
     assert "task2" not in result  # Different thread
     assert "task4" not in result  # Completed
@@ -111,6 +118,7 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
     # Should only show task2
     assert "**Scheduled Tasks:**" in result2
     assert "task2" in result2
+    assert "Test task 2" in result2
     assert "Test message 2" in result2
     assert "task1" not in result2
     assert "task3" not in result2
@@ -135,6 +143,15 @@ async def test_list_scheduled_tasks_tasks_in_other_threads() -> None:
     """Test list_scheduled_tasks when all tasks are in other threads."""
     client = AsyncMock()
 
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="Test message",
+        description="Test task",
+        thread_id="$thread456",  # Different thread
+        room_id="!test:server",
+    )
+
     # Tasks only in other threads
     mock_response = nio.RoomGetStateResponse.from_dict(
         [
@@ -142,10 +159,7 @@ async def test_list_scheduled_tasks_tasks_in_other_threads() -> None:
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task1",
                 "content": {
-                    "task_id": "task1",
-                    "thread_id": "$thread456",  # Different thread
-                    "execute_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
-                    "message": "Test message",
+                    "workflow": workflow.model_dump_json(),
                     "status": "pending",
                 },
                 "event_id": "$state_task1",
@@ -187,6 +201,15 @@ async def test_list_scheduled_tasks_invalid_task_data() -> None:
     """Test list_scheduled_tasks handles invalid task data gracefully."""
     client = AsyncMock()
 
+    valid_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="Valid task",
+        description="Valid task description",
+        thread_id="$thread123",
+        room_id="!test:server",
+    )
+
     # Mix of valid and invalid tasks
     mock_response = nio.RoomGetStateResponse.from_dict(
         [
@@ -194,10 +217,7 @@ async def test_list_scheduled_tasks_invalid_task_data() -> None:
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task1",
                 "content": {
-                    # Missing execute_at - should be skipped
-                    "task_id": "task1",
-                    "thread_id": "$thread123",
-                    "message": "Test message",
+                    # Missing workflow - should be skipped
                     "status": "pending",
                 },
                 "event_id": "$state_task1",
@@ -208,10 +228,7 @@ async def test_list_scheduled_tasks_invalid_task_data() -> None:
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task2",
                 "content": {
-                    "task_id": "task2",
-                    "thread_id": "$thread123",
-                    "execute_at": "invalid-date",  # Invalid date format
-                    "message": "Test message",
+                    "workflow": "invalid-json",  # Invalid JSON
                     "status": "pending",
                 },
                 "event_id": "$state_task2",
@@ -222,10 +239,7 @@ async def test_list_scheduled_tasks_invalid_task_data() -> None:
                 "type": "com.mindroom.scheduled.task",
                 "state_key": "task3",
                 "content": {
-                    "task_id": "task3",
-                    "thread_id": "$thread123",
-                    "execute_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
-                    "message": "Valid task",
+                    "workflow": valid_workflow.model_dump_json(),
                     "status": "pending",
                 },
                 "event_id": "$state_task3",
