@@ -48,6 +48,11 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *.cover
+
+# Playwright test results
+test-results/
+playwright-report/
+playwright/.cache/
 *.py,cover
 .hypothesis/
 .pytest_cache/
