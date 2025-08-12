@@ -20,7 +20,11 @@ const serviceIcons = {
   'Google Drive': HardDrive,
 };
 
-export function GoogleIntegration() {
+interface GoogleIntegrationProps {
+  onSuccess?: () => void;
+}
+
+export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
   const [status, setStatus] = useState<GoogleStatus>({ connected: false, services: [] });
   const [loading, setLoading] = useState(false);
   const { toast } = useToast();
@@ -40,6 +44,11 @@ export function GoogleIntegration() {
         title: 'Google Account Connected',
         description: 'Your Google services are now available to MindRoom agents.',
       });
+
+      // Notify parent component of success
+      if (onSuccess) {
+        onSuccess();
+      }
     }
   }, []);
 
