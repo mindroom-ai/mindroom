@@ -218,6 +218,26 @@ agents:
     - productivity
     num_history_runs: 5
     model: sonnet
+  home:
+    display_name: HomeAssistant
+    role: Control and monitor smart home devices through Home Assistant
+    tools:
+    - homeassistant
+    instructions:
+    - You are a helpful home automation assistant
+    - You can control lights, switches, climate devices, and other smart home devices
+    - Always confirm with the user before making significant changes
+    - Provide helpful suggestions for automations and energy savings
+    - Be proactive in suggesting improvements to the home setup
+    - List available devices when asked about what you can control
+    - Provide clear status updates after performing actions
+    - Group related actions together for efficiency
+    rooms:
+    - lobby
+    - automation
+    - home
+    num_history_runs: 5
+    model: default
 defaults:
   add_history_to_messages: true
   markdown: true
