@@ -15,6 +15,7 @@ from mindroom.config import Config
 
 # Import routers
 from src.api.google_integration import router as google_router
+from src.api.homeassistant_integration import router as homeassistant_router
 from src.api.integrations import router as integrations_router
 from src.api.tools import router as tools_router
 
@@ -93,6 +94,7 @@ observer.start()
 
 # Include routers
 app.include_router(google_router)
+app.include_router(homeassistant_router)
 app.include_router(integrations_router)
 app.include_router(tools_router)
 
