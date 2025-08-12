@@ -56,25 +56,7 @@ const SPECIAL_INTEGRATIONS: UnifiedIntegration[] = [
     status: 'available',
     setup_type: 'special',
   },
-  // IMDb and Spotify have special frontend handling even though they're "coming soon" in backend
-  {
-    id: 'imdb',
-    name: 'Movies & TV (IMDb)',
-    description: 'Get movie and TV show information from IMDb',
-    category: 'entertainment',
-    icon: null, // Will be replaced by iconMapping
-    status: 'available',
-    setup_type: 'api_key',
-  },
-  {
-    id: 'spotify',
-    name: 'Spotify',
-    description: 'Access your Spotify music data and current playback',
-    category: 'entertainment',
-    icon: null, // Will be replaced by iconMapping
-    status: 'available',
-    setup_type: 'oauth',
-  },
+  // Only Google has special handling - it's the only OAuth integration actually implemented
 ];
 
 export function Integrations() {
