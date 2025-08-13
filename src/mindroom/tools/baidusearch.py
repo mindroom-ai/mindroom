@@ -33,7 +33,7 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             placeholder="5",
-            description="Sets a fixed number of maximum results to return. If not set, can be specified per search",
+            description="Sets a fixed number of maximum results to return",
         ),
         ConfigField(
             name="fixed_language",
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             placeholder="zh",
-            description="Set the fixed language for search results (e.g., 'zh' for Chinese, 'en' for English)",
+            description="Set the fixed language for the results",
         ),
         ConfigField(
             name="headers",
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             placeholder='{"User-Agent": "Custom Agent"}',
-            description="Custom HTTP headers to send with requests (JSON format)",
+            description="Headers to be used in the search request",
         ),
         ConfigField(
             name="proxy",
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
             type="url",
             required=False,
             placeholder="http://proxy.example.com:8080",
-            description="Proxy server address to use for HTTP requests",
+            description="Specifies a single proxy address as a string",
         ),
         ConfigField(
             name="timeout",
@@ -65,7 +65,7 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=10,
-            description="Timeout for HTTP requests in seconds",
+            description="Sets the timeout for HTTP requests, in seconds",
         ),
         # Feature flags
         ConfigField(

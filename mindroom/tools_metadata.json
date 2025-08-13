@@ -5341,7 +5341,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Sets a fixed number of maximum results to return. If not set, can be specified per search",
+          "description": "Sets a fixed number of maximum results to return",
           "label": "Fixed Max Results",
           "name": "fixed_max_results",
           "options": null,
@@ -5352,7 +5352,7 @@
         },
         {
           "default": null,
-          "description": "Set the fixed language for search results (e.g., 'zh' for Chinese, 'en' for English)",
+          "description": "Set the fixed language for the results",
           "label": "Fixed Language",
           "name": "fixed_language",
           "options": null,
@@ -5363,7 +5363,7 @@
         },
         {
           "default": null,
-          "description": "Custom HTTP headers to send with requests (JSON format)",
+          "description": "Headers to be used in the search request",
           "label": "Custom Headers",
           "name": "headers",
           "options": null,
@@ -5374,7 +5374,7 @@
         },
         {
           "default": null,
-          "description": "Proxy server address to use for HTTP requests",
+          "description": "Specifies a single proxy address as a string",
           "label": "Proxy",
           "name": "proxy",
           "options": null,
@@ -5385,7 +5385,7 @@
         },
         {
           "default": 10,
-          "description": "Timeout for HTTP requests in seconds",
+          "description": "Sets the timeout for HTTP requests, in seconds",
           "label": "Timeout",
           "name": "timeout",
           "options": null,
