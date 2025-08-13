@@ -41,7 +41,13 @@ Generate ConfigField definitions for the [TOOL_NAME] tool from the agno library 
    - Fall back to generating descriptions based on parameter names when not documented
    - Always use the source code for the complete list of parameters
 
-5. For each parameter, create a ConfigField with:
+5. **Add dependencies to pyproject.toml**:
+   - Check what dependencies the tool requires (from the `dependencies` field in the tool file)
+   - Add any missing dependencies to `pyproject.toml` in the main dependencies list
+   - Use the format: `"package-name",  # for [Tool Name] tool`
+   - Follow the existing pattern in the file with proper comments
+
+6. For each parameter, create a ConfigField with:
    - `name`: Exact parameter name from agno
    - `label`: Human-readable label (title case with spaces)
    - `type`: Map Python types as follows:
@@ -179,6 +185,7 @@ For a parameter like `enable_search: bool = True`:
 8. The test `verify_tool_configfields("[tool_name]", [ToolClass])` must pass
 9. For `docs_url`: Use the URL from `llms.txt` but **remove the .md extension**
    - Example: `https://docs.agno.com/tools/toolkits/database/pandas` (not `.../pandas.md`)
+10. **Update pyproject.toml dependencies**: Add any new tool dependencies with proper comments
 
 ## Verification
 
