@@ -143,7 +143,11 @@ export function Integrations() {
         title: 'Coming Soon',
         description: `${integration.name} integration is in development and will be available soon.`,
       });
-    } else if (integration.setup_type === 'api_key') {
+    } else if (
+      integration.setup_type === 'api_key' ||
+      integration.setup_type === 'oauth' ||
+      integration.setup_type === 'special'
+    ) {
       // Show generic config dialog for tools with config_fields
       const tool = integration as any; // Cast to access config_fields
       if (tool.config_fields && tool.config_fields.length > 0) {
