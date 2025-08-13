@@ -7,8 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from mindroom.tools import TOOL_REGISTRY, get_tool_by_name
-from mindroom.tools_metadata import TOOL_METADATA, ToolStatus
+from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, ToolStatus, get_tool_by_name
 
 
 def test_all_tools_can_be_imported() -> None:

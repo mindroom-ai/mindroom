@@ -39,10 +39,10 @@ from .telegram import telegram_tools
 from .website import website_tools
 from .wikipedia import wikipedia_tools
 from .x import x_tools
+from .yfinance import yfinance_tools
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
-    from agno.tools.yfinance import YFinanceTools
     from agno.tools.youtube import YouTubeTools
 
     from mindroom.custom_tools.gmail import GmailTools
@@ -70,24 +70,8 @@ __all__ = [
     "website_tools",
     "wikipedia_tools",
     "x_tools",
+    "yfinance_tools",
 ]
-
-
-@register_tool_with_metadata(
-    name="yfinance",
-    display_name="Yahoo Finance",
-    description="Stock market data and financial information",
-    category=ToolCategory.RESEARCH,
-    icon="TrendingUp",
-    icon_color="text-green-600",
-    dependencies=["yfinance"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/yfinance",
-)
-def yfinance_tools() -> type[YFinanceTools]:
-    """Return Yahoo Finance tools for financial data."""
-    from agno.tools.yfinance import YFinanceTools  # noqa: PLC0415
-
-    return YFinanceTools
 
 
 @register_tool_with_metadata(
