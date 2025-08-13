@@ -115,7 +115,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["duckdb"],
-    docs_url="https://docs.agno.com/tools/toolkits/productivity/duckdb",
+    docs_url="https://docs.agno.com/tools/toolkits/database/duckdb",
 )
 def duckdb_tools() -> type[DuckDbTools]:
     """Return DuckDB tools for data analysis and processing."""

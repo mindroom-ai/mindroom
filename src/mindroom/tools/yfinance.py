@@ -112,7 +112,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["yfinance"],
-    docs_url="https://docs.agno.com/tools/toolkits/productivity/yfinance",
+    docs_url="https://docs.agno.com/tools/toolkits/others/yfinance",
 )
 def yfinance_tools() -> type[YFinanceTools]:
     """Return Yahoo Finance tools for financial data."""

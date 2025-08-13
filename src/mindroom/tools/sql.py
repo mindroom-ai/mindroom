@@ -129,7 +129,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["sqlalchemy"],
-    docs_url="https://docs.agno.com/tools/toolkits/integrations/sql",
+    docs_url="https://docs.agno.com/tools/toolkits/database/sql",
 )
 def sql_tools() -> type[SQLTools]:
     """Return SQL tools for database operations."""

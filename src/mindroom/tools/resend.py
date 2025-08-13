@@ -46,7 +46,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["resend"],
-    docs_url="https://docs.agno.com/tools/toolkits/email/resend",
+    docs_url="https://docs.agno.com/tools/toolkits/others/resend",
 )
 def resend_tools() -> type[ResendTools]:
     """Return Resend email tools for sending transactional emails."""

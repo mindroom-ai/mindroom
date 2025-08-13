@@ -72,7 +72,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx"],
-    docs_url="https://docs.agno.com/tools/toolkits/communication/whatsapp",
+    docs_url="https://docs.agno.com/tools/toolkits/social/whatsapp",
 )
 def whatsapp_tools() -> type[WhatsAppTools]:
     """Return WhatsApp Business API tools for messaging."""

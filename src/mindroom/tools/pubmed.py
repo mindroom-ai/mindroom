@@ -55,7 +55,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx"],
-    docs_url="https://docs.agno.com/tools/toolkits/research/pubmed",
+    docs_url="https://docs.agno.com/tools/toolkits/search/pubmed",
 )
 def pubmed_tools() -> type[PubmedTools]:
     """Return PubMed tools for medical research and literature search."""

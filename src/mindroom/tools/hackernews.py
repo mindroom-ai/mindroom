@@ -45,7 +45,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx"],
-    docs_url="https://docs.agno.com/tools/toolkits/research/hackernews",
+    docs_url="https://docs.agno.com/tools/toolkits/search/hackernews",
 )
 def hackernews_tools() -> type[HackerNewsTools]:
     """Return Hacker News tools for getting stories and user details."""

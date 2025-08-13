@@ -72,7 +72,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/communication/discord",
+    docs_url="https://docs.agno.com/tools/toolkits/social/discord",
 )
 def discord_tools() -> type[DiscordTools]:
     """Return Discord tools for interacting with Discord channels and servers."""

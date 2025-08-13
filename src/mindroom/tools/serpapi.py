@@ -46,7 +46,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["google-search-results"],
-    docs_url="https://docs.agno.com/tools/toolkits/research/serpapi",
+    docs_url="https://docs.agno.com/tools/toolkits/search/serpapi",
 )
 def serpapi_tools() -> type[SerpApiTools]:
     """Return SerpApi tools for Google and YouTube search."""

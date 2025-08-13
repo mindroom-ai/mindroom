@@ -237,7 +237,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["exa_py"],
-    docs_url="https://docs.agno.com/tools/toolkits/research/exa",
+    docs_url="https://docs.agno.com/tools/toolkits/search/exa",
 )
 def exa_tools() -> type[ExaTools]:
     """Return Exa tools for AI-powered web search and research."""
