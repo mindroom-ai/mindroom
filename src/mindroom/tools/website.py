@@ -40,6 +40,6 @@ if TYPE_CHECKING:
 )
 def website_tools() -> type[WebsiteTools]:
     """Return website tools for web scraping and content extraction."""
-    from agno.tools.website import WebsiteTools  # noqa: PLC0415
+    from agno.tools.website import WebsiteTools
 
     return WebsiteTools

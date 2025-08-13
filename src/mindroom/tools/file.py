@@ -75,6 +75,6 @@ if TYPE_CHECKING:
 )
 def file_tools() -> type[FileTools]:
     """Return file tools for local file operations."""
-    from agno.tools.file import FileTools  # noqa: PLC0415
+    from agno.tools.file import FileTools
 
     return FileTools

@@ -94,6 +94,6 @@ if TYPE_CHECKING:
 )
 def google_calendar_tools() -> type[GoogleCalendarTools]:
     """Return Google Calendar tools for calendar management."""
-    from agno.tools.googlecalendar import GoogleCalendarTools  # noqa: PLC0415
+    from agno.tools.googlecalendar import GoogleCalendarTools
 
     return GoogleCalendarTools

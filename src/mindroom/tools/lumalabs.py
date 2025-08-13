@@ -66,6 +66,6 @@ if TYPE_CHECKING:
 )
 def lumalabs_tools() -> type[LumaLabTools]:
     """Return Luma Labs tools for 3D content creation and video generation."""
-    from agno.tools.lumalab import LumaLabTools  # noqa: PLC0415
+    from agno.tools.lumalab import LumaLabTools
 
     return LumaLabTools

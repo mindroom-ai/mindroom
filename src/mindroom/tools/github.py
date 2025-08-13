@@ -371,6 +371,6 @@ if TYPE_CHECKING:
 )
 def github_tools() -> type[GithubTools]:
     """Return GitHub tools for repository management."""
-    from agno.tools.github import GithubTools  # noqa: PLC0415
+    from agno.tools.github import GithubTools
 
     return GithubTools

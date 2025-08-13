@@ -76,6 +76,6 @@ if TYPE_CHECKING:
 )
 def whatsapp_tools() -> type[WhatsAppTools]:
     """Return WhatsApp Business API tools for messaging."""
-    from agno.tools.whatsapp import WhatsAppTools  # noqa: PLC0415
+    from agno.tools.whatsapp import WhatsAppTools
 
     return WhatsAppTools

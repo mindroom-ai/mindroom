@@ -76,6 +76,6 @@ if TYPE_CHECKING:
 )
 def youtube_tools() -> type[YouTubeTools]:
     """Return YouTube tools for video data extraction."""
-    from agno.tools.youtube import YouTubeTools  # noqa: PLC0415
+    from agno.tools.youtube import YouTubeTools
 
     return YouTubeTools

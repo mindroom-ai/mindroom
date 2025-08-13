@@ -103,6 +103,6 @@ if TYPE_CHECKING:
 )
 def jina_tools() -> type[JinaReaderTools]:
     """Return Jina Reader tools for web content reading and search."""
-    from agno.tools.jina import JinaReaderTools  # noqa: PLC0415
+    from agno.tools.jina import JinaReaderTools
 
     return JinaReaderTools

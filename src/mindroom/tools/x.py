@@ -92,6 +92,6 @@ if TYPE_CHECKING:
 )
 def x_tools() -> type[XTools]:
     """Return X (Twitter) tools for posting tweets and social media interaction."""
-    from agno.tools.x import XTools  # noqa: PLC0415
+    from agno.tools.x import XTools
 
     return XTools

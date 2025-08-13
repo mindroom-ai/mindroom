@@ -41,6 +41,6 @@ if TYPE_CHECKING:
 )
 def shell_tools() -> type[ShellTools]:
     """Return shell tools for command execution."""
-    from agno.tools.shell import ShellTools  # noqa: PLC0415
+    from agno.tools.shell import ShellTools
 
     return ShellTools

@@ -116,6 +116,6 @@ if TYPE_CHECKING:
 )
 def yfinance_tools() -> type[YFinanceTools]:
     """Return Yahoo Finance tools for financial data."""
-    from agno.tools.yfinance import YFinanceTools  # noqa: PLC0415
+    from agno.tools.yfinance import YFinanceTools
 
     return YFinanceTools

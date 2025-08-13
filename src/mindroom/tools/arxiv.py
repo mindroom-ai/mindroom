@@ -59,6 +59,6 @@ if TYPE_CHECKING:
 )
 def arxiv_tools() -> type[ArxivTools]:
     """Return ArXiv tools for academic paper research."""
-    from agno.tools.arxiv import ArxivTools  # noqa: PLC0415
+    from agno.tools.arxiv import ArxivTools
 
     return ArxivTools

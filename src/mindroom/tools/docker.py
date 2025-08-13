@@ -68,6 +68,6 @@ if TYPE_CHECKING:
 )
 def docker_tools() -> type[DockerTools]:
     """Return Docker tools for container management."""
-    from agno.tools.docker import DockerTools  # noqa: PLC0415
+    from agno.tools.docker import DockerTools
 
     return DockerTools

@@ -150,6 +150,6 @@ if TYPE_CHECKING:
 )
 def reddit_tools() -> type[RedditTools]:
     """Return Reddit tools for social media interaction."""
-    from agno.tools.reddit import RedditTools  # noqa: PLC0415
+    from agno.tools.reddit import RedditTools
 
     return RedditTools

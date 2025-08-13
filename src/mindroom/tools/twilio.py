@@ -92,6 +92,6 @@ if TYPE_CHECKING:
 )
 def twilio_tools() -> type[TwilioTools]:
     """Return Twilio tools for SMS messaging and voice communication."""
-    from agno.tools.twilio import TwilioTools  # noqa: PLC0415
+    from agno.tools.twilio import TwilioTools
 
     return TwilioTools

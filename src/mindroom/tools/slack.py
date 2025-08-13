@@ -75,6 +75,6 @@ if TYPE_CHECKING:
 )
 def slack_tools() -> type[SlackTools]:
     """Return Slack tools for messaging and channel management."""
-    from agno.tools.slack import SlackTools  # noqa: PLC0415
+    from agno.tools.slack import SlackTools
 
     return SlackTools

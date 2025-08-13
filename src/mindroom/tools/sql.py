@@ -133,6 +133,6 @@ if TYPE_CHECKING:
 )
 def sql_tools() -> type[SQLTools]:
     """Return SQL tools for database operations."""
-    from agno.tools.sql import SQLTools  # noqa: PLC0415
+    from agno.tools.sql import SQLTools
 
     return SQLTools

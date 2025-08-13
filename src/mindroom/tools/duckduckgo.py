@@ -113,6 +113,6 @@ if TYPE_CHECKING:
 )
 def duckduckgo_tools() -> type[DuckDuckGoTools]:
     """Return DuckDuckGo tools for web search and news."""
-    from agno.tools.duckduckgo import DuckDuckGoTools  # noqa: PLC0415
+    from agno.tools.duckduckgo import DuckDuckGoTools
 
     return DuckDuckGoTools

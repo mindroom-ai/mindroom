@@ -98,6 +98,6 @@ if TYPE_CHECKING:
 )
 def linear_tools() -> type[LinearTools]:
     """Return Linear tools for issue tracking and project management."""
-    from agno.tools.linear import LinearTools  # noqa: PLC0415
+    from agno.tools.linear import LinearTools
 
     return LinearTools

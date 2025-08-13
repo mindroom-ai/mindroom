@@ -69,6 +69,6 @@ if TYPE_CHECKING:
 )
 def email_tools() -> type[EmailTools]:
     """Return email tools for sending messages via SMTP."""
-    from agno.tools.email import EmailTools  # noqa: PLC0415
+    from agno.tools.email import EmailTools
 
     return EmailTools

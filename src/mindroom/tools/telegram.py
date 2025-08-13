@@ -49,6 +49,6 @@ if TYPE_CHECKING:
 )
 def telegram_tools() -> type[TelegramTools]:
     """Return Telegram tools for sending messages."""
-    from agno.tools.telegram import TelegramTools  # noqa: PLC0415
+    from agno.tools.telegram import TelegramTools
 
     return TelegramTools

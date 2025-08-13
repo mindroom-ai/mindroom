@@ -59,6 +59,6 @@ if TYPE_CHECKING:
 )
 def pubmed_tools() -> type[PubmedTools]:
     """Return PubMed tools for medical research and literature search."""
-    from agno.tools.pubmed import PubmedTools  # noqa: PLC0415
+    from agno.tools.pubmed import PubmedTools
 
     return PubmedTools

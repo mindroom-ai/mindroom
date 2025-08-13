@@ -50,6 +50,6 @@ if TYPE_CHECKING:
 )
 def resend_tools() -> type[ResendTools]:
     """Return Resend email tools for sending transactional emails."""
-    from agno.tools.resend import ResendTools  # noqa: PLC0415
+    from agno.tools.resend import ResendTools
 
     return ResendTools

@@ -51,6 +51,6 @@ if TYPE_CHECKING:
 )
 def replicate_tools() -> type[ReplicateTools]:
     """Return Replicate tools for AI media generation."""
-    from agno.tools.replicate import ReplicateTools  # noqa: PLC0415
+    from agno.tools.replicate import ReplicateTools
 
     return ReplicateTools

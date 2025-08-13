@@ -40,6 +40,6 @@ if TYPE_CHECKING:
 )
 def wikipedia_tools() -> type[WikipediaTools]:
     """Return Wikipedia tools for searching and retrieving information."""
-    from agno.tools.wikipedia import WikipediaTools  # noqa: PLC0415
+    from agno.tools.wikipedia import WikipediaTools
 
     return WikipediaTools

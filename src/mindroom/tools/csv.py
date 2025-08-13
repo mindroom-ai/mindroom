@@ -99,6 +99,6 @@ if TYPE_CHECKING:
 )
 def csv_tools() -> type[CsvTools]:
     """Return CSV toolkit for data analysis and querying."""
-    from agno.tools.csv_toolkit import CsvTools  # noqa: PLC0415
+    from agno.tools.csv_toolkit import CsvTools
 
     return CsvTools

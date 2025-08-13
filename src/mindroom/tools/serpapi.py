@@ -50,6 +50,6 @@ if TYPE_CHECKING:
 )
 def serpapi_tools() -> type[SerpApiTools]:
     """Return SerpApi tools for Google and YouTube search."""
-    from agno.tools.serpapi import SerpApiTools  # noqa: PLC0415
+    from agno.tools.serpapi import SerpApiTools
 
     return SerpApiTools

@@ -115,6 +115,6 @@ if TYPE_CHECKING:
 )
 def python_tools() -> type[PythonTools]:
     """Return Python tools for code execution and file management."""
-    from agno.tools.python import PythonTools  # noqa: PLC0415
+    from agno.tools.python import PythonTools
 
     return PythonTools

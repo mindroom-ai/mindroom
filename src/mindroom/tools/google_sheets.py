@@ -124,15 +124,11 @@ if TYPE_CHECKING:
             description="Enable duplicating existing Google Sheets",
         ),
     ],
-    dependencies=[
-        "google-api-python-client",
-        "google-auth-httplib2", 
-        "google-auth-oauthlib"
-    ],
+    dependencies=["google-api-python-client", "google-auth-httplib2", "google-auth-oauthlib"],
     docs_url="https://docs.agno.com/tools/toolkits/others/google_sheets",
 )
 def google_sheets_tools() -> type[GoogleSheetsTools]:
     """Return Google Sheets tools for spreadsheet integration."""
-    from agno.tools.googlesheets import GoogleSheetsTools  # noqa: PLC0415
+    from agno.tools.googlesheets import GoogleSheetsTools
 
     return GoogleSheetsTools

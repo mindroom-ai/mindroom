@@ -99,6 +99,6 @@ if TYPE_CHECKING:
 )
 def tavily_tools() -> type[TavilyTools]:
     """Return Tavily tools for real-time web search."""
-    from agno.tools.tavily import TavilyTools  # noqa: PLC0415
+    from agno.tools.tavily import TavilyTools
 
     return TavilyTools

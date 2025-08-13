@@ -119,6 +119,6 @@ if TYPE_CHECKING:
 )
 def firecrawl_tools() -> type[FirecrawlTools]:
     """Return Firecrawl tools for web scraping and crawling."""
-    from agno.tools.firecrawl import FirecrawlTools  # noqa: PLC0415
+    from agno.tools.firecrawl import FirecrawlTools
 
     return FirecrawlTools

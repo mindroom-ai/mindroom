@@ -30,6 +30,6 @@ if TYPE_CHECKING:
 )
 def pandas_tools() -> type[PandasTools]:
     """Return Pandas tools for data manipulation and analysis."""
-    from agno.tools.pandas import PandasTools  # noqa: PLC0415
+    from agno.tools.pandas import PandasTools
 
     return PandasTools

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -33,6 +32,6 @@ if TYPE_CHECKING:
 )
 def web_browser_tools() -> type[WebBrowserTools]:
     """Return Web Browser Tools for opening URLs."""
-    from agno.tools.webbrowser import WebBrowserTools  # noqa: PLC0415
+    from agno.tools.webbrowser import WebBrowserTools
 
     return WebBrowserTools

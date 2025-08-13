@@ -49,6 +49,6 @@ if TYPE_CHECKING:
 )
 def hackernews_tools() -> type[HackerNewsTools]:
     """Return Hacker News tools for getting stories and user details."""
-    from agno.tools.hackernews import HackerNewsTools  # noqa: PLC0415
+    from agno.tools.hackernews import HackerNewsTools
 
     return HackerNewsTools

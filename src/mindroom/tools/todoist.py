@@ -98,6 +98,6 @@ if TYPE_CHECKING:
 )
 def todoist_tools() -> type[TodoistTools]:
     """Return Todoist tools for task management."""
-    from agno.tools.todoist import TodoistTools  # noqa: PLC0415
+    from agno.tools.todoist import TodoistTools
 
     return TodoistTools

@@ -107,6 +107,6 @@ if TYPE_CHECKING:
 )
 def calculator_tools() -> type[CalculatorTools]:
     """Return calculator tools for mathematical operations."""
-    from agno.tools.calculator import CalculatorTools  # noqa: PLC0415
+    from agno.tools.calculator import CalculatorTools
 
     return CalculatorTools

@@ -33,6 +33,6 @@ if TYPE_CHECKING:
 )
 def sleep_tools() -> type[SleepTools]:
     """Return sleep tools for introducing delays and pauses in execution."""
-    from agno.tools.sleep import SleepTools  # noqa: PLC0415
+    from agno.tools.sleep import SleepTools
 
     return SleepTools

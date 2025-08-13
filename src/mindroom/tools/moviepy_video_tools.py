@@ -57,6 +57,6 @@ if TYPE_CHECKING:
 )
 def moviepy_video_tools() -> type[MoviePyVideoTools]:
     """Return MoviePy Video Tools for video processing, audio extraction, and caption generation."""
-    from agno.tools.moviepy_video import MoviePyVideoTools  # noqa: PLC0415
+    from agno.tools.moviepy_video import MoviePyVideoTools
 
     return MoviePyVideoTools

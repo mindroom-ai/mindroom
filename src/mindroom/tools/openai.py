@@ -138,6 +138,6 @@ if TYPE_CHECKING:
 )
 def openai_tools() -> type[OpenAITools]:
     """Return OpenAI tools for AI-powered transcription, image generation, and speech synthesis."""
-    from agno.tools.openai import OpenAITools  # noqa: PLC0415
+    from agno.tools.openai import OpenAITools
 
     return OpenAITools

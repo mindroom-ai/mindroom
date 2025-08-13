@@ -119,6 +119,6 @@ if TYPE_CHECKING:
 )
 def duckdb_tools() -> type[DuckDbTools]:
     """Return DuckDB tools for data analysis and processing."""
-    from agno.tools.duckdb import DuckDbTools  # noqa: PLC0415
+    from agno.tools.duckdb import DuckDbTools
 
     return DuckDbTools

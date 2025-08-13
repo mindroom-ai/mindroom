@@ -84,6 +84,6 @@ if TYPE_CHECKING:
 )
 def openweather_tools() -> type[OpenWeatherTools]:
     """Return OpenWeather tools for weather data access."""
-    from agno.tools.openweather import OpenWeatherTools  # noqa: PLC0415
+    from agno.tools.openweather import OpenWeatherTools
 
     return OpenWeatherTools

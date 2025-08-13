@@ -78,6 +78,6 @@ if TYPE_CHECKING:
 )
 def googlesearch_tools() -> type[GoogleSearchTools]:
     """Return Google Search tools for web search."""
-    from agno.tools.googlesearch import GoogleSearchTools  # noqa: PLC0415
+    from agno.tools.googlesearch import GoogleSearchTools
 
     return GoogleSearchTools

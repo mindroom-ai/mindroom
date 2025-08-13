@@ -76,6 +76,6 @@ if TYPE_CHECKING:
 )
 def discord_tools() -> type[DiscordTools]:
     """Return Discord tools for interacting with Discord channels and servers."""
-    from agno.tools.discord import DiscordTools  # noqa: PLC0415
+    from agno.tools.discord import DiscordTools
 
     return DiscordTools

@@ -41,6 +41,6 @@ if TYPE_CHECKING:
 )
 def newspaper_tools() -> type[NewspaperTools]:
     """Return newspaper tools for article extraction."""
-    from agno.tools.newspaper import NewspaperTools  # noqa: PLC0415
+    from agno.tools.newspaper import NewspaperTools
 
     return NewspaperTools

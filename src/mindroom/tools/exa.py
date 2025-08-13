@@ -241,6 +241,6 @@ if TYPE_CHECKING:
 )
 def exa_tools() -> type[ExaTools]:
     """Return Exa tools for AI-powered web search and research."""
-    from agno.tools.exa import ExaTools  # noqa: PLC0415
+    from agno.tools.exa import ExaTools
 
     return ExaTools
