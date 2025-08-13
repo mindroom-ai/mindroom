@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -50,7 +50,7 @@ class ConfigField:
 
     name: str  # Environment variable name (e.g., "SMTP_HOST")
     label: str  # Display label (e.g., "SMTP Host")
-    type: str = "text"  # Field type: text, password, number, boolean, select, url
+    type: Literal["boolean", "number", "password", "text", "url", "select"] = "text"
     required: bool = True
     default: Any = None
     placeholder: str | None = None
