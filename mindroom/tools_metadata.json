@@ -5,6 +5,78 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Discord bot token for authentication (can also be set via DISCORD_BOT_TOKEN env var)",
+          "label": "Bot Token",
+          "name": "bot_token",
+          "options": null,
+          "placeholder": "MTAx...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable sending messages to Discord channels",
+          "label": "Enable Messaging",
+          "name": "enable_messaging",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving message history from channels",
+          "label": "Enable History",
+          "name": "enable_history",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable getting channel info and listing channels",
+          "label": "Enable Channel Management",
+          "name": "enable_channel_management",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable deleting messages from channels",
+          "label": "Enable Message Management",
+          "name": "enable_message_management",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Tool for interacting with Discord channels and servers",
+      "display_name": "Discord",
+      "docs_url": "https://docs.agno.com/tools/toolkits/communication/discord",
+      "helper_text": null,
+      "icon": "FaDiscord",
+      "icon_color": "text-indigo-500",
+      "name": "discord",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "communication",
+      "config_fields": [
+        {
+          "default": null,
           "description": "Slack bot token (can also be set via SLACK_TOKEN env var)",
           "label": "Slack Token",
           "name": "token",
@@ -108,6 +180,172 @@
       "icon": "FaTelegram",
       "icon_color": "text-blue-500",
       "name": "telegram",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "communication",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Twilio Account SID (can also be set via TWILIO_ACCOUNT_SID env var)",
+          "label": "Account SID",
+          "name": "account_sid",
+          "options": null,
+          "placeholder": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Twilio Auth Token for basic authentication (can also be set via TWILIO_AUTH_TOKEN env var)",
+          "label": "Auth Token",
+          "name": "auth_token",
+          "options": null,
+          "placeholder": "your_auth_token_here",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Twilio API Key for key-based authentication (can also be set via TWILIO_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Twilio API Secret for key-based authentication (can also be set via TWILIO_API_SECRET env var)",
+          "label": "API Secret",
+          "name": "api_secret",
+          "options": null,
+          "placeholder": "your_api_secret_here",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Optional Twilio region (e.g. 'au1' for Australia) (can also be set via TWILIO_REGION env var)",
+          "label": "Region",
+          "name": "region",
+          "options": null,
+          "placeholder": "au1",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Optional Twilio edge location (e.g. 'sydney') (can also be set via TWILIO_EDGE env var)",
+          "label": "Edge Location",
+          "name": "edge",
+          "options": null,
+          "placeholder": "sydney",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable debug logging for Twilio HTTP client",
+          "label": "Debug Mode",
+          "name": "debug",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "twilio"
+      ],
+      "description": "SMS messaging and voice communication platform",
+      "display_name": "Twilio",
+      "docs_url": "https://docs.agno.com/tools/toolkits/communication/twilio",
+      "helper_text": null,
+      "icon": "FaPhone",
+      "icon_color": "text-red-600",
+      "name": "twilio",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "communication",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "WhatsApp Business API access token (can also be set via WHATSAPP_ACCESS_TOKEN env var)",
+          "label": "Access Token",
+          "name": "access_token",
+          "options": null,
+          "placeholder": "EAAxxxxxxx...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "WhatsApp Business Account phone number ID (can also be set via WHATSAPP_PHONE_NUMBER_ID env var)",
+          "label": "Phone Number ID",
+          "name": "phone_number_id",
+          "options": null,
+          "placeholder": "1234567890123456",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "v22.0",
+          "description": "WhatsApp API version to use",
+          "label": "API Version",
+          "name": "version",
+          "options": null,
+          "placeholder": "v22.0",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Default recipient WhatsApp ID or phone number (optional, can also be set via WHATSAPP_RECIPIENT_WAID env var)",
+          "label": "Default Recipient WhatsApp ID",
+          "name": "recipient_waid",
+          "options": null,
+          "placeholder": "+1234567890",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable asynchronous message sending",
+          "label": "Async Mode",
+          "name": "async_mode",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "httpx"
+      ],
+      "description": "Send text and template messages via WhatsApp Business API",
+      "display_name": "WhatsApp Business",
+      "docs_url": "https://docs.agno.com/tools/toolkits/communication/whatsapp",
+      "helper_text": null,
+      "icon": "FaWhatsapp",
+      "icon_color": "text-green-500",
+      "name": "whatsapp",
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -861,6 +1099,155 @@
       "config_fields": [
         {
           "default": null,
+          "description": "OpenAI API key (can also be set via OPENAI_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "sk-...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable audio transcription using Whisper",
+          "label": "Enable Transcription",
+          "name": "enable_transcription",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable image generation using DALL-E",
+          "label": "Enable Image Generation",
+          "name": "enable_image_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable text-to-speech synthesis",
+          "label": "Enable Speech Generation",
+          "name": "enable_speech_generation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": "whisper-1",
+          "description": "Model to use for audio transcription",
+          "label": "Transcription Model",
+          "name": "transcription_model",
+          "options": null,
+          "placeholder": "whisper-1",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "alloy",
+          "description": "Voice to use for speech generation (alloy, echo, fable, onyx, nova, shimmer)",
+          "label": "Text-to-Speech Voice",
+          "name": "text_to_speech_voice",
+          "options": null,
+          "placeholder": "alloy",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "tts-1",
+          "description": "Model to use for text-to-speech (tts-1, tts-1-hd)",
+          "label": "Text-to-Speech Model",
+          "name": "text_to_speech_model",
+          "options": null,
+          "placeholder": "tts-1",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "mp3",
+          "description": "Audio format for speech generation (mp3, opus, aac, flac, wav, pcm)",
+          "label": "Text-to-Speech Format",
+          "name": "text_to_speech_format",
+          "options": null,
+          "placeholder": "mp3",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "dall-e-3",
+          "description": "Model to use for image generation",
+          "label": "Image Model",
+          "name": "image_model",
+          "options": null,
+          "placeholder": "dall-e-3",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Quality setting for image generation (standard, hd)",
+          "label": "Image Quality",
+          "name": "image_quality",
+          "options": null,
+          "placeholder": "standard",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Size for generated images (256x256, 512x512, 1024x1024, 1792x1024, 1024x1792)",
+          "label": "Image Size",
+          "name": "image_size",
+          "options": null,
+          "placeholder": "1024x1024",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Style for generated images (vivid, natural)",
+          "label": "Image Style",
+          "name": "image_style",
+          "options": null,
+          "placeholder": "vivid",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "openai"
+      ],
+      "description": "AI-powered tools for transcription, image generation, and speech synthesis",
+      "display_name": "OpenAI",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/openai",
+      "helper_text": null,
+      "icon": "SiOpenai",
+      "icon_color": "text-green-600",
+      "name": "openai",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": "Base directory for file operations (defaults to current working directory)",
           "label": "Base Directory",
           "name": "base_dir",
@@ -1006,6 +1393,22 @@
       "icon": "Terminal",
       "icon_color": "text-green-500",
       "name": "shell",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "development",
+      "config_fields": [],
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Sleep utility for introducing delays and pauses in execution",
+      "display_name": "Sleep",
+      "docs_url": "https://docs.agno.com/tools/toolkits/local/sleep",
+      "helper_text": null,
+      "icon": "Clock",
+      "icon_color": "text-purple-500",
+      "name": "sleep",
       "setup_type": "none",
       "status": "available"
     },
@@ -1159,6 +1562,45 @@
       "name": "outlook",
       "setup_type": "coming_soon",
       "status": "coming_soon"
+    },
+    {
+      "category": "email",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Resend API key for authentication (can also be set via RESEND_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "re_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Default sender email address for outgoing emails",
+          "label": "From Email",
+          "name": "from_email",
+          "options": null,
+          "placeholder": "noreply@example.com",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "resend"
+      ],
+      "description": "Email delivery service for sending transactional emails",
+      "display_name": "Resend",
+      "docs_url": "https://docs.agno.com/tools/toolkits/email/resend",
+      "helper_text": null,
+      "icon": "Mail",
+      "icon_color": "text-blue-600",
+      "name": "resend",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "email",
@@ -1393,6 +1835,133 @@
     },
     {
       "category": "productivity",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Path to the DuckDB database file (if None, uses in-memory database)",
+          "label": "Database Path",
+          "name": "db_path",
+          "options": null,
+          "placeholder": "/path/to/database.db",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Existing DuckDB connection object (advanced users only)",
+          "label": "Database Connection",
+          "name": "connection",
+          "options": null,
+          "placeholder": "Optional existing DuckDB connection",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "List of SQL commands to run on initialization (as JSON array)",
+          "label": "Initialization Commands",
+          "name": "init_commands",
+          "options": null,
+          "placeholder": "[\"INSTALL spatial\", \"LOAD spatial\"]",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Open database in read-only mode",
+          "label": "Read Only",
+          "name": "read_only",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Database configuration as JSON string (optional)",
+          "label": "Database Config",
+          "name": "config",
+          "options": null,
+          "placeholder": "{\"memory_limit\": \"1GB\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable executing SQL queries",
+          "label": "Run Queries",
+          "name": "run_queries",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable query plan inspection and analysis",
+          "label": "Inspect Queries",
+          "name": "inspect_queries",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable creating tables from files and data sources",
+          "label": "Create Tables",
+          "name": "create_tables",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable table summarization with statistical analysis",
+          "label": "Summarize Tables",
+          "name": "summarize_tables",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable exporting tables to various file formats",
+          "label": "Export Tables",
+          "name": "export_tables",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "duckdb"
+      ],
+      "description": "In-memory analytical database for data processing and analysis",
+      "display_name": "DuckDB",
+      "docs_url": "https://docs.agno.com/tools/toolkits/productivity/duckdb",
+      "helper_text": null,
+      "icon": "Database",
+      "icon_color": "text-yellow-600",
+      "name": "duckdb",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "productivity",
       "config_fields": [],
       "dependencies": [
         "pandas"
@@ -1404,6 +1973,282 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "pandas",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "productivity",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Complete database connection URL (can also be set via DB_URL env var)",
+          "label": "Database URL",
+          "name": "db_url",
+          "options": null,
+          "placeholder": "postgresql://user:password@host:port/database",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Pre-configured SQLAlchemy Engine instance (for advanced users)",
+          "label": "Database Engine",
+          "name": "db_engine",
+          "options": null,
+          "placeholder": "Advanced: Pre-configured SQLAlchemy Engine object",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Database username (alternative to db_url)",
+          "label": "Username",
+          "name": "user",
+          "options": null,
+          "placeholder": "database_user",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Database password (alternative to db_url)",
+          "label": "Password",
+          "name": "password",
+          "options": null,
+          "placeholder": "database_password",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Database host (alternative to db_url)",
+          "label": "Host",
+          "name": "host",
+          "options": null,
+          "placeholder": "localhost",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Database port (alternative to db_url)",
+          "label": "Port",
+          "name": "port",
+          "options": null,
+          "placeholder": "5432",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Database schema or database name",
+          "label": "Schema/Database",
+          "name": "schema",
+          "options": null,
+          "placeholder": "mydb",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Database dialect (postgresql, mysql, sqlite, etc.)",
+          "label": "Database Dialect",
+          "name": "dialect",
+          "options": null,
+          "placeholder": "postgresql",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "JSON configuration of specific tables to access (optional)",
+          "label": "Tables Configuration",
+          "name": "tables",
+          "options": null,
+          "placeholder": "{\"users\": {...}, \"orders\": {...}}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable listing database tables",
+          "label": "List Tables",
+          "name": "list_tables",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable describing table schemas",
+          "label": "Describe Table",
+          "name": "describe_table",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable executing SQL queries",
+          "label": "Run SQL Query",
+          "name": "run_sql_query",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "sqlalchemy"
+      ],
+      "description": "Database query and management tools for SQL databases",
+      "display_name": "SQL Tools",
+      "docs_url": "https://docs.agno.com/tools/toolkits/integrations/sql",
+      "helper_text": null,
+      "icon": "Database",
+      "icon_color": "text-blue-600",
+      "name": "sql",
+      "setup_type": "special",
+      "status": "requires_config"
+    },
+    {
+      "category": "productivity",
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable getting current stock prices",
+          "label": "Stock Price",
+          "name": "stock_price",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting company information and overview",
+          "label": "Company Info",
+          "name": "company_info",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting fundamental data for stocks",
+          "label": "Stock Fundamentals",
+          "name": "stock_fundamentals",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting historical stock prices",
+          "label": "Historical Prices",
+          "name": "historical_prices",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting income statements",
+          "label": "Income Statements",
+          "name": "income_statements",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting key financial ratios",
+          "label": "Key Financial Ratios",
+          "name": "key_financial_ratios",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting analyst recommendations",
+          "label": "Analyst Recommendations",
+          "name": "analyst_recommendations",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting company news and press releases",
+          "label": "Company News",
+          "name": "company_news",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting technical indicators",
+          "label": "Technical Indicators",
+          "name": "technical_indicators",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable all available Yahoo Finance tools",
+          "label": "Enable All",
+          "name": "enable_all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "yfinance"
+      ],
+      "description": "Get financial data and stock information from Yahoo Finance",
+      "display_name": "Yahoo Finance",
+      "docs_url": "https://docs.agno.com/tools/toolkits/productivity/yfinance",
+      "helper_text": null,
+      "icon": "FaChartLine",
+      "icon_color": "text-purple-600",
+      "name": "yfinance",
       "setup_type": "none",
       "status": "available"
     },
@@ -1579,6 +2424,425 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Exa API key for authentication (can also be set via EXA_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "exa_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable web search functionality",
+          "label": "Search",
+          "name": "search",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving detailed content from URLs",
+          "label": "Get Contents",
+          "name": "get_contents",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable finding similar pages to a given URL",
+          "label": "Find Similar",
+          "name": "find_similar",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable LLM-powered question answering with search results",
+          "label": "Answer",
+          "name": "answer",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable deep research functionality with structured output",
+          "label": "Research",
+          "name": "research",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Retrieve text content from search results",
+          "label": "Text",
+          "name": "text",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": 1000,
+          "description": "Maximum length of text content per result",
+          "label": "Text Length Limit",
+          "name": "text_length_limit",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Include highlighted snippets in results",
+          "label": "Highlights",
+          "name": "highlights",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Include AI-generated summaries in results",
+          "label": "Summary",
+          "name": "summary",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Default number of search results to return (overrides individual searches if set)",
+          "label": "Number of Results",
+          "name": "num_results",
+          "options": null,
+          "placeholder": "10",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": "always",
+          "description": "Live crawl setting for fresh content",
+          "label": "Live Crawl",
+          "name": "livecrawl",
+          "options": null,
+          "placeholder": "always",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Include results crawled on/after this date (YYYY-MM-DD format)",
+          "label": "Start Crawl Date",
+          "name": "start_crawl_date",
+          "options": null,
+          "placeholder": "2024-01-01",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Include results crawled on/before this date (YYYY-MM-DD format)",
+          "label": "End Crawl Date",
+          "name": "end_crawl_date",
+          "options": null,
+          "placeholder": "2024-12-31",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Include results published on/after this date (YYYY-MM-DD format)",
+          "label": "Start Published Date",
+          "name": "start_published_date",
+          "options": null,
+          "placeholder": "2024-01-01",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Include results published on/before this date (YYYY-MM-DD format)",
+          "label": "End Published Date",
+          "name": "end_published_date",
+          "options": null,
+          "placeholder": "2024-12-31",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Enable autoprompt features to improve query understanding",
+          "label": "Use Autoprompt",
+          "name": "use_autoprompt",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Specify content type filter (e.g., article, blog, video)",
+          "label": "Content Type",
+          "name": "type",
+          "options": null,
+          "placeholder": "article",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Filter results by category. Options: \"company\", \"research paper\", \"news\", \"pdf\", \"github\", \"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"",
+          "label": "Category",
+          "name": "category",
+          "options": null,
+          "placeholder": "research paper",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma-separated list of domains to restrict results to",
+          "label": "Include Domains",
+          "name": "include_domains",
+          "options": null,
+          "placeholder": "example.com,google.com",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma-separated list of domains to exclude from results",
+          "label": "Exclude Domains",
+          "name": "exclude_domains",
+          "options": null,
+          "placeholder": "spam.com,ads.com",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "The search model to use. Options: \"exa\" or \"exa-pro\"",
+          "label": "Search Model",
+          "name": "model",
+          "options": null,
+          "placeholder": "exa",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "exa-research",
+          "description": "Model for research functionality. Options: \"exa-research\" or \"exa-research-pro\"",
+          "label": "Research Model",
+          "name": "research_model",
+          "options": null,
+          "placeholder": "exa-research",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 30,
+          "description": "Maximum time in seconds to wait for API responses",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Log search results for debugging purposes",
+          "label": "Show Results",
+          "name": "show_results",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "exa_py"
+      ],
+      "description": "Advanced AI-powered web search engine for research and content discovery",
+      "display_name": "Exa",
+      "docs_url": "https://docs.agno.com/tools/toolkits/research/exa",
+      "helper_text": null,
+      "icon": "FaSearch",
+      "icon_color": "text-blue-600",
+      "name": "exa",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Firecrawl API key for authentication (can also be set via FIRECRAWL_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "fc-...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "https://api.firecrawl.dev",
+          "description": "Firecrawl API endpoint URL",
+          "label": "API URL",
+          "name": "api_url",
+          "options": null,
+          "placeholder": "https://api.firecrawl.dev",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma-separated list of output formats (e.g., markdown, html, text)",
+          "label": "Output Formats",
+          "name": "formats",
+          "options": null,
+          "placeholder": "markdown,html,text",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 10,
+          "description": "Maximum number of pages to crawl",
+          "label": "Crawl Limit",
+          "name": "limit",
+          "options": null,
+          "placeholder": "10",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": 30,
+          "description": "Polling interval in seconds for crawl operations",
+          "label": "Poll Interval",
+          "name": "poll_interval",
+          "options": null,
+          "placeholder": "30",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Additional search parameters as JSON string",
+          "label": "Search Parameters",
+          "name": "search_params",
+          "options": null,
+          "placeholder": "{\"location\": \"US\", \"language\": \"en\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable website scraping functionality",
+          "label": "Enable Scraping",
+          "name": "scrape",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable website crawling functionality",
+          "label": "Enable Crawling",
+          "name": "crawl",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable website structure mapping functionality",
+          "label": "Enable Mapping",
+          "name": "mapping",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable web search functionality",
+          "label": "Enable Search",
+          "name": "search",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "firecrawl-py"
+      ],
+      "description": "Web scraping and crawling tool for extracting content from websites",
+      "display_name": "Firecrawl",
+      "docs_url": "https://docs.agno.com/tools/toolkits/research/firecrawl",
+      "helper_text": null,
+      "icon": "FaSpider",
+      "icon_color": "text-orange-500",
+      "name": "firecrawl",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
           "description": "Fixed number of maximum search results to return (overrides per-query max_results)",
           "label": "Fixed Max Results",
           "name": "fixed_max_results",
@@ -1644,6 +2908,45 @@
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
       "name": "googlesearch",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable getting top stories from Hacker News",
+          "label": "Get Top Stories",
+          "name": "get_top_stories",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable getting user details from Hacker News",
+          "label": "Get User Details",
+          "name": "get_user_details",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "httpx"
+      ],
+      "description": "Get top stories and user details from Hacker News",
+      "display_name": "Hacker News",
+      "docs_url": "https://docs.agno.com/tools/toolkits/research/hackernews",
+      "helper_text": null,
+      "icon": "FaHackerNews",
+      "icon_color": "text-orange-600",
+      "name": "hackernews",
       "setup_type": "none",
       "status": "available"
     },
@@ -1781,6 +3084,95 @@
       "name": "newspaper",
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": "your_email@example.com",
+          "description": "Email address for NCBI API identification (required by NCBI guidelines)",
+          "label": "Email Address",
+          "name": "email",
+          "options": null,
+          "placeholder": "researcher@institution.edu",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Default maximum number of search results to return (can be overridden per search)",
+          "label": "Maximum Results",
+          "name": "max_results",
+          "options": null,
+          "placeholder": "10",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Return comprehensive article metadata including keywords, MeSH terms, and full abstracts",
+          "label": "Expanded Results",
+          "name": "results_expanded",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "httpx"
+      ],
+      "description": "Search and retrieve medical and life science literature from PubMed",
+      "display_name": "PubMed",
+      "docs_url": "https://docs.agno.com/tools/toolkits/research/pubmed",
+      "helper_text": null,
+      "icon": "FaStethoscope",
+      "icon_color": "text-blue-600",
+      "name": "pubmed",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "SerpApi API key for authentication (can also be set via SERP_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "YOUR_SERPAPI_KEY",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable YouTube search functionality",
+          "label": "Search YouTube",
+          "name": "search_youtube",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "google-search-results"
+      ],
+      "description": "Google and YouTube search using SerpApi",
+      "display_name": "SerpApi",
+      "docs_url": "https://docs.agno.com/tools/toolkits/research/serpapi",
+      "helper_text": null,
+      "icon": "FaGoogle",
+      "icon_color": "text-blue-500",
+      "name": "serpapi",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "research",
@@ -1948,22 +3340,6 @@
       "icon": "FaWikipediaW",
       "icon_color": "text-gray-700",
       "name": "wikipedia",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "category": "research",
-      "config_fields": null,
-      "dependencies": [
-        "yfinance"
-      ],
-      "description": "Stock market data and financial information",
-      "display_name": "Yahoo Finance",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/yfinance",
-      "helper_text": null,
-      "icon": "TrendingUp",
-      "icon_color": "text-green-600",
-      "name": "yfinance",
       "setup_type": "none",
       "status": "available"
     },

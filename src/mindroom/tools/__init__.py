@@ -21,22 +21,35 @@ from mindroom.tools_metadata import (
 from .arxiv import arxiv_tools
 from .calculator import calculator_tools
 from .csv import csv_tools
+from .discord import discord_tools
 from .docker import docker_tools
+from .duckdb import duckdb_tools
 from .duckduckgo import duckduckgo_tools
 from .email import email_tools
+from .exa import exa_tools
 from .file import file_tools
+from .firecrawl import firecrawl_tools
 from .github import github_tools
 from .googlesearch import googlesearch_tools
+from .hackernews import hackernews_tools
 from .jina import jina_tools
 from .newspaper import newspaper_tools
+from .openai import openai_tools
 from .pandas import pandas_tools
+from .pubmed import pubmed_tools
 from .python import python_tools
 from .reddit import reddit_tools
+from .resend import resend_tools
+from .serpapi import serpapi_tools
 from .shell import shell_tools
 from .slack import slack_tools
+from .sleep import sleep_tools
+from .sql import sql_tools
 from .tavily import tavily_tools
 from .telegram import telegram_tools
+from .twilio import twilio_tools
 from .website import website_tools
+from .whatsapp import whatsapp_tools
 from .wikipedia import wikipedia_tools
 from .x import x_tools
 from .yfinance import yfinance_tools
@@ -52,22 +65,35 @@ __all__ = [
     "arxiv_tools",
     "calculator_tools",
     "csv_tools",
+    "discord_tools",
     "docker_tools",
+    "duckdb_tools",
     "duckduckgo_tools",
     "email_tools",
+    "exa_tools",
     "file_tools",
+    "firecrawl_tools",
     "github_tools",
     "googlesearch_tools",
+    "hackernews_tools",
     "jina_tools",
     "newspaper_tools",
+    "openai_tools",
     "pandas_tools",
+    "pubmed_tools",
     "python_tools",
     "reddit_tools",
+    "resend_tools",
+    "serpapi_tools",
     "shell_tools",
     "slack_tools",
+    "sleep_tools",
+    "sql_tools",
     "tavily_tools",
     "telegram_tools",
+    "twilio_tools",
     "website_tools",
+    "whatsapp_tools",
     "wikipedia_tools",
     "x_tools",
     "yfinance_tools",
