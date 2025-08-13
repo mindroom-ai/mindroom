@@ -3,7 +3,7 @@ import {
   ArrowRight,
   Settings,
   CheckCircle2,
-  XCircle,
+  Circle,
   Loader2,
   Key,
   ExternalLink,
@@ -13,7 +13,6 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import {
   Dialog,
   DialogContent,
@@ -33,6 +32,7 @@ import {
   getAllIntegrations,
 } from './integrations';
 import { EnhancedConfigDialog } from './EnhancedConfigDialog';
+import { FilterSelector } from '@/components/shared/FilterSelector';
 
 export function Integrations() {
   // Fetch tools from backend
@@ -333,7 +333,7 @@ export function Integrations() {
             </Badge>
           ) : (
             <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 backdrop-blur-md border-amber-500/20">
-              <XCircle className="h-3 w-3 mr-1" />
+              <Circle className="h-3 w-3 mr-1" />
               Available
             </Badge>
           )}
@@ -481,32 +481,22 @@ export function Integrations() {
                 onChange={e => setSearchTerm(e.target.value)}
                 className="w-64"
               />
-              <ToggleGroup
-                type="single"
+              <FilterSelector
+                options={[
+                  { value: 'all', label: 'Show All' },
+                  { value: 'available', label: 'Available' },
+                  { value: 'unconfigured', label: 'Unconfigured' },
+                  { value: 'configured', label: 'Configured' },
+                  { value: 'coming_soon', label: 'Coming Soon' },
+                ]}
                 value={filterMode}
-                onValueChange={(value: string) =>
+                onChange={value =>
                   setFilterMode(
                     value as 'all' | 'available' | 'unconfigured' | 'configured' | 'coming_soon'
                   )
                 }
-                className="backdrop-blur-md bg-white/50 dark:bg-white/10 border border-white/20 dark:border-white/10 rounded-lg"
-              >
-                <ToggleGroupItem value="all" aria-label="Show all services">
-                  <span className="text-xs font-medium">Show All</span>
-                </ToggleGroupItem>
-                <ToggleGroupItem value="available" aria-label="Show available only">
-                  <span className="text-xs font-medium">Available</span>
-                </ToggleGroupItem>
-                <ToggleGroupItem value="unconfigured" aria-label="Show unconfigured only">
-                  <span className="text-xs font-medium">Unconfigured</span>
-                </ToggleGroupItem>
-                <ToggleGroupItem value="configured" aria-label="Show configured only">
-                  <span className="text-xs font-medium">Configured</span>
-                </ToggleGroupItem>
-                <ToggleGroupItem value="coming_soon" aria-label="Show coming soon only">
-                  <span className="text-xs font-medium">Coming Soon</span>
-                </ToggleGroupItem>
-              </ToggleGroup>
+                size="sm"
+              />
             </div>
           </div>
           <p className="text-gray-600 dark:text-gray-400">

@@ -12,12 +12,12 @@ import {
 } from '@/components/ui/select';
 import { EditorPanel } from '@/components/shared/EditorPanel';
 import { FieldGroup } from '@/components/shared/FieldGroup';
-import { Eye, EyeOff, TestTube, Save, Trash2, Settings, Filter, Sparkles } from 'lucide-react';
+import { Eye, EyeOff, TestTube, Save, Trash2, Settings, Sparkles } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
 import { Badge } from '@/components/ui/badge';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { ApiKeyConfig } from '@/components/ApiKeyConfig';
+import { FilterSelector } from '@/components/shared/FilterSelector';
 
 interface ModelFormData {
   provider: string;
@@ -217,36 +217,27 @@ export function ModelConfig() {
             </Button>
           )}
 
-          {/* Provider Filter Tabs */}
+          {/* Provider Filter Selector */}
           {!isAddingModel && providers.length > 1 && (
-            <Tabs
+            <FilterSelector
+              options={providers.map(provider => {
+                const providerInfo = provider === 'all' ? null : getProviderInfo(provider);
+                const count =
+                  provider === 'all'
+                    ? undefined
+                    : Object.values(config.models).filter(m => m.provider === provider).length;
+                return {
+                  value: provider,
+                  label: provider === 'all' ? 'All' : providerInfo?.name || provider,
+                  count,
+                  showIcon: provider === 'all',
+                };
+              })}
               value={selectedProvider}
-              onValueChange={setSelectedProvider}
+              onChange={value => setSelectedProvider(value as string)}
               className="w-full sm:w-auto"
-            >
-              <TabsList className="glass-subtle grid grid-flow-col auto-cols-fr sm:auto-cols-auto">
-                {providers.map(provider => {
-                  const providerInfo = provider === 'all' ? null : getProviderInfo(provider);
-                  return (
-                    <TabsTrigger
-                      key={provider}
-                      value={provider}
-                      className="capitalize data-[state=active]:glass-card"
-                    >
-                      <Filter
-                        className={cn('h-3 w-3 mr-1.5', provider === 'all' && 'text-primary')}
-                      />
-                      {provider === 'all' ? 'All' : providerInfo?.name}
-                      {provider !== 'all' && (
-                        <Badge variant="secondary" className="ml-1.5 px-1 py-0 text-xs">
-                          {Object.values(config.models).filter(m => m.provider === provider).length}
-                        </Badge>
-                      )}
-                    </TabsTrigger>
-                  );
-                })}
-              </TabsList>
-            </Tabs>
+              showFilterIcon={false}
+            />
           )}
         </div>
 
