@@ -69,7 +69,7 @@ dependencies = [
   "replicate>=1.0.7",
   "requests",                                                                                          # for Cal.com tool
   "resend",
-  "rich>=13.10.5",                                                                                     # for CLI output
+  "rich",                                                                                              # for CLI output
   "scrapegraph-py",                                                                                    # for ScrapeGraph tool
   "slack-sdk",                                                                                         # for Slack tool
   "spider-client",                                                                                     # for Spider tool
@@ -147,6 +147,9 @@ lint.ignore = [
   "T20",     # flake8-print
   "TD002",   # Missing author in TODO; try: `# TODO(<author_name>): ...`
   "TD003",   # Missing issue link on the line following this TODO
+]
+lint.per-file-ignores."src/mindroom/tools/*" = [
+  "PLC0415", #`import` should be at the top-level of a file"
 ]
 
 [tool.pytest.ini_options]

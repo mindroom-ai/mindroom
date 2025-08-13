@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tools_metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from composio_agno import ComposioToolSet
+    from composio_agno import ComposioToolSet  # type: ignore[import-untyped]
 
 
 @register_tool_with_metadata(
@@ -79,4 +79,4 @@ def composio_tools() -> type[ComposioToolSet]:
     """Return Composio tools for accessing 1000+ integrations."""
     from composio_agno import ComposioToolSet
 
-    return ComposioToolSet
+    return ComposioToolSet  # type: ignore[no-any-return]
