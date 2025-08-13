@@ -353,6 +353,199 @@
       "category": "development",
       "config_fields": [
         {
+          "default": null,
+          "description": "Directory for DAG files (relative to current working directory)",
+          "label": "DAGs Directory",
+          "name": "dags_dir",
+          "options": null,
+          "placeholder": "dags",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable saving DAG files",
+          "label": "Save DAG",
+          "name": "save_dag",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable reading DAG files",
+          "label": "Read DAG",
+          "name": "read_dag",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [],
+      "description": "Apache Airflow DAG file management for workflow orchestration",
+      "display_name": "Airflow",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/airflow",
+      "helper_text": null,
+      "icon": "FaCog",
+      "icon_color": "text-blue-600",
+      "name": "airflow",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Apify API token for authentication (can also be set via APIFY_API_TOKEN env var)",
+          "label": "API Token",
+          "name": "apify_api_token",
+          "options": null,
+          "placeholder": "apify_api_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Single Actor ID as string or comma-separated list of Actor IDs to register as individual tools (e.g., 'apify/rag-web-browser' for web content extraction)",
+          "label": "Actors",
+          "name": "actors",
+          "options": null,
+          "placeholder": "apify/rag-web-browser,compass/crawler-google-places",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "apify-client"
+      ],
+      "description": "Web scraping, crawling, data extraction, and web automation platform with ready-to-use Actors",
+      "display_name": "Apify",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/apify",
+      "helper_text": null,
+      "icon": "FaCode",
+      "icon_color": "text-blue-600",
+      "name": "apify",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Cal.com API key (can also be set via CALCOM_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "cal_live_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Default event type ID for bookings (can also be set via CALCOM_EVENT_TYPE_ID env var)",
+          "label": "Event Type ID",
+          "name": "event_type_id",
+          "options": null,
+          "placeholder": "123456",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": "America/New_York",
+          "description": "User's timezone in IANA format (e.g., 'America/New_York', 'Europe/London')",
+          "label": "User Timezone",
+          "name": "user_timezone",
+          "options": null,
+          "placeholder": "America/New_York",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable getting available time slots for booking",
+          "label": "Get Available Slots",
+          "name": "get_available_slots",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable creating new bookings",
+          "label": "Create Booking",
+          "name": "create_booking",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable getting upcoming bookings",
+          "label": "Get Upcoming Bookings",
+          "name": "get_upcoming_bookings",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable rescheduling existing bookings",
+          "label": "Reschedule Booking",
+          "name": "reschedule_booking",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable canceling existing bookings",
+          "label": "Cancel Booking",
+          "name": "cancel_booking",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests",
+        "pytz"
+      ],
+      "description": "Calendar scheduling and booking management",
+      "display_name": "Cal.com",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/calcom",
+      "helper_text": null,
+      "icon": "FaCalendarAlt",
+      "icon_color": "text-blue-600",
+      "name": "cal_com",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
           "default": true,
           "description": "Enable addition operation",
           "label": "Addition",
@@ -464,6 +657,564 @@
       "name": "calculator",
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Cartesia API key for authentication (can also be set via CARTESIA_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "your_api_key_here",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "sonic-2",
+          "description": "The model ID to use for text-to-speech",
+          "label": "Model ID",
+          "name": "model_id",
+          "options": null,
+          "placeholder": "sonic-2",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "78ab82d5-25be-4f7d-82b3-7ad64e5b85b2",
+          "description": "The default voice ID to use for text-to-speech and localization",
+          "label": "Default Voice ID",
+          "name": "default_voice_id",
+          "options": null,
+          "placeholder": "78ab82d5-25be-4f7d-82b3-7ad64e5b85b2",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable text-to-speech functionality",
+          "label": "Text to Speech Enabled",
+          "name": "text_to_speech_enabled",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable listing available voices functionality",
+          "label": "List Voices Enabled",
+          "name": "list_voices_enabled",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable voice localization functionality",
+          "label": "Voice Localize Enabled",
+          "name": "voice_localize_enabled",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "cartesia"
+      ],
+      "description": "Voice AI services including text-to-speech and voice localization",
+      "display_name": "Cartesia",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/cartesia",
+      "helper_text": null,
+      "icon": "VolumeX",
+      "icon_color": "text-purple-500",
+      "name": "cartesia",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Confluence instance URL (can also be set via CONFLUENCE_URL env var)",
+          "label": "Confluence URL",
+          "name": "url",
+          "options": null,
+          "placeholder": "https://your-confluence-instance.atlassian.net",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Confluence username (can also be set via CONFLUENCE_USERNAME env var)",
+          "label": "Username",
+          "name": "username",
+          "options": null,
+          "placeholder": "your-username",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Confluence password (can also be set via CONFLUENCE_PASSWORD env var)",
+          "label": "Password",
+          "name": "password",
+          "options": null,
+          "placeholder": "your-password",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Confluence API key - alternative to password (can also be set via CONFLUENCE_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "your-api-key",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Whether to verify SSL certificates when connecting to Confluence",
+          "label": "Verify SSL",
+          "name": "verify_ssl",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "atlassian-python-api"
+      ],
+      "description": "Atlassian wiki platform for retrieving, creating, and updating pages",
+      "display_name": "Confluence",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/confluence",
+      "helper_text": null,
+      "icon": "FaConfluence",
+      "icon_color": "text-blue-600",
+      "name": "confluence",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Base URL for API calls. If not provided, full URLs must be specified in endpoints",
+          "label": "Base URL",
+          "name": "base_url",
+          "options": null,
+          "placeholder": "https://api.example.com",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Username for basic authentication",
+          "label": "Username",
+          "name": "username",
+          "options": null,
+          "placeholder": "username",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Password for basic authentication",
+          "label": "Password",
+          "name": "password",
+          "options": null,
+          "placeholder": "password",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "API key for bearer token authentication",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "sk-...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Default headers to include in requests (JSON format)",
+          "label": "Default Headers",
+          "name": "headers",
+          "options": null,
+          "placeholder": "{\"Content-Type\": \"application/json\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Whether to verify SSL certificates for HTTPS requests",
+          "label": "Verify SSL",
+          "name": "verify_ssl",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": 30,
+          "description": "Request timeout in seconds",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": "30",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Whether to register the make_request function",
+          "label": "Enable Make Request",
+          "name": "make_request",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Make HTTP requests to any external API with customizable authentication and parameters",
+      "display_name": "Custom API",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/custom_api",
+      "helper_text": null,
+      "icon": "Globe",
+      "icon_color": "text-blue-500",
+      "name": "custom_api",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "OpenAI API key for authentication (can also be set via OPENAI_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "sk-...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "dall-e-3",
+          "description": "The DALL-E model to use (dall-e-3 or dall-e-2)",
+          "label": "Model",
+          "name": "model",
+          "options": null,
+          "placeholder": "dall-e-3",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "1024x1024",
+          "description": "Image size (256x256, 512x512, 1024x1024, 1792x1024, or 1024x1792)",
+          "label": "Image Size",
+          "name": "size",
+          "options": null,
+          "placeholder": "1024x1024",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "standard",
+          "description": "Image quality (standard or hd)",
+          "label": "Quality",
+          "name": "quality",
+          "options": null,
+          "placeholder": "standard",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "vivid",
+          "description": "Image style (vivid or natural)",
+          "label": "Style",
+          "name": "style",
+          "options": null,
+          "placeholder": "vivid",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 1,
+          "description": "Number of images to generate (DALL-E 3 only supports 1)",
+          "label": "Number of Images",
+          "name": "n",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "openai"
+      ],
+      "description": "OpenAI DALL-E image generation from text prompts",
+      "display_name": "DALL-E",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/dalle",
+      "helper_text": null,
+      "icon": "FaImage",
+      "icon_color": "text-green-600",
+      "name": "dalle",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Daytona API key (can also be set via DAYTONA_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "dt_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Daytona API URL (can also be set via DAYTONA_API_URL env var)",
+          "label": "API URL",
+          "name": "api_url",
+          "options": null,
+          "placeholder": "https://api.daytona.io",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Specific sandbox ID to use. If None, creates or uses persistent sandbox",
+          "label": "Sandbox ID",
+          "name": "sandbox_id",
+          "options": null,
+          "placeholder": "sandbox-123",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "PYTHON",
+          "description": "Primary language for the sandbox (PYTHON, JAVASCRIPT, TYPESCRIPT)",
+          "label": "Sandbox Language",
+          "name": "sandbox_language",
+          "options": null,
+          "placeholder": "PYTHON",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Target configuration for the sandbox",
+          "label": "Sandbox Target",
+          "name": "sandbox_target",
+          "options": null,
+          "placeholder": "target-config",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Operating system for the sandbox",
+          "label": "Sandbox OS",
+          "name": "sandbox_os",
+          "options": null,
+          "placeholder": "ubuntu-20.04",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 60,
+          "description": "Auto-stop interval in minutes (0 to disable)",
+          "label": "Auto Stop Interval",
+          "name": "auto_stop_interval",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "OS user for the sandbox",
+          "label": "Sandbox OS User",
+          "name": "sandbox_os_user",
+          "options": null,
+          "placeholder": "daytona",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Environment variables for the sandbox (JSON format)",
+          "label": "Sandbox Environment Variables",
+          "name": "sandbox_env_vars",
+          "options": null,
+          "placeholder": "{\"ENV_VAR\": \"value\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "{}",
+          "description": "Labels for the sandbox (JSON format)",
+          "label": "Sandbox Labels",
+          "name": "sandbox_labels",
+          "options": null,
+          "placeholder": "{\"label\": \"value\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Organization ID for the sandbox",
+          "label": "Organization ID",
+          "name": "organization_id",
+          "options": null,
+          "placeholder": "org-123",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 300,
+          "description": "Timeout for sandbox operations in seconds",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Automatically create sandbox if none exists",
+          "label": "Auto Create Sandbox",
+          "name": "auto_create_sandbox",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Whether to verify SSL certificates",
+          "label": "Verify SSL",
+          "name": "verify_ssl",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Whether to reuse the same sandbox across agent sessions",
+          "label": "Persistent",
+          "name": "persistent",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Whether the sandbox should be public",
+          "label": "Sandbox Public",
+          "name": "sandbox_public",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Custom instructions for the toolkit",
+          "label": "Instructions",
+          "name": "instructions",
+          "options": null,
+          "placeholder": "Custom guidelines for the toolkit",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Whether to add instructions to the agent",
+          "label": "Add Instructions",
+          "name": "add_instructions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "daytona"
+      ],
+      "description": "Execute code in secure, remote sandbox environments",
+      "display_name": "Daytona",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/daytona",
+      "helper_text": null,
+      "icon": "FaTerminal",
+      "icon_color": "text-blue-600",
+      "name": "daytona",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "development",
@@ -611,6 +1362,244 @@
       "name": "file",
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Financial Datasets API key (can also be set via FINANCIAL_DATASETS_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "your_api_key_here",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable financial statement related functions (income statements, balance sheets, cash flow)",
+          "label": "Enable Financial Statements",
+          "name": "enable_financial_statements",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable company information related functions",
+          "label": "Enable Company Info",
+          "name": "enable_company_info",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable market data related functions (stock prices, earnings, metrics)",
+          "label": "Enable Market Data",
+          "name": "enable_market_data",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable ownership data related functions (insider trades, institutional ownership)",
+          "label": "Enable Ownership Data",
+          "name": "enable_ownership_data",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable news related functions",
+          "label": "Enable News",
+          "name": "enable_news",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable SEC filings related functions",
+          "label": "Enable SEC Filings",
+          "name": "enable_sec_filings",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable cryptocurrency related functions",
+          "label": "Enable Crypto",
+          "name": "enable_crypto",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable search related functions",
+          "label": "Enable Search",
+          "name": "enable_search",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Comprehensive financial data API for stocks, financial statements, SEC filings, and cryptocurrency",
+      "display_name": "Financial Datasets API",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/financial_datasets",
+      "helper_text": null,
+      "icon": "TrendingUp",
+      "icon_color": "text-green-600",
+      "name": "financial_datasets_api",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Google AI API key for authentication (can also be set via GOOGLE_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "AIza...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable Vertex AI API instead of Gemini API (required for video generation)",
+          "label": "Use Vertex AI",
+          "name": "vertexai",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Google Cloud project ID (for Vertex AI, can also be set via GOOGLE_CLOUD_PROJECT env var)",
+          "label": "Project ID",
+          "name": "project_id",
+          "options": null,
+          "placeholder": "my-project-123",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "us-central1",
+          "description": "Google Cloud location/region (for Vertex AI, can also be set via GOOGLE_CLOUD_LOCATION env var)",
+          "label": "Location",
+          "name": "location",
+          "options": null,
+          "placeholder": "us-central1",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "imagen-3.0-generate-002",
+          "description": "Model to use for image generation",
+          "label": "Image Generation Model",
+          "name": "image_generation_model",
+          "options": null,
+          "placeholder": "imagen-3.0-generate-002",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "veo-2.0-generate-001",
+          "description": "Model to use for video generation (requires Vertex AI)",
+          "label": "Video Generation Model",
+          "name": "video_generation_model",
+          "options": null,
+          "placeholder": "veo-2.0-generate-001",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "google-genai"
+      ],
+      "description": "Google AI API services for generating images and videos using Gemini models",
+      "display_name": "Gemini",
+      "docs_url": "https://docs.agno.com/tools/toolkits/models/gemini",
+      "helper_text": null,
+      "icon": "FaGoogle",
+      "icon_color": "text-blue-500",
+      "name": "gemini",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Giphy API key (can also be set via GIPHY_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "dc6zaTOxFJmzC",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": 1,
+          "description": "Number of GIFs to return in search results",
+          "label": "GIF Limit",
+          "name": "limit",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "httpx"
+      ],
+      "description": "GIF search and integration",
+      "display_name": "Giphy",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/giphy",
+      "helper_text": null,
+      "icon": "GiGift",
+      "icon_color": "text-purple-500",
+      "name": "giphy",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "development",
@@ -1099,6 +2088,512 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Google Maps API key (can also be set via GOOGLE_MAPS_API_KEY env var)",
+          "label": "API Key",
+          "name": "key",
+          "options": null,
+          "placeholder": "AIza...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable places search functionality",
+          "label": "Search Places",
+          "name": "search_places",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable directions functionality",
+          "label": "Get Directions",
+          "name": "get_directions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable address validation functionality",
+          "label": "Validate Address",
+          "name": "validate_address",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable geocoding functionality",
+          "label": "Geocode Address",
+          "name": "geocode_address",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable reverse geocoding functionality",
+          "label": "Reverse Geocode",
+          "name": "reverse_geocode",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable distance matrix functionality",
+          "label": "Get Distance Matrix",
+          "name": "get_distance_matrix",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable elevation functionality",
+          "label": "Get Elevation",
+          "name": "get_elevation",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable timezone functionality",
+          "label": "Get Timezone",
+          "name": "get_timezone",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "googlemaps",
+        "google-maps-places"
+      ],
+      "description": "Tools for interacting with Google Maps services including place search, directions, geocoding, and more",
+      "display_name": "Google Maps",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/google_maps",
+      "helper_text": null,
+      "icon": "FaMapMarkedAlt",
+      "icon_color": "text-red-500",
+      "name": "google_maps",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Custom OAuth scopes. If None, determined by operations (read-only or read-write)",
+          "label": "OAuth Scopes",
+          "name": "scopes",
+          "options": null,
+          "placeholder": "https://www.googleapis.com/auth/spreadsheets",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Pre-existing Google OAuth credentials object",
+          "label": "Pre-existing Credentials",
+          "name": "creds",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Path to credentials JSON file from Google Cloud Console",
+          "label": "Credentials File Path",
+          "name": "creds_path",
+          "options": null,
+          "placeholder": "credentials.json",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Path to store OAuth token file for future authentication",
+          "label": "Token File Path",
+          "name": "token_path",
+          "options": null,
+          "placeholder": "token.json",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": 0,
+          "description": "Port to use for OAuth authentication callback (0 for auto-select)",
+          "label": "OAuth Port",
+          "name": "oauth_port",
+          "options": null,
+          "placeholder": "8080",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "ID of the target spreadsheet (from the Google Sheets URL)",
+          "label": "Spreadsheet ID",
+          "name": "spreadsheet_id",
+          "options": null,
+          "placeholder": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Range within the spreadsheet (e.g., 'Sheet1!A1:E10')",
+          "label": "Spreadsheet Range",
+          "name": "spreadsheet_range",
+          "options": null,
+          "placeholder": "Sheet1!A1:E10",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable reading values from Google Sheets",
+          "label": "Enable Read Operations",
+          "name": "read",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable creating new Google Sheets",
+          "label": "Enable Create Operations",
+          "name": "create",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable updating data in Google Sheets",
+          "label": "Enable Update Operations",
+          "name": "update",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable duplicating existing Google Sheets",
+          "label": "Enable Duplicate Operations",
+          "name": "duplicate",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
+      ],
+      "description": "Read, create, update, and duplicate Google Sheets spreadsheets",
+      "display_name": "Google Sheets",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/google_sheets",
+      "helper_text": null,
+      "icon": "FaGoogle",
+      "icon_color": "text-green-600",
+      "name": "google_sheets",
+      "setup_type": "oauth",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Groq API key for authentication (can also be set via GROQ_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "gsk_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "whisper-large-v3",
+          "description": "Whisper model to use for audio transcription",
+          "label": "Transcription Model",
+          "name": "transcription_model",
+          "options": null,
+          "placeholder": "whisper-large-v3",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "whisper-large-v3",
+          "description": "Whisper model to use for audio translation to English",
+          "label": "Translation Model",
+          "name": "translation_model",
+          "options": null,
+          "placeholder": "whisper-large-v3",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "playai-tts",
+          "description": "Model to use for text-to-speech generation",
+          "label": "Text-to-Speech Model",
+          "name": "tts_model",
+          "options": null,
+          "placeholder": "playai-tts",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "Chip-PlayAI",
+          "description": "Voice to use for text-to-speech generation",
+          "label": "TTS Voice",
+          "name": "tts_voice",
+          "options": null,
+          "placeholder": "Chip-PlayAI",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "groq"
+      ],
+      "description": "Fast AI inference for audio transcription, translation, and text-to-speech",
+      "display_name": "Groq",
+      "docs_url": "https://docs.agno.com/tools/toolkits/models/groq",
+      "helper_text": null,
+      "icon": "TbBrain",
+      "icon_color": "text-orange-500",
+      "name": "groq",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable fetching authenticated user details",
+          "label": "Get User Details",
+          "name": "get_user_details",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable fetching team details for the authenticated user",
+          "label": "Get Teams Details",
+          "name": "get_teams_details",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving details of specific issues by ID",
+          "label": "Get Issue Details",
+          "name": "get_issue_details",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable creating new issues within teams and projects",
+          "label": "Create Issue",
+          "name": "create_issue",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable updating issue titles and states",
+          "label": "Update Issue",
+          "name": "update_issue",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving issues assigned to specific users",
+          "label": "Get User Assigned Issues",
+          "name": "get_user_assigned_issues",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving issues within specific workflow states",
+          "label": "Get Workflow Issues",
+          "name": "get_workflow_issues",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving issues with high priority (priority <= 2)",
+          "label": "Get High Priority Issues",
+          "name": "get_high_priority_issues",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Issue tracking and project management",
+      "display_name": "Linear",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/linear",
+      "helper_text": null,
+      "icon": "FaLinear",
+      "icon_color": "text-purple-600",
+      "name": "linear",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "The ModelsLab API key for authentication (can also be set via MODELS_LAB_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "your-modelslabs-api-key",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "mp4",
+          "description": "The type of file to generate (mp4, gif, or mp3)",
+          "label": "File Type",
+          "name": "file_type",
+          "options": null,
+          "placeholder": "mp4",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Whether to wait for the media generation to complete before returning",
+          "label": "Wait for Completion",
+          "name": "wait_for_completion",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": 15,
+          "description": "Time in seconds to add to the ETA to account for the time it takes to fetch the media",
+          "label": "Add to ETA",
+          "name": "add_to_eta",
+          "options": null,
+          "placeholder": "15",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": 60,
+          "description": "Maximum time in seconds to wait for the media to be ready",
+          "label": "Max Wait Time",
+          "name": "max_wait_time",
+          "options": null,
+          "placeholder": "60",
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "AI model marketplace for generating videos, audio, and GIFs from text prompts",
+      "display_name": "ModelsLabs",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/models_labs",
+      "helper_text": null,
+      "icon": "Video",
+      "icon_color": "text-purple-600",
+      "name": "modelslabs",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": "OpenAI API key (can also be set via OPENAI_API_KEY env var)",
           "label": "API Key",
           "name": "api_key",
@@ -1417,6 +2912,56 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Verified SES sender address",
+          "label": "Sender Email",
+          "name": "sender_email",
+          "options": null,
+          "placeholder": "sender@example.com",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Display name that appears to recipients",
+          "label": "Sender Name",
+          "name": "sender_name",
+          "options": null,
+          "placeholder": "Your Name",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "us-east-1",
+          "description": "AWS region where SES is provisioned",
+          "label": "AWS Region",
+          "name": "region_name",
+          "options": null,
+          "placeholder": "us-east-1",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "boto3"
+      ],
+      "description": "Send emails using Amazon Simple Email Service",
+      "display_name": "AWS SES",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/aws_ses",
+      "helper_text": null,
+      "icon": "FaAws",
+      "icon_color": "text-orange-500",
+      "name": "aws_ses",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "email",
+      "config_fields": [
+        {
+          "default": null,
           "description": "Default recipient email address",
           "label": "Receiver Email",
           "name": "receiver_email",
@@ -1534,20 +3079,6 @@
       "name": "gmail",
       "setup_type": "oauth",
       "status": "requires_config"
-    },
-    {
-      "category": "email",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Manage calendar events and schedules",
-      "display_name": "Google Calendar",
-      "docs_url": null,
-      "helper_text": null,
-      "icon": "FaGoogle",
-      "icon_color": "text-blue-500",
-      "name": "google_calendar",
-      "setup_type": "coming_soon",
-      "status": "coming_soon"
     },
     {
       "category": "email",
@@ -1962,6 +3493,186 @@
     },
     {
       "category": "productivity",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Path to the OAuth 2.0 credentials JSON file from Google Cloud Console",
+          "label": "Credentials Path",
+          "name": "credentials_path",
+          "options": null,
+          "placeholder": "/path/to/credentials.json",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "token.json",
+          "description": "Path where the user's access and refresh tokens will be stored",
+          "label": "Token Path",
+          "name": "token_path",
+          "options": null,
+          "placeholder": "token.json",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "OAuth access token (can also be set via environment variables)",
+          "label": "Access Token",
+          "name": "access_token",
+          "options": null,
+          "placeholder": "ya29.a0...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "primary",
+          "description": "ID of the calendar to use (default is the user's primary calendar)",
+          "label": "Calendar ID",
+          "name": "calendar_id",
+          "options": null,
+          "placeholder": "primary",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 8080,
+          "description": "Port to use for OAuth callback during authentication flow",
+          "label": "OAuth Port",
+          "name": "oauth_port",
+          "options": null,
+          "placeholder": "8080",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "List of OAuth scopes for calendar access (leave empty for defaults)",
+          "label": "Scopes",
+          "name": "scopes",
+          "options": null,
+          "placeholder": "https://www.googleapis.com/auth/calendar",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable creating, updating, and deleting calendar events (requires write scope)",
+          "label": "Allow Updates",
+          "name": "allow_update",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "google-auth-oauthlib"
+      ],
+      "description": "View and schedule meetings with Google Calendar",
+      "display_name": "Google Calendar",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/googlecalendar",
+      "helper_text": null,
+      "icon": "FaCalendarAlt",
+      "icon_color": "text-blue-600",
+      "name": "google_calendar",
+      "setup_type": "special",
+      "status": "requires_config"
+    },
+    {
+      "category": "productivity",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Mem0 API key for cloud usage (can also be set via MEM0_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "mem0_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Organization ID for Mem0 cloud (can also be set via MEM0_ORG_ID env var)",
+          "label": "Organization ID",
+          "name": "org_id",
+          "options": null,
+          "placeholder": "org_123...",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Project ID for Mem0 cloud (can also be set via MEM0_PROJECT_ID env var)",
+          "label": "Project ID",
+          "name": "project_id",
+          "options": null,
+          "placeholder": "proj_456...",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "JSON configuration for self-hosted Mem0 instance (overrides cloud API)",
+          "label": "Local Configuration",
+          "name": "config",
+          "options": null,
+          "placeholder": "{\"vector_store\": {\"provider\": \"chroma\"}}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Default user ID for memory operations (can be overridden per operation)",
+          "label": "Default User ID",
+          "name": "user_id",
+          "options": null,
+          "placeholder": "user_123",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable automatic memory inference and extraction from conversations",
+          "label": "Enable Memory Inference",
+          "name": "infer",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "mem0ai"
+      ],
+      "description": "Persistent memory system that stores, retrieves, searches, and manages user memories and context",
+      "display_name": "Mem0 Memory",
+      "docs_url": "https://docs.agno.com/tools/toolkits/database/mem0",
+      "helper_text": null,
+      "icon": "Brain",
+      "icon_color": "text-purple-600",
+      "name": "mem0",
+      "setup_type": "api_key",
+      "status": "available"
+    },
+    {
+      "category": "productivity",
       "config_fields": [],
       "dependencies": [
         "pandas"
@@ -1975,6 +3686,133 @@
       "name": "pandas",
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "category": "productivity",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Name of the database to connect to",
+          "label": "Database Name",
+          "name": "db_name",
+          "options": null,
+          "placeholder": "ai",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Username for database authentication",
+          "label": "Username",
+          "name": "user",
+          "options": null,
+          "placeholder": "postgres",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Password for database authentication",
+          "label": "Password",
+          "name": "password",
+          "options": null,
+          "placeholder": "password",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "localhost",
+          "description": "Host for the database connection",
+          "label": "Host",
+          "name": "host",
+          "options": null,
+          "placeholder": "localhost",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 5432,
+          "description": "Port for the database connection",
+          "label": "Port",
+          "name": "port",
+          "options": null,
+          "placeholder": "5432",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": "public",
+          "description": "Default schema to use for database operations",
+          "label": "Table Schema",
+          "name": "table_schema",
+          "options": null,
+          "placeholder": "public",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable running SQL queries",
+          "label": "Run Queries",
+          "name": "run_queries",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable inspecting SQL queries before execution",
+          "label": "Inspect Queries",
+          "name": "inspect_queries",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable summarizing table structures",
+          "label": "Summarize Tables",
+          "name": "summarize_tables",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable exporting tables from the database",
+          "label": "Export Tables",
+          "name": "export_tables",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "psycopg-binary"
+      ],
+      "description": "PostgreSQL database toolkit for querying, inspecting, and managing PostgreSQL databases",
+      "display_name": "PostgreSQL",
+      "docs_url": "https://docs.agno.com/tools/toolkits/database/postgres",
+      "helper_text": null,
+      "icon": "FaDatabase",
+      "icon_color": "text-blue-600",
+      "name": "postgres",
+      "setup_type": "none",
+      "status": "requires_config"
     },
     {
       "category": "productivity",
@@ -2251,6 +4089,122 @@
       "name": "yfinance",
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "category": "productivity",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Zep API key for authentication (can also be set via ZEP_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "your_zep_api_key",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Optional session ID. Auto-generated if not provided",
+          "label": "Session ID",
+          "name": "session_id",
+          "options": null,
+          "placeholder": "agno-session",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Optional user ID. Auto-generated if not provided",
+          "label": "User ID",
+          "name": "user_id",
+          "options": null,
+          "placeholder": "user-123",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Custom instructions for using the Zep tools",
+          "label": "Custom Instructions",
+          "name": "instructions",
+          "options": null,
+          "placeholder": "Custom instructions for using the Zep tools",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Whether to ignore assistant messages when adding to memory",
+          "label": "Ignore Assistant Messages",
+          "name": "ignore_assistant_messages",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Whether to add default instructions",
+          "label": "Add Instructions",
+          "name": "add_instructions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable adding messages to the current Zep session memory",
+          "label": "Add Zep Message",
+          "name": "add_zep_message",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving memory for the current Zep session",
+          "label": "Get Zep Memory",
+          "name": "get_zep_memory",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable searching the Zep memory store for relevant information",
+          "label": "Search Zep Memory",
+          "name": "search_zep_memory",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "zep-cloud"
+      ],
+      "description": "Memory system for storing, retrieving, and searching conversational data",
+      "display_name": "Zep Memory",
+      "docs_url": "https://docs.agno.com/tools/toolkits/database/zep",
+      "helper_text": null,
+      "icon": "Brain",
+      "icon_color": "text-purple-600",
+      "name": "zep",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "research",

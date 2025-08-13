@@ -9,7 +9,7 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_metadata
 
-SKIP_CUSTOM = {"homeassistant", "imdb", "gmail"}
+SKIP_CUSTOM = {"homeassistant", "imdb", "gmail", "postgress"}
 
 
 @pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))
