@@ -1,6 +1,7 @@
 """Test that ConfigField definitions match actual tool parameters from agno."""
 
 import inspect
+from typing import Union, get_args, get_origin
 
 import pytest
 from agno.tools.github import GithubTools
@@ -10,11 +11,17 @@ import mindroom.tools  # noqa: F401
 from mindroom.tools_metadata import get_tool_metadata
 
 
-def test_github_configfields_match_agno_params() -> None:
-    """Verify GitHub ConfigFields have all parameter names from agno GithubTools."""
+def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa: C901, PLR0912, PLR0915
+    """Verify tool ConfigFields match agno tool parameters.
+
+    Args:
+        tool_name: Name of the tool in the registry
+        tool_class: The agno tool class to check against
+
+    """
     # Get the actual parameters from agno
-    sig = inspect.signature(GithubTools.__init__)
-    agno_param_names = set()
+    sig = inspect.signature(tool_class.__init__)
+    agno_params = {}
 
     for name, param in sig.parameters.items():
         if name == "self":
@@ -22,16 +29,21 @@ def test_github_configfields_match_agno_params() -> None:
         # Skip **kwargs as it's for forward compatibility
         if param.kind == inspect.Parameter.VAR_KEYWORD:
             continue
-        agno_param_names.add(name)
+        agno_params[name] = {
+            "type": param.annotation if param.annotation != inspect.Parameter.empty else None,
+        }
 
-    # Get our ConfigFields for GitHub
-    github_metadata = get_tool_metadata("github")
-    assert github_metadata is not None, "GitHub tool not found in registry"
+    # Get our ConfigFields for the tool
+    tool_metadata = get_tool_metadata(tool_name)
+    assert tool_metadata is not None, f"{tool_name} tool not found in registry"
 
-    config_fields = github_metadata.config_fields or []
-    config_field_names = {field.name for field in config_fields}
+    config_fields = tool_metadata.config_fields or []
+    config_field_map = {field.name: field for field in config_fields}
 
-    # Check that all agno parameters have corresponding ConfigFields
+    # Check parameter names
+    agno_param_names = set(agno_params.keys())
+    config_field_names = set(config_field_map.keys())
+
     missing_fields = agno_param_names - config_field_names
     extra_fields = config_field_names - agno_param_names
 
@@ -42,10 +54,66 @@ def test_github_configfields_match_agno_params() -> None:
     if extra_fields:
         errors.append(f"Extra ConfigFields not in agno: {', '.join(sorted(extra_fields))}")
 
+    # Check types for matching parameters
+    type_mismatches = []
+    for param_name, param_info in agno_params.items():
+        if param_name not in config_field_map:
+            continue
+
+        field = config_field_map[param_name]
+        param_type = param_info["type"]
+
+        # Handle Optional types
+        actual_type = param_type
+        if get_origin(param_type) is Union:
+            args = get_args(param_type)
+            if type(None) in args:
+                # It's Optional, get the actual type
+                actual_type = next(arg for arg in args if arg is not type(None))
+
+        if actual_type is bool:
+            expected_type = "boolean"
+        elif actual_type is int or actual_type is float:
+            expected_type = "number"
+        elif actual_type is str:
+            # String parameters - check name patterns for special types
+            if (
+                "token" in param_name.lower()
+                or "password" in param_name.lower()
+                or "secret" in param_name.lower()
+                or "key" in param_name.lower()
+            ):
+                expected_type = "password"
+            elif (
+                "url" in param_name.lower()
+                or "uri" in param_name.lower()
+                or "endpoint" in param_name.lower()
+                or "host" in param_name.lower()
+            ):
+                expected_type = "url"
+            else:
+                expected_type = "text"
+        else:
+            # For Any or other types, we can't determine automatically
+            continue
+
+        if field.type != expected_type:
+            type_mismatches.append(
+                f"{param_name}: expected type '{expected_type}' (from {param_type}), got '{field.type}'",
+            )
+
+    if type_mismatches:
+        errors.append("Type mismatches:\n  " + "\n  ".join(type_mismatches))
+
     # Assert no errors
     if errors:
         error_msg = "\n\n".join(errors)
-        pytest.fail(f"ConfigField validation failed:\n{error_msg}")
+        pytest.fail(f"{tool_name} ConfigField validation failed:\n{error_msg}")
 
     # Success message (will only show with -v flag)
-    print(f"\n✅ All {len(config_fields)} GitHub ConfigFields match agno parameter names!")
+    print(f"\n✅ All {len(config_fields)} {tool_name} ConfigFields match agno parameter names and types!")
+
+
+def test_github_configfields_match_agno_params() -> None:
+    """Verify GitHub ConfigFields have all parameter names and types from agno GithubTools."""
+    verify_tool_configfields("github", GithubTools)
