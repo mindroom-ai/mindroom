@@ -5,10 +5,10 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { NetworkGraph } from './NetworkGraph';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 import { sharedStyles } from '@/components/shared/styles';
+import { FilterSelector } from '@/components/shared/FilterSelector';
 import { Bot, Home, Users, Settings, RefreshCw, FileText, BarChart3, User } from 'lucide-react';
 
 export function Dashboard() {
@@ -172,22 +172,41 @@ export function Dashboard() {
             onChange={e => setSearchTerm(e.target.value)}
             className="w-32 sm:w-48 md:w-64"
           />
-          <ToggleGroup
-            type="multiple"
+          <FilterSelector
+            options={[
+              {
+                value: 'agents',
+                label: (
+                  <>
+                    <Bot className="w-4 h-4" />
+                    <span className="hidden lg:inline">Agents</span>
+                  </>
+                ),
+              },
+              {
+                value: 'rooms',
+                label: (
+                  <>
+                    <Home className="w-4 h-4" />
+                    <span className="hidden lg:inline">Rooms</span>
+                  </>
+                ),
+              },
+              {
+                value: 'teams',
+                label: (
+                  <>
+                    <Users className="w-4 h-4" />
+                    <span className="hidden lg:inline">Teams</span>
+                  </>
+                ),
+              },
+            ]}
             value={showTypes}
-            onValueChange={setShowTypes}
-            className="hidden md:flex"
-          >
-            <ToggleGroupItem value="agents" className="flex items-center gap-1">
-              <Bot className="w-4 h-4" /> <span className="hidden lg:inline">Agents</span>
-            </ToggleGroupItem>
-            <ToggleGroupItem value="rooms" className="flex items-center gap-1">
-              <Home className="w-4 h-4" /> <span className="hidden lg:inline">Rooms</span>
-            </ToggleGroupItem>
-            <ToggleGroupItem value="teams" className="flex items-center gap-1">
-              <Users className="w-4 h-4" /> <span className="hidden lg:inline">Teams</span>
-            </ToggleGroupItem>
-          </ToggleGroup>
+            onChange={value => setShowTypes(value as string[])}
+            multiple
+            className="hidden md:inline-flex"
+          />
           <Button
             variant="outline"
             size="sm"
