@@ -17,65 +17,74 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
+  "agentql",                                                                                           # for AgentQL tool
   "agno[anthropic,google,ollama,openai,sql,ddg,arxiv,yfinance,newspaper,github,docker,duckdb]>=1.7.6",
   "apify-client>=1.12.2",
-  "arxiv",                                                                                                       # for Arxiv tool
+  "arxiv",                                                                                             # for Arxiv tool
   "atlassian-python-api",
   "boto3>=1.40.8",
-  "cartesia",                                                                                                    # for Cartesia voice AI tool
+  "browserbase",                                                                                       # for Browserbase tool
+  "cartesia",                                                                                          # for Cartesia voice AI tool
   "chromadb>=1.0.15",
   "composio-agno",
+  "crawl4ai>=0.7.3",
   "croniter>=6",
-  "daytona",                                                                                                     # for Daytona tool
+  "daytona",                                                                                           # for Daytona tool
   "diskcache>=5.6.3",
-  "exa-py",                                                                                                      # for Exa tool
-  "fal-client",                                                                                                  # for Fal tool
+  "exa-py",                                                                                            # for Exa tool
+  "fal-client",                                                                                        # for Fal tool
   "fastapi>=0.116.1",
   "firecrawl-py",
-  "psycopg-binary",
-  "resend",
-  "twilio",
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
   "google-auth-oauthlib>=1.2.2",
-  "google-genai",                                                                                                # for Gemini tool
-  "google-maps-places",                                                                                          # for Google Maps tool
-  "googlemaps",                                                                                                  # for Google Maps tool
-  "googlesearch-python",                                                                                         # for Google Search tool
+  "google-genai",                                                                                      # for Gemini tool
+  "google-maps-places",                                                                                # for Google Maps tool
+  "google-search-results>=2.4.2",
+  "googlemaps",                                                                                        # for Google Maps tool
+  "googlesearch-python",                                                                               # for Google Search tool
   "groq>=0.31",
-  "httpx>=0.27",                                                                                                 # for Jina and Telegram tools
+  "httpx>=0.27",                                                                                       # for Jina, Telegram, and Searxng tools
   "jira>=3.10.5",
+  "linkup-sdk>=0.2.8",
   "loguru>=0.7.3",
-  "lumaai",                                                                                                      # for Luma Labs tool
-  "markdown>=3.7",                                                                                               # for HTML formatting in Matrix messages
+  "lumaai",                                                                                            # for Luma Labs tool
+  "markdown>=3.7",                                                                                     # for HTML formatting in Matrix messages
   "matrix-nio>=0.24",
   "mcp[cli]>=1.12.4",
   "mem0ai>=0.1.115",
-  "mlx-whisper",                                                                                                   # for MLX Transcribe tool
-  "pandas>=2.2",                                                                                                 # for Pandas data analysis tool
-  "praw",                                                                                                        # for Reddit tool
-  "psycopg-binary",                                                                                              # for PostgreSQL tool
-  "py-trello",                                                                                                   # for Trello tool
-  "pycountry",                                                                                                   # for Google Search tool
+  "mlx-whisper",                                                                                       # for MLX Transcribe tool
+  "oxylabs",                                                                                           # for Oxylabs tool
+  "pandas>=2.2",                                                                                       # for Pandas data analysis tool
+  "playwright",                                                                                        # for AgentQL tool
+  "praw",                                                                                              # for PostgreSQL tool
+  "psycopg[binary]>=3.2.9",
+  "py-trello",                                                                                         # for Trello tool
+  "pycountry",                                                                                         # for Google Search tool
   "pydantic>=2",
-  "pygithub>=2.5",                                                                                               # for GitHub tool
-  "pypdf",                                                                                                       # for Arxiv tool
+  "pygithub>=2.5",                                                                                     # for GitHub tool
+  "pypdf",                                                                                             # for Arxiv tool
   "python-dotenv>=1",
-  "pytz",                                                                                                        # for Cal.com tool
+  "pytz",                                                                                              # for Cal.com tool
   "pyyaml>=6",
-  "requests",                                                                                                    # for Cal.com tool
-  "rich",                                                                                                        # for CLI output
-  "slack-sdk",                                                                                                   # for Slack tool
+  "replicate>=1.0.7",
+  "requests",                                                                                          # for Cal.com tool
+  "resend",
+  "rich",                                                                                              # for CLI output
+  "scrapegraph-py",                                                                                    # for ScrapeGraph tool
+  "slack-sdk",                                                                                         # for Slack tool
+  "spider-client",                                                                                     # for Spider tool
   "spotipy>=2.25.1",
-  "structlog>=24.1",                                                                                             # for structured logging
-  "tavily-python",                                                                                               # for Tavily tool
-  "tweepy",                                                                                                      # for Twitter/X tool
+  "structlog>=24.1",                                                                                   # for structured logging
+  "tavily-python",                                                                                     # for Tavily tool
+  "tweepy",                                                                                            # for Twitter/X tool
+  "twilio",
   "typer>=0.16",
   "uvicorn>=0.35",
   "watchdog>=6",
-  "wikipedia",                                                                                                   # for Wikipedia tool (required by agno.tools.wikipedia)
-  "youtube-transcript-api",                                                                                      # for YouTube tool
+  "wikipedia",                                                                                         # for Wikipedia tool (required by agno.tools.wikipedia)
+  "youtube-transcript-api",                                                                            # for YouTube tool
   "zep-cloud>=3.3",
 ]
 
@@ -108,110 +117,89 @@ packages = [ "src/mindroom" ]
 
 [tool.ruff]
 target-version = "py312"
-fix = true
 line-length = 120
 
 exclude = [
+  "*.egg-info/",
+  ".git/",
+  ".mypy_cache/",
+  ".pytest_cache/",
+  ".ruff_cache/",
+  ".venv/",
+  "__pycache__/",
   "build/",
   "dist/",
   "node_modules/",
-  ".venv/",
-  ".git/",
-  "__pycache__/",
-  "*.egg-info/",
-  ".pytest_cache/",
-  ".mypy_cache/",
-  ".ruff_cache/",
 ]
 
-[tool.ruff.lint]
-extend-ignore = [
-  "COM812",   # conflicts with ruff formatter
-  "ISC001",   # conflicts with ruff formatter
-  "PLR0913",  # too many arguments
-  "PLR2004",  # magic value used in comparison
-  "PLC0415",  # import outside toplevel
-  "PLR0912",  # too many branches
-  "PLR0911",  # too many return statements
+fix = true
+lint.extend-select = [
+  "A",    # flake8-builtins
+  "ARG",  # flake8-unused-arguments
+  "B",    # flake8-bugbear
+  "C",    # mccabe complexity, flake8-comprehensions
+  "C4",   # flake8-comprehensions
+  "COM",  # flake8-commas
+  "CPY",  # flake8-copyright
+  "DTZ",  # flake8-datetimez
+  "E",    # pycodestyle errors
+  "ERA",  # eradicate
+  "EXE",  # flake8-executable
+  "F",    # pyflakes
+  "FA",   # flake8-future-annotations
+  "FBT",  # flake8-boolean-trap
+  "FLY",  # flynt
+  "FURB", # refurb
+  "G",    # flake8-logging-format
+  "I",    # isort
+  "ICN",  # flake8-import-conventions
+  "INP",  # flake8-no-pep420
+  "INT",  # flake8-gettext
+  "ISC",  # flake8-implicit-str-concat
+  "LOG",  # flake8-logging
+  "N",    # pep8-naming
+  "NPY",  # numpy specific rules
+  "PERF", # perflint
+  "PGH",  # pygrep-hooks
+  "PIE",  # flake8-pie
+  "PL",   # pylint
+  "PT",   # flake8-pytest-style
+  "PTH",  # flake8-use-pathlib
+  "PYI",  # flake8-pyi
+  "Q",    # flake8-quotes
+  "RET",  # flake8-return
+  "RSE",  # flake8-raise
+  "RUF",  # ruff specific rules
+  "S",    # flake8-bandit
+  "SIM",  # flake8-simplify
+  "SLF",  # flake8-self
+  "SLOT", # flake8-slots
+  "T20",  # flake8-print
+  "TCH",  # flake8-type-checking
+  "TID",  # flake8-tidy-imports
+  "TRY",  # tryceratops
+  "UP",   # pyupgrade
+  "W",    # pycodestyle warnings
+  "YTT",  # flake8-2020
 ]
-
-extend-select = [
-  "A",      # flake8-builtins
-  "ARG",    # flake8-unused-arguments
-  "B",      # flake8-bugbear
-  "C",      # mccabe complexity, flake8-comprehensions
-  "C4",     # flake8-comprehensions
-  "COM",    # flake8-commas
-  "CPY",    # flake8-copyright
-  "DTZ",    # flake8-datetimez
-  "E",      # pycodestyle errors
-  "ERA",    # eradicate
-  "EXE",    # flake8-executable
-  "F",      # pyflakes
-  "FA",     # flake8-future-annotations
-  "FBT",    # flake8-boolean-trap
-  "FLY",    # flynt
-  "FURB",   # refurb
-  "G",      # flake8-logging-format
-  "I",      # isort
-  "ICN",    # flake8-import-conventions
-  "INP",    # flake8-no-pep420
-  "INT",    # flake8-gettext
-  "ISC",    # flake8-implicit-str-concat
-  "LOG",    # flake8-logging
-  "N",      # pep8-naming
-  "NPY",    # numpy specific rules
-  "PERF",   # perflint
-  "PGH",    # pygrep-hooks
-  "PIE",    # flake8-pie
-  "PL",     # pylint
-  "PT",     # flake8-pytest-style
-  "PTH",    # flake8-use-pathlib
-  "PYI",    # flake8-pyi
-  "Q",      # flake8-quotes
-  "RET",    # flake8-return
-  "RSE",    # flake8-raise
-  "RUF",    # ruff specific rules
-  "S",      # flake8-bandit
-  "SIM",    # flake8-simplify
-  "SLF",    # flake8-self
-  "SLOT",   # flake8-slots
-  "T20",    # flake8-print
-  "TCH",    # flake8-type-checking
-  "TID",    # flake8-tidy-imports
-  "TRY",    # tryceratops
-  "UP",     # pyupgrade
-  "W",      # pycodestyle warnings
-  "YTT",    # flake8-2020
+lint.extend-ignore = [
+  "COM812",  # conflicts with ruff formatter
+  "ISC001",  # conflicts with ruff formatter
+  "PLC0415", # import outside toplevel
+  "PLR0911", # too many return statements
+  "PLR0912", # too many branches
+  "PLR0913", # too many arguments
+  "PLR2004", # magic value used in comparison
 ]
-
-[tool.ruff.lint.per-file-ignores]
-"__init__.py" = [ "F401" ]
-"tests/*" = [ "S101", "PLR2004" ]  # Use of assert detected, Magic value used in comparison
-"src/mindroom/**/agent_configs/*.py" = [ "S105" ]  # hardcoded-password-string
-
-[tool.ruff.lint.mccabe]
+lint.per-file-ignores."__init__.py" = [ "F401" ]
+lint.per-file-ignores."src/mindroom/**/agent_configs/*.py" = [ "S105" ] # hardcoded-password-string
+lint.per-file-ignores."tests/*" = [ "PLR2004", "S101" ] # Use of assert detected, Magic value used in comparison
 # C901
-max-complexity = 10
-
-[tool.mypy]
-strict = true
-warn_unreachable = true
-pretty = true
-show_column_numbers = true
-show_error_codes = true
-show_error_context = true
-ignore_missing_imports = true
+lint.mccabe.max-complexity = 10
 
 [tool.pytest.ini_options]
 addopts = "-ra -q --strict-markers --strict-config"
 testpaths = [ "tests" ]
-
-[tool.vulture]
-make_whitelist = true
-min_confidence = 60
-paths = [ "src" ]
-sort_by_size = true
 
 [tool.coverage.run]
 source = [ "src" ]
@@ -239,3 +227,18 @@ ignore_errors = true
 
 [tool.coverage.html]
 directory = "coverage_html_report"
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+pretty = true
+show_column_numbers = true
+show_error_codes = true
+show_error_context = true
+ignore_missing_imports = true
+
+[tool.vulture]
+make_whitelist = true
+min_confidence = 60
+paths = [ "src" ]
+sort_by_size = true

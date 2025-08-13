@@ -10,20 +10,19 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from mindroom.tools_metadata import ConfigField
-from mindroom.tools_metadata import SetupType
-from mindroom.tools_metadata import ToolCategory
-from mindroom.tools_metadata import ToolStatus
-from mindroom.tools_metadata import register_tool_with_metadata
+from mindroom.tools_metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
+from .agentql import agentql_tools
 from .airflow import airflow_tools
 from .apify import apify_tools
 from .arxiv import arxiv_tools
 from .aws_ses import aws_ses_tools
+from .brightdata import brightdata_tools
 from .cal_com import cal_com_tools
 from .calculator import calculator_tools
 from .cartesia import cartesia_tools
 from .confluence import confluence_tools
+from .crawl4ai import crawl4ai_tools
 from .csv import csv_tools
 from .custom_api import custom_api_tools
 from .dalle import dalle_tools
@@ -41,6 +40,7 @@ from .firecrawl import firecrawl_tools
 from .gemini import gemini_tools
 from .giphy import giphy_tools
 from .github import github_tools
+from .google_calendar import google_calendar_tools
 from .google_maps import google_maps_tools
 from .google_sheets import google_sheets_tools
 from .googlesearch import googlesearch_tools
@@ -48,12 +48,16 @@ from .groq import groq_tools
 from .hackernews import hackernews_tools
 from .jina import jina_tools
 from .linear import linear_tools
+from .linkup import linkup_tools
 from .mem0 import mem0_tools
-from .modelslabs import modelslabs_tools
 from .mlx_transcribe import mlx_transcribe_tools
+from .modelslabs import modelslabs_tools
 from .newspaper import newspaper_tools
+from .newspaper4k import newspaper4k_tools
 from .openai import openai_tools
+from .openbb import openbb_tools
 from .openweather import openweather_tools
+from .oxylabs import oxylabs_tools
 from .pandas import pandas_tools
 from .postgres import postgres_tools
 from .pubmed import pubmed_tools
@@ -61,19 +65,26 @@ from .python import python_tools
 from .reddit import reddit_tools
 from .replicate import replicate_tools
 from .resend import resend_tools
+from .scrapegraph import scrapegraph_tools
+from .searxng import searxng_tools
 from .serpapi import serpapi_tools
 from .shell import shell_tools
 from .slack import slack_tools
 from .sleep import sleep_tools
+from .spider import spider_tools
 from .sql import sql_tools
 from .tavily import tavily_tools
 from .telegram import telegram_tools
+from .trello import trello_tools
 from .twilio import twilio_tools
+from .web_browser_tools import web_browser_tools
+from .webex import webex_tools
 from .website import website_tools
 from .whatsapp import whatsapp_tools
 from .wikipedia import wikipedia_tools
 from .x import x_tools
 from .yfinance import yfinance_tools
+from .zendesk import zendesk_tools
 from .zep import zep_tools
 
 if TYPE_CHECKING:
@@ -92,6 +103,7 @@ __all__ = [
     "calculator_tools",
     "cartesia_tools",
     "confluence_tools",
+    "crawl4ai_tools",
     "csv_tools",
     "custom_api_tools",
     "dalle_tools",
@@ -108,8 +120,8 @@ __all__ = [
     "firecrawl_tools",
     "gemini_tools",
     "giphy_tools",
-    "google_calendar_tools",
     "github_tools",
+    "google_calendar_tools",
     "google_maps_tools",
     "google_sheets_tools",
     "googlesearch_tools",
@@ -117,12 +129,16 @@ __all__ = [
     "hackernews_tools",
     "jina_tools",
     "linear_tools",
+    "linkup_tools",
     "mem0_tools",
-    "modelslabs_tools",
     "mlx_transcribe_tools",
+    "modelslabs_tools",
+    "newspaper4k_tools",
     "newspaper_tools",
     "openai_tools",
+    "openbb_tools",
     "openweather_tools",
+    "oxylabs_tools",
     "pandas_tools",
     "postgres_tools",
     "pubmed_tools",
@@ -130,19 +146,26 @@ __all__ = [
     "reddit_tools",
     "replicate_tools",
     "resend_tools",
+    "scrapegraph_tools",
+    "searxng_tools",
     "serpapi_tools",
     "shell_tools",
     "slack_tools",
     "sleep_tools",
+    "spider_tools",
     "sql_tools",
     "tavily_tools",
     "telegram_tools",
+    "trello_tools",
     "twilio_tools",
+    "web_browser_tools",
+    "webex_tools",
     "website_tools",
     "whatsapp_tools",
     "wikipedia_tools",
     "x_tools",
     "yfinance_tools",
+    "zendesk_tools",
     "zep_tools",
 ]
 
@@ -293,7 +316,6 @@ def yahoo_mail_tools() -> type[Toolkit]:
     """Yahoo Mail integration - coming soon."""
     msg = "Yahoo Mail integration is coming soon"
     raise NotImplementedError(msg)
-
 
 
 # Shopping integrations (coming soon)

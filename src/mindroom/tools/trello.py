@@ -116,6 +116,6 @@ if TYPE_CHECKING:
 )
 def trello_tools() -> type[TrelloTools]:
     """Return Trello tools for project board management."""
-    from agno.tools.trello import TrelloTools  # noqa: PLC0415
+    from agno.tools.trello import TrelloTools
 
     return TrelloTools

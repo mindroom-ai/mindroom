@@ -91,9 +91,14 @@ if TYPE_CHECKING:
     ],
     dependencies=["openbb"],
     docs_url="https://docs.agno.com/tools/toolkits/others/openbb",
+    helper_text="Note: OpenBB has strict dependency requirements. Install with `pip install openbb` in a separate environment if needed.",
 )
 def openbb_tools() -> type[OpenBBTools]:
     """Return OpenBB financial data and analysis tools."""
-    from agno.tools.openbb import OpenBBTools  # noqa: PLC0415
+    try:
+        from agno.tools.openbb import OpenBBTools
 
-    return OpenBBTools
+        return OpenBBTools
+    except ImportError as e:
+        msg = "OpenBB package not installed. Please install with: pip install openbb"
+        raise ImportError(msg) from e

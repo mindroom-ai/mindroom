@@ -282,6 +282,56 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Webex access token for authentication (can also be set via WEBEX_ACCESS_TOKEN env var)",
+          "label": "Access Token",
+          "name": "access_token",
+          "options": null,
+          "placeholder": "Bearer token from Webex Developer Portal",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable sending messages to Webex spaces/rooms",
+          "label": "Send Message",
+          "name": "send_message",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable listing Webex spaces/rooms",
+          "label": "List Rooms",
+          "name": "list_rooms",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "webexpythonsdk"
+      ],
+      "description": "Video conferencing and messaging platform for teams",
+      "display_name": "Webex",
+      "docs_url": "https://docs.agno.com/tools/toolkits/social/webex",
+      "helper_text": null,
+      "icon": "FaVideo",
+      "icon_color": "text-blue-600",
+      "name": "webex",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "communication",
+      "config_fields": [
+        {
+          "default": null,
           "description": "WhatsApp Business API access token (can also be set via WHATSAPP_ACCESS_TOKEN env var)",
           "label": "Access Token",
           "name": "access_token",
@@ -1290,6 +1340,45 @@
       "name": "dropbox",
       "setup_type": "coming_soon",
       "status": "coming_soon"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Fal API key for authentication (can also be set via FAL_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "fal-***",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "fal-ai/hunyuan-video",
+          "description": "The model to use for media generation (default: fal-ai/hunyuan-video)",
+          "label": "Model",
+          "name": "model",
+          "options": null,
+          "placeholder": "fal-ai/hunyuan-video",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "fal-client"
+      ],
+      "description": "AI model serving platform for media generation (images and videos)",
+      "display_name": "Fal",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/fal",
+      "helper_text": null,
+      "icon": "FaRobot",
+      "icon_color": "text-purple-600",
+      "name": "fal",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "development",
@@ -2522,6 +2611,199 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Base directory for audio files (defaults to current directory)",
+          "label": "Base Directory",
+          "name": "base_dir",
+          "options": null,
+          "placeholder": "/path/to/audio/files",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable the read_files function to list audio files in base directory",
+          "label": "Enable File Reading",
+          "name": "read_files_in_base_dir",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": "mlx-community/whisper-large-v3-turbo",
+          "description": "Path or HuggingFace repository for the Whisper model",
+          "label": "Model Path or HuggingFace Repo",
+          "name": "path_or_hf_repo",
+          "options": null,
+          "placeholder": "mlx-community/whisper-large-v3-turbo",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Enable verbose output during transcription",
+          "label": "Verbose Output",
+          "name": "verbose",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Temperature for sampling (can be float or tuple of floats)",
+          "label": "Temperature",
+          "name": "temperature",
+          "options": null,
+          "placeholder": "0.0",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Threshold for compression ratio detection",
+          "label": "Compression Ratio Threshold",
+          "name": "compression_ratio_threshold",
+          "options": null,
+          "placeholder": "2.4",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Log probability threshold for token filtering",
+          "label": "Log Probability Threshold",
+          "name": "logprob_threshold",
+          "options": null,
+          "placeholder": "-1.0",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Threshold for detecting silence/no speech",
+          "label": "No Speech Threshold",
+          "name": "no_speech_threshold",
+          "options": null,
+          "placeholder": "0.6",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Whether to condition transcription on previous text context",
+          "label": "Condition on Previous Text",
+          "name": "condition_on_previous_text",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Initial prompt to guide transcription style and context",
+          "label": "Initial Prompt",
+          "name": "initial_prompt",
+          "options": null,
+          "placeholder": "The following is a recording of...",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Enable word-level timestamps in transcription output",
+          "label": "Word Timestamps",
+          "name": "word_timestamps",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Punctuation characters to prepend to words",
+          "label": "Prepend Punctuations",
+          "name": "prepend_punctuations",
+          "options": null,
+          "placeholder": "\"'([{-",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Punctuation characters to append to words",
+          "label": "Append Punctuations",
+          "name": "append_punctuations",
+          "options": null,
+          "placeholder": "\"'.\u3002,\uff0c!\uff01?\uff1f:\uff1a\")]}\u3001",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Clip timestamps (string format like '0,30' or comma-separated list)",
+          "label": "Clip Timestamps",
+          "name": "clip_timestamps",
+          "options": null,
+          "placeholder": "0,30",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Threshold for detecting hallucinated content in silence",
+          "label": "Hallucination Silence Threshold",
+          "name": "hallucination_silence_threshold",
+          "options": null,
+          "placeholder": "2.0",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Additional decoding options as JSON string (e.g., beam search parameters)",
+          "label": "Decode Options",
+          "name": "decode_options",
+          "options": null,
+          "placeholder": "{\"beam_size\": 5}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "mlx-whisper"
+      ],
+      "description": "Audio transcription using Apple's MLX Whisper framework",
+      "display_name": "MLX Transcribe",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/mlx_transcribe",
+      "helper_text": null,
+      "icon": "Mic",
+      "icon_color": "text-blue-600",
+      "name": "mlx_transcribe",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": "The ModelsLab API key for authentication (can also be set via MODELS_LAB_API_KEY env var)",
           "label": "API Key",
           "name": "api_key",
@@ -2743,6 +3025,183 @@
       "config_fields": [
         {
           "default": null,
+          "description": "OpenBB personal access token for enhanced data access (can also be set via OPENBB_PAT env var)",
+          "label": "OpenBB Personal Access Token",
+          "name": "openbb_pat",
+          "options": null,
+          "placeholder": "your_personal_access_token",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "yfinance",
+          "description": "Data provider to use (benzinga, fmp, intrinio, polygon, tiingo, tmx, yfinance)",
+          "label": "Data Provider",
+          "name": "provider",
+          "options": null,
+          "placeholder": "yfinance",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable getting current stock prices and quotes",
+          "label": "Stock Price",
+          "name": "stock_price",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable searching for company ticker symbols by name",
+          "label": "Search Symbols",
+          "name": "search_symbols",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting latest company news and press releases",
+          "label": "Company News",
+          "name": "company_news",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting company profiles and overviews",
+          "label": "Company Profile",
+          "name": "company_profile",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable getting consensus price targets and analyst recommendations",
+          "label": "Price Targets",
+          "name": "price_targets",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "openbb"
+      ],
+      "description": "Financial data and market analysis tools",
+      "display_name": "OpenBB",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/openbb",
+      "helper_text": "Note: OpenBB has strict dependency requirements. Install with `pip install openbb` in a separate environment if needed.",
+      "icon": "TrendingUp",
+      "icon_color": "text-green-600",
+      "name": "openbb",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "OpenWeatherMap API key. If not provided, uses OPENWEATHER_API_KEY env var.",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "your_openweather_api_key",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "metric",
+          "description": "Units of measurement. Options: 'standard', 'metric', 'imperial'.",
+          "label": "Units",
+          "name": "units",
+          "options": null,
+          "placeholder": "metric",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable current weather function",
+          "label": "Current Weather",
+          "name": "current_weather",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable forecast function",
+          "label": "Forecast",
+          "name": "forecast",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable air pollution function",
+          "label": "Air Pollution",
+          "name": "air_pollution",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable geocoding function",
+          "label": "Geocoding",
+          "name": "geocoding",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Weather data services from OpenWeatherMap API",
+      "display_name": "OpenWeather",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/openweather",
+      "helper_text": null,
+      "icon": "WiDaySunny",
+      "icon_color": "text-orange-500",
+      "name": "openweather",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": "Base directory for file operations (defaults to current working directory)",
           "label": "Base Directory",
           "name": "base_dir",
@@ -2870,6 +3329,45 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Replicate API token (can also be set via REPLICATE_API_TOKEN env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "r8_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "minimax/video-01",
+          "description": "The Replicate model to use for media generation",
+          "label": "Model",
+          "name": "model",
+          "options": null,
+          "placeholder": "minimax/video-01",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "replicate"
+      ],
+      "description": "Generate images and videos using AI models on the Replicate platform",
+      "display_name": "Replicate",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/replicate",
+      "helper_text": null,
+      "icon": "FaVideo",
+      "icon_color": "text-purple-600",
+      "name": "replicate",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": "Base directory for command execution (defaults to current directory)",
           "label": "Base Directory",
           "name": "base_dir",
@@ -2906,6 +3404,197 @@
       "name": "sleep",
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Trello API key (can also be set via TRELLO_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "your_trello_api_key",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Trello API secret (can also be set via TRELLO_API_SECRET env var)",
+          "label": "API Secret",
+          "name": "api_secret",
+          "options": null,
+          "placeholder": "your_trello_api_secret",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Trello token (can also be set via TRELLO_TOKEN env var)",
+          "label": "Token",
+          "name": "token",
+          "options": null,
+          "placeholder": "your_trello_token",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable creating new cards in boards and lists",
+          "label": "Create Card",
+          "name": "create_card",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable moving cards between lists",
+          "label": "Move Card",
+          "name": "move_card",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving all cards from a list",
+          "label": "Get Cards",
+          "name": "get_cards",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable creating new Trello boards",
+          "label": "Create Board",
+          "name": "create_board",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable listing all accessible Trello boards",
+          "label": "List Boards",
+          "name": "list_boards",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving all lists on a board",
+          "label": "Get Board Lists",
+          "name": "get_board_lists",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable creating new lists on boards",
+          "label": "Create List",
+          "name": "create_list",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "py-trello"
+      ],
+      "description": "Project board management with Trello API integration",
+      "display_name": "Trello",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/trello",
+      "helper_text": null,
+      "icon": "SiTrello",
+      "icon_color": "text-blue-600",
+      "name": "trello",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [],
+      "dependencies": [],
+      "description": "Open URLs in web browser tabs or windows",
+      "display_name": "Web Browser Tools",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/web-browser",
+      "helper_text": null,
+      "icon": "FaGlobe",
+      "icon_color": "text-blue-600",
+      "name": "web_browser_tools",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "The username used for authentication or identification purposes (can also be set via ZENDESK_USERNAME env var)",
+          "label": "Username",
+          "name": "username",
+          "options": null,
+          "placeholder": "john.doe@company.com",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "The password associated with the username for authentication purposes (can also be set via ZENDESK_PW env var)",
+          "label": "Password",
+          "name": "password",
+          "options": null,
+          "placeholder": "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "The name of the company related to the user or the data being accessed (can also be set via ZENDESK_COMPANY_NAME env var)",
+          "label": "Company Name",
+          "name": "company_name",
+          "options": null,
+          "placeholder": "mycompany",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Customer support platform for searching help center articles",
+      "display_name": "Zendesk",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/zendesk",
+      "helper_text": null,
+      "icon": "HelpCircle",
+      "icon_color": "text-green-600",
+      "name": "zendesk",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "email",
@@ -3513,7 +4202,7 @@
           "options": null,
           "placeholder": "token.json",
           "required": false,
-          "type": "text",
+          "type": "password",
           "validation": null
         },
         {
@@ -4210,6 +4899,57 @@
       "category": "research",
       "config_fields": [
         {
+          "default": null,
+          "description": "AgentQL API key for authentication (can also be set via AGENTQL_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "agentql_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable the basic text scraping functionality",
+          "label": "Enable Text Scraping",
+          "name": "scrape",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": "",
+          "description": "Custom AgentQL query for specific data extraction (enables custom scraping when provided)",
+          "label": "Custom AgentQL Query",
+          "name": "agentql_query",
+          "options": null,
+          "placeholder": "{\"links\": [\"a\"], \"titles\": [\"h1\", \"h2\"]}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "agentql",
+        "playwright"
+      ],
+      "description": "AI-powered web scraping and data extraction from websites",
+      "display_name": "AgentQL",
+      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/agentql",
+      "helper_text": null,
+      "icon": "FaSpider",
+      "icon_color": "text-purple-600",
+      "name": "agentql",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
           "default": true,
           "description": "Enable searching ArXiv for academic papers",
           "label": "Search ArXiv",
@@ -4254,6 +4994,216 @@
       "icon": "FaFileAlt",
       "icon_color": "text-red-600",
       "name": "arxiv",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "BrightData API key (can also be set via BRIGHT_DATA_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "your_brightdata_api_key",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "serp_api",
+          "description": "Zone for search engine requests (can be overridden with BRIGHT_DATA_SERP_ZONE env var)",
+          "label": "SERP Zone",
+          "name": "serp_zone",
+          "options": null,
+          "placeholder": "serp_api",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "web_unlocker1",
+          "description": "Zone for web scraping requests (can be overridden with BRIGHT_DATA_WEB_UNLOCKER_ZONE env var)",
+          "label": "Web Unlocker Zone",
+          "name": "web_unlocker_zone",
+          "options": null,
+          "placeholder": "web_unlocker1",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable the scrape_as_markdown tool",
+          "label": "Scrape as Markdown",
+          "name": "scrape_as_markdown",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable the get_screenshot tool",
+          "label": "Get Screenshot",
+          "name": "get_screenshot",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable the search_engine tool",
+          "label": "Search Engine",
+          "name": "search_engine",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable the web_data_feed tool",
+          "label": "Web Data Feed",
+          "name": "web_data_feed",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable verbose logging",
+          "label": "Verbose Logging",
+          "name": "verbose",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": 600,
+          "description": "Timeout in seconds for web data feed requests",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": "600",
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Web scraping, search engine queries, screenshots, and structured data extraction",
+      "display_name": "BrightData",
+      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/brightdata",
+      "helper_text": null,
+      "icon": "FaSpider",
+      "icon_color": "text-blue-600",
+      "name": "brightdata",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": 5000,
+          "description": "Maximum length of the text from the webpage to be returned",
+          "label": "Max Length",
+          "name": "max_length",
+          "options": null,
+          "placeholder": "5000",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": 60,
+          "description": "Timeout in seconds for page loading",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": "60",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable content pruning to remove low-quality content",
+          "label": "Use Pruning",
+          "name": "use_pruning",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": 0.48,
+          "description": "Threshold for content pruning (0.0 to 1.0)",
+          "label": "Pruning Threshold",
+          "name": "pruning_threshold",
+          "options": null,
+          "placeholder": "0.48",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": 1.0,
+          "description": "Threshold for BM25 content filtering when using search queries",
+          "label": "BM25 Threshold",
+          "name": "bm25_threshold",
+          "options": null,
+          "placeholder": "1.0",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Run browser in headless mode (no GUI)",
+          "label": "Headless Mode",
+          "name": "headless",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": "domcontentloaded",
+          "description": "Browser event to wait for before extracting content (domcontentloaded, load, networkidle)",
+          "label": "Wait Until",
+          "name": "wait_until",
+          "options": null,
+          "placeholder": "domcontentloaded",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "crawl4ai"
+      ],
+      "description": "Web crawling and scraping using the Crawl4ai library",
+      "display_name": "Crawl4AI",
+      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/crawl4ai",
+      "helper_text": null,
+      "icon": "FaSpider",
+      "icon_color": "text-blue-600",
+      "name": "crawl4ai",
       "setup_type": "none",
       "status": "available"
     },
@@ -5014,6 +5964,56 @@
       "category": "research",
       "config_fields": [
         {
+          "default": null,
+          "description": "Linkup API key for authentication (can also be set via LINKUP_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "linkup_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "standard",
+          "description": "Depth of the search. Use 'standard' for fast and affordable web search or 'deep' for comprehensive, in-depth web search",
+          "label": "Search Depth",
+          "name": "depth",
+          "options": null,
+          "placeholder": "standard",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "searchResults",
+          "description": "Type of output. 'sourcedAnswer' provides a comprehensive natural language answer with citations, 'searchResults' returns raw search context data",
+          "label": "Output Type",
+          "name": "output_type",
+          "options": null,
+          "placeholder": "searchResults",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "linkup-sdk"
+      ],
+      "description": "Web search using Linkup API for real-time information",
+      "display_name": "Linkup",
+      "docs_url": "https://docs.agno.com/tools/toolkits/search/linkup",
+      "helper_text": null,
+      "icon": "FaSearch",
+      "icon_color": "text-blue-600",
+      "name": "linkup",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
           "default": true,
           "description": "Enable extracting text content from article URLs",
           "label": "Get Article Text",
@@ -5038,6 +6038,96 @@
       "name": "newspaper",
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable the functionality to read the full content of an article",
+          "label": "Read Article",
+          "name": "read_article",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Include a summary of the article along with the full content",
+          "label": "Include Summary",
+          "name": "include_summary",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Maximum length of the article or its summary to be processed or returned",
+          "label": "Article Length",
+          "name": "article_length",
+          "options": null,
+          "placeholder": "5000",
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "newspaper4k",
+        "lxml_html_clean"
+      ],
+      "description": "Read and extract content from news articles using advanced web scraping",
+      "display_name": "Newspaper4k",
+      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper4k",
+      "helper_text": null,
+      "icon": "FaNewspaper",
+      "icon_color": "text-blue-600",
+      "name": "newspaper4k",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Oxylabs dashboard username (can also be set via OXYLABS_USERNAME env var)",
+          "label": "Username",
+          "name": "username",
+          "options": null,
+          "placeholder": "your_oxylabs_username",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Oxylabs dashboard password (can also be set via OXYLABS_PASSWORD env var)",
+          "label": "Password",
+          "name": "password",
+          "options": null,
+          "placeholder": "your_oxylabs_password",
+          "required": false,
+          "type": "password",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "oxylabs"
+      ],
+      "description": "Powerful web scraping capabilities including SERP, Amazon product data, and universal web scraping",
+      "display_name": "Oxylabs",
+      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/oxylabs",
+      "helper_text": null,
+      "icon": "FaGlobe",
+      "icon_color": "text-blue-600",
+      "name": "oxylabs",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "research",
@@ -5094,6 +6184,203 @@
       "config_fields": [
         {
           "default": null,
+          "description": "ScrapeGraph API key for enhanced services (can also be set via SGAI_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "sgai_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable AI-powered data extraction using natural language prompts",
+          "label": "Smart Scraper",
+          "name": "smartscraper",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable webpage to markdown conversion",
+          "label": "Markdownify",
+          "name": "markdownify",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable website crawling and structured data extraction",
+          "label": "Crawl",
+          "name": "crawl",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable web search and information extraction",
+          "label": "Search Scraper",
+          "name": "searchscraper",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "scrapegraph-py"
+      ],
+      "description": "Extract structured data from webpages using AI and natural language prompts",
+      "display_name": "ScrapeGraph",
+      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/scrapegraph",
+      "helper_text": null,
+      "icon": "FaGlobe",
+      "icon_color": "text-blue-600",
+      "name": "scrapegraph",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "The host for the SearxNG instance connection",
+          "label": "Host URL",
+          "name": "host",
+          "options": null,
+          "placeholder": "http://localhost:8080",
+          "required": true,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": "",
+          "description": "Comma-separated list of search engines to use (leave empty for default)",
+          "label": "Search Engines",
+          "name": "engines",
+          "options": null,
+          "placeholder": "google,bing,duckduckgo",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Optional parameter to specify the fixed maximum number of results",
+          "label": "Fixed Max Results",
+          "name": "fixed_max_results",
+          "options": null,
+          "placeholder": "10",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable searching for images",
+          "label": "Enable Image Search",
+          "name": "images",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable searching for IT-related content",
+          "label": "Enable IT Search",
+          "name": "it",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable searching for maps",
+          "label": "Enable Map Search",
+          "name": "map",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable searching for music",
+          "label": "Enable Music Search",
+          "name": "music",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable searching for news",
+          "label": "Enable News Search",
+          "name": "news",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable searching for science-related content",
+          "label": "Enable Science Search",
+          "name": "science",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable searching for videos",
+          "label": "Enable Video Search",
+          "name": "videos",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [],
+      "description": "Open source search engine for web, images, news, science, and specialized content",
+      "display_name": "SearxNG",
+      "docs_url": "https://docs.agno.com/tools/toolkits/search/searxng",
+      "helper_text": null,
+      "icon": "FaSearch",
+      "icon_color": "text-blue-600",
+      "name": "searxng",
+      "setup_type": "none",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
           "description": "SerpApi API key for authentication (can also be set via SERP_API_KEY env var)",
           "label": "API Key",
           "name": "api_key",
@@ -5127,6 +6414,56 @@
       "name": "serpapi",
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "The maximum number of search results to return",
+          "label": "Maximum Results",
+          "name": "max_results",
+          "options": null,
+          "placeholder": "5",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "The default URL to be scraped or crawled",
+          "label": "Default URL",
+          "name": "url",
+          "options": null,
+          "placeholder": "https://example.com",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Additional optional parameters as JSON object for Spider API calls",
+          "label": "Optional Parameters",
+          "name": "optional_params",
+          "options": null,
+          "placeholder": "{\"return_format\": \"markdown\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "spider-client"
+      ],
+      "description": "Web scraper and crawler that returns LLM-ready data",
+      "display_name": "Spider",
+      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/spider",
+      "helper_text": "Get your API key from the [Spider dashboard](https://spider.cloud)",
+      "icon": "FaSpider",
+      "icon_color": "text-red-600",
+      "name": "spider",
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "category": "research",

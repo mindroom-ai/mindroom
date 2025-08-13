@@ -36,7 +36,7 @@ if TYPE_CHECKING:
             placeholder="your-modelslabs-api-key",
             description="The ModelsLab API key for authentication (can also be set via MODELS_LAB_API_KEY env var)",
         ),
-        # Media generation parameters  
+        # Media generation parameters
         ConfigField(
             name="file_type",
             label="File Type",
@@ -80,6 +80,6 @@ if TYPE_CHECKING:
 )
 def modelslabs_tools() -> type[ModelsLabTools]:
     """Return ModelsLabs tool for AI-powered media generation."""
-    from agno.tools.models_labs import ModelsLabTools  # noqa: PLC0415
+    from agno.tools.models_labs import ModelsLabTools
 
     return ModelsLabTools
