@@ -37,8 +37,8 @@ def test_export_tools_metadata_json() -> None:
 
     # Write the JSON file
     output_path.parent.mkdir(exist_ok=True)
-    with output_path.open("w") as f:
-        json.dump({"tools": tools}, f, indent=2, sort_keys=True)
+    content = json.dumps({"tools": tools}, indent=2, sort_keys=True)
+    output_path.write_text(content + "\n", encoding="utf-8")
 
     # Verify it was created and is valid
     assert output_path.exists()

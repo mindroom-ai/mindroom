@@ -146,7 +146,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["praw"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/reddit",
+    docs_url=None,
 )
 def reddit_tools() -> type[RedditTools]:
     """Return Reddit tools for social media interaction."""

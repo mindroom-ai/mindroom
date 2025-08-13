@@ -5,75 +5,57 @@
       "config_fields": [
         {
           "default": null,
-          "description": "SMTP server hostname",
-          "label": "SMTP Host",
-          "name": "SMTP_HOST",
-          "options": null,
-          "placeholder": "smtp.gmail.com",
-          "required": true,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": 587,
-          "description": "SMTP server port",
-          "label": "SMTP Port",
-          "name": "SMTP_PORT",
-          "options": null,
-          "placeholder": "587",
-          "required": true,
-          "type": "number",
-          "validation": {
-            "max": 65535,
-            "min": 1
-          }
-        },
-        {
-          "default": null,
-          "description": "Email account username",
-          "label": "Username",
-          "name": "SMTP_USERNAME",
-          "options": null,
-          "placeholder": "your-email@example.com",
-          "required": true,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Email account password",
-          "label": "Password",
-          "name": "SMTP_PASSWORD",
-          "options": null,
-          "placeholder": "Enter password or app-specific password",
-          "required": true,
-          "type": "password",
-          "validation": null
-        }
-      ],
-      "dependencies": null,
-      "description": "Send emails via SMTP",
-      "display_name": "Email",
-      "docs_url": "https://docs.agno.com/tools/toolkits/social/email",
-      "helper_text": null,
-      "icon": "Mail",
-      "icon_color": "text-blue-600",
-      "name": "email",
-      "setup_type": "api_key",
-      "status": "requires_config"
-    },
-    {
-      "category": "communication",
-      "config_fields": [
-        {
-          "default": null,
-          "description": "Your Slack bot token",
+          "description": "Slack bot token (can also be set via SLACK_TOKEN env var)",
           "label": "Slack Token",
-          "name": "SLACK_TOKEN",
+          "name": "token",
           "options": null,
           "placeholder": "xoxb-...",
-          "required": true,
+          "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable sending messages to channels",
+          "label": "Send Message",
+          "name": "send_message",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable sending threaded messages",
+          "label": "Send Message Thread",
+          "name": "send_message_thread",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable listing workspace channels",
+          "label": "List Channels",
+          "name": "list_channels",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving channel message history",
+          "label": "Get Channel History",
+          "name": "get_channel_history",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -95,12 +77,23 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Your Telegram bot API token",
-          "label": "Bot Token",
-          "name": "TELEGRAM_TOKEN",
+          "description": "The chat ID or username to send messages to",
+          "label": "Chat ID",
+          "name": "chat_id",
           "options": null,
-          "placeholder": "123456:ABC-DEF...",
+          "placeholder": "123456789 or @username",
           "required": true,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Telegram bot token (can also be set via TELEGRAM_TOKEN env var)",
+          "label": "Bot Token",
+          "name": "token",
+          "options": null,
+          "placeholder": "1234567890:ABCdefGHijKlmnOPqrSTuvwXYZ",
+          "required": false,
           "type": "password",
           "validation": null
         }
@@ -108,7 +101,7 @@
       "dependencies": [
         "httpx"
       ],
-      "description": "Send and receive Telegram messages",
+      "description": "Send messages via Telegram bot",
       "display_name": "Telegram",
       "docs_url": "https://core.telegram.org/bots/api",
       "helper_text": null,
@@ -120,30 +113,177 @@
     },
     {
       "category": "development",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Mathematical calculations and expressions",
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable addition operation",
+          "label": "Addition",
+          "name": "add",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable subtraction operation",
+          "label": "Subtraction",
+          "name": "subtract",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable multiplication operation",
+          "label": "Multiplication",
+          "name": "multiply",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable division operation",
+          "label": "Division",
+          "name": "divide",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable exponentiation operation (power calculation)",
+          "label": "Exponentiation",
+          "name": "exponentiate",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable factorial calculation for integers",
+          "label": "Factorial",
+          "name": "factorial",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable prime number checking",
+          "label": "Prime Check",
+          "name": "is_prime",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable square root calculation",
+          "label": "Square Root",
+          "name": "square_root",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable all available mathematical operations regardless of individual settings",
+          "label": "Enable All Operations",
+          "name": "enable_all",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Mathematical calculator with basic and advanced operations",
       "display_name": "Calculator",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/calculator",
       "helper_text": null,
       "icon": "Calculator",
-      "icon_color": "text-gray-600",
+      "icon_color": "text-blue-500",
       "name": "calculator",
       "setup_type": "none",
       "status": "available"
     },
     {
       "category": "development",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable container operations (list, start, stop, remove, logs, inspect, run, exec)",
+          "label": "Enable Container Management",
+          "name": "enable_container_management",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable image operations (list, pull, remove, build, tag, inspect)",
+          "label": "Enable Image Management",
+          "name": "enable_image_management",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable volume operations (list, create, remove, inspect)",
+          "label": "Enable Volume Management",
+          "name": "enable_volume_management",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable network operations (list, create, remove, inspect, connect, disconnect)",
+          "label": "Enable Network Management",
+          "name": "enable_network_management",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "docker"
       ],
-      "description": "Manage Docker containers and images",
+      "description": "Container, image, volume, and network management",
       "display_name": "Docker",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/docker",
       "helper_text": null,
       "icon": "FaDocker",
-      "icon_color": "text-blue-400",
+      "icon_color": "text-blue-500",
       "name": "docker",
       "setup_type": "none",
       "status": "available"
@@ -164,14 +304,72 @@
     },
     {
       "category": "development",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Read, write, and manage files",
-      "display_name": "File Operations",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Base directory for file operations (defaults to current working directory)",
+          "label": "Base Directory",
+          "name": "base_dir",
+          "options": null,
+          "placeholder": "/path/to/directory",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable file saving operations",
+          "label": "Save Files",
+          "name": "save_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable file reading operations",
+          "label": "Read Files",
+          "name": "read_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable file listing operations",
+          "label": "List Files",
+          "name": "list_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable file search operations with pattern matching",
+          "label": "Search Files",
+          "name": "search_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Local file operations including read, write, list, and search",
+      "display_name": "File Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/file",
       "helper_text": null,
-      "icon": "Folder",
-      "icon_color": "text-yellow-600",
+      "icon": "FaFolder",
+      "icon_color": "text-yellow-500",
       "name": "file",
       "setup_type": "none",
       "status": "available"
@@ -660,13 +858,126 @@
     },
     {
       "category": "development",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Execute Python code in a sandboxed environment",
-      "display_name": "Python Execution",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Base directory for file operations (defaults to current working directory)",
+          "label": "Base Directory",
+          "name": "base_dir",
+          "options": null,
+          "placeholder": "/path/to/working/directory",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Custom global scope for code execution (advanced users only)",
+          "label": "Safe Globals",
+          "name": "safe_globals",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Custom local scope for code execution (advanced users only)",
+          "label": "Safe Locals",
+          "name": "safe_locals",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable saving Python code to files and executing them",
+          "label": "Save and Run Files",
+          "name": "save_and_run",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable direct execution of Python code in memory",
+          "label": "Run Code",
+          "name": "run_code",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable reading file contents",
+          "label": "Read Files",
+          "name": "read_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable listing files in the base directory",
+          "label": "List Files",
+          "name": "list_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable running existing Python files",
+          "label": "Run Files",
+          "name": "run_files",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable installing packages using pip",
+          "label": "Pip Install",
+          "name": "pip_install",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable installing packages using uv pip",
+          "label": "UV Pip Install",
+          "name": "uv_pip_install",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Execute Python code, manage files, and install packages",
+      "display_name": "Python Tools",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/python",
       "helper_text": null,
-      "icon": "Code",
+      "icon": "FaPython",
       "icon_color": "text-blue-500",
       "name": "python",
       "setup_type": "none",
@@ -674,8 +985,20 @@
     },
     {
       "category": "development",
-      "config_fields": null,
-      "dependencies": null,
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Base directory for command execution (defaults to current directory)",
+          "label": "Base Directory",
+          "name": "base_dir",
+          "options": null,
+          "placeholder": "/path/to/working/directory",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [],
       "description": "Execute shell commands and scripts",
       "display_name": "Shell Commands",
       "docs_url": "https://docs.agno.com/tools/toolkits/local/shell",
@@ -685,6 +1008,65 @@
       "name": "shell",
       "setup_type": "none",
       "status": "available"
+    },
+    {
+      "category": "email",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Default recipient email address",
+          "label": "Receiver Email",
+          "name": "receiver_email",
+          "options": null,
+          "placeholder": "recipient@example.com",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Name to display as the sender",
+          "label": "Sender Name",
+          "name": "sender_name",
+          "options": null,
+          "placeholder": "Your Name",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Gmail address to send emails from",
+          "label": "Sender Email",
+          "name": "sender_email",
+          "options": null,
+          "placeholder": "your.email@gmail.com",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Gmail password or app-specific password for authentication",
+          "label": "Sender Password/App Password",
+          "name": "sender_passkey",
+          "options": null,
+          "placeholder": "Gmail password or app-specific password",
+          "required": false,
+          "type": "password",
+          "validation": null
+        }
+      ],
+      "dependencies": [],
+      "description": "Send emails via SMTP (Gmail)",
+      "display_name": "Email",
+      "docs_url": "https://docs.agno.com/tools/toolkits/social/email",
+      "helper_text": null,
+      "icon": "Mail",
+      "icon_color": "text-blue-600",
+      "name": "email",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "email",
@@ -905,17 +1287,172 @@
       "status": "coming_soon"
     },
     {
+      "category": "productivity",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "List of CSV file paths to work with (comma-separated)",
+          "label": "CSV Files",
+          "name": "csvs",
+          "options": null,
+          "placeholder": "/path/to/file1.csv,/path/to/file2.csv",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Maximum number of rows to read from CSV files",
+          "label": "Row Limit",
+          "name": "row_limit",
+          "options": null,
+          "placeholder": "1000",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable reading CSV file contents",
+          "label": "Read CSVs",
+          "name": "read_csvs",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable listing available CSV files",
+          "label": "List CSVs",
+          "name": "list_csvs",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable SQL querying of CSV files (requires DuckDB)",
+          "label": "Query CSVs",
+          "name": "query_csvs",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable reading column names from CSV files",
+          "label": "Read Column Names",
+          "name": "read_column_names",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Existing DuckDB connection object (advanced usage)",
+          "label": "DuckDB Connection",
+          "name": "duckdb_connection",
+          "options": null,
+          "placeholder": "Auto-created if not provided",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Additional arguments for DuckDB connection (JSON format)",
+          "label": "DuckDB Arguments",
+          "name": "duckdb_kwargs",
+          "options": null,
+          "placeholder": "{\"memory_limit\": \"1GB\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "duckdb"
+      ],
+      "description": "CSV file analysis and querying with SQL support",
+      "display_name": "CSV Toolkit",
+      "docs_url": "https://docs.agno.com/tools/toolkits/database/csv",
+      "helper_text": null,
+      "icon": "FaFileCsv",
+      "icon_color": "text-green-600",
+      "name": "csv",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "productivity",
+      "config_fields": [],
+      "dependencies": [
+        "pandas"
+      ],
+      "description": "Advanced data manipulation and analysis",
+      "display_name": "Pandas",
+      "docs_url": "https://docs.agno.com/tools/toolkits/database/pandas",
+      "helper_text": null,
+      "icon": "Database",
+      "icon_color": "text-blue-600",
+      "name": "pandas",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
       "category": "research",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable searching ArXiv for academic papers",
+          "label": "Search ArXiv",
+          "name": "search_arxiv",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable downloading and reading ArXiv papers",
+          "label": "Read ArXiv Papers",
+          "name": "read_arxiv_papers",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Directory to download PDF files (defaults to arxiv_pdfs in tool directory)",
+          "label": "Download Directory",
+          "name": "download_dir",
+          "options": null,
+          "placeholder": "/path/to/downloads",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "arxiv",
         "pypdf"
       ],
-      "description": "Search and retrieve academic papers",
-      "display_name": "arXiv",
+      "description": "Search and read academic papers from ArXiv",
+      "display_name": "ArXiv",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/arxiv",
       "helper_text": null,
-      "icon": "Book",
+      "icon": "FaFileAlt",
       "icon_color": "text-red-600",
       "name": "arxiv",
       "setup_type": "none",
@@ -923,31 +1460,115 @@
     },
     {
       "category": "research",
-      "config_fields": null,
-      "dependencies": [
-        "duckdb"
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable DuckDuckGo search function",
+          "label": "Search",
+          "name": "search",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable DuckDuckGo news function",
+          "label": "News",
+          "name": "news",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "A modifier to be used in the search request",
+          "label": "Search Modifier",
+          "name": "modifier",
+          "options": null,
+          "placeholder": "site:example.com",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "A fixed number of maximum results",
+          "label": "Fixed Max Results",
+          "name": "fixed_max_results",
+          "options": null,
+          "placeholder": "10",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Headers to be used in the search request",
+          "label": "Headers",
+          "name": "headers",
+          "options": null,
+          "placeholder": "{\"User-Agent\": \"MyBot/1.0\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Proxy to be used in the search request",
+          "label": "Proxy",
+          "name": "proxy",
+          "options": null,
+          "placeholder": "http://proxy.example.com:8080",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "A list of proxies to be used in the search request",
+          "label": "Proxies",
+          "name": "proxies",
+          "options": null,
+          "placeholder": "{\"http\": \"proxy1\", \"https\": \"proxy2\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 10,
+          "description": "The maximum number of seconds to wait for a response",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": "10",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Verify SSL certificates for secure connections",
+          "label": "Verify SSL",
+          "name": "verify_ssl",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
       ],
-      "description": "Read and analyze CSV data with DuckDB",
-      "display_name": "CSV Files",
-      "docs_url": "https://docs.agno.com/tools/toolkits/database/csv",
-      "helper_text": null,
-      "icon": "FileText",
-      "icon_color": "text-blue-600",
-      "name": "csv",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "category": "research",
-      "config_fields": null,
       "dependencies": [
         "duckduckgo-search"
       ],
-      "description": "Web search without tracking",
+      "description": "Search engine for web search and news",
       "display_name": "DuckDuckGo",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/duckduckgo",
       "helper_text": null,
-      "icon": "Search",
+      "icon": "FaSearch",
       "icon_color": "text-orange-500",
       "name": "duckduckgo",
       "setup_type": "none",
@@ -955,16 +1576,72 @@
     },
     {
       "category": "research",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Fixed number of maximum search results to return (overrides per-query max_results)",
+          "label": "Fixed Max Results",
+          "name": "fixed_max_results",
+          "options": null,
+          "placeholder": "10",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Fixed language for search results (overrides per-query language setting)",
+          "label": "Fixed Language",
+          "name": "fixed_language",
+          "options": null,
+          "placeholder": "en",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Proxy server for search requests",
+          "label": "Proxy",
+          "name": "proxy",
+          "options": null,
+          "placeholder": "http://proxy.example.com:8080",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": 10,
+          "description": "Timeout for search requests in seconds",
+          "label": "Request Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": "10",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Custom headers for search requests (JSON format)",
+          "label": "Custom Headers",
+          "name": "headers",
+          "options": null,
+          "placeholder": "{\"User-Agent\": \"Custom Agent\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "googlesearch-python",
         "pycountry"
       ],
-      "description": "Search the web using Google",
+      "description": "Search Google for web results using Python library",
       "display_name": "Google Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/googlesearch",
       "helper_text": null,
-      "icon": "Search",
+      "icon": "FaGoogle",
       "icon_color": "text-blue-500",
       "name": "googlesearch",
       "setup_type": "none",
@@ -975,34 +1652,125 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Your Jina API key for web content extraction",
-          "label": "Jina API Key",
-          "name": "JINA_API_KEY",
+          "description": "API key for Jina Reader (can also be set via JINA_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
           "options": null,
           "placeholder": "jina_...",
-          "required": true,
+          "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "default": "https://r.jina.ai/",
+          "description": "Base URL for Jina Reader API",
+          "label": "Base URL",
+          "name": "base_url",
+          "options": null,
+          "placeholder": "https://r.jina.ai/",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": "https://s.jina.ai/",
+          "description": "Search URL for Jina Reader API",
+          "label": "Search URL",
+          "name": "search_url",
+          "options": null,
+          "placeholder": "https://s.jina.ai/",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": 10000,
+          "description": "Maximum content length in characters",
+          "label": "Max Content Length",
+          "name": "max_content_length",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Timeout for Jina Reader API requests in seconds",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": "30",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable URL reading functionality",
+          "label": "Read URL",
+          "name": "read_url",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable web search functionality",
+          "label": "Search Query",
+          "name": "search_query",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Include full URL content in search results",
+          "label": "Search Query Content",
+          "name": "search_query_content",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
       "dependencies": [
-        "httpx"
+        "httpx",
+        "pydantic"
       ],
-      "description": "Advanced content extraction and processing",
+      "description": "Web content reading and search using Jina AI Reader API",
       "display_name": "Jina Reader",
       "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
       "helper_text": null,
-      "icon": "FileText",
-      "icon_color": "text-pink-500",
+      "icon": "FaGlobe",
+      "icon_color": "text-blue-600",
       "name": "jina",
       "setup_type": "api_key",
-      "status": "requires_config"
+      "status": "available"
     },
     {
       "category": "research",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable extracting text content from article URLs",
+          "label": "Get Article Text",
+          "name": "get_article_text",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "dependencies": [
-        "newspaper3k"
+        "newspaper3k",
+        "lxml_html_clean"
       ],
       "description": "Extract and analyze news articles from URLs",
       "display_name": "News Articles",
@@ -1016,17 +1784,142 @@
     },
     {
       "category": "research",
-      "config_fields": null,
-      "dependencies": [
-        "pandas"
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Tavily API key for web search access (can also be set via TAVILY_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "tvly-...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable web search functionality",
+          "label": "Enable Search",
+          "name": "search",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Use search context method instead of regular search",
+          "label": "Use Search Context",
+          "name": "use_search_context",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": 6000,
+          "description": "Maximum number of tokens to return in search results",
+          "label": "Max Tokens",
+          "name": "max_tokens",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Include AI-generated answer summary in search results",
+          "label": "Include Answer",
+          "name": "include_answer",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": "advanced",
+          "description": "Search depth level for query processing",
+          "label": "Search Depth",
+          "name": "search_depth",
+          "options": [
+            {
+              "label": "Basic",
+              "value": "basic"
+            },
+            {
+              "label": "Advanced",
+              "value": "advanced"
+            }
+          ],
+          "placeholder": null,
+          "required": false,
+          "type": "select",
+          "validation": null
+        },
+        {
+          "default": "markdown",
+          "description": "Format for search result output",
+          "label": "Output Format",
+          "name": "format",
+          "options": [
+            {
+              "label": "JSON",
+              "value": "json"
+            },
+            {
+              "label": "Markdown",
+              "value": "markdown"
+            }
+          ],
+          "placeholder": null,
+          "required": false,
+          "type": "select",
+          "validation": null
+        }
       ],
-      "description": "Pandas data manipulation and analysis",
-      "display_name": "Data Analysis",
-      "docs_url": "https://docs.agno.com/tools/toolkits/database/pandas",
+      "dependencies": [
+        "tavily-python"
+      ],
+      "description": "Real-time web search API for retrieving current information",
+      "display_name": "Tavily",
+      "docs_url": "https://docs.agno.com/tools/toolkits/search/tavily",
       "helper_text": null,
-      "icon": "Database",
-      "icon_color": "text-purple-600",
-      "name": "pandas",
+      "icon": "FaSearch",
+      "icon_color": "text-blue-600",
+      "name": "tavily",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Advanced: Optional knowledge base instance for storing website content (WebsiteKnowledgeBase or CombinedKnowledgeBase)",
+          "label": "Knowledge Base",
+          "name": "knowledge_base",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "httpx",
+        "beautifulsoup4"
+      ],
+      "description": "Web scraping and content extraction from websites",
+      "display_name": "Website Tools",
+      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/website",
+      "helper_text": null,
+      "icon": "FaGlobe",
+      "icon_color": "text-blue-600",
+      "name": "website",
       "setup_type": "none",
       "status": "available"
     },
@@ -1035,54 +1928,24 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Your Tavily API key for AI-powered search",
-          "label": "Tavily API Key",
-          "name": "TAVILY_API_KEY",
+          "description": "Optional WikipediaKnowledgeBase instance for advanced usage (typically left empty)",
+          "label": "Knowledge Base",
+          "name": "knowledge_base",
           "options": null,
-          "placeholder": "tvly-...",
-          "required": true,
-          "type": "password",
+          "placeholder": null,
+          "required": false,
+          "type": "text",
           "validation": null
         }
       ],
       "dependencies": [
-        "tavily-python"
-      ],
-      "description": "Advanced AI-powered web search engine",
-      "display_name": "Tavily Search",
-      "docs_url": "https://docs.agno.com/tools/toolkits/search/tavily",
-      "helper_text": null,
-      "icon": "Search",
-      "icon_color": "text-purple-500",
-      "name": "tavily",
-      "setup_type": "api_key",
-      "status": "requires_config"
-    },
-    {
-      "category": "research",
-      "config_fields": null,
-      "dependencies": null,
-      "description": "Extract and analyze content from websites",
-      "display_name": "Website Reader",
-      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/website",
-      "helper_text": null,
-      "icon": "Globe",
-      "icon_color": "text-indigo-500",
-      "name": "website",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "category": "research",
-      "config_fields": null,
-      "dependencies": [
         "wikipedia"
       ],
-      "description": "Search encyclopedia articles",
+      "description": "Search and retrieve information from Wikipedia",
       "display_name": "Wikipedia",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/wikipedia",
       "helper_text": null,
-      "icon": "Globe",
+      "icon": "FaWikipediaW",
       "icon_color": "text-gray-700",
       "name": "wikipedia",
       "setup_type": "none",
@@ -1246,58 +2109,168 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Reddit application client ID",
-          "label": "Client ID",
-          "name": "REDDIT_CLIENT_ID",
+          "description": "Pre-configured Reddit instance (optional, will create one if not provided)",
+          "label": "Reddit Instance",
+          "name": "reddit_instance",
           "options": null,
-          "placeholder": "Reddit app client ID",
-          "required": true,
+          "placeholder": null,
+          "required": false,
           "type": "text",
           "validation": null
         },
         {
           "default": null,
-          "description": "Reddit application client secret",
-          "label": "Client Secret",
-          "name": "REDDIT_CLIENT_SECRET",
+          "description": "Reddit API client ID (can also be set via REDDIT_CLIENT_ID env var)",
+          "label": "Client ID",
+          "name": "client_id",
           "options": null,
-          "placeholder": "Reddit app client secret",
-          "required": true,
-          "type": "password",
+          "placeholder": "your_client_id",
+          "required": false,
+          "type": "text",
           "validation": null
         },
         {
           "default": null,
-          "description": "Your Reddit username",
+          "description": "Reddit API client secret (can also be set via REDDIT_CLIENT_SECRET env var)",
+          "label": "Client Secret",
+          "name": "client_secret",
+          "options": null,
+          "placeholder": "your_client_secret",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "RedditTools v1.0",
+          "description": "User agent string for API requests (can also be set via REDDIT_USER_AGENT env var)",
+          "label": "User Agent",
+          "name": "user_agent",
+          "options": null,
+          "placeholder": "MyApp v1.0",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Reddit username for authenticated actions (can also be set via REDDIT_USERNAME env var)",
           "label": "Username",
-          "name": "REDDIT_USERNAME",
+          "name": "username",
           "options": null,
           "placeholder": "your_reddit_username",
-          "required": true,
+          "required": false,
           "type": "text",
           "validation": null
         },
         {
           "default": null,
-          "description": "Your Reddit password",
+          "description": "Reddit password for authenticated actions (can also be set via REDDIT_PASSWORD env var)",
           "label": "Password",
-          "name": "REDDIT_PASSWORD",
+          "name": "password",
           "options": null,
-          "placeholder": "Your Reddit password",
-          "required": true,
+          "placeholder": "your_reddit_password",
+          "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable getting information about Reddit users",
+          "label": "Get User Info",
+          "name": "get_user_info",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable getting top posts from subreddits",
+          "label": "Get Top Posts",
+          "name": "get_top_posts",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable getting information about subreddits",
+          "label": "Get Subreddit Info",
+          "name": "get_subreddit_info",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable getting currently trending subreddits",
+          "label": "Get Trending Subreddits",
+          "name": "get_trending_subreddits",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable getting statistics about subreddits",
+          "label": "Get Subreddit Stats",
+          "name": "get_subreddit_stats",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable creating new posts in subreddits",
+          "label": "Create Post",
+          "name": "create_post",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable replying to existing posts",
+          "label": "Reply to Post",
+          "name": "reply_to_post",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable replying to existing comments",
+          "label": "Reply to Comment",
+          "name": "reply_to_comment",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
       "dependencies": [
         "praw"
       ],
-      "description": "Browse subreddits and search posts",
+      "description": "Social media platform for browsing, posting, and interacting with Reddit communities",
       "display_name": "Reddit",
       "docs_url": null,
       "helper_text": null,
       "icon": "FaReddit",
-      "icon_color": "text-orange-600",
+      "icon_color": "text-orange-500",
       "name": "reddit",
       "setup_type": "api_key",
       "status": "requires_config"
@@ -1307,70 +2280,92 @@
       "config_fields": [
         {
           "default": null,
-          "description": "X/Twitter API Bearer token",
+          "description": "Twitter API Bearer token (can also be set via X_BEARER_TOKEN env var)",
           "label": "Bearer Token",
-          "name": "X_BEARER_TOKEN",
+          "name": "bearer_token",
           "options": null,
-          "placeholder": "Bearer token from X/Twitter",
-          "required": true,
+          "placeholder": "AAA...",
+          "required": false,
           "type": "password",
           "validation": null
         },
         {
           "default": null,
-          "description": "X/Twitter API consumer key",
+          "description": "Twitter API consumer key (can also be set via X_CONSUMER_KEY env var)",
           "label": "Consumer Key",
-          "name": "X_CONSUMER_KEY",
+          "name": "consumer_key",
           "options": null,
-          "placeholder": "Consumer key from X/Twitter",
-          "required": true,
-          "type": "text",
+          "placeholder": "consumer_key...",
+          "required": false,
+          "type": "password",
           "validation": null
         },
         {
           "default": null,
-          "description": "X/Twitter API consumer secret",
+          "description": "Twitter API consumer secret (can also be set via X_CONSUMER_SECRET env var)",
           "label": "Consumer Secret",
-          "name": "X_CONSUMER_SECRET",
+          "name": "consumer_secret",
           "options": null,
-          "placeholder": "Consumer secret from X/Twitter",
-          "required": true,
+          "placeholder": "consumer_secret...",
+          "required": false,
           "type": "password",
           "validation": null
         },
         {
           "default": null,
-          "description": "X/Twitter API access token",
+          "description": "Twitter API access token (can also be set via X_ACCESS_TOKEN env var)",
           "label": "Access Token",
-          "name": "X_ACCESS_TOKEN",
+          "name": "access_token",
           "options": null,
-          "placeholder": "Access token from X/Twitter",
-          "required": true,
+          "placeholder": "access_token...",
+          "required": false,
           "type": "password",
           "validation": null
         },
         {
           "default": null,
-          "description": "X/Twitter API access token secret",
+          "description": "Twitter API access token secret (can also be set via X_ACCESS_TOKEN_SECRET env var)",
           "label": "Access Token Secret",
-          "name": "X_ACCESS_TOKEN_SECRET",
+          "name": "access_token_secret",
           "options": null,
-          "placeholder": "Access token secret from X/Twitter",
-          "required": true,
+          "placeholder": "access_token_secret...",
+          "required": false,
           "type": "password",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable including post metrics (likes, retweets, etc.) in search results",
+          "label": "Include Post Metrics",
+          "name": "include_post_metrics",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable waiting when rate limit is reached instead of failing",
+          "label": "Wait on Rate Limit",
+          "name": "wait_on_rate_limit",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
       "dependencies": [
         "tweepy"
       ],
-      "description": "Post tweets and search Twitter",
-      "display_name": "Twitter/X",
+      "description": "Post tweets, send DMs, and search Twitter/X content",
+      "display_name": "X (Twitter)",
       "docs_url": "https://docs.agno.com/tools/toolkits/social/x",
       "helper_text": null,
       "icon": "FaTwitter",
       "icon_color": "text-blue-400",
-      "name": "twitter",
+      "name": "x",
       "setup_type": "api_key",
       "status": "requires_config"
     }

@@ -74,7 +74,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["googlesearch-python", "pycountry"],
-    docs_url="https://docs.agno.com/tools/toolkits/research/googlesearch",
+    docs_url="https://docs.agno.com/tools/toolkits/search/googlesearch",
 )
 def googlesearch_tools() -> type[GoogleSearchTools]:
     """Return Google Search tools for web search."""

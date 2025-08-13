@@ -71,7 +71,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["slack-sdk"],
-    docs_url="https://docs.agno.com/tools/toolkits/communication/slack",
+    docs_url="https://docs.agno.com/tools/toolkits/social/slack",
 )
 def slack_tools() -> type[SlackTools]:
     """Return Slack tools for messaging and channel management."""

@@ -4,13 +4,25 @@ import inspect
 from typing import Union, get_args, get_origin
 
 import pytest
-from agno.tools.csv_toolkit import CsvTools
-from agno.tools.github import GithubTools
-from agno.tools.tavily import TavilyTools
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
-from mindroom.tools_metadata import get_tool_metadata
+from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_metadata
+
+SKIP_CUSTOM = {"homeassistant", "imdb", "gmail"}
+
+
+@pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))
+def test_all(tool_name: str) -> None:
+    """Test that all tools have matching ConfigFields and agno parameters."""
+    if tool_name in SKIP_CUSTOM:
+        pytest.skip(f"{tool_name} is a custom tool, skipping test")
+    meta = TOOL_METADATA[tool_name]
+    if not meta.config_fields:
+        pytest.skip(f"{tool_name} has no ConfigFields defined, skipping test")
+    tool_factory = TOOL_REGISTRY[tool_name]
+    tool_class = tool_factory()
+    verify_tool_configfields(tool_name, tool_class)
 
 
 def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa: C901, PLR0912, PLR0915
@@ -89,6 +101,7 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
             elif (
                 "url" in param_name.lower()
                 or "uri" in param_name.lower()
+                or "proxy" in param_name.lower()
                 or "endpoint" in param_name.lower()
                 or "host" in param_name.lower()
             ):
@@ -114,18 +127,3 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
 
     # Success message (will only show with -v flag)
     print(f"\n✅ All {len(config_fields)} {tool_name} ConfigFields match agno parameter names and types!")
-
-
-def test_github_configfields_match_agno_params() -> None:
-    """Verify GitHub ConfigFields have all parameter names and types from agno GithubTools."""
-    verify_tool_configfields("github", GithubTools)
-
-
-def test_csv_configfields_match_agno_params() -> None:
-    """Verify CSV ConfigFields have all parameter names and types from agno CsvTools."""
-    verify_tool_configfields("csv", CsvTools)
-
-
-def test_tavily_configfields_match_agno_params() -> None:
-    """Verify Tavily ConfigFields have all parameter names and types from agno TavilyTools."""
-    verify_tool_configfields("tavily", TavilyTools)

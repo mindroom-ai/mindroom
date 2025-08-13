@@ -45,7 +45,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx"],
-    docs_url="https://docs.agno.com/tools/toolkits/communication/telegram",
+    docs_url="https://core.telegram.org/bots/api",
 )
 def telegram_tools() -> type[TelegramTools]:
     """Return Telegram tools for sending messages."""

@@ -109,7 +109,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["duckduckgo-search"],
-    docs_url="https://docs.agno.com/tools/toolkits/research/duckduckgo",
+    docs_url="https://docs.agno.com/tools/toolkits/search/duckduckgo",
 )
 def duckduckgo_tools() -> type[DuckDuckGoTools]:
     """Return DuckDuckGo tools for web search and news."""

@@ -99,7 +99,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx", "pydantic"],
-    docs_url="https://docs.agno.com/tools/toolkits/research/jina",
+    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
 )
 def jina_tools() -> type[JinaReaderTools]:
     """Return Jina Reader tools for web content reading and search."""
