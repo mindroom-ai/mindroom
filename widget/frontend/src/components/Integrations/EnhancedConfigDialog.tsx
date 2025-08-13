@@ -356,103 +356,118 @@ export function EnhancedConfigDialog({
                   <div key={field.name} className="space-y-2">
                     {index > 0 && <Separator className="my-4" />}
 
-                    <div className="flex items-center justify-between">
-                      <Label
-                        htmlFor={field.name}
-                        className={cn(
-                          'flex items-center space-x-2',
-                          hasError && 'text-destructive'
-                        )}
-                      >
-                        {FieldIcon && <FieldIcon className="h-4 w-4 text-muted-foreground" />}
-                        <span>{field.label}</span>
-                        {field.required && (
-                          <Badge variant="secondary" className="ml-2 text-xs px-1.5 py-0">
-                            Required
-                          </Badge>
-                        )}
-                      </Label>
-
-                      {field.description && (
-                        <TooltipProvider>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" />
-                            </TooltipTrigger>
-                            <TooltipContent className="max-w-xs">
-                              <p className="text-xs">{field.description}</p>
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      )}
-                    </div>
-
                     {field.type === 'boolean' ? (
-                      <div className="flex items-center space-x-2">
+                      <div className="flex items-center space-x-3 p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
                         <Checkbox
                           id={field.name}
                           checked={configValues[field.name] === true}
                           onCheckedChange={checked => handleFieldChange(field, checked === true)}
+                          className="h-5 w-5"
                         />
-                        <Label htmlFor={field.name} className="text-sm font-normal cursor-pointer">
-                          {field.description || 'Enable this option'}
-                        </Label>
+                        <label htmlFor={field.name} className="flex-1 cursor-pointer select-none">
+                          <div className="flex items-center space-x-2">
+                            {FieldIcon && <FieldIcon className="h-4 w-4 text-muted-foreground" />}
+                            <span className="font-medium text-sm">{field.label}</span>
+                            {field.required && (
+                              <Badge variant="secondary" className="ml-2 text-xs px-1.5 py-0">
+                                Required
+                              </Badge>
+                            )}
+                          </div>
+                          {field.description && (
+                            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6">
+                              {field.description}
+                            </div>
+                          )}
+                        </label>
                       </div>
                     ) : (
-                      <div className="relative">
-                        <Input
-                          id={field.name}
-                          type={
-                            isPasswordField && !showPassword[field.name]
-                              ? 'password'
-                              : field.type === 'number'
-                                ? 'number'
-                                : 'text'
-                          }
-                          placeholder={field.placeholder}
-                          value={(configValues[field.name] as string) || ''}
-                          onChange={e => handleFieldChange(field, e.target.value)}
-                          min={field.validation?.min}
-                          max={field.validation?.max}
-                          className={cn(
-                            'pr-10',
-                            hasError && 'border-destructive focus-visible:ring-destructive',
-                            isPasswordField && 'font-mono'
-                          )}
-                        />
-
-                        {isPasswordField && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
-                            onClick={() => togglePasswordVisibility(field.name)}
-                          >
-                            {showPassword[field.name] ? (
-                              <Lock className="h-4 w-4 text-muted-foreground" />
-                            ) : (
-                              <Lock className="h-4 w-4 text-muted-foreground" />
+                      <>
+                        <div className="flex items-center justify-between">
+                          <Label
+                            htmlFor={field.name}
+                            className={cn(
+                              'flex items-center space-x-2',
+                              hasError && 'text-destructive'
                             )}
-                          </Button>
+                          >
+                            {FieldIcon && <FieldIcon className="h-4 w-4 text-muted-foreground" />}
+                            <span>{field.label}</span>
+                            {field.required && (
+                              <Badge variant="secondary" className="ml-2 text-xs px-1.5 py-0">
+                                Required
+                              </Badge>
+                            )}
+                          </Label>
+
+                          {field.description && (
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" />
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-xs">
+                                  <p className="text-xs">{field.description}</p>
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          )}
+                        </div>
+                        <div className="relative">
+                          <Input
+                            id={field.name}
+                            type={
+                              isPasswordField && !showPassword[field.name]
+                                ? 'password'
+                                : field.type === 'number'
+                                  ? 'number'
+                                  : 'text'
+                            }
+                            placeholder={field.placeholder}
+                            value={(configValues[field.name] as string) || ''}
+                            onChange={e => handleFieldChange(field, e.target.value)}
+                            min={field.validation?.min}
+                            max={field.validation?.max}
+                            className={cn(
+                              'pr-10',
+                              hasError && 'border-destructive focus-visible:ring-destructive',
+                              isPasswordField && 'font-mono'
+                            )}
+                          />
+
+                          {isPasswordField && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
+                              onClick={() => togglePasswordVisibility(field.name)}
+                            >
+                              {showPassword[field.name] ? (
+                                <Lock className="h-4 w-4 text-muted-foreground" />
+                              ) : (
+                                <Lock className="h-4 w-4 text-muted-foreground" />
+                              )}
+                            </Button>
+                          )}
+                        </div>
+
+                        {hasError && (
+                          <div className="flex items-center space-x-1 text-destructive">
+                            <AlertCircle className="h-3 w-3" />
+                            <p className="text-xs">{fieldErrors[field.name]}</p>
+                          </div>
                         )}
-                      </div>
-                    )}
 
-                    {hasError && (
-                      <div className="flex items-center space-x-1 text-destructive">
-                        <AlertCircle className="h-3 w-3" />
-                        <p className="text-xs">{fieldErrors[field.name]}</p>
-                      </div>
-                    )}
-
-                    {field.validation && (
-                      <p className="text-xs text-muted-foreground">
-                        {field.type === 'number' &&
-                          field.validation.min !== undefined &&
-                          field.validation.max !== undefined &&
-                          `Value must be between ${field.validation.min} and ${field.validation.max}`}
-                      </p>
+                        {field.validation && (
+                          <p className="text-xs text-muted-foreground">
+                            {field.type === 'number' &&
+                              field.validation.min !== undefined &&
+                              field.validation.max !== undefined &&
+                              `Value must be between ${field.validation.min} and ${field.validation.max}`}
+                          </p>
+                        )}
+                      </>
                     )}
                   </div>
                 );
