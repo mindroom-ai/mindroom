@@ -10,7 +10,8 @@ Generate ConfigField definitions for the [TOOL_NAME] tool from the agno library 
 1. **Fetch the agno documentation**:
    - First, fetch `https://docs.agno.com/llms.txt` to find the tool's documentation URL
    - Look for the pattern: `- [ToolName](https://docs.agno.com/tools/toolkits/[category]/[tool_name].md)`
-   - Fetch the specific tool's documentation page to get parameter descriptions
+   - Fetch the specific tool's documentation page (the .md file) to get parameter descriptions
+   - For the `docs_url` field in the code, use the URL WITHOUT the .md extension
    - Use the documentation's parameter descriptions when available (they are more accurate and user-friendly)
 
 2. **Analyze the source code**:
@@ -138,7 +139,7 @@ if TYPE_CHECKING:
         # Continue for ALL parameters...
     ],
     dependencies=["[pip-package-name]"],  # From agno requirements
-    docs_url="https://docs.agno.com/tools/toolkits/[category]/[tool_name]",  # Use actual URL from llms.txt
+    docs_url="https://docs.agno.com/tools/toolkits/[category]/[tool_name]",  # URL from llms.txt but WITHOUT .md extension
 )
 def [tool_name]_tools() -> type[[ToolClass]]:
     """Return [tool description]."""
@@ -168,14 +169,16 @@ For a parameter like `enable_search: bool = True`:
 
 ## Important Notes
 
-1. **ALWAYS** fetch and use the agno documentation for accurate parameter descriptions
-2. **EVERY** parameter from the agno tool MUST have a corresponding ConfigField
-3. Parameter names must match EXACTLY (including underscores)
-4. Group related boolean flags together with comments
-5. Put authentication/connection parameters first
-6. Use the actual default values from agno, not made-up values
-7. The test `verify_tool_configfields("[tool_name]", [ToolClass])` must pass
-8. Use the exact docs URL as found in `https://docs.agno.com/llms.txt`
+1. **ALWAYS** read `CLAUDE.md` in the project root for project-specific instructions
+2. **ALWAYS** fetch and use the agno documentation for accurate parameter descriptions
+3. **EVERY** parameter from the agno tool MUST have a corresponding ConfigField
+4. Parameter names must match EXACTLY (including underscores)
+5. Group related boolean flags together with comments
+6. Put authentication/connection parameters first
+7. Use the actual default values from agno, not made-up values
+8. The test `verify_tool_configfields("[tool_name]", [ToolClass])` must pass
+9. For `docs_url`: Use the URL from `llms.txt` but **remove the .md extension**
+   - Example: `https://docs.agno.com/tools/toolkits/database/pandas` (not `.../pandas.md`)
 
 ## Verification
 
