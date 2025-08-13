@@ -408,6 +408,21 @@ wheels = [
 ]
 
 [[package]]
+name = "baidusearch"
+version = "1.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "beautifulsoup4" },
+    { name = "lxml" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e6/c7/5e111f7d6b87ab5169665e4cb80aff1bfcd94c07045b02d217711f1638bb/baidusearch-1.0.3.tar.gz", hash = "sha256:b34648dd3370a953cf0ee5f9a9164154d46c2490518e4440d349ff77ff87a07b", size = 22574, upload-time = "2024-11-14T03:11:26.299Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/f0/e5143bc695528069089260b2c3d19a9fe160bf9b55477eda7da1bd96e44f/baidusearch-1.0.3-py2.py3-none-any.whl", hash = "sha256:d915b06d0ff54c71572a82ee2850d9bd7f6451e67506279ef4e65fc40728367a", size = 14293, upload-time = "2024-11-14T03:11:22.002Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/f8/442c495790e1a1403005c68c9c05bae040cd2e21c973abb86b272b5fcfbc/baidusearch-1.0.3-py3-none-any.whl", hash = "sha256:179a0f11f52c72645d7b5c3e1e3c9cbdf2f086dba12bf274f7da48621d8f0e03", size = 14288, upload-time = "2024-11-14T03:11:23.531Z" },
+]
+
+[[package]]
 name = "bcrypt"
 version = "4.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1005,6 +1020,18 @@ wheels = [
 ]
 
 [[package]]
+name = "dataclass-wizard"
+version = "0.35.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f2/61/c432fc30841214df594c82e7c39dd8e46f6c60357b16d5e578e6258b178c/dataclass-wizard-0.35.1.tar.gz", hash = "sha256:18c780e3c574c3534cb2bbc447025cff140f0e640cd98e143a7d234c6445d09e", size = 295591, upload-time = "2025-07-27T21:54:05.351Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/34/a66cfdd36d9155800c00800211ecc75059db71ad3e79100b50929ed87af0/dataclass_wizard-0.35.1-py2.py3-none-any.whl", hash = "sha256:30858e14d780a40792fa190d55220a12cd0ef02a3d8fb8373b1eb4363d4b5549", size = 176536, upload-time = "2025-07-27T21:54:03.47Z" },
+]
+
+[[package]]
 name = "daytona"
 version = "0.25.5"
 source = { registry = "https://pypi.org/simple" }
@@ -1054,6 +1081,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e3/d3/1a337a966eaee7b6f09da09d396e84521ccab95bbd5537f5350dda8f420b/daytona_api_client_async-0.25.5.tar.gz", hash = "sha256:94cc1d9c2368da211d55c4b92347aad02f370548399f80f4071361b30f621d6b", size = 100636, upload-time = "2025-08-06T14:31:26.16Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e7/75/938470fbe3230258c075043ae9d17f1dfe6588d361931b95e1c18f5bfb04/daytona_api_client_async-0.25.5-py3-none-any.whl", hash = "sha256:f8aeca577bab7c07c4d112fc53d7cc84bdf3a9ccdae7f6ce43c424244c3313b2", size = 301098, upload-time = "2025-08-06T14:31:24.049Z" },
+]
+
+[[package]]
+name = "decorator"
+version = "5.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/fa/6d96a0978d19e17b68d634497769987b16c8f4cd0a7a05048bec693caa6b/decorator-5.2.1.tar.gz", hash = "sha256:65f266143752f734b0a7cc83c46f4618af75b8c5911b00ccb61d0ac9b6da0360", size = 56711, upload-time = "2025-02-24T04:41:34.073Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/8c/f3147f5c4b73e7550fe5f9352eaa956ae838d5c51eb58e7a25b9f3e2643b/decorator-5.2.1-py3-none-any.whl", hash = "sha256:d316bb415a2d9e2d2b3abcc4084c6502fc09240e292cd76a76afc106a1c8e04a", size = 9190, upload-time = "2025-02-24T04:41:32.565Z" },
 ]
 
 [[package]]
@@ -1173,6 +1209,55 @@ wheels = [
 ]
 
 [[package]]
+name = "e2b"
+version = "1.11.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "httpcore" },
+    { name = "httpx" },
+    { name = "packaging" },
+    { name = "protobuf" },
+    { name = "python-dateutil" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b4/49/2110d31074da3ba233984c6c02fa5def9ab043669cdb921f380b71457329/e2b-1.11.1.tar.gz", hash = "sha256:7f7b6f238208d0a23353bb0da01f91a924321b57c61b176506862cbc1493ce8c", size = 61926, upload-time = "2025-08-06T10:31:42.747Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/be/a4/be83c8b1cd923b558fb76a0fcbc4172b5348c956c706c70e19c038bc37f8/e2b-1.11.1-py3-none-any.whl", hash = "sha256:1ecb123873788472731c101939a494ab852cbcce0f913df6f7ecb194ae932130", size = 114762, upload-time = "2025-08-06T10:31:40.971Z" },
+]
+
+[[package]]
+name = "e2b-code-interpreter"
+version = "1.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "e2b" },
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ee/85/b4a1c9427b45818d4c3773ed967ec1fcc2d7b677e096d8051303889adc2d/e2b_code_interpreter-1.5.2.tar.gz", hash = "sha256:3bd6ea70596290e85aaf0a2f19f28bf37a5e73d13086f5e6a0080bb591c5a547", size = 10006, upload-time = "2025-07-07T14:58:28.676Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f5/4a/7dc5c673c47418e1b38594ab3b022ee20ea1bf3ff8f8aa8273d6ddc99532/e2b_code_interpreter-1.5.2-py3-none-any.whl", hash = "sha256:5c3188d8f25226b28fef4b255447cc6a4c36afb748bdd5180b45be486d5169f3", size = 12873, upload-time = "2025-07-07T14:58:27.622Z" },
+]
+
+[[package]]
+name = "elevenlabs"
+version = "2.9.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "requests" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/09/61/452764eb9684cd639d16f01772847df5cf79ac10b7ccdcc8bac54c835240/elevenlabs-2.9.2.tar.gz", hash = "sha256:f767e7e567450106fa3f4abe770c507b1ece0b13363110a18b9946315a0eab93", size = 277596, upload-time = "2025-08-09T20:24:45.903Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5d/11/66eefe3fcbe7ce2353d67223fb70885f1cf074dd69272315e016976a427a/elevenlabs-2.9.2-py3-none-any.whl", hash = "sha256:c7ca04a774bc3801b7d15027810181435f9fd6a93cc707ae0d32a7ce57ac8e59", size = 797980, upload-time = "2025-08-09T20:24:44.008Z" },
+]
+
+[[package]]
 name = "environs"
 version = "14.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1265,6 +1350,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/ff/aa/7af346ebeb42a76bf
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7c/d4/8c31aad9cc18f451c49f7f9cfb5799dadffc88177f7917bc90a66459b1d7/feedparser-6.0.11-py3-none-any.whl", hash = "sha256:0be7ee7b395572b19ebeb1d6aafb0028dee11169f1c934e0ed67d54992f4ad45", size = 81343, upload-time = "2023-12-10T16:03:19.484Z" },
 ]
+
+[[package]]
+name = "ffmpeg"
+version = "1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f0/cc/3b7408b8ecf7c1d20ad480c3eaed7619857bf1054b690226e906fdf14258/ffmpeg-1.4.tar.gz", hash = "sha256:6931692c890ff21d39938433c2189747815dca0c60ddc7f9bb97f199dba0b5b9", size = 5055, upload-time = "2018-10-08T07:50:05.748Z" }
 
 [[package]]
 name = "filelock"
@@ -1899,6 +1990,33 @@ wheels = [
 ]
 
 [[package]]
+name = "imageio"
+version = "2.37.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pillow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0c/47/57e897fb7094afb2d26e8b2e4af9a45c7cf1a405acdeeca001fdf2c98501/imageio-2.37.0.tar.gz", hash = "sha256:71b57b3669666272c818497aebba2b4c5f20d5b37c81720e5e1a56d59c492996", size = 389963, upload-time = "2025-01-20T02:42:37.089Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/bd/b394387b598ed84d8d0fa90611a90bee0adc2021820ad5729f7ced74a8e2/imageio-2.37.0-py3-none-any.whl", hash = "sha256:11efa15b87bc7871b61590326b2d635439acc321cf7f8ce996f812543ce10eed", size = 315796, upload-time = "2025-01-20T02:42:34.931Z" },
+]
+
+[[package]]
+name = "imageio-ffmpeg"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/44/bd/c3343c721f2a1b0c9fc71c1aebf1966a3b7f08c2eea8ed5437a2865611d6/imageio_ffmpeg-0.6.0.tar.gz", hash = "sha256:e2556bed8e005564a9f925bb7afa4002d82770d6b08825078b7697ab88ba1755", size = 25210, upload-time = "2025-01-16T21:34:32.747Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/58/87ef68ac83f4c7690961bce288fd8e382bc5f1513860fc7f90a9c1c1c6bf/imageio_ffmpeg-0.6.0-py3-none-macosx_10_9_intel.macosx_10_9_x86_64.whl", hash = "sha256:9d2baaf867088508d4a3458e61eeb30e945c4ad8016025545f66c4b5aaef0a61", size = 24932969, upload-time = "2025-01-16T21:34:20.464Z" },
+    { url = "https://files.pythonhosted.org/packages/40/5c/f3d8a657d362cc93b81aab8feda487317da5b5d31c0e1fdfd5e986e55d17/imageio_ffmpeg-0.6.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b1ae3173414b5fc5f538a726c4e48ea97edc0d2cdc11f103afee655c463fa742", size = 21113891, upload-time = "2025-01-16T21:34:00.277Z" },
+    { url = "https://files.pythonhosted.org/packages/33/e7/1925bfbc563c39c1d2e82501d8372734a5c725e53ac3b31b4c2d081e895b/imageio_ffmpeg-0.6.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:1d47bebd83d2c5fc770720d211855f208af8a596c82d17730aa51e815cdee6dc", size = 25632706, upload-time = "2025-01-16T21:33:53.475Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/2d/43c8522a2038e9d0e7dbdf3a61195ecc31ca576fb1527a528c877e87d973/imageio_ffmpeg-0.6.0-py3-none-manylinux2014_x86_64.whl", hash = "sha256:c7e46fcec401dd990405049d2e2f475e2b397779df2519b544b8aab515195282", size = 29498237, upload-time = "2025-01-16T21:34:13.726Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/13/59da54728351883c3c1d9fca1710ab8eee82c7beba585df8f25ca925f08f/imageio_ffmpeg-0.6.0-py3-none-win32.whl", hash = "sha256:196faa79366b4a82f95c0f4053191d2013f4714a715780f0ad2a68ff37483cc2", size = 19652251, upload-time = "2025-01-16T21:34:06.812Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/c6/fa760e12a2483469e2bf5058c5faff664acf66cadb4df2ad6205b016a73d/imageio_ffmpeg-0.6.0-py3-none-win_amd64.whl", hash = "sha256:02fa47c83703c37df6bfe4896aab339013f62bf02c5ebf2dce6da56af04ffc0a", size = 31246824, upload-time = "2025-01-16T21:34:28.6Z" },
+]
+
+[[package]]
 name = "importlib-metadata"
 version = "8.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2387,6 +2505,7 @@ dependencies = [
     { name = "apify-client" },
     { name = "arxiv" },
     { name = "atlassian-python-api" },
+    { name = "baidusearch" },
     { name = "boto3" },
     { name = "browserbase" },
     { name = "cartesia" },
@@ -2396,9 +2515,12 @@ dependencies = [
     { name = "croniter" },
     { name = "daytona" },
     { name = "diskcache" },
+    { name = "e2b-code-interpreter" },
+    { name = "elevenlabs" },
     { name = "exa-py" },
     { name = "fal-client" },
     { name = "fastapi" },
+    { name = "ffmpeg" },
     { name = "firecrawl-py" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
@@ -2419,6 +2541,7 @@ dependencies = [
     { name = "matrix-nio" },
     { name = "mcp", extra = ["cli"] },
     { name = "mem0ai" },
+    { name = "moviepy" },
     { name = "oxylabs" },
     { name = "pandas" },
     { name = "playwright" },
@@ -2441,6 +2564,7 @@ dependencies = [
     { name = "spotipy" },
     { name = "structlog" },
     { name = "tavily-python" },
+    { name = "todoist-api-python" },
     { name = "tweepy" },
     { name = "twilio" },
     { name = "typer" },
@@ -2477,6 +2601,7 @@ requires-dist = [
     { name = "apify-client", specifier = ">=1.12.2" },
     { name = "arxiv" },
     { name = "atlassian-python-api" },
+    { name = "baidusearch" },
     { name = "boto3", specifier = ">=1.40.8" },
     { name = "browserbase" },
     { name = "cartesia" },
@@ -2486,9 +2611,12 @@ requires-dist = [
     { name = "croniter", specifier = ">=6" },
     { name = "daytona" },
     { name = "diskcache", specifier = ">=5.6.3" },
+    { name = "e2b-code-interpreter" },
+    { name = "elevenlabs" },
     { name = "exa-py" },
     { name = "fal-client" },
     { name = "fastapi", specifier = ">=0.116.1" },
+    { name = "ffmpeg" },
     { name = "firecrawl-py" },
     { name = "google-api-python-client", specifier = ">=2.178" },
     { name = "google-auth", specifier = ">=2.40.3" },
@@ -2509,6 +2637,7 @@ requires-dist = [
     { name = "matrix-nio", specifier = ">=0.24" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.12.4" },
     { name = "mem0ai", specifier = ">=0.1.115" },
+    { name = "moviepy" },
     { name = "oxylabs" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "playwright" },
@@ -2531,6 +2660,7 @@ requires-dist = [
     { name = "spotipy", specifier = ">=2.25.1" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "tavily-python" },
+    { name = "todoist-api-python" },
     { name = "tweepy" },
     { name = "twilio" },
     { name = "typer", specifier = ">=0.16" },
@@ -2647,6 +2777,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ce/a0/834b0cebabbfc7e311f30b46c8188790a37f89fc8d756660346fe5abfd09/more_itertools-10.7.0.tar.gz", hash = "sha256:9fddd5403be01a94b204faadcff459ec3568cf110265d3c54323e1e866ad29d3", size = 127671, upload-time = "2025-04-22T14:17:41.838Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2b/9f/7ba6f94fc1e9ac3d2b853fdff3035fb2fa5afbed898c4a72b8a020610594/more_itertools-10.7.0-py3-none-any.whl", hash = "sha256:d43980384673cb07d2f7d2d918c616b30c659c089ee23953f601d6609c67510e", size = 65278, upload-time = "2025-04-22T14:17:40.49Z" },
+]
+
+[[package]]
+name = "moviepy"
+version = "2.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "decorator" },
+    { name = "imageio" },
+    { name = "imageio-ffmpeg" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "proglog" },
+    { name = "python-dotenv" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/de/61/15f9476e270f64c78a834e7459ca045d669f869cec24eed26807b8cd479d/moviepy-2.2.1.tar.gz", hash = "sha256:c80cb56815ece94e5e3e2d361aa40070eeb30a09d23a24c4e684d03e16deacb1", size = 58431438, upload-time = "2025-05-21T19:31:52.601Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9a/73/7d3b2010baa0b5eb1e4dfa9e4385e89b6716be76f2fa21a6c0fe34b68e5a/moviepy-2.2.1-py3-none-any.whl", hash = "sha256:6b56803fec2ac54b557404126ac1160e65448e03798fa282bd23e8fab3795060", size = 129871, upload-time = "2025-05-21T19:31:50.11Z" },
 ]
 
 [[package]]
@@ -3406,6 +3554,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ac/96/84078e09f16a1dad208f2fe0f8a81be2cf36e024675b0f9eec0c2f6e2182/primp-0.15.0-cp38-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:592f6079646bdf5abbbfc3b0a28dac8de943f8907a250ce09398cda5eaebd260", size = 3418567, upload-time = "2025-04-17T11:41:01.595Z" },
     { url = "https://files.pythonhosted.org/packages/6c/80/8a7a9587d3eb85be3d0b64319f2f690c90eb7953e3f73a9ddd9e46c8dc42/primp-0.15.0-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:5a728e5a05f37db6189eb413d22c78bd143fa59dd6a8a26dacd43332b3971fe8", size = 3606279, upload-time = "2025-04-17T11:41:03.61Z" },
     { url = "https://files.pythonhosted.org/packages/0c/dd/f0183ed0145e58cf9d286c1b2c14f63ccee987a4ff79ac85acc31b5d86bd/primp-0.15.0-cp38-abi3-win_amd64.whl", hash = "sha256:aeb6bd20b06dfc92cfe4436939c18de88a58c640752cf7f30d9e4ae893cdec32", size = 3149967, upload-time = "2025-04-17T11:41:07.067Z" },
+]
+
+[[package]]
+name = "proglog"
+version = "0.1.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c2/af/c108866c452eda1132f3d6b3cb6be2ae8430c97e9309f38ca9dbd430af37/proglog-0.1.12.tar.gz", hash = "sha256:361ee074721c277b89b75c061336cb8c5f287c92b043efa562ccf7866cda931c", size = 8794, upload-time = "2025-05-09T14:36:18.316Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c1/1b/f7ea6cde25621cd9236541c66ff018f4268012a534ec31032bcb187dc5e7/proglog-0.1.12-py3-none-any.whl", hash = "sha256:ccaafce51e80a81c65dc907a460c07ccb8ec1f78dc660cfd8f9ec3a22f01b84c", size = 6337, upload-time = "2025-05-09T14:36:16.798Z" },
 ]
 
 [[package]]
@@ -4833,6 +4993,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/97/78/182641ea38e3cfd56e9c7b3c0d48a53d432eea755003aa544af96403d4ac/tldextract-5.3.0.tar.gz", hash = "sha256:b3d2b70a1594a0ecfa6967d57251527d58e00bb5a91a74387baa0d87a0678609", size = 128502, upload-time = "2025-04-22T06:19:37.491Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/67/7c/ea488ef48f2f544566947ced88541bc45fae9e0e422b2edbf165ee07da99/tldextract-5.3.0-py3-none-any.whl", hash = "sha256:f70f31d10b55c83993f55e91ecb7c5d84532a8972f22ec578ecfbe5ea2292db2", size = 107384, upload-time = "2025-04-22T06:19:36.304Z" },
+]
+
+[[package]]
+name = "todoist-api-python"
+version = "3.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "annotated-types" },
+    { name = "dataclass-wizard" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c6/db/7e31fa6e683cbdc5c823edaddfdb9437b0d37e817c919d0a54ef2a52b1a3/todoist_api_python-3.1.0.tar.gz", hash = "sha256:7cad732f58a4bdfbd1c073a1a8be1c1b4e13ae0c8be210bb7840fbba06eb987c", size = 20212, upload-time = "2025-05-07T17:50:47.345Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/99/19c8fcaa0f691d41dc5687cb21432b7ea01175b9e4b4097a6caffedbe6b7/todoist_api_python-3.1.0-py3-none-any.whl", hash = "sha256:20ee2445983235566e7f2b2c82f769b9a265bb3fa6d7aad3fa73cf9e2d4cd787", size = 23102, upload-time = "2025-05-07T17:50:46.43Z" },
 ]
 
 [[package]]

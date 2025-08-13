@@ -16,11 +16,15 @@ from .agentql import agentql_tools
 from .airflow import airflow_tools
 from .apify import apify_tools
 from .arxiv import arxiv_tools
+from .aws_lambda import aws_lambda_tools
 from .aws_ses import aws_ses_tools
+from .baidusearch import baidusearch_tools
 from .brightdata import brightdata_tools
+from .browserbase import browserbase_tools
 from .cal_com import cal_com_tools
 from .calculator import calculator_tools
 from .cartesia import cartesia_tools
+from .composio import composio_tools
 from .confluence import confluence_tools
 from .crawl4ai import crawl4ai_tools
 from .csv import csv_tools
@@ -31,6 +35,8 @@ from .discord import discord_tools
 from .docker import docker_tools
 from .duckdb import duckdb_tools
 from .duckduckgo import duckduckgo_tools
+from .e2b import e2b_tools
+from .eleven_labs import eleven_labs_tools
 from .email import email_tools
 from .exa import exa_tools
 from .fal import fal_tools
@@ -47,10 +53,13 @@ from .googlesearch import googlesearch_tools
 from .groq import groq_tools
 from .hackernews import hackernews_tools
 from .jina import jina_tools
+from .jira import jira_tools
 from .linear import linear_tools
 from .linkup import linkup_tools
+from .lumalabs import lumalabs_tools
 from .mem0 import mem0_tools
 from .modelslabs import modelslabs_tools
+from .moviepy_video_tools import moviepy_video_tools
 from .newspaper import newspaper_tools
 from .newspaper4k import newspaper4k_tools
 from .openai import openai_tools
@@ -65,6 +74,7 @@ from .resend import resend_tools
 from .scrapegraph import scrapegraph_tools
 from .searxng import searxng_tools
 from .serpapi import serpapi_tools
+from .serper import serper_tools
 from .shell import shell_tools
 from .slack import slack_tools
 from .sleep import sleep_tools
@@ -72,6 +82,7 @@ from .spider import spider_tools
 from .sql import sql_tools
 from .tavily import tavily_tools
 from .telegram import telegram_tools
+from .todoist import todoist_tools
 from .trello import trello_tools
 from .twilio import twilio_tools
 from .web_browser_tools import web_browser_tools
@@ -81,12 +92,13 @@ from .whatsapp import whatsapp_tools
 from .wikipedia import wikipedia_tools
 from .x import x_tools
 from .yfinance import yfinance_tools
+from .youtube import youtube_tools
 from .zendesk import zendesk_tools
 from .zep import zep_tools
+from .zoom import zoom_tools
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
-    from agno.tools.youtube import YouTubeTools
 
     from mindroom.custom_tools.gmail import GmailTools
 
@@ -96,11 +108,15 @@ __all__ = [
     "airflow_tools",
     "apify_tools",
     "arxiv_tools",
+    "aws_lambda_tools",
     "aws_ses_tools",
+    "baidusearch_tools",
     "brightdata_tools",
+    "browserbase_tools",
     "cal_com_tools",
     "calculator_tools",
     "cartesia_tools",
+    "composio_tools",
     "confluence_tools",
     "crawl4ai_tools",
     "csv_tools",
@@ -111,6 +127,8 @@ __all__ = [
     "docker_tools",
     "duckdb_tools",
     "duckduckgo_tools",
+    "e2b_tools",
+    "eleven_labs_tools",
     "email_tools",
     "exa_tools",
     "fal_tools",
@@ -127,10 +145,13 @@ __all__ = [
     "groq_tools",
     "hackernews_tools",
     "jina_tools",
+    "jira_tools",
     "linear_tools",
     "linkup_tools",
+    "lumalabs_tools",
     "mem0_tools",
     "modelslabs_tools",
+    "moviepy_video_tools",
     "newspaper4k_tools",
     "newspaper_tools",
     "openai_tools",
@@ -145,6 +166,7 @@ __all__ = [
     "scrapegraph_tools",
     "searxng_tools",
     "serpapi_tools",
+    "serper_tools",
     "shell_tools",
     "slack_tools",
     "sleep_tools",
@@ -152,6 +174,7 @@ __all__ = [
     "sql_tools",
     "tavily_tools",
     "telegram_tools",
+    "todoist_tools",
     "trello_tools",
     "twilio_tools",
     "web_browser_tools",
@@ -161,8 +184,10 @@ __all__ = [
     "wikipedia_tools",
     "x_tools",
     "yfinance_tools",
+    "youtube_tools",
     "zendesk_tools",
     "zep_tools",
+    "zoom_tools",
 ]
 
 
@@ -256,26 +281,6 @@ def gmail_tools() -> type[GmailTools]:
 
     logger.info("Using MindRoom's Gmail wrapper with unified credentials")
     return GmailTools
-
-
-# Entertainment Tools
-@register_tool_with_metadata(
-    name="youtube",
-    display_name="YouTube",
-    description="Search videos and get transcripts",
-    category=ToolCategory.ENTERTAINMENT,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-    icon="FaYoutube",
-    icon_color="text-red-600",
-    dependencies=["youtube-transcript-api"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/youtube",
-)
-def youtube_tools() -> type[YouTubeTools]:
-    """YouTube tools for searching and getting video information."""
-    from agno.tools.youtube import YouTubeTools
-
-    return YouTubeTools
 
 
 # Coming Soon Tools - These are planned integrations that are not yet implemented

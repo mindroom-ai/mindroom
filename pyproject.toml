@@ -21,8 +21,9 @@ dependencies = [
   "agno[anthropic,google,ollama,openai,sql,ddg,arxiv,yfinance,newspaper,github,docker,duckdb]>=1.7.6",
   "apify-client>=1.12.2",
   "arxiv",                                                                                             # for Arxiv tool
-  "atlassian-python-api",
-  "boto3>=1.40.8",
+  "atlassian-python-api",                                                                              # for ConfluenceTools
+  "baidusearch",                                                                                       # for BaiduSearchTools
+  "boto3>=1.40.8",                                                                                     # for AWSLambdaTools and AWSSESTool
   "browserbase",                                                                                       # for Browserbase tool
   "cartesia",                                                                                          # for Cartesia voice AI tool
   "chromadb>=1.0.15",
@@ -31,9 +32,12 @@ dependencies = [
   "croniter>=6",
   "daytona",                                                                                           # for Daytona tool
   "diskcache>=5.6.3",
+  "e2b-code-interpreter",
+  "elevenlabs",
   "exa-py",                                                                                            # for Exa tool
   "fal-client",                                                                                        # for Fal tool
   "fastapi>=0.116.1",
+  "ffmpeg",
   "firecrawl-py",
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
@@ -54,6 +58,7 @@ dependencies = [
   "matrix-nio>=0.24",
   "mcp[cli]>=1.12.4",
   "mem0ai>=0.1.115",
+  "moviepy",
   "oxylabs",                                                                                           # for Oxylabs tool
   "pandas>=2.2",                                                                                       # for Pandas data analysis tool
   "playwright",                                                                                        # for AgentQL tool
@@ -76,6 +81,7 @@ dependencies = [
   "spotipy>=2.25.1",
   "structlog>=24.1",                                                                                   # for structured logging
   "tavily-python",                                                                                     # for Tavily tool
+  "todoist-api-python",
   "tweepy",                                                                                            # for Twitter/X tool
   "twilio",
   "typer>=0.16",

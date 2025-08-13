@@ -490,6 +490,34 @@
       "category": "development",
       "config_fields": [
         {
+          "default": "us-east-1",
+          "description": "AWS region name where Lambda functions are located",
+          "label": "Region Name",
+          "name": "region_name",
+          "options": null,
+          "placeholder": "us-east-1",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "boto3"
+      ],
+      "description": "Serverless function management and execution",
+      "display_name": "AWS Lambda",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/aws_lambda",
+      "helper_text": null,
+      "icon": "FaAws",
+      "icon_color": "text-orange-500",
+      "name": "aws_lambda",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
           "default": null,
           "description": "Cal.com API key (can also be set via CALCOM_API_KEY env var)",
           "label": "API Key",
@@ -1340,6 +1368,205 @@
       "name": "dropbox",
       "setup_type": "coming_soon",
       "status": "coming_soon"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "E2B API key for authentication (can also be set via E2B_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "e2b_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": 300,
+          "description": "Timeout in seconds for the sandbox (default: 5 minutes)",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": "300",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable running Python code in the sandbox",
+          "label": "Run Code",
+          "name": "run_code",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable uploading files to the sandbox",
+          "label": "Upload File",
+          "name": "upload_file",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable downloading execution results (PNG images, charts, files)",
+          "label": "Download Result",
+          "name": "download_result",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable filesystem operations (list, read, write files and directories)",
+          "label": "Filesystem Operations",
+          "name": "filesystem",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable internet access functions (public URLs, web servers)",
+          "label": "Internet Access",
+          "name": "internet_access",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable sandbox management functions (timeout, status, shutdown)",
+          "label": "Sandbox Management",
+          "name": "sandbox_management",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Additional options to pass to the Sandbox constructor (JSON format)",
+          "label": "Sandbox Options",
+          "name": "sandbox_options",
+          "options": null,
+          "placeholder": "{\"template\": \"python\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable shell command execution in the sandbox",
+          "label": "Command Execution",
+          "name": "command_execution",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "e2b_code_interpreter"
+      ],
+      "description": "Code execution sandbox environment with Python, file operations, and web server capabilities",
+      "display_name": "E2B Code Execution",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/e2b",
+      "helper_text": null,
+      "icon": "Terminal",
+      "icon_color": "text-blue-600",
+      "name": "e2b",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Eleven Labs API key for authentication (can also be set via ELEVEN_LABS_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "sk-...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "JBFqnCBsd6RMkjVDRZzb",
+          "description": "The voice ID to use for audio generation",
+          "label": "Voice ID",
+          "name": "voice_id",
+          "options": null,
+          "placeholder": "JBFqnCBsd6RMkjVDRZzb",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "eleven_multilingual_v2",
+          "description": "The model's ID to use for audio generation",
+          "label": "Model ID",
+          "name": "model_id",
+          "options": null,
+          "placeholder": "eleven_multilingual_v2",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "mp3_44100_64",
+          "description": "The output format for audio generation (e.g., mp3_44100_64, pcm_44100)",
+          "label": "Output Format",
+          "name": "output_format",
+          "options": null,
+          "placeholder": "mp3_44100_64",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Directory to save generated audio files (optional)",
+          "label": "Target Directory",
+          "name": "target_directory",
+          "options": null,
+          "placeholder": "audio_generations",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "elevenlabs"
+      ],
+      "description": "Text-to-speech and sound effect generation using AI voices",
+      "display_name": "Eleven Labs",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/eleven_labs",
+      "helper_text": null,
+      "icon": "FaVolumeUp",
+      "icon_color": "text-orange-500",
+      "name": "eleven_labs",
+      "setup_type": "api_key",
+      "status": "requires_config"
     },
     {
       "category": "development",
@@ -2505,6 +2732,67 @@
       "category": "development",
       "config_fields": [
         {
+          "default": null,
+          "description": "The URL of the JIRA server (can also be set via JIRA_SERVER_URL env var)",
+          "label": "Server URL",
+          "name": "server_url",
+          "options": null,
+          "placeholder": "https://your-domain.atlassian.net",
+          "required": true,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "The JIRA username for authentication (can also be set via JIRA_USERNAME env var)",
+          "label": "Username",
+          "name": "username",
+          "options": null,
+          "placeholder": "your.email@company.com",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "The JIRA password for authentication (can also be set via JIRA_PASSWORD env var)",
+          "label": "Password",
+          "name": "password",
+          "options": null,
+          "placeholder": "your-password",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "The JIRA API token for authentication (can also be set via JIRA_TOKEN env var)",
+          "label": "API Token",
+          "name": "token",
+          "options": null,
+          "placeholder": "your-api-token",
+          "required": false,
+          "type": "password",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "jira"
+      ],
+      "description": "Issue tracking and project management",
+      "display_name": "Jira",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/jira",
+      "helper_text": null,
+      "icon": "FaTicketAlt",
+      "icon_color": "text-blue-600",
+      "name": "jira",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
           "default": true,
           "description": "Enable fetching authenticated user details",
           "label": "Get User Details",
@@ -2611,6 +2899,67 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Luma AI API key for authentication (can also be set via LUMAAI_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "luma_api_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Wait for video generation to complete before returning results",
+          "label": "Wait for Completion",
+          "name": "wait_for_completion",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": 3,
+          "description": "Interval in seconds between status checks during video generation",
+          "label": "Poll Interval",
+          "name": "poll_interval",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": 300,
+          "description": "Maximum time in seconds to wait for video generation completion",
+          "label": "Max Wait Time",
+          "name": "max_wait_time",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "lumaai"
+      ],
+      "description": "3D content creation and video generation using Luma AI Dream Machine",
+      "display_name": "Luma Labs",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/lumalabs",
+      "helper_text": null,
+      "icon": "FaVideo",
+      "icon_color": "text-purple-600",
+      "name": "lumalabs",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": "The ModelsLab API key for authentication (can also be set via MODELS_LAB_API_KEY env var)",
           "label": "API Key",
           "name": "api_key",
@@ -2677,6 +3026,56 @@
       "name": "modelslabs",
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "category": "development",
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable the extract_audio tool for extracting audio tracks from video files",
+          "label": "Process Video",
+          "name": "process_video",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable the create_srt tool for saving transcriptions to SRT formatted files",
+          "label": "Generate Captions",
+          "name": "generate_captions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable the embed_captions tool for creating videos with word-level highlighted captions",
+          "label": "Embed Captions",
+          "name": "embed_captions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "moviepy"
+      ],
+      "description": "Process videos, extract audio, generate SRT caption files, and embed rich word-highlighted captions",
+      "display_name": "MoviePy Video Tools",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/moviepy",
+      "helper_text": null,
+      "icon": "FaVideo",
+      "icon_color": "text-purple-600",
+      "name": "moviepy_video_tools",
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "category": "development",
@@ -3662,6 +4061,89 @@
       "status": "coming_soon"
     },
     {
+      "category": "integrations",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Composio API key (can also be set via COMPOSIO_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "comp_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Entity identifier for Composio workspace",
+          "label": "Entity ID",
+          "name": "entity_id",
+          "options": null,
+          "placeholder": "default",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma-separated list of specific Composio actions to enable",
+          "label": "Enabled Actions",
+          "name": "actions",
+          "options": null,
+          "placeholder": "GITHUB_STAR_A_REPOSITORY_FOR_THE_AUTHENTICATED_USER",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma-separated list of apps to enable (e.g., github, gmail, slack)",
+          "label": "Enabled Apps",
+          "name": "apps",
+          "options": null,
+          "placeholder": "github,gmail,slack",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable local tool execution when available",
+          "label": "Use Local Tools",
+          "name": "use_local",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable detailed logging for Composio operations",
+          "label": "Enable Logging",
+          "name": "enable_logging",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "composio-agno"
+      ],
+      "description": "Access 1000+ integrations including Gmail, Salesforce, GitHub, and more",
+      "display_name": "Composio",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/composio",
+      "helper_text": null,
+      "icon": "FaConnectdevelop",
+      "icon_color": "text-blue-600",
+      "name": "composio",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
       "category": "productivity",
       "config_fields": [
         {
@@ -4242,6 +4724,111 @@
       "category": "productivity",
       "config_fields": [
         {
+          "default": null,
+          "description": "Todoist API token (can also be set via TODOIST_API_TOKEN env var). Get from https://app.todoist.com/app/settings/integrations/developer",
+          "label": "API Token",
+          "name": "api_token",
+          "options": null,
+          "placeholder": "your_api_token",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable creating new tasks in Todoist",
+          "label": "Create Task",
+          "name": "create_task",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable fetching specific tasks by ID",
+          "label": "Get Task",
+          "name": "get_task",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable updating existing tasks with new properties",
+          "label": "Update Task",
+          "name": "update_task",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable marking tasks as completed",
+          "label": "Close Task",
+          "name": "close_task",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable deleting tasks from Todoist",
+          "label": "Delete Task",
+          "name": "delete_task",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving all active (non-completed) tasks",
+          "label": "Get Active Tasks",
+          "name": "get_active_tasks",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable retrieving all projects in Todoist",
+          "label": "Get Projects",
+          "name": "get_projects",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "todoist-api-python"
+      ],
+      "description": "Task management with Todoist - create, update, delete, and organize tasks and projects",
+      "display_name": "Todoist",
+      "docs_url": "https://docs.agno.com/tools/toolkits/others/todoist",
+      "helper_text": null,
+      "icon": "FaTasks",
+      "icon_color": "text-red-500",
+      "name": "todoist",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "productivity",
+      "config_fields": [
+        {
           "default": true,
           "description": "Enable getting current stock prices",
           "label": "Stock Price",
@@ -4588,6 +5175,129 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Sets a fixed number of maximum results to return. If not set, can be specified per search",
+          "label": "Fixed Max Results",
+          "name": "fixed_max_results",
+          "options": null,
+          "placeholder": "5",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Set the fixed language for search results (e.g., 'zh' for Chinese, 'en' for English)",
+          "label": "Fixed Language",
+          "name": "fixed_language",
+          "options": null,
+          "placeholder": "zh",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Proxy server address to use for HTTP requests",
+          "label": "Proxy",
+          "name": "proxy",
+          "options": null,
+          "placeholder": "http://proxy.example.com:8080",
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": 10,
+          "description": "Timeout for HTTP requests in seconds",
+          "label": "Timeout",
+          "name": "timeout",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable debug output for search requests",
+          "label": "Debug Mode",
+          "name": "debug",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "baidusearch",
+        "pycountry"
+      ],
+      "description": "Search the web using Baidu search engine with Chinese language support",
+      "display_name": "Baidu Search",
+      "docs_url": "https://docs.agno.com/tools/toolkits/search/baidusearch",
+      "helper_text": null,
+      "icon": "Search",
+      "icon_color": "text-blue-600",
+      "name": "baidusearch",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Brave Search API key (can also be set via BRAVE_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "BSA...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Optional fixed maximum number of results to return for all searches",
+          "label": "Fixed Max Results",
+          "name": "fixed_max_results",
+          "options": null,
+          "placeholder": "10",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Optional fixed language for all search results (e.g., 'en', 'es', 'fr')",
+          "label": "Fixed Language",
+          "name": "fixed_language",
+          "options": null,
+          "placeholder": "en",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "brave-search"
+      ],
+      "description": "Privacy-focused web search using the Brave search engine",
+      "display_name": "Brave Search",
+      "docs_url": "https://docs.agno.com/tools/toolkits/search/bravesearch",
+      "helper_text": null,
+      "icon": "FaSearch",
+      "icon_color": "text-orange-500",
+      "name": "brave_search",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
           "description": "BrightData API key (can also be set via BRIGHT_DATA_API_KEY env var)",
           "label": "API Key",
           "name": "api_key",
@@ -4696,6 +5406,57 @@
       "icon": "FaSpider",
       "icon_color": "text-blue-600",
       "name": "brightdata",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Browserbase API key (can also be set via BROWSERBASE_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "bb_...",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Browserbase project ID (can also be set via BROWSERBASE_PROJECT_ID env var)",
+          "label": "Project ID",
+          "name": "project_id",
+          "options": null,
+          "placeholder": "project-12345",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Custom Browserbase API endpoint URL. Only use this if you're using a self-hosted Browserbase instance or need to connect to a different region (can also be set via BROWSERBASE_BASE_URL env var)",
+          "label": "Base URL",
+          "name": "base_url",
+          "options": null,
+          "placeholder": "https://api.browserbase.com",
+          "required": false,
+          "type": "url",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "browserbase",
+        "playwright"
+      ],
+      "description": "Browser automation and web scraping using headless browsers",
+      "display_name": "Browserbase",
+      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/browserbase",
+      "helper_text": null,
+      "icon": "FaChrome",
+      "icon_color": "text-blue-600",
+      "name": "browserbase",
       "setup_type": "api_key",
       "status": "requires_config"
     },
@@ -6692,6 +7453,56 @@
       "icon_color": "text-blue-400",
       "name": "x",
       "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "social",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Zoom account ID from Server-to-Server OAuth app (can also be set via ZOOM_ACCOUNT_ID env var)",
+          "label": "Account ID",
+          "name": "account_id",
+          "options": null,
+          "placeholder": "your_account_id",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Client ID from Server-to-Server OAuth app (can also be set via ZOOM_CLIENT_ID env var)",
+          "label": "Client ID",
+          "name": "client_id",
+          "options": null,
+          "placeholder": "your_client_id",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Client secret from Server-to-Server OAuth app (can also be set via ZOOM_CLIENT_SECRET env var)",
+          "label": "Client Secret",
+          "name": "client_secret",
+          "options": null,
+          "placeholder": "your_client_secret",
+          "required": false,
+          "type": "password",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Video conferencing platform for scheduling and managing meetings",
+      "display_name": "Zoom",
+      "docs_url": "https://docs.agno.com/tools/toolkits/social/zoom",
+      "helper_text": null,
+      "icon": "FaVideo",
+      "icon_color": "text-blue-500",
+      "name": "zoom",
+      "setup_type": "oauth",
       "status": "requires_config"
     }
   ]
