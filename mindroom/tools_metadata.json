@@ -4071,7 +4071,7 @@
       "icon_color": "text-purple-600",
       "name": "mem0",
       "setup_type": "api_key",
-      "status": "available"
+      "status": "requires_config"
     },
     {
       "category": "productivity",
@@ -5544,7 +5544,7 @@
       "icon_color": "text-blue-600",
       "name": "jina",
       "setup_type": "api_key",
-      "status": "available"
+      "status": "requires_config"
     },
     {
       "category": "research",
@@ -5998,6 +5998,78 @@
       "icon": "FaGoogle",
       "icon_color": "text-blue-500",
       "name": "serpapi",
+      "setup_type": "api_key",
+      "status": "requires_config"
+    },
+    {
+      "category": "research",
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Serper API key for authentication (can also be set via SERPER_API_KEY env var)",
+          "label": "API Key",
+          "name": "api_key",
+          "options": null,
+          "placeholder": "your-serper-api-key",
+          "required": false,
+          "type": "password",
+          "validation": null
+        },
+        {
+          "default": "us",
+          "description": "Google location code for search results (e.g., 'us', 'uk', 'ca')",
+          "label": "Location",
+          "name": "location",
+          "options": null,
+          "placeholder": "us",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": "en",
+          "description": "Language code for search results (e.g., 'en', 'es', 'fr')",
+          "label": "Language",
+          "name": "language",
+          "options": null,
+          "placeholder": "en",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 10,
+          "description": "Default number of search results to retrieve",
+          "label": "Number of Results",
+          "name": "num_results",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Default date range filter for searches (e.g., 'd' for day, 'w' for week, 'm' for month)",
+          "label": "Date Range",
+          "name": "date_range",
+          "options": null,
+          "placeholder": "d",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "requests"
+      ],
+      "description": "Search Google, news, academic papers, and scrape webpages using Serper API",
+      "display_name": "Serper",
+      "docs_url": "https://docs.agno.com/tools/toolkits/search/serper",
+      "helper_text": null,
+      "icon": "FaSearch",
+      "icon_color": "text-blue-600",
+      "name": "serper",
       "setup_type": "api_key",
       "status": "requires_config"
     },

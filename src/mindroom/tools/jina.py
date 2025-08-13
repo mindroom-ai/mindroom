@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     display_name="Jina Reader",
     description="Web content reading and search using Jina AI Reader API",
     category=ToolCategory.RESEARCH,
-    status=ToolStatus.AVAILABLE,
+    status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
     icon="FaGlobe",
     icon_color="text-blue-600",

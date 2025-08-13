@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     display_name="Mem0 Memory",
     description="Persistent memory system that stores, retrieves, searches, and manages user memories and context",
     category=ToolCategory.PRODUCTIVITY,  # Database tools → Productivity
-    status=ToolStatus.AVAILABLE,  # Works with default config or API key
+    status=ToolStatus.REQUIRES_CONFIG,  # Requires API key for cloud usage
     setup_type=SetupType.API_KEY,  # Optional API key for cloud usage
     icon="Brain",
     icon_color="text-purple-600",  # Memory/brain theme
