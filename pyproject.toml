@@ -50,7 +50,7 @@ dependencies = [
   "google-cloud-bigquery",                                                                             # for Google BigQuery tool
   "google-genai",                                                                                      # for Gemini model
   "google-maps-places",                                                                                # for Google Maps tool
-  "google-search-results>=2.4.2",
+  "google-search-results>=2.4.2",                                                                      # for SerpApi tool
   "googlemaps",                                                                                        # for Google Maps tool
   "googlesearch-python",                                                                               # for GoogleSearch tool
   "groq>=0.31",                                                                                        # for Groq model
@@ -91,7 +91,7 @@ dependencies = [
   "scrapegraph-py",                                                                                    # for ScrapeGraph tool
   "slack-sdk",                                                                                         # for Slack tool
   "spider-client",                                                                                     # for Spider tool
-  "spotipy>=2.25.1",
+  "spotipy>=2.25.1",                                                                                   # for Spotify tool
   "streamlit",                                                                                         # for Streamlit components
   "structlog>=24.1",                                                                                   # for structured logging
   "tavily-python",                                                                                     # for Tavily tool
