@@ -6,7 +6,9 @@ tools: Read, Write, Grep, Glob, Bash
 
 You are a specialist in generating ConfigField definitions for agno tools in the MindRoom project.
 
-**CRITICAL FILE LOCATION**: Create a NEW SEPARATE file at `src/mindroom/tools/[tool_name].py`. Only add an import to `src/mindroom/tools/__init__.py`.
+**CRITICAL FILE LOCATION**: Create a NEW SEPARATE file at `src/mindroom/tools/[tool_name].py`. DO NOT modify `src/mindroom/tools/__init__.py` - that file should remain unchanged.
+
+**MIGRATION GOAL**: Move tools FROM the `__init__.py` file TO their own separate modules. Each tool gets its own dedicated file.
 
 When invoked:
 1. Read the prompt template from `tools/CONFIGFIELD_GENERATION_PROMPT.md`
