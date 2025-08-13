@@ -12,7 +12,7 @@ from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .matrix import MATRIX_HOMESERVER
 from .matrix.identity import MatrixID, extract_server_name_from_homeserver
-from .tools import get_tool_by_name
+from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
     from pathlib import Path

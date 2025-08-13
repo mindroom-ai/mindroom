@@ -18,217 +18,59 @@ from mindroom.tools_metadata import (
     register_tool_with_metadata,
 )
 
+from .arxiv import arxiv_tools
 from .calculator import calculator_tools
+from .csv import csv_tools
+from .docker import docker_tools
+from .duckduckgo import duckduckgo_tools
+from .email import email_tools
+from .file import file_tools
 from .github import github_tools
+from .googlesearch import googlesearch_tools
+from .jina import jina_tools
+from .newspaper import newspaper_tools
+from .pandas import pandas_tools
+from .python import python_tools
+from .reddit import reddit_tools
+from .shell import shell_tools
+from .slack import slack_tools
+from .tavily import tavily_tools
+from .telegram import telegram_tools
+from .website import website_tools
+from .wikipedia import wikipedia_tools
+from .x import x_tools
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from agno.tools import Toolkit
-    from agno.tools.arxiv import ArxivTools
-    from agno.tools.csv_toolkit import CsvTools
-    from agno.tools.docker import DockerTools
-    from agno.tools.duckduckgo import DuckDuckGoTools
-    from agno.tools.email import EmailTools
-    from agno.tools.file import FileTools
-    from agno.tools.googlesearch import GoogleSearchTools
-    from agno.tools.jina import JinaReaderTools
-    from agno.tools.newspaper import NewspaperTools
-    from agno.tools.pandas import PandasTools
-    from agno.tools.python import PythonTools
-    from agno.tools.reddit import RedditTools
-    from agno.tools.shell import ShellTools
-    from agno.tools.slack import SlackTools
-    from agno.tools.tavily import TavilyTools
-    from agno.tools.telegram import TelegramTools
-    from agno.tools.website import WebsiteTools
-    from agno.tools.wikipedia import WikipediaTools
-    from agno.tools.x import XTools
     from agno.tools.yfinance import YFinanceTools
     from agno.tools.youtube import YouTubeTools
 
     from mindroom.custom_tools.gmail import GmailTools
 
+
 __all__ = [
+    "arxiv_tools",
     "calculator_tools",
+    "csv_tools",
+    "docker_tools",
+    "duckduckgo_tools",
+    "email_tools",
+    "file_tools",
     "github_tools",
+    "googlesearch_tools",
+    "jina_tools",
+    "newspaper_tools",
+    "pandas_tools",
+    "python_tools",
+    "reddit_tools",
+    "shell_tools",
+    "slack_tools",
+    "tavily_tools",
+    "telegram_tools",
+    "website_tools",
+    "wikipedia_tools",
+    "x_tools",
 ]
-
-
-# Registry mapping tool names to their factory functions
-TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
-
-
-def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
-    """Decorator to register a tool factory function.
-
-    Args:
-        name: The name to register the tool under
-
-    Returns:
-        Decorator function
-
-    """
-
-    def decorator(func: Callable[[], type[Toolkit]]) -> Callable[[], type[Toolkit]]:
-        TOOL_REGISTRY[name] = func
-        return func
-
-    return decorator
-
-
-# Development Tools
-
-
-@register_tool_with_metadata(
-    name="file",
-    display_name="File Operations",
-    description="Read, write, and manage files",
-    category=ToolCategory.DEVELOPMENT,
-    icon="Folder",
-    icon_color="text-yellow-600",
-    docs_url="https://docs.agno.com/tools/toolkits/local/file",
-)
-def file_tools() -> type[FileTools]:
-    """Return file tools for file system operations."""
-    from agno.tools.file import FileTools  # noqa: PLC0415
-
-    return FileTools
-
-
-@register_tool_with_metadata(
-    name="shell",
-    display_name="Shell Commands",
-    description="Execute shell commands and scripts",
-    category=ToolCategory.DEVELOPMENT,
-    icon="Terminal",
-    icon_color="text-green-500",
-    docs_url="https://docs.agno.com/tools/toolkits/local/shell",
-)
-def shell_tools() -> type[ShellTools]:
-    """Return shell tools for command execution."""
-    from agno.tools.shell import ShellTools  # noqa: PLC0415
-
-    return ShellTools
-
-
-@register_tool_with_metadata(
-    name="python",
-    display_name="Python Execution",
-    description="Execute Python code in a sandboxed environment",
-    category=ToolCategory.DEVELOPMENT,
-    icon="Code",
-    icon_color="text-blue-500",
-    docs_url="https://docs.agno.com/tools/toolkits/local/python",
-)
-def python_tools() -> type[PythonTools]:
-    """Return Python tools for code execution."""
-    from agno.tools.python import PythonTools  # noqa: PLC0415
-
-    return PythonTools
-
-
-@register_tool_with_metadata(
-    name="docker",
-    display_name="Docker",
-    description="Manage Docker containers and images",
-    category=ToolCategory.DEVELOPMENT,
-    icon="FaDocker",
-    icon_color="text-blue-400",
-    dependencies=["docker"],
-    docs_url="https://docs.agno.com/tools/toolkits/local/docker",
-)
-def docker_tools() -> type[DockerTools]:
-    """Return Docker tools for container management."""
-    from agno.tools.docker import DockerTools  # noqa: PLC0415
-
-    return DockerTools
-
-
-# Research & Data Tools
-@register_tool_with_metadata(
-    name="csv",
-    display_name="CSV Files",
-    description="Read and analyze CSV data with DuckDB",
-    category=ToolCategory.RESEARCH,
-    icon="FileText",
-    icon_color="text-blue-600",
-    dependencies=["duckdb"],
-    docs_url="https://docs.agno.com/tools/toolkits/database/csv",
-)
-def csv_tools() -> type[CsvTools]:
-    """Return CSV tools for data processing."""
-    from agno.tools.csv_toolkit import CsvTools  # noqa: PLC0415
-
-    return CsvTools
-
-
-@register_tool_with_metadata(
-    name="arxiv",
-    display_name="arXiv",
-    description="Search and retrieve academic papers",
-    category=ToolCategory.RESEARCH,
-    icon="Book",
-    icon_color="text-red-600",
-    dependencies=["arxiv", "pypdf"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/arxiv",
-)
-def arxiv_tools() -> type[ArxivTools]:
-    """Return ArXiv tools for academic paper research."""
-    from agno.tools.arxiv import ArxivTools  # noqa: PLC0415
-
-    return ArxivTools
-
-
-@register_tool_with_metadata(
-    name="duckduckgo",
-    display_name="DuckDuckGo",
-    description="Web search without tracking",
-    category=ToolCategory.RESEARCH,
-    icon="Search",
-    icon_color="text-orange-500",
-    dependencies=["duckduckgo-search"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/duckduckgo",
-)
-def duckduckgo_tools() -> type[DuckDuckGoTools]:
-    """Return DuckDuckGo tools for web search."""
-    from agno.tools.duckduckgo import DuckDuckGoTools  # noqa: PLC0415
-
-    return DuckDuckGoTools
-
-
-@register_tool_with_metadata(
-    name="wikipedia",
-    display_name="Wikipedia",
-    description="Search encyclopedia articles",
-    category=ToolCategory.RESEARCH,
-    icon="Globe",
-    icon_color="text-gray-700",
-    dependencies=["wikipedia"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/wikipedia",
-)
-def wikipedia_tools() -> type[WikipediaTools]:
-    """Return Wikipedia tools for encyclopedia research."""
-    from agno.tools.wikipedia import WikipediaTools  # noqa: PLC0415
-
-    return WikipediaTools
-
-
-@register_tool_with_metadata(
-    name="newspaper",
-    display_name="News Articles",
-    description="Extract and analyze news articles from URLs",
-    category=ToolCategory.RESEARCH,
-    icon="Newspaper",
-    icon_color="text-gray-600",
-    dependencies=["newspaper3k"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/newspaper",
-)
-def newspaper_tools() -> type[NewspaperTools]:
-    """Return newspaper tools for article extraction."""
-    from agno.tools.newspaper import NewspaperTools  # noqa: PLC0415
-
-    return NewspaperTools
 
 
 @register_tool_with_metadata(
@@ -285,227 +127,6 @@ def homeassistant_tools() -> type[Toolkit]:
     return HomeAssistantTools
 
 
-@register_tool_with_metadata(
-    name="pandas",
-    display_name="Data Analysis",
-    description="Pandas data manipulation and analysis",
-    category=ToolCategory.RESEARCH,
-    icon="Database",
-    icon_color="text-purple-600",
-    dependencies=["pandas"],
-    docs_url="https://docs.agno.com/tools/toolkits/database/pandas",
-)
-def pandas_tools() -> type[PandasTools]:
-    """Return Pandas tools for data analysis."""
-    from agno.tools.pandas import PandasTools  # noqa: PLC0415
-
-    return PandasTools
-
-
-@register_tool_with_metadata(
-    name="tavily",
-    display_name="Tavily Search",
-    description="Advanced AI-powered web search engine",
-    category=ToolCategory.RESEARCH,
-    status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
-    icon="Search",
-    icon_color="text-purple-500",
-    config_fields=[
-        ConfigField(
-            name="TAVILY_API_KEY",
-            label="Tavily API Key",
-            type="password",
-            required=True,
-            placeholder="tvly-...",
-            description="Your Tavily API key for AI-powered search",
-        ),
-    ],
-    dependencies=["tavily-python"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/tavily",
-)
-def tavily_tools() -> type[TavilyTools]:
-    """Return Tavily tools for AI-powered search."""
-    from agno.tools.tavily import TavilyTools  # noqa: PLC0415
-
-    return TavilyTools
-
-
-@register_tool_with_metadata(
-    name="googlesearch",
-    display_name="Google Search",
-    description="Search the web using Google",
-    category=ToolCategory.RESEARCH,
-    icon="Search",
-    icon_color="text-blue-500",
-    dependencies=["googlesearch-python", "pycountry"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/googlesearch",
-)
-def googlesearch_tools() -> type[GoogleSearchTools]:
-    """Return Google Search tools for web queries."""
-    from agno.tools.googlesearch import GoogleSearchTools  # noqa: PLC0415
-
-    return GoogleSearchTools
-
-
-@register_tool_with_metadata(
-    name="website",
-    display_name="Website Reader",
-    description="Extract and analyze content from websites",
-    category=ToolCategory.RESEARCH,
-    icon="Globe",
-    icon_color="text-indigo-500",
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/website",
-)
-def website_tools() -> type[WebsiteTools]:
-    """Return website tools for web scraping."""
-    from agno.tools.website import WebsiteTools  # noqa: PLC0415
-
-    return WebsiteTools
-
-
-@register_tool_with_metadata(
-    name="jina",
-    display_name="Jina Reader",
-    description="Advanced content extraction and processing",
-    category=ToolCategory.RESEARCH,
-    status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
-    icon="FileText",
-    icon_color="text-pink-500",
-    config_fields=[
-        ConfigField(
-            name="JINA_API_KEY",
-            label="Jina API Key",
-            type="password",
-            required=True,
-            placeholder="jina_...",
-            description="Your Jina API key for web content extraction",
-        ),
-    ],
-    dependencies=["httpx"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
-)
-def jina_tools() -> type[JinaReaderTools]:
-    """Return Jina tools for document reading."""
-    from agno.tools.jina import JinaReaderTools  # noqa: PLC0415
-
-    return JinaReaderTools
-
-
-# Communication Tools
-@register_tool_with_metadata(
-    name="email",
-    display_name="Email",
-    description="Send emails via SMTP",
-    category=ToolCategory.COMMUNICATION,
-    status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
-    icon="Mail",
-    icon_color="text-blue-600",
-    config_fields=[
-        ConfigField(
-            name="SMTP_HOST",
-            label="SMTP Host",
-            type="text",
-            required=True,
-            placeholder="smtp.gmail.com",
-            description="SMTP server hostname",
-        ),
-        ConfigField(
-            name="SMTP_PORT",
-            label="SMTP Port",
-            type="number",
-            required=True,
-            default=587,
-            placeholder="587",
-            description="SMTP server port",
-            validation={"min": 1, "max": 65535},
-        ),
-        ConfigField(
-            name="SMTP_USERNAME",
-            label="Username",
-            type="text",
-            required=True,
-            placeholder="your-email@example.com",
-            description="Email account username",
-        ),
-        ConfigField(
-            name="SMTP_PASSWORD",
-            label="Password",
-            type="password",
-            required=True,
-            placeholder="Enter password or app-specific password",
-            description="Email account password",
-        ),
-    ],
-    docs_url="https://docs.agno.com/tools/toolkits/social/email",
-)
-def email_tools() -> type[EmailTools]:
-    """Return email tools for message handling."""
-    from agno.tools.email import EmailTools  # noqa: PLC0415
-
-    return EmailTools
-
-
-@register_tool_with_metadata(
-    name="telegram",
-    display_name="Telegram",
-    description="Send and receive Telegram messages",
-    category=ToolCategory.COMMUNICATION,
-    status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
-    icon="FaTelegram",
-    icon_color="text-blue-500",
-    config_fields=[
-        ConfigField(
-            name="TELEGRAM_TOKEN",
-            label="Bot Token",
-            type="password",
-            required=True,
-            placeholder="123456:ABC-DEF...",
-            description="Your Telegram bot API token",
-        ),
-    ],
-    dependencies=["httpx"],
-    docs_url="https://core.telegram.org/bots/api",
-)
-def telegram_tools() -> type[TelegramTools]:
-    """Return Telegram tools for messaging integration."""
-    from agno.tools.telegram import TelegramTools  # noqa: PLC0415
-
-    return TelegramTools
-
-
-@register_tool_with_metadata(
-    name="slack",
-    display_name="Slack",
-    description="Send messages and manage channels",
-    category=ToolCategory.COMMUNICATION,
-    status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
-    icon="FaSlack",
-    icon_color="text-purple-600",
-    config_fields=[
-        ConfigField(
-            name="SLACK_TOKEN",
-            label="Slack Token",
-            type="password",
-            required=True,
-            placeholder="xoxb-...",
-            description="Your Slack bot token",
-        ),
-    ],
-    dependencies=["slack-sdk"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/slack",
-)
-def slack_tools() -> type[SlackTools]:
-    """Slack tools for messaging and channel management."""
-    from agno.tools.slack import SlackTools  # noqa: PLC0415
-
-    return SlackTools
-
-
 # Email Category
 @register_tool_with_metadata(
     name="gmail",
@@ -559,121 +180,6 @@ def gmail_tools() -> type[GmailTools]:
 
     logger.info("Using MindRoom's Gmail wrapper with unified credentials")
     return GmailTools
-
-
-# Social Media Tools
-@register_tool_with_metadata(
-    name="reddit",
-    display_name="Reddit",
-    description="Browse subreddits and search posts",
-    category=ToolCategory.SOCIAL,
-    status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
-    icon="FaReddit",
-    icon_color="text-orange-600",
-    config_fields=[
-        ConfigField(
-            name="REDDIT_CLIENT_ID",
-            label="Client ID",
-            type="text",
-            required=True,
-            placeholder="Reddit app client ID",
-            description="Reddit application client ID",
-        ),
-        ConfigField(
-            name="REDDIT_CLIENT_SECRET",
-            label="Client Secret",
-            type="password",
-            required=True,
-            placeholder="Reddit app client secret",
-            description="Reddit application client secret",
-        ),
-        ConfigField(
-            name="REDDIT_USERNAME",
-            label="Username",
-            type="text",
-            required=True,
-            placeholder="your_reddit_username",
-            description="Your Reddit username",
-        ),
-        ConfigField(
-            name="REDDIT_PASSWORD",
-            label="Password",
-            type="password",
-            required=True,
-            placeholder="Your Reddit password",
-            description="Your Reddit password",
-        ),
-    ],
-    dependencies=["praw"],
-    docs_url=None,
-)
-def reddit_tools() -> type[RedditTools]:
-    """Reddit tools for browsing and searching Reddit."""
-    from agno.tools.reddit import RedditTools  # noqa: PLC0415
-
-    return RedditTools
-
-
-@register_tool_with_metadata(
-    name="twitter",
-    display_name="Twitter/X",
-    description="Post tweets and search Twitter",
-    category=ToolCategory.SOCIAL,
-    status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.API_KEY,
-    icon="FaTwitter",
-    icon_color="text-blue-400",
-    config_fields=[
-        ConfigField(
-            name="X_BEARER_TOKEN",
-            label="Bearer Token",
-            type="password",
-            required=True,
-            placeholder="Bearer token from X/Twitter",
-            description="X/Twitter API Bearer token",
-        ),
-        ConfigField(
-            name="X_CONSUMER_KEY",
-            label="Consumer Key",
-            type="text",
-            required=True,
-            placeholder="Consumer key from X/Twitter",
-            description="X/Twitter API consumer key",
-        ),
-        ConfigField(
-            name="X_CONSUMER_SECRET",
-            label="Consumer Secret",
-            type="password",
-            required=True,
-            placeholder="Consumer secret from X/Twitter",
-            description="X/Twitter API consumer secret",
-        ),
-        ConfigField(
-            name="X_ACCESS_TOKEN",
-            label="Access Token",
-            type="password",
-            required=True,
-            placeholder="Access token from X/Twitter",
-            description="X/Twitter API access token",
-        ),
-        ConfigField(
-            name="X_ACCESS_TOKEN_SECRET",
-            label="Access Token Secret",
-            type="password",
-            required=True,
-            placeholder="Access token secret from X/Twitter",
-            description="X/Twitter API access token secret",
-        ),
-    ],
-    dependencies=["tweepy"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/x",
-)
-def twitter_tools() -> type[XTools]:
-    """Twitter/X tools for posting and searching tweets."""
-    from agno.tools.x import XTools  # noqa: PLC0415
-
-    return XTools
 
 
 # Entertainment Tools
@@ -1003,31 +509,3 @@ def imdb_tools() -> type[Toolkit]:
     """IMDb integration - coming soon."""
     msg = "IMDb integration is coming soon"
     raise NotImplementedError(msg)
-
-
-def get_tool_by_name(tool_name: str) -> Toolkit:
-    """Get a tool instance by its registered name.
-
-    Args:
-        tool_name: The registered name of the tool
-
-    Returns:
-        An instance of the requested tool
-
-    Raises:
-        ValueError: If the tool name is not registered
-
-    """
-    if tool_name not in TOOL_REGISTRY:
-        available = ", ".join(sorted(TOOL_REGISTRY.keys()))
-        msg = f"Unknown tool: {tool_name}. Available tools: {available}"
-        raise ValueError(msg)
-
-    try:
-        tool_factory = TOOL_REGISTRY[tool_name]
-        tool_class = tool_factory()
-        return tool_class()
-    except ImportError as e:
-        logger.warning(f"Could not import tool '{tool_name}': {e}")
-        logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
-        raise

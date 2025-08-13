@@ -4,7 +4,9 @@ import inspect
 from typing import Union, get_args, get_origin
 
 import pytest
+from agno.tools.csv_toolkit import CsvTools
 from agno.tools.github import GithubTools
+from agno.tools.tavily import TavilyTools
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
@@ -117,3 +119,13 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
 def test_github_configfields_match_agno_params() -> None:
     """Verify GitHub ConfigFields have all parameter names and types from agno GithubTools."""
     verify_tool_configfields("github", GithubTools)
+
+
+def test_csv_configfields_match_agno_params() -> None:
+    """Verify CSV ConfigFields have all parameter names and types from agno CsvTools."""
+    verify_tool_configfields("csv", CsvTools)
+
+
+def test_tavily_configfields_match_agno_params() -> None:
+    """Verify Tavily ConfigFields have all parameter names and types from agno TavilyTools."""
+    verify_tool_configfields("tavily", TavilyTools)

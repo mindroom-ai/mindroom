@@ -6,8 +6,61 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
+from loguru import logger
+
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from agno.tools import Toolkit
+
+# Registry mapping tool names to their factory functions
+TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
+
+
+def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
+    """Decorator to register a tool factory function.
+
+    Args:
+        name: The name to register the tool under
+
+    Returns:
+        Decorator function
+
+    """
+
+    def decorator(func: Callable[[], type[Toolkit]]) -> Callable[[], type[Toolkit]]:
+        TOOL_REGISTRY[name] = func
+        return func
+
+    return decorator
+
+
+def get_tool_by_name(tool_name: str) -> Toolkit:
+    """Get a tool instance by its registered name.
+
+    Args:
+        tool_name: The registered name of the tool
+
+    Returns:
+        An instance of the requested tool
+
+    Raises:
+        ValueError: If the tool name is not registered
+
+    """
+    if tool_name not in TOOL_REGISTRY:
+        available = ", ".join(sorted(TOOL_REGISTRY.keys()))
+        msg = f"Unknown tool: {tool_name}. Available tools: {available}"
+        raise ValueError(msg)
+
+    try:
+        tool_factory = TOOL_REGISTRY[tool_name]
+        tool_class = tool_factory()
+        return tool_class()
+    except ImportError as e:
+        logger.warning(f"Could not import tool '{tool_name}': {e}")
+        logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
+        raise
 
 
 class ToolCategory(str, Enum):
@@ -74,8 +127,8 @@ class ToolMetadata:
     config_fields: list[ConfigField] | None = None  # Detailed field definitions
     dependencies: list[str] | None = None  # Required pip packages
     docs_url: str | None = None  # Documentation URL
-    helper_text: str | None = None  # Additional helper text (markdown) for configuration
-    factory: Callable[[], type] | None = None  # Tool factory function
+    helper_text: str | None = None  # Additional help text for setup
+    factory: Callable | None = None  # Factory function to create tool instance
 
 
 # Global registry for tool metadata
@@ -83,6 +136,7 @@ TOOL_METADATA: dict[str, ToolMetadata] = {}
 
 
 def register_tool_with_metadata(
+    *,
     name: str,
     display_name: str,
     description: str,
@@ -96,29 +150,32 @@ def register_tool_with_metadata(
     docs_url: str | None = None,
     helper_text: str | None = None,
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
-    """Enhanced decorator to register a tool with full metadata.
+    """Decorator to register a tool with metadata.
+
+    This decorator stores comprehensive metadata about tools that can be used
+    by the frontend and other components.
 
     Args:
-        name: Internal tool name
-        display_name: Display name for UI
-        description: Tool description
-        category: Tool category
-        status: Availability status
-        setup_type: Setup requirements
-        icon: Icon identifier
-        icon_color: Tailwind color class for icon
-        config_fields: Configuration field definitions
-        dependencies: Required pip packages
-        docs_url: Documentation URL
-        helper_text: Additional helper text (markdown) for configuration
+        name: Tool identifier used in registry
+        display_name: Human-readable name for UI
+        description: Brief description of what the tool does
+        category: Tool category for organization
+        status: Availability status of the tool
+        setup_type: Type of setup required
+        icon: Icon identifier for frontend
+        icon_color: CSS color class for the icon
+        config_fields: List of configuration fields
+        dependencies: Required Python packages
+        docs_url: Link to documentation
+        helper_text: Additional setup instructions
 
     Returns:
         Decorator function
 
     """
 
-    def decorator(func: Callable[[], type]) -> Callable[[], type]:
-        # Create metadata
+    def decorator(func: Callable) -> Callable:
+        # Create metadata object
         metadata = ToolMetadata(
             name=name,
             display_name=display_name,
@@ -139,9 +196,6 @@ def register_tool_with_metadata(
         TOOL_METADATA[name] = metadata
 
         # Also register in TOOL_REGISTRY for actual tool loading
-        # Import here to avoid circular dependency
-        from mindroom.tools import TOOL_REGISTRY  # noqa: PLC0415
-
         TOOL_REGISTRY[name] = func
 
         return func
@@ -157,13 +211,3 @@ def get_tool_metadata(name: str) -> ToolMetadata | None:
 def get_all_tool_metadata() -> dict[str, ToolMetadata]:
     """Get all tool metadata."""
     return TOOL_METADATA.copy()
-
-
-def get_tools_by_category(category: ToolCategory) -> dict[str, ToolMetadata]:
-    """Get all tools in a specific category."""
-    return {name: meta for name, meta in TOOL_METADATA.items() if meta.category == category}
-
-
-def get_available_tools() -> dict[str, ToolMetadata]:
-    """Get all available tools."""
-    return {name: meta for name, meta in TOOL_METADATA.items() if meta.status == ToolStatus.AVAILABLE}
