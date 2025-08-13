@@ -21,7 +21,6 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
@@ -277,39 +276,18 @@ export function EnhancedConfigDialog({
     <Dialog open={open} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[600px]">
         <DialogHeader className="space-y-3">
-          <div className="flex items-start justify-between">
-            <div className="flex items-center space-x-3">
-              {Icon && (
-                <div className={cn('p-2 rounded-lg bg-muted', iconColor)}>
-                  <Icon className="h-5 w-5" />
-                </div>
-              )}
-              <div>
-                <DialogTitle className="text-xl">
-                  {isEditing ? 'Edit' : 'Configure'} {displayName}
-                </DialogTitle>
-                <DialogDescription className="mt-1">{description}</DialogDescription>
+          <div className="flex items-center space-x-3">
+            {Icon && (
+              <div className={cn('p-2 rounded-lg bg-muted', iconColor)}>
+                <Icon className="h-5 w-5" />
               </div>
-            </div>
-            {docsUrl && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8"
-                      onClick={() => window.open(docsUrl, '_blank')}
-                    >
-                      <ExternalLink className="h-4 w-4" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    <p>View Documentation</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
             )}
+            <div>
+              <DialogTitle className="text-xl">
+                {isEditing ? 'Edit' : 'Configure'} {displayName}
+              </DialogTitle>
+              <DialogDescription className="mt-1">{description}</DialogDescription>
+            </div>
           </div>
 
           {/* Security Notice */}
@@ -329,6 +307,18 @@ export function EnhancedConfigDialog({
                 {renderHelperText(helperText)}
               </AlertDescription>
             </Alert>
+          )}
+
+          {/* Documentation Link - More Prominent */}
+          {docsUrl && (
+            <Button
+              variant="outline"
+              className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-950/20 dark:to-amber-950/20 hover:from-orange-100 hover:to-amber-100 dark:hover:from-orange-950/30 dark:hover:to-amber-950/30 border-orange-200 dark:border-orange-800"
+              onClick={() => window.open(docsUrl, '_blank')}
+            >
+              <ExternalLink className="h-4 w-4" />
+              View Official Documentation
+            </Button>
           )}
         </DialogHeader>
 
