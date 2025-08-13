@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState } from 'react';
+import { useEffect, useCallback, useState, useMemo } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { useSwipeBack } from '@/hooks/useSwipeBack';
 import { Button } from '@/components/ui/button';
@@ -14,12 +14,12 @@ import {
 } from '@/components/ui/select';
 import { Plus, X, Bot, Settings } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
-import { AVAILABLE_TOOLS } from '@/types/config';
 import { useForm, Controller } from 'react-hook-form';
 import { Agent } from '@/types/config';
 import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
-import { TOOL_SCHEMAS, toolNeedsConfiguration } from '@/types/toolConfig';
+import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
+import { useTools } from '@/hooks/useTools';
 
 export function AgentEditor() {
   const {
@@ -36,6 +36,25 @@ export function AgentEditor() {
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
+
+  // Fetch tools from backend
+  const { tools: backendTools, loading: toolsLoading } = useTools();
+
+  // Filter tools to only show configured ones or those that don't need configuration
+  const availableTools = useMemo(() => {
+    return backendTools.filter(tool => {
+      // Include tools that don't require configuration
+      if (tool.setup_type === 'none') {
+        return true;
+      }
+      // Include tools that are already configured
+      if (tool.status === 'available') {
+        return true;
+      }
+      // Exclude everything else (requires_config, coming_soon)
+      return false;
+    });
+  }, [backendTools]);
 
   // Enable swipe back on mobile
   useSwipeBack({
@@ -190,68 +209,84 @@ export function AgentEditor() {
       </FieldGroup>
 
       {/* Tools */}
-      <FieldGroup label="Tools" helperText="Available tools this agent can use">
+      <FieldGroup
+        label="Tools"
+        helperText="Available tools this agent can use (only showing configured tools)"
+      >
         <div className="space-y-2">
-          {AVAILABLE_TOOLS.map(tool => (
-            <Controller
-              key={tool}
-              name="tools"
-              control={control}
-              render={({ field }) => {
-                const isChecked = field.value.includes(tool);
-                const hasSchema = !!TOOL_SCHEMAS[tool];
-                const needsConfig = toolNeedsConfiguration(tool);
-                const isConfigured =
-                  config?.tools?.[tool] && Object.keys(config.tools[tool]).length > 0;
+          {toolsLoading ? (
+            <div className="text-sm text-muted-foreground text-center py-4">
+              Loading available tools...
+            </div>
+          ) : availableTools.length === 0 ? (
+            <div className="text-sm text-muted-foreground text-center py-4">
+              No tools are configured yet. Please configure tools in the Integrations tab first.
+            </div>
+          ) : (
+            availableTools.map(tool => (
+              <Controller
+                key={tool.name}
+                name="tools"
+                control={control}
+                render={({ field }) => {
+                  const isChecked = field.value.includes(tool.name);
+                  const hasSchema = !!TOOL_SCHEMAS[tool.name];
+                  const needsConfig =
+                    tool.setup_type !== 'none' &&
+                    tool.config_fields &&
+                    tool.config_fields.length > 0;
 
-                return (
-                  <div className="flex items-center justify-between p-3 sm:p-2 rounded-lg hover:bg-gray-50 transition-colors">
-                    <div className="flex items-center space-x-3 sm:space-x-2">
-                      <Checkbox
-                        id={tool}
-                        checked={isChecked}
-                        onCheckedChange={checked => {
-                          const newTools = checked
-                            ? [...field.value, tool]
-                            : field.value.filter(t => t !== tool);
-                          field.onChange(newTools);
-                          handleFieldChange('tools', newTools);
-                        }}
-                        className="h-5 w-5 sm:h-4 sm:w-4"
-                      />
-                      <label
-                        htmlFor={tool}
-                        className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
-                      >
-                        {TOOL_SCHEMAS[tool]?.name || tool}
-                      </label>
-                      {isChecked && needsConfig && !isConfigured && (
-                        <Badge variant="destructive" className="text-xs">
-                          Needs Config
-                        </Badge>
-                      )}
-                      {isChecked && isConfigured && (
-                        <Badge variant="default" className="text-xs bg-green-100 text-green-800">
-                          Configured
-                        </Badge>
+                  return (
+                    <div className="flex items-center justify-between p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
+                      <div className="flex items-center space-x-3 sm:space-x-2">
+                        <Checkbox
+                          id={tool.name}
+                          checked={isChecked}
+                          onCheckedChange={checked => {
+                            const newTools = checked
+                              ? [...field.value, tool.name]
+                              : field.value.filter(t => t !== tool.name);
+                            field.onChange(newTools);
+                            handleFieldChange('tools', newTools);
+                          }}
+                          className="h-5 w-5 sm:h-4 sm:w-4"
+                        />
+                        <label
+                          htmlFor={tool.name}
+                          className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
+                        >
+                          {tool.display_name}
+                        </label>
+                        {tool.setup_type === 'none' ? (
+                          <Badge variant="secondary" className="text-xs">
+                            No Config Needed
+                          </Badge>
+                        ) : (
+                          <Badge
+                            variant="default"
+                            className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                          >
+                            Configured
+                          </Badge>
+                        )}
+                      </div>
+                      {isChecked && hasSchema && needsConfig && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setConfigDialogTool(tool.name)}
+                          className="h-8 px-2"
+                        >
+                          <Settings className="h-4 w-4 sm:mr-1" />
+                          <span className="hidden sm:inline">Configure</span>
+                        </Button>
                       )}
                     </div>
-                    {isChecked && hasSchema && (needsConfig || isConfigured) && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => setConfigDialogTool(tool)}
-                        className="h-8 px-2"
-                      >
-                        <Settings className="h-4 w-4 sm:mr-1" />
-                        <span className="hidden sm:inline">Configure</span>
-                      </Button>
-                    )}
-                  </div>
-                );
-              }}
-            />
-          ))}
+                  );
+                }}
+              />
+            ))
+          )}
         </div>
       </FieldGroup>
 
