@@ -6,7 +6,6 @@ import {
   Shield,
   CheckCircle,
   AlertCircle,
-  HelpCircle,
   Key,
   Lock,
 } from 'lucide-react';
@@ -383,7 +382,7 @@ export function EnhancedConfigDialog({
                       </div>
                     ) : (
                       <>
-                        <div className="flex items-center justify-between">
+                        <div className="space-y-1">
                           <Label
                             htmlFor={field.name}
                             className={cn(
@@ -399,18 +398,10 @@ export function EnhancedConfigDialog({
                               </Badge>
                             )}
                           </Label>
-
                           {field.description && (
-                            <TooltipProvider>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" />
-                                </TooltipTrigger>
-                                <TooltipContent className="max-w-xs">
-                                  <p className="text-xs">{field.description}</p>
-                                </TooltipContent>
-                              </Tooltip>
-                            </TooltipProvider>
+                            <p className="text-xs text-muted-foreground ml-6">
+                              {field.description}
+                            </p>
                           )}
                         </div>
                         <div className="relative">
