@@ -1,0 +1,376 @@
+"""Tools registry for all available Agno tools.
+
+This module provides a centralized registry for all tools that can be used by agents.
+Tools are registered by string name and can be instantiated dynamically when loading agents.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from mindroom.tools_metadata import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolStatus,
+    register_tool_with_metadata,
+)
+
+if TYPE_CHECKING:
+    from agno.tools.github import GithubTools
+
+
+@register_tool_with_metadata(
+    name="github",
+    display_name="GitHub",
+    description="Repository and issue management",
+    category=ToolCategory.DEVELOPMENT,
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.API_KEY,
+    icon="FaGithub",
+    icon_color="text-gray-800",  # GitHub black
+    config_fields=[
+        # Authentication
+        ConfigField(
+            name="access_token",
+            label="Access Token",
+            type="password",
+            required=False,
+            placeholder="ghp_...",
+            description="GitHub personal access token (can also be set via GITHUB_ACCESS_TOKEN env var)",
+        ),
+        ConfigField(
+            name="base_url",
+            label="Base URL",
+            type="url",
+            required=False,
+            placeholder="https://api.github.com",
+            description="GitHub API base URL (for GitHub Enterprise)",
+        ),
+        # Repository operations
+        ConfigField(
+            name="search_repositories",
+            label="Search Repositories",
+            type="boolean",
+            required=False,
+            default=True,
+            description="Enable searching for repositories",
+        ),
+        ConfigField(
+            name="list_repositories",
+            label="List Repositories",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable listing user/org repositories",
+        ),
+        ConfigField(
+            name="get_repository",
+            label="Get Repository",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting repository details",
+        ),
+        ConfigField(
+            name="create_repository",
+            label="Create Repository",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable creating new repositories",
+        ),
+        ConfigField(
+            name="delete_repository",
+            label="Delete Repository",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable deleting repositories",
+        ),
+        ConfigField(
+            name="get_repository_languages",
+            label="Get Repository Languages",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting repository language statistics",
+        ),
+        ConfigField(
+            name="get_repository_stars",
+            label="Get Repository Stars",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting repository star count",
+        ),
+        ConfigField(
+            name="get_repository_with_stats",
+            label="Get Repository with Stats",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting repository with detailed statistics",
+        ),
+        # Branch operations
+        ConfigField(
+            name="list_branches",
+            label="List Branches",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable listing repository branches",
+        ),
+        ConfigField(
+            name="create_branch",
+            label="Create Branch",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable creating new branches",
+        ),
+        ConfigField(
+            name="set_default_branch",
+            label="Set Default Branch",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable setting the default branch",
+        ),
+        ConfigField(
+            name="get_branch_content",
+            label="Get Branch Content",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting branch content",
+        ),
+        # Pull Request operations
+        ConfigField(
+            name="get_pull_request",
+            label="Get Pull Request",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting pull request details",
+        ),
+        ConfigField(
+            name="get_pull_request_changes",
+            label="Get Pull Request Changes",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting pull request file changes",
+        ),
+        ConfigField(
+            name="get_pull_request_count",
+            label="Get Pull Request Count",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting pull request count",
+        ),
+        ConfigField(
+            name="get_pull_requests",
+            label="Get Pull Requests",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable listing pull requests",
+        ),
+        ConfigField(
+            name="get_pull_request_comments",
+            label="Get Pull Request Comments",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting pull request comments",
+        ),
+        ConfigField(
+            name="create_pull_request_comment",
+            label="Create Pull Request Comment",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable creating pull request comments",
+        ),
+        ConfigField(
+            name="edit_pull_request_comment",
+            label="Edit Pull Request Comment",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable editing pull request comments",
+        ),
+        ConfigField(
+            name="get_pull_request_with_details",
+            label="Get Pull Request with Details",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting pull request with full details",
+        ),
+        ConfigField(
+            name="create_pull_request",
+            label="Create Pull Request",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable creating new pull requests",
+        ),
+        ConfigField(
+            name="create_review_request",
+            label="Create Review Request",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable requesting reviews on pull requests",
+        ),
+        # Issue operations
+        ConfigField(
+            name="create_issue",
+            label="Create Issue",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable creating new issues",
+        ),
+        ConfigField(
+            name="list_issues",
+            label="List Issues",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable listing repository issues",
+        ),
+        ConfigField(
+            name="get_issue",
+            label="Get Issue",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable getting issue details",
+        ),
+        ConfigField(
+            name="comment_on_issue",
+            label="Comment on Issue",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable commenting on issues",
+        ),
+        ConfigField(
+            name="close_issue",
+            label="Close Issue",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable closing issues",
+        ),
+        ConfigField(
+            name="reopen_issue",
+            label="Reopen Issue",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable reopening closed issues",
+        ),
+        ConfigField(
+            name="assign_issue",
+            label="Assign Issue",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable assigning issues to users",
+        ),
+        ConfigField(
+            name="label_issue",
+            label="Label Issue",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable adding labels to issues",
+        ),
+        ConfigField(
+            name="list_issue_comments",
+            label="List Issue Comments",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable listing issue comments",
+        ),
+        ConfigField(
+            name="edit_issue",
+            label="Edit Issue",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable editing issue details",
+        ),
+        # File operations
+        ConfigField(
+            name="create_file",
+            label="Create File",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable creating new files in repositories",
+        ),
+        ConfigField(
+            name="get_file_content",
+            label="Get File Content",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable reading file content from repositories",
+        ),
+        ConfigField(
+            name="update_file",
+            label="Update File",
+            type="boolean",
+            required=False,
+            default=True,
+            description="Enable updating files in repositories",
+        ),
+        ConfigField(
+            name="delete_file",
+            label="Delete File",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable deleting files from repositories",
+        ),
+        ConfigField(
+            name="get_directory_content",
+            label="Get Directory Content",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable listing directory contents",
+        ),
+        # Search operations
+        ConfigField(
+            name="search_code",
+            label="Search Code",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable searching code across repositories",
+        ),
+        ConfigField(
+            name="search_issues_and_prs",
+            label="Search Issues and PRs",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Enable searching issues and pull requests",
+        ),
+    ],
+    dependencies=["PyGithub"],
+    docs_url="https://docs.agno.com/tools/toolkits/others/github",
+)
+def github_tools() -> type[GithubTools]:
+    """Return GitHub tools for repository management."""
+    from agno.tools.github import GithubTools
+
+    return GithubTools
