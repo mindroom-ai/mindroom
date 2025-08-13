@@ -44,6 +44,14 @@ if TYPE_CHECKING:
             description="Set the fixed language for search results (e.g., 'zh' for Chinese, 'en' for English)",
         ),
         ConfigField(
+            name="headers",
+            label="Custom Headers",
+            type="text",
+            required=False,
+            placeholder='{"User-Agent": "Custom Agent"}',
+            description="Custom HTTP headers to send with requests (JSON format)",
+        ),
+        ConfigField(
             name="proxy",
             label="Proxy",
             type="url",

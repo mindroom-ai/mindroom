@@ -4032,13 +4032,69 @@
     },
     {
       "category": "entertainment",
-      "config_fields": null,
-      "dependencies": [
-        "youtube-transcript-api"
+      "config_fields": [
+        {
+          "default": true,
+          "description": "Enable extracting captions/transcripts from YouTube videos",
+          "label": "Get Video Captions",
+          "name": "get_video_captions",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable extracting video metadata (title, author, thumbnail, etc.)",
+          "label": "Get Video Data",
+          "name": "get_video_data",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Enable generating timestamped transcripts from video captions",
+          "label": "Get Video Timestamps",
+          "name": "get_video_timestamps",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Comma-separated list of preferred language codes for captions (e.g., 'en,es,fr'). If not specified, defaults to English.",
+          "label": "Languages",
+          "name": "languages",
+          "options": null,
+          "placeholder": "en,es,fr",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "JSON string of proxy configuration for network requests (e.g., for bypassing geo-restrictions)",
+          "label": "Proxies",
+          "name": "proxies",
+          "options": null,
+          "placeholder": "{\"http\": \"http://proxy:8080\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
       ],
-      "description": "Search videos and get transcripts",
+      "dependencies": [
+        "youtube_transcript_api"
+      ],
+      "description": "Extract video data, captions, and timestamps from YouTube videos",
       "display_name": "YouTube",
-      "docs_url": "https://docs.agno.com/tools/toolkits/others/youtube",
+      "docs_url": "https://docs.agno.com/tools/toolkits/entertainment/youtube",
       "helper_text": null,
       "icon": "FaYoutube",
       "icon_color": "text-red-600",
@@ -4076,6 +4132,17 @@
         },
         {
           "default": null,
+          "description": "Base URL for Composio API (leave empty for default)",
+          "label": "Base URL",
+          "name": "base_url",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "url",
+          "validation": null
+        },
+        {
+          "default": "default",
           "description": "Entity identifier for Composio workspace",
           "label": "Entity ID",
           "name": "entity_id",
@@ -4087,31 +4154,119 @@
         },
         {
           "default": null,
-          "description": "Comma-separated list of specific Composio actions to enable",
-          "label": "Enabled Actions",
-          "name": "actions",
+          "description": "Workspace identifier for organizing tools and data",
+          "label": "Workspace ID",
+          "name": "workspace_id",
           "options": null,
-          "placeholder": "GITHUB_STAR_A_REPOSITORY_FOR_THE_AUTHENTICATED_USER",
+          "placeholder": "workspace_123",
           "required": false,
           "type": "text",
           "validation": null
         },
         {
           "default": null,
-          "description": "Comma-separated list of apps to enable (e.g., github, gmail, slack)",
-          "label": "Enabled Apps",
-          "name": "apps",
+          "description": "JSON configuration for workspace settings",
+          "label": "Workspace Config",
+          "name": "workspace_config",
           "options": null,
-          "placeholder": "github,gmail,slack",
+          "placeholder": "{\"type\": \"local\"}",
           "required": false,
           "type": "text",
           "validation": null
         },
         {
+          "default": null,
+          "description": "JSON mapping of app names to connected account IDs",
+          "label": "Connected Account IDs",
+          "name": "connected_account_ids",
+          "options": null,
+          "placeholder": "{\"github\": \"account_123\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "JSON metadata for tools and actions configuration",
+          "label": "Metadata",
+          "name": "metadata",
+          "options": null,
+          "placeholder": "{\"key\": \"value\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Custom processors configuration (JSON format)",
+          "label": "Processors",
+          "name": "processors",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Directory path for output files",
+          "label": "Output Directory",
+          "name": "output_dir",
+          "options": null,
+          "placeholder": "/path/to/output",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Path to lock file for concurrency control",
+          "label": "Lock File Path",
+          "name": "lockfile",
+          "options": null,
+          "placeholder": "/path/to/lockfile",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": 3,
+          "description": "Maximum number of retries for failed operations",
+          "label": "Max Retries",
+          "name": "max_retries",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Logging verbosity level (0-3, higher = more verbose)",
+          "label": "Verbosity Level",
+          "name": "verbosity_level",
+          "options": null,
+          "placeholder": "1",
+          "required": false,
+          "type": "number",
+          "validation": null
+        },
+        {
           "default": false,
-          "description": "Enable local tool execution when available",
-          "label": "Use Local Tools",
-          "name": "use_local",
+          "description": "Enable file-based output for operations",
+          "label": "Output in File",
+          "name": "output_in_file",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable operation tracing for debugging",
+          "label": "Allow Tracing",
+          "name": "allow_tracing",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -4120,13 +4275,24 @@
         },
         {
           "default": true,
-          "description": "Enable detailed logging for Composio operations",
-          "label": "Enable Logging",
-          "name": "enable_logging",
+          "description": "Enable file locking for concurrent operations",
+          "label": "Enable Locking",
+          "name": "lock",
           "options": null,
           "placeholder": null,
           "required": false,
           "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": "INFO",
+          "description": "Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
+          "label": "Logging Level",
+          "name": "logging_level",
+          "options": null,
+          "placeholder": "INFO",
+          "required": false,
+          "type": "text",
           "validation": null
         }
       ],
@@ -5197,6 +5363,17 @@
         },
         {
           "default": null,
+          "description": "Custom HTTP headers to send with requests (JSON format)",
+          "label": "Custom Headers",
+          "name": "headers",
+          "options": null,
+          "placeholder": "{\"User-Agent\": \"Custom Agent\"}",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
           "description": "Proxy server address to use for HTTP requests",
           "label": "Proxy",
           "name": "proxy",
@@ -5242,56 +5419,6 @@
       "name": "baidusearch",
       "setup_type": "none",
       "status": "available"
-    },
-    {
-      "category": "research",
-      "config_fields": [
-        {
-          "default": null,
-          "description": "Brave Search API key (can also be set via BRAVE_API_KEY env var)",
-          "label": "API Key",
-          "name": "api_key",
-          "options": null,
-          "placeholder": "BSA...",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Optional fixed maximum number of results to return for all searches",
-          "label": "Fixed Max Results",
-          "name": "fixed_max_results",
-          "options": null,
-          "placeholder": "10",
-          "required": false,
-          "type": "number",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Optional fixed language for all search results (e.g., 'en', 'es', 'fr')",
-          "label": "Fixed Language",
-          "name": "fixed_language",
-          "options": null,
-          "placeholder": "en",
-          "required": false,
-          "type": "text",
-          "validation": null
-        }
-      ],
-      "dependencies": [
-        "brave-search"
-      ],
-      "description": "Privacy-focused web search using the Brave search engine",
-      "display_name": "Brave Search",
-      "docs_url": "https://docs.agno.com/tools/toolkits/search/bravesearch",
-      "helper_text": null,
-      "icon": "FaSearch",
-      "icon_color": "text-orange-500",
-      "name": "brave_search",
-      "setup_type": "api_key",
-      "status": "requires_config"
     },
     {
       "category": "research",
