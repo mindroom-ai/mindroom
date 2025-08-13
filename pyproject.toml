@@ -19,77 +19,95 @@ classifiers = [
 dependencies = [
   "agentql",                                                                                           # for AgentQL tool
   "agno[anthropic,google,ollama,openai,sql,ddg,arxiv,yfinance,newspaper,github,docker,duckdb]>=1.7.6",
-  "apify-client>=1.12.2",
+  "apify-client>=1.12.2",                                                                              # for Apify tool
   "arxiv",                                                                                             # for Arxiv tool
-  "atlassian-python-api",                                                                              # for ConfluenceTools
-  "baidusearch",                                                                                       # for BaiduSearchTools
-  "boto3>=1.40.8",                                                                                     # for AWSLambdaTools and AWSSESTool
+  "atlassian-python-api",                                                                              # for Confluence tool
+  "baidusearch",                                                                                       # for BaiduSearch tool
+  "boto3>=1.40.8",                                                                                     # for AWS Lambda and AWS SES tools
+  "brave-search",                                                                                      # for BraveSearch tool
   "browserbase",                                                                                       # for Browserbase tool
-  "cartesia",                                                                                          # for Cartesia voice AI tool
+  "cartesia",                                                                                          # for Cartesia tool
   "chromadb>=1.0.15",
-  "composio-agno",
-  "crawl4ai>=0.7.3",
+  "composio-agno",                                                                                     # for Composio tool
+  "crawl4ai>=0.7.3",                                                                                   # for Crawl4AI tool
   "croniter>=6",
   "daytona",                                                                                           # for Daytona tool
   "diskcache>=5.6.3",
-  "e2b-code-interpreter",
-  "elevenlabs",
+  "docker",                                                                                            # for Docker tool
+  "duckdb",                                                                                            # for DuckDB tool
+  "duckduckgo-search",                                                                                 # for DuckDuckGo tool
+  "e2b-code-interpreter",                                                                              # for E2B tool
+  "elevenlabs",                                                                                        # for ElevenLabs tool
   "exa-py",                                                                                            # for Exa tool
   "fal-client",                                                                                        # for Fal tool
   "fastapi>=0.116.1",
-  "ffmpeg",
-  "firecrawl-py",
-  "google-api-python-client>=2.178",
-  "google-auth>=2.40.3",
-  "google-auth-httplib2>=0.2",
-  "google-auth-oauthlib>=1.2.2",
-  "google-genai",                                                                                      # for Gemini tool
+  "ffmpeg",                                                                                            # for MoviePy tool
+  "firecrawl-py",                                                                                      # for Firecrawl tool
+  "google-api-python-client>=2.178",                                                                   # for Google Calendar, Google Sheets, Gmail tools
+  "google-auth>=2.40.3",                                                                               # for Google Calendar, Google Sheets, Gmail tools
+  "google-auth-httplib2>=0.2",                                                                         # for Google Calendar, Google Sheets, Gmail tools
+  "google-auth-oauthlib>=1.2.2",                                                                       # for Google Calendar, Google Sheets, Gmail tools
+  "google-cloud-bigquery",                                                                             # for Google BigQuery tool
+  "google-genai",                                                                                      # for Gemini model
   "google-maps-places",                                                                                # for Google Maps tool
   "google-search-results>=2.4.2",
   "googlemaps",                                                                                        # for Google Maps tool
-  "googlesearch-python",                                                                               # for Google Search tool
-  "groq>=0.31",
+  "googlesearch-python",                                                                               # for GoogleSearch tool
+  "groq>=0.31",                                                                                        # for Groq model
   "httpx>=0.27",                                                                                       # for Jina, Telegram, and Searxng tools
-  "jira>=3.10.5",
-  "linkup-sdk>=0.2.8",
+  "jira>=3.10.5",                                                                                      # for Jira tool
+  "linkup-sdk>=0.2.8",                                                                                 # for Linkup tool
   "loguru>=0.7.3",
-  "lumaai",                                                                                            # for Luma Labs tool
+  "lumaai",                                                                                            # for LumaLabs tool
+  "lxml-html-clean",                                                                                   # for Newspaper and Newspaper4K tools
   "markdown>=3.7",                                                                                     # for HTML formatting in Matrix messages
+  "matplotlib",                                                                                        # for Visualization tool
   "matrix-nio>=0.24",
-  "mcp[cli]>=1.12.4",
-  "mem0ai>=0.1.115",
-  "moviepy",
+  "mcp[cli]>=1.12.4",                                                                                  # for MCP tool
+  "mem0ai>=0.1.115",                                                                                   # for Mem0 tool
+  "mlx-whisper",                                                                                       # for MLX Transcribe tool
+  "moviepy",                                                                                           # for MoviePy tool
+  "newspaper3k",                                                                                       # for Newspaper tool
+  "newspaper4k",                                                                                       # for Newspaper4K tool
+  "openai",                                                                                            # for OpenAI and DALL-E tools, Morph model
+  "opencv-python",                                                                                     # for OpenCV tool
   "oxylabs",                                                                                           # for Oxylabs tool
-  "pandas>=2.2",                                                                                       # for Pandas data analysis tool
-  "playwright",                                                                                        # for AgentQL tool
+  "pandas>=2.2",                                                                                       # for Pandas tool
+  "playwright",                                                                                        # for AgentQL and Browserbase tools
   "praw",                                                                                              # for Reddit tool
+  "psycopg-binary",                                                                                    # for Postgres tool
   "py-trello",                                                                                         # for Trello tool
-  "pycountry",                                                                                         # for Google Search tool
+  "pycountry",                                                                                         # for BaiduSearch and GoogleSearch tools
   "pydantic>=2",
   "pygithub>=2.5",                                                                                     # for GitHub tool
   "pypdf",                                                                                             # for Arxiv tool
   "python-dotenv>=1",
   "pytz",                                                                                              # for Cal.com tool
   "pyyaml>=6",
-  "replicate>=1.0.7",
-  "requests",                                                                                          # for Cal.com tool
-  "resend",
+  "replicate>=1.0.7",                                                                                  # for Replicate tool
+  "requests",                                                                                          # for ClickUp, Cal.com, Zendesk, OpenWeather, ModelsLabs, API tools
+  "resend",                                                                                            # for Resend tool
   "rich",                                                                                              # for CLI output
   "scrapegraph-py",                                                                                    # for ScrapeGraph tool
   "slack-sdk",                                                                                         # for Slack tool
   "spider-client",                                                                                     # for Spider tool
   "spotipy>=2.25.1",
+  "streamlit",                                                                                         # for Streamlit components
   "structlog>=24.1",                                                                                   # for structured logging
   "tavily-python",                                                                                     # for Tavily tool
-  "todoist-api-python",
-  "tweepy",                                                                                            # for Twitter/X tool
-  "twilio",
+  "todoist-api-python",                                                                                # for Todoist tool
+  "tweepy",                                                                                            # for X/Twitter tool
+  "twilio",                                                                                            # for Twilio tool
   "typer>=0.16",
   "uvicorn>=0.35",
+  "valyu",                                                                                             # for Valyu tool
   "watchdog>=6",
-  "wikipedia",                                                                                         # for Wikipedia tool (required by agno.tools.wikipedia)
+  "web3",                                                                                              # for EVM tool
+  "webexpythonsdk",                                                                                    # for Webex tool
+  "wikipedia",                                                                                         # for Wikipedia tool
+  "yfinance",                                                                                          # for YFinance tool
   "youtube-transcript-api",                                                                            # for YouTube tool
-  "zep-cloud>=3.3",
+  "zep-cloud>=3.3",                                                                                    # for Zep tool
 ]
 
 urls.documentation = "https://github.com/basnijholt/mindroom"
