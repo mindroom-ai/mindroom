@@ -146,7 +146,8 @@ export function Integrations() {
     } else if (
       integration.setup_type === 'api_key' ||
       integration.setup_type === 'oauth' ||
-      integration.setup_type === 'special'
+      integration.setup_type === 'special' ||
+      integration.setup_type === 'none'
     ) {
       // Show generic config dialog for tools with config_fields
       const tool = integration as any; // Cast to access config_fields
@@ -255,14 +256,66 @@ export function Integrations() {
       );
     }
 
-    // Tools with no setup required - just show available status
+    // Tools with no setup required
     if (integration.setup_type === 'none') {
-      return (
-        <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-          <CheckCircle2 className="h-3 w-3 mr-1" />
-          Ready to Use
-        </Badge>
-      );
+      const tool = integration as any;
+      // Check if there are optional config fields
+      if (tool.config_fields && tool.config_fields.length > 0) {
+        // Check if any configuration has been saved
+        const hasConfig = integration.status === 'connected';
+
+        if (hasConfig) {
+          // Show edit/reset buttons for configured tools
+          return (
+            <div className="flex gap-2">
+              <Button
+                onClick={() => handleIntegrationAction(integration)}
+                disabled={loading}
+                variant="outline"
+                size="sm"
+              >
+                <Settings className="h-4 w-4 mr-1" />
+                Settings
+              </Button>
+              <Button
+                onClick={() => handleDisconnect(integration)}
+                disabled={loading}
+                variant="ghost"
+                size="sm"
+              >
+                Reset
+              </Button>
+            </div>
+          );
+        } else {
+          // Show optional configure button
+          return (
+            <div className="flex gap-2 items-center">
+              <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+                <CheckCircle2 className="h-3 w-3 mr-1" />
+                Ready
+              </Badge>
+              <Button
+                onClick={() => handleIntegrationAction(integration)}
+                disabled={loading}
+                variant="outline"
+                size="sm"
+              >
+                <Settings className="h-4 w-4 mr-1" />
+                Configure
+              </Button>
+            </div>
+          );
+        }
+      } else {
+        // No config fields, just show ready status
+        return (
+          <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+            <CheckCircle2 className="h-3 w-3 mr-1" />
+            Ready to Use
+          </Badge>
+        );
+      }
     }
 
     if (integration.status === 'connected') {
