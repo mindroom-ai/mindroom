@@ -29,7 +29,7 @@ class CredentialStatus(BaseModel):
 class SetCredentialsRequest(BaseModel):
     """Request to set multiple credentials for a service."""
 
-    credentials: dict[str, str]
+    credentials: dict[str, Any]  # Can be strings, booleans, numbers, etc.
 
 
 @router.get("/list")
