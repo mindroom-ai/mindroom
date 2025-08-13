@@ -13,6 +13,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogContent,
@@ -72,7 +73,7 @@ export function EnhancedConfigDialog({
   icon: Icon,
   iconColor,
 }: EnhancedConfigDialogProps) {
-  const [configValues, setConfigValues] = useState<Record<string, string>>({});
+  const [configValues, setConfigValues] = useState<Record<string, string | boolean>>({});
   const [loading, setLoading] = useState(false);
   const [loadingExisting, setLoadingExisting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -116,12 +117,24 @@ export function EnhancedConfigDialog({
           const data = await response.json();
           if (data.credentials) {
             // Merge existing credentials with defaults
-            const defaults: Record<string, string> = {};
+            const defaults: Record<string, string | boolean> = {};
             configFields.forEach(field => {
               if (data.credentials[field.name] !== undefined) {
-                defaults[field.name] = String(data.credentials[field.name]);
+                // Keep boolean values as boolean, convert others to string
+                if (field.type === 'boolean') {
+                  defaults[field.name] =
+                    data.credentials[field.name] === true ||
+                    data.credentials[field.name] === 'true';
+                } else {
+                  defaults[field.name] = String(data.credentials[field.name]);
+                }
               } else if (field.default !== undefined && field.default !== null) {
-                defaults[field.name] = String(field.default);
+                // Use default value with proper type
+                if (field.type === 'boolean') {
+                  defaults[field.name] = field.default === true || field.default === 'true';
+                } else {
+                  defaults[field.name] = String(field.default);
+                }
               }
             });
             setConfigValues(defaults);
@@ -135,10 +148,14 @@ export function EnhancedConfigDialog({
       }
 
       // If no existing credentials, just use defaults
-      const defaults: Record<string, string> = {};
+      const defaults: Record<string, string | boolean> = {};
       configFields.forEach(field => {
         if (field.default !== undefined && field.default !== null) {
-          defaults[field.name] = String(field.default);
+          if (field.type === 'boolean') {
+            defaults[field.name] = field.default === true || field.default === 'true';
+          } else {
+            defaults[field.name] = String(field.default);
+          }
         }
       });
       setConfigValues(defaults);
@@ -147,12 +164,17 @@ export function EnhancedConfigDialog({
     loadExistingCredentials();
   }, [configFields, service, open]);
 
-  const validateField = (field: ConfigField, value: string): string | null => {
+  const validateField = (field: ConfigField, value: string | boolean): string | null => {
+    // Boolean fields don't need validation
+    if (field.type === 'boolean') {
+      return null;
+    }
+
     if (field.required && !value) {
       return `${field.label} is required`;
     }
 
-    if (value && field.validation) {
+    if (value && field.validation && typeof value === 'string') {
       if (field.type === 'number') {
         const numValue = Number(value);
         if (isNaN(numValue)) {
@@ -170,10 +192,10 @@ export function EnhancedConfigDialog({
     return null;
   };
 
-  const handleFieldChange = (field: ConfigField, value: string) => {
+  const handleFieldChange = (field: ConfigField, value: string | boolean) => {
     setConfigValues({ ...configValues, [field.name]: value });
 
-    // Clear error when user starts typing
+    // Clear error when user starts typing or toggling
     if (fieldErrors[field.name]) {
       const newErrors = { ...fieldErrors };
       delete newErrors[field.name];
@@ -365,44 +387,57 @@ export function EnhancedConfigDialog({
                       )}
                     </div>
 
-                    <div className="relative">
-                      <Input
-                        id={field.name}
-                        type={
-                          isPasswordField && !showPassword[field.name]
-                            ? 'password'
-                            : field.type === 'number'
-                              ? 'number'
-                              : 'text'
-                        }
-                        placeholder={field.placeholder}
-                        value={configValues[field.name] || ''}
-                        onChange={e => handleFieldChange(field, e.target.value)}
-                        min={field.validation?.min}
-                        max={field.validation?.max}
-                        className={cn(
-                          'pr-10',
-                          hasError && 'border-destructive focus-visible:ring-destructive',
-                          isPasswordField && 'font-mono'
-                        )}
-                      />
-
-                      {isPasswordField && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
-                          onClick={() => togglePasswordVisibility(field.name)}
-                        >
-                          {showPassword[field.name] ? (
-                            <Lock className="h-4 w-4 text-muted-foreground" />
-                          ) : (
-                            <Lock className="h-4 w-4 text-muted-foreground" />
+                    {field.type === 'boolean' ? (
+                      <div className="flex items-center space-x-2">
+                        <Checkbox
+                          id={field.name}
+                          checked={configValues[field.name] === true}
+                          onCheckedChange={checked => handleFieldChange(field, checked === true)}
+                        />
+                        <Label htmlFor={field.name} className="text-sm font-normal cursor-pointer">
+                          {field.description || 'Enable this option'}
+                        </Label>
+                      </div>
+                    ) : (
+                      <div className="relative">
+                        <Input
+                          id={field.name}
+                          type={
+                            isPasswordField && !showPassword[field.name]
+                              ? 'password'
+                              : field.type === 'number'
+                                ? 'number'
+                                : 'text'
+                          }
+                          placeholder={field.placeholder}
+                          value={(configValues[field.name] as string) || ''}
+                          onChange={e => handleFieldChange(field, e.target.value)}
+                          min={field.validation?.min}
+                          max={field.validation?.max}
+                          className={cn(
+                            'pr-10',
+                            hasError && 'border-destructive focus-visible:ring-destructive',
+                            isPasswordField && 'font-mono'
                           )}
-                        </Button>
-                      )}
-                    </div>
+                        />
+
+                        {isPasswordField && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
+                            onClick={() => togglePasswordVisibility(field.name)}
+                          >
+                            {showPassword[field.name] ? (
+                              <Lock className="h-4 w-4 text-muted-foreground" />
+                            ) : (
+                              <Lock className="h-4 w-4 text-muted-foreground" />
+                            )}
+                          </Button>
+                        )}
+                      </div>
+                    )}
 
                     {hasError && (
                       <div className="flex items-center space-x-1 text-destructive">
