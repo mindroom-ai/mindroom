@@ -7,8 +7,18 @@ Generate ConfigField definitions for the [TOOL_NAME] tool from the agno library 
 
 ## Instructions
 
-1. Analyze the `agno.tools.[TOOL_MODULE].[TOOL_CLASS]` class (see `.venv/lib/python3.13/site-packages/agno/tools`)
-2. Determine tool metadata from agno docs structure:
+1. **Fetch the agno documentation**:
+   - First, fetch `https://docs.agno.com/llms.txt` to find the tool's documentation URL
+   - Look for the pattern: `- [ToolName](https://docs.agno.com/tools/toolkits/[category]/[tool_name].md)`
+   - Fetch the specific tool's documentation page to get parameter descriptions
+   - Use the documentation's parameter descriptions when available (they are more accurate and user-friendly)
+
+2. **Analyze the source code**:
+   - Examine `agno.tools.[TOOL_MODULE].[TOOL_CLASS]` class (see `.venv/lib/python3.13/site-packages/agno/tools`)
+   - Extract ALL parameters from the `__init__` method
+   - Use source code for complete parameter list and default values
+
+3. Determine tool metadata from agno docs structure:
    - **Category**: Infer from the agno docs URL path: `https://docs.agno.com/tools/toolkits/[CATEGORY]/[tool_name]`
      - `local/` → `ToolCategory.DEVELOPMENT`
      - `email/` → `ToolCategory.EMAIL`
@@ -25,8 +35,12 @@ Generate ConfigField definitions for the [TOOL_NAME] tool from the agno library 
      - OAuth-based tools → `SetupType.OAUTH`
      - No authentication needed → `SetupType.NONE`
      - Special setup (like Google tools) → `SetupType.SPECIAL`
-3. Extract ALL parameters from the `__init__` method (except `self` and `**kwargs`)
-4. For each parameter, create a ConfigField with:
+4. **Merge documentation with source code analysis**:
+   - Use parameter descriptions from the documentation when available
+   - Fall back to generating descriptions based on parameter names when not documented
+   - Always use the source code for the complete list of parameters
+
+5. For each parameter, create a ConfigField with:
    - `name`: Exact parameter name from agno
    - `label`: Human-readable label (title case with spaces)
    - `type`: Map Python types as follows:
@@ -40,7 +54,7 @@ Generate ConfigField definitions for the [TOOL_NAME] tool from the agno library 
    - `required`: Set to `False` for Optional parameters, `True` otherwise
    - `default`: Use the actual default value from agno
    - `placeholder`: Add helpful placeholder for user input (optional)
-   - `description`: Clear description of what the parameter does
+   - `description`: Use from documentation if available, otherwise create a clear description
 
 ## Available Tool Categories
 
@@ -57,15 +71,16 @@ Available `ToolCategory` values:
 - `INTEGRATIONS` - Integration services
 - `SMART_HOME` - Smart home and IoT tools
 
-## Category Mapping Examples
+## Category Mapping from Agno Docs
 
-Based on agno docs URLs:
-- `calculator` → `local/calculator` → `ToolCategory.DEVELOPMENT`
-- `gmail` → `email/gmail` → `ToolCategory.EMAIL`
-- `slack` → `communication/slack` → `ToolCategory.COMMUNICATION`
-- `arxiv` → `research/arxiv` → `ToolCategory.RESEARCH`
-- `github` → `others/github` → `ToolCategory.DEVELOPMENT`
-- `wikipedia` → `research/wikipedia` → `ToolCategory.RESEARCH`
+The correct category mapping based on actual agno documentation structure:
+- Tools under `/tools/toolkits/database/` → `ToolCategory.PRODUCTIVITY`
+- Tools under `/tools/toolkits/local/` → `ToolCategory.DEVELOPMENT`
+- Tools under `/tools/toolkits/models/` → `ToolCategory.DEVELOPMENT`
+- Tools under `/tools/toolkits/others/` → `ToolCategory.DEVELOPMENT`
+- Tools under `/tools/toolkits/search/` → `ToolCategory.RESEARCH`
+- Tools under `/tools/toolkits/social/` → `ToolCategory.COMMUNICATION` (for slack, discord, etc.) or `ToolCategory.EMAIL` (for email, gmail)
+- Tools under `/tools/toolkits/web_scrape/` → `ToolCategory.RESEARCH`
 
 ## Output Format
 
@@ -123,7 +138,7 @@ if TYPE_CHECKING:
         # Continue for ALL parameters...
     ],
     dependencies=["[pip-package-name]"],  # From agno requirements
-    docs_url="https://docs.agno.com/tools/toolkits/[category]/[tool_name]",
+    docs_url="https://docs.agno.com/tools/toolkits/[category]/[tool_name]",  # Use actual URL from llms.txt
 )
 def [tool_name]_tools() -> type[[ToolClass]]:
     """Return [tool description]."""
@@ -153,12 +168,14 @@ For a parameter like `enable_search: bool = True`:
 
 ## Important Notes
 
-1. **EVERY** parameter from the agno tool MUST have a corresponding ConfigField
-2. Parameter names must match EXACTLY (including underscores)
-3. Group related boolean flags together with comments
-4. Put authentication/connection parameters first
-5. Use the actual default values from agno, not made-up values
-6. The test `verify_tool_configfields("[tool_name]", [ToolClass])` must pass
+1. **ALWAYS** fetch and use the agno documentation for accurate parameter descriptions
+2. **EVERY** parameter from the agno tool MUST have a corresponding ConfigField
+3. Parameter names must match EXACTLY (including underscores)
+4. Group related boolean flags together with comments
+5. Put authentication/connection parameters first
+6. Use the actual default values from agno, not made-up values
+7. The test `verify_tool_configfields("[tool_name]", [ToolClass])` must pass
+8. Use the exact docs URL as found in `https://docs.agno.com/llms.txt`
 
 ## Verification
 
