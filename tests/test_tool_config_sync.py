@@ -7,9 +7,9 @@ import pytest
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
-from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_metadata
+from mindroom.tools_metadata import TOOL_REGISTRY, get_tool_metadata
 
-SKIP_CUSTOM = {"homeassistant", "imdb", "gmail", "postgress"}
+SKIP_CUSTOM = {"homeassistant", "imdb", "gmail"}
 
 
 @pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))
@@ -17,11 +17,11 @@ def test_all(tool_name: str) -> None:
     """Test that all tools have matching ConfigFields and agno parameters."""
     if tool_name in SKIP_CUSTOM:
         pytest.skip(f"{tool_name} is a custom tool, skipping test")
-    meta = TOOL_METADATA[tool_name]
-    if not meta.config_fields:
-        pytest.skip(f"{tool_name} has no ConfigFields defined, skipping test")
     tool_factory = TOOL_REGISTRY[tool_name]
-    tool_class = tool_factory()
+    try:
+        tool_class = tool_factory()
+    except NotImplementedError:
+        pytest.skip(f"{tool_name} tool is not implemented, skipping test")
     verify_tool_configfields(tool_name, tool_class)
 
 
