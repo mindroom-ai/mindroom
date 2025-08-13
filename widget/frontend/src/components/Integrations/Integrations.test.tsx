@@ -9,6 +9,7 @@ const mockTools = [
     display_name: 'Weather',
     description: 'Get weather information',
     icon: '🌤️',
+    icon_color: null,
     category: 'information',
     status: 'available',
     setup_type: 'api_key',
@@ -24,18 +25,21 @@ const mockTools = [
     ],
     helper_text: null,
     docs_url: null,
+    dependencies: null,
   },
   {
     name: 'news',
     display_name: 'News',
     description: 'Get latest news',
     icon: '📰',
+    icon_color: null,
     category: 'information',
     status: 'coming_soon',
     setup_type: 'coming_soon',
     config_fields: null,
     helper_text: null,
     docs_url: null,
+    dependencies: null,
   },
 ];
 
@@ -62,7 +66,7 @@ vi.mock('@/components/ui/use-toast', () => ({
 
 // Mock icon mapping
 vi.mock('./iconMapping', () => ({
-  getIconForTool: (icon: string) => <span>{icon}</span>,
+  getIconForTool: (icon: string | null, _iconColor?: string | null) => <span>{icon}</span>,
 }));
 
 // Mock API_BASE

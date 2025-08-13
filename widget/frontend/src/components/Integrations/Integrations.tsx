@@ -91,7 +91,7 @@ export function Integrations() {
           const mapped = mapToolToIntegration(tool);
           return {
             ...mapped,
-            icon: getIconForTool(tool.icon),
+            icon: getIconForTool(tool.icon, tool.icon_color),
             connected: false,
           } as Integration;
         });

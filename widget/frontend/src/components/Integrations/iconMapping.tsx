@@ -1,4 +1,94 @@
-import {
+import { createElement } from 'react';
+import * as LucideIcons from 'lucide-react';
+import * as FaIcons from 'react-icons/fa';
+import * as FaIcons6 from 'react-icons/fa6';
+import * as SiIcons from 'react-icons/si';
+import * as GiIcons from 'react-icons/gi';
+import * as VscIcons from 'react-icons/vsc';
+import type { LucideIcon } from 'lucide-react';
+import type { IconType } from 'react-icons';
+
+// Type for all icon libraries
+type IconLibrary = {
+  [key: string]: LucideIcon | IconType | any;
+};
+
+// Map of icon prefixes to their libraries
+const iconLibraries: Record<string, IconLibrary> = {
+  // No prefix = Lucide icons
+  '': LucideIcons,
+  // React Icons libraries
+  Fa: { ...FaIcons, ...FaIcons6 },
+  Si: SiIcons,
+  Gi: GiIcons,
+  Vsc: VscIcons,
+};
+
+/**
+ * Dynamically load an icon component based on its name
+ * Supports icons from lucide-react and react-icons libraries
+ */
+function loadIconComponent(iconName: string): any {
+  if (!iconName) return null;
+
+  // Check if it's a prefixed icon (e.g., FaGithub, SiNetflix)
+  const prefix = iconName.match(/^(Fa|Si|Gi|Vsc)/)?.[0] || '';
+  const library = iconLibraries[prefix] || iconLibraries[''];
+
+  // For react-icons, the full name is the key
+  if (prefix) {
+    return library[iconName];
+  }
+
+  // For Lucide icons, try exact match first
+  if (library[iconName]) {
+    return library[iconName];
+  }
+
+  // Try with 'Icon' suffix for Lucide (some exports include it)
+  const withSuffix = iconName + 'Icon';
+  if (library[withSuffix]) {
+    return library[withSuffix];
+  }
+
+  return null;
+}
+
+/**
+ * Get the appropriate icon for a tool with dynamic loading
+ * @param iconName - The icon name from backend (e.g., "FaGithub", "Calculator", "Globe")
+ * @param iconColor - The color class from backend (e.g., "text-blue-500")
+ * @returns React element of the icon or default Globe icon
+ */
+export function getIconForTool(
+  iconName: string | null,
+  iconColor?: string | null
+): React.ReactNode {
+  // Default icon
+  const defaultIcon = createElement(LucideIcons.Globe, {
+    className: `h-5 w-5 ${iconColor || ''}`.trim(),
+  });
+
+  if (!iconName) {
+    return defaultIcon;
+  }
+
+  // Try to load the icon component
+  const IconComponent = loadIconComponent(iconName);
+
+  if (!IconComponent) {
+    console.warn(`Icon "${iconName}" not found, using default`);
+    return defaultIcon;
+  }
+
+  // Create the icon element with the specified color
+  return createElement(IconComponent, {
+    className: `h-5 w-5 ${iconColor || ''}`.trim(),
+  });
+}
+
+// Export specific icons that might be needed elsewhere
+export const {
   Calculator,
   Folder,
   Terminal,
@@ -12,85 +102,6 @@ import {
   Database,
   Mail,
   Film,
-} from 'lucide-react';
-import {
-  FaGoogle,
-  FaTwitter,
-  FaReddit,
-  FaTelegram,
-  FaGithub,
-  FaDocker,
-  FaSlack,
-  FaYoutube,
-  FaAmazon,
-  FaApple,
-  FaDropbox,
-  FaEbay,
-  FaFacebook,
-  FaGitlab,
-  FaGoodreads,
-  FaInstagram,
-  FaLinkedin,
-  FaMicrosoft,
-  FaSpotify,
-  FaYahoo,
-} from 'react-icons/fa';
-import { SiHbo, SiNetflix, SiTarget, SiWalmart } from 'react-icons/si';
-
-// Map icon names from backend to React components with their brand colors
-export const iconMap: Record<string, React.ReactNode> = {
-  // Lucide icons with appropriate colors
-  Calculator: <Calculator className="h-5 w-5" />,
-  Folder: <Folder className="h-5 w-5" />,
-  Terminal: <Terminal className="h-5 w-5" />,
-  Code: <Code className="h-5 w-5 text-blue-500" />,
-  Book: <Book className="h-5 w-5 text-red-600" />, // arXiv
-  Globe: <Globe className="h-5 w-5" />, // Wikipedia and general web
-  Search: <Search className="h-5 w-5 text-orange-500" />, // DuckDuckGo
-  Newspaper: <Newspaper className="h-5 w-5" />,
-  TrendingUp: <TrendingUp className="h-5 w-5 text-green-600" />, // Yahoo Finance
-  FileText: <FileText className="h-5 w-5 text-blue-600" />, // CSV
-  Database: <Database className="h-5 w-5 text-purple-600" />, // Pandas
-  Mail: <Mail className="h-5 w-5" />, // Email SMTP
-  Film: <Film className="h-5 w-5 text-yellow-500" />, // IMDb
-
-  // Font Awesome icons with brand colors
-  FaGoogle: <FaGoogle className="h-5 w-5" />, // Google Search and Gmail
-  FaTwitter: <FaTwitter className="h-5 w-5 text-blue-400" />,
-  FaReddit: <FaReddit className="h-5 w-5 text-orange-600" />,
-  FaTelegram: <FaTelegram className="h-5 w-5 text-blue-500" />,
-  FaGithub: <FaGithub className="h-5 w-5" />,
-  FaDocker: <FaDocker className="h-5 w-5 text-blue-400" />,
-  FaSlack: <FaSlack className="h-5 w-5 text-purple-600" />,
-  FaYoutube: <FaYoutube className="h-5 w-5 text-red-600" />,
-  FaAmazon: <FaAmazon className="h-5 w-5 text-orange-500" />,
-  FaApple: <FaApple className="h-5 w-5 text-gray-800" />,
-  FaDropbox: <FaDropbox className="h-5 w-5 text-blue-600" />,
-  FaEbay: <FaEbay className="h-5 w-5 text-blue-500" />,
-  FaFacebook: <FaFacebook className="h-5 w-5 text-blue-600" />,
-  FaGitlab: <FaGitlab className="h-5 w-5 text-orange-600" />,
-  FaGoodreads: <FaGoodreads className="h-5 w-5 text-amber-700" />,
-  FaInstagram: <FaInstagram className="h-5 w-5 text-pink-600" />,
-  FaLinkedin: <FaLinkedin className="h-5 w-5 text-blue-700" />,
-  FaMicrosoft: <FaMicrosoft className="h-5 w-5 text-blue-600" />,
-  FaSpotify: <FaSpotify className="h-5 w-5 text-green-500" />,
-  FaYahoo: <FaYahoo className="h-5 w-5 text-purple-600" />,
-
-  // Simple Icons with brand colors
-  SiHbo: <SiHbo className="h-5 w-5 text-purple-600" />,
-  SiNetflix: <SiNetflix className="h-5 w-5 text-red-600" />,
-  SiTarget: <SiTarget className="h-5 w-5 text-red-600" />,
-  SiWalmart: <SiWalmart className="h-5 w-5 text-blue-500" />,
-
-  // Additional mappings for tools that might use different icon names
-  'Search-indigo': <Search className="h-5 w-5 text-indigo-600" />, // Tavily
-  'FileText-purple': <FileText className="h-5 w-5 text-purple-500" />, // Jina
-  'Globe-blue': <Globe className="h-5 w-5 text-blue-600" />, // Website reader
-};
-
-export function getIconForTool(iconName: string | null): React.ReactNode {
-  if (!iconName) {
-    return <Globe className="h-5 w-5" />; // Default icon
-  }
-  return iconMap[iconName] || <Globe className="h-5 w-5" />;
-}
+  VolumeX,
+  Volume2,
+} = LucideIcons;
