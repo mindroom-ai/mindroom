@@ -1,9 +1,9 @@
 # Prompt for Generating Tool ConfigField Definitions
 
 ## Task
-Generate ConfigField definitions for the [TOOL_NAME] tool from the agno library and create a SEPARATE module file. This is part of migrating tools from the monolithic `__init__.py` file into individual, dedicated modules.
+Generate ConfigField definitions for the [TOOL_NAME] tool from the agno library and create a SEPARATE module file.
 
-**CRITICAL**: Create a NEW file at `src/mindroom/tools/[tool_name].py` - DO NOT modify `__init__.py`
+**CRITICAL**: Create a NEW file at `src/mindroom/tools/[tool_name].py`.
 
 ## Instructions
 
