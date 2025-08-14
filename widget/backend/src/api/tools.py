@@ -40,6 +40,15 @@ def _check_google_tools_configured(tool_name: str, manager: CredentialsManager) 
             "https://www.googleapis.com/auth/spreadsheets.readonly",
         ]
         return any(scope in scopes for scope in required_scopes)
+    if tool_name == "gmail":
+        # Check for Gmail scopes
+        required_scopes = [
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.compose",
+            "https://www.googleapis.com/auth/gmail.send",
+        ]
+        return any(scope in scopes for scope in required_scopes)
 
     return False
 

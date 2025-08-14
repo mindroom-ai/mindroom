@@ -255,9 +255,11 @@ export function AgentEditor() {
                             tool.setup_type !== 'none' &&
                             tool.config_fields &&
                             tool.config_fields.length > 0;
-                          const isGoogleServiceTool = ['google_calendar', 'google_sheets'].includes(
-                            tool.name
-                          );
+                          const isGoogleServiceTool = [
+                            'google_calendar',
+                            'google_sheets',
+                            'gmail',
+                          ].includes(tool.name);
 
                           return (
                             <div className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
