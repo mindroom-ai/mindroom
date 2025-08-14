@@ -86,19 +86,23 @@ export function Integrations() {
       // (excluding those already handled by providers)
       const providerIds = Object.keys(integrationProviders);
 
-      // Also exclude Google tools that are managed through Google Services
+      // Google tools that are managed through Google Services
       const googleServicesManagedTools = ['google_calendar', 'google_sheets'];
 
       const backendIntegrations = backendTools
         .filter(tool => !providerIds.includes(tool.name))
-        .filter(tool => !googleServicesManagedTools.includes(tool.name)) // Exclude Google-managed tools
         .map(tool => {
           const mapped = mapToolToIntegration(tool);
+          // Mark Google-managed tools specially
+          const isGoogleManaged = googleServicesManagedTools.includes(tool.name);
           return {
             ...mapped,
             icon: getIconForTool(tool.icon, tool.icon_color),
             connected: false,
-          } as Integration;
+            isGoogleManaged, // Add flag for special handling
+            // Google-managed tools show as connected if their status is 'available'
+            status: isGoogleManaged && tool.status === 'available' ? 'connected' : mapped.status,
+          } as Integration & { isGoogleManaged?: boolean };
         });
 
       setIntegrations([...loadedIntegrations, ...backendIntegrations]);
@@ -383,7 +387,11 @@ export function Integrations() {
     );
   };
 
-  const IntegrationCard = ({ integration }: { integration: Integration }) => (
+  const IntegrationCard = ({
+    integration,
+  }: {
+    integration: Integration & { isGoogleManaged?: boolean };
+  }) => (
     <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
       <CardHeader>
         <div className="flex items-center justify-between">
@@ -401,6 +409,11 @@ export function Integrations() {
               <Star className="h-3 w-3 mr-1" />
               Coming Soon
             </Badge>
+          ) : integration.isGoogleManaged ? (
+            <Badge className="bg-blue-500/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 backdrop-blur-md border-blue-500/20">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              Via Google Services
+            </Badge>
           ) : (
             <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 backdrop-blur-md border-amber-500/20">
               <Circle className="h-3 w-3 mr-1" />
@@ -408,13 +421,20 @@ export function Integrations() {
             </Badge>
           )}
         </div>
-        <CardDescription>{integration.description}</CardDescription>
+        <CardDescription>
+          {integration.description}
+          {integration.isGoogleManaged && (
+            <span className="block mt-1 text-xs text-muted-foreground">
+              Managed by Google Services
+            </span>
+          )}
+        </CardDescription>
       </CardHeader>
 
       <CardContent>
         <div className="space-y-3">
           <div className="flex gap-2">
-            {getActionButton(integration)}
+            {!integration.isGoogleManaged && getActionButton(integration)}
             {integration.id === 'google' && (
               <Button
                 variant="outline"
