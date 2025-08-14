@@ -13,7 +13,7 @@ from mindroom.tools_metadata import (
 )
 
 if TYPE_CHECKING:
-    from agno.tools.googlesheets import GoogleSheetsTools
+    from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 
 
 @register_tool_with_metadata(
@@ -81,6 +81,6 @@ if TYPE_CHECKING:
 )
 def google_sheets_tools() -> type[GoogleSheetsTools]:
     """Return Google Sheets tools for spreadsheet integration."""
-    from agno.tools.googlesheets import GoogleSheetsTools
+    from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 
     return GoogleSheetsTools

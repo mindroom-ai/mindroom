@@ -13,7 +13,7 @@ from mindroom.tools_metadata import (
 )
 
 if TYPE_CHECKING:
-    from agno.tools.googlecalendar import GoogleCalendarTools
+    from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 
 
 @register_tool_with_metadata(
@@ -50,6 +50,6 @@ if TYPE_CHECKING:
 )
 def google_calendar_tools() -> type[GoogleCalendarTools]:
     """Return Google Calendar tools for calendar management."""
-    from agno.tools.googlecalendar import GoogleCalendarTools
+    from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 
     return GoogleCalendarTools
