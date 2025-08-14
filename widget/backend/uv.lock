@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -3021,6 +3021,7 @@ dependencies = [
     { name = "arxiv" },
     { name = "atlassian-python-api" },
     { name = "baidusearch" },
+    { name = "beautifulsoup4" },
     { name = "boto3" },
     { name = "browserbase" },
     { name = "cartesia" },
@@ -3089,6 +3090,7 @@ dependencies = [
     { name = "slack-sdk" },
     { name = "spider-client" },
     { name = "spotipy" },
+    { name = "sqlalchemy" },
     { name = "streamlit" },
     { name = "structlog" },
     { name = "tavily-python" },
@@ -3115,6 +3117,7 @@ requires-dist = [
     { name = "arxiv" },
     { name = "atlassian-python-api" },
     { name = "baidusearch" },
+    { name = "beautifulsoup4" },
     { name = "boto3", specifier = ">=1.40.8" },
     { name = "browserbase" },
     { name = "cartesia" },
@@ -3183,6 +3186,7 @@ requires-dist = [
     { name = "slack-sdk" },
     { name = "spider-client" },
     { name = "spotipy", specifier = ">=2.25.1" },
+    { name = "sqlalchemy" },
     { name = "streamlit" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "tavily-python" },
@@ -3234,7 +3238,10 @@ dependencies = [
     { name = "google-auth-oauthlib" },
     { name = "httpx" },
     { name = "imdbpy" },
+    { name = "lxml-html-clean" },
     { name = "mindroom" },
+    { name = "newspaper3k" },
+    { name = "newspaper4k" },
     { name = "praw" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -3267,7 +3274,10 @@ requires-dist = [
     { name = "google-auth-oauthlib", specifier = ">=1.2.2" },
     { name = "httpx", specifier = ">=0.26" },
     { name = "imdbpy", specifier = ">=2022.7.9" },
+    { name = "lxml-html-clean", specifier = ">=0.4.2" },
     { name = "mindroom", editable = "../../" },
+    { name = "newspaper3k", specifier = ">=0.2.8" },
+    { name = "newspaper4k", specifier = ">=0.9.3.1" },
     { name = "praw", specifier = ">=7.8.1" },
     { name = "pydantic", specifier = ">=2.5.3" },
     { name = "pydantic-settings", specifier = ">=2.1" },
