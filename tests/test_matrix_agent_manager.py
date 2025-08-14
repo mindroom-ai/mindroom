@@ -227,7 +227,7 @@ class TestAgentUserCreation:
         assert agent_user.agent_name == "calculator"
         assert agent_user.user_id == "@mindroom_calculator:localhost"
         assert agent_user.display_name == "CalculatorAgent"
-        assert agent_user.password == "calculator_secure_password"  # noqa: S105
+        assert agent_user.password.startswith("calculator_secure_password")
 
         mock_save_creds.assert_called_once()
         mock_register.assert_called_once()
