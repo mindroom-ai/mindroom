@@ -24,7 +24,6 @@ dependencies = [
   "atlassian-python-api",                                                                              # for Confluence tool
   "baidusearch",                                                                                       # for BaiduSearch tool
   "boto3>=1.40.8",                                                                                     # for AWS Lambda and AWS SES tools
-  "brave-search",                                                                                      # for BraveSearch tool
   "browserbase",                                                                                       # for Browserbase tool
   "cartesia",                                                                                          # for Cartesia tool
   "chromadb>=1.0.15",
