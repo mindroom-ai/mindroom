@@ -74,7 +74,7 @@ class TestMemoryFunctions:
 
             # Check messages format
             messages = call_args[0][0]
-            assert messages == [{"role": "assistant", "content": "Test memory content"}]
+            assert messages == [{"role": "user", "content": "Test memory content"}]
 
             # Check user_id and metadata
             assert call_args[1]["user_id"] == "agent_test_agent"

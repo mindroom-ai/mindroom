@@ -53,7 +53,7 @@ async def add_agent_memory(
         metadata = {}
     metadata["agent"] = agent_name
 
-    messages = [{"role": "assistant", "content": content}]
+    messages = [{"role": "user", "content": content}]
 
     # Use agent_name as user_id to namespace memories per agent
     try:
@@ -119,7 +119,7 @@ async def add_room_memory(
     if agent_name:
         metadata["contributed_by"] = agent_name
 
-    messages = [{"role": "assistant", "content": content}]
+    messages = [{"role": "user", "content": content}]
 
     safe_room_id = room_id.replace(":", "_").replace("!", "")
     await memory.add(messages, user_id=f"room_{safe_room_id}", metadata=metadata)
