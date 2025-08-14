@@ -2,11 +2,12 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import CredentialsManager, get_credentials_manager
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 
@@ -15,6 +16,36 @@ class ToolsResponse(BaseModel):
     """Response containing all registered tools."""
 
     tools: list[dict]
+
+
+def _check_google_tools_configured(tool_name: str, manager: CredentialsManager) -> bool:
+    """Check if Google tools are configured."""
+    if tool_name in ["google_calendar", "google_sheets"]:
+        google_creds = manager.load_credentials("google")
+        return bool(google_creds and "token" in google_creds)
+    return False
+
+
+def _check_homeassistant_configured(tool_name: str, manager: CredentialsManager) -> bool:
+    """Check if HomeAssistant is configured."""
+    if tool_name == "homeassistant":
+        ha_creds = manager.load_credentials("homeassistant")
+        return bool(ha_creds and "instance_url" in ha_creds and "long_lived_token" in ha_creds)
+    return False
+
+
+def _check_standard_tool_configured(tool: dict[str, Any], manager: CredentialsManager) -> bool:
+    """Check if a standard tool with config_fields is configured."""
+    if not tool.get("config_fields"):
+        return False
+
+    credentials = manager.load_credentials(tool["name"])
+    if not credentials:
+        return False
+
+    # Check if all required fields are present
+    required_fields = [field["name"] for field in tool.get("config_fields", []) if field.get("required", True)]
+    return all(field in credentials for field in required_fields)
 
 
 @router.get("")
@@ -43,16 +74,11 @@ async def get_registered_tools() -> ToolsResponse:
 
     # Update status for tools that require configuration
     for tool in tools:
-        if tool.get("status") == "requires_config" and tool.get("config_fields"):
-            # Check if all required fields have credentials
-            credentials = manager.load_credentials(tool["name"])
-            if credentials:
-                # Check if all required fields are present
-                required_fields = [
-                    field["name"] for field in tool.get("config_fields", []) if field.get("required", True)
-                ]
-                if all(field in credentials for field in required_fields):
-                    # Tool is configured!
-                    tool["status"] = "available"
+        if tool.get("status") == "requires_config" and (
+            _check_google_tools_configured(tool["name"], manager)
+            or _check_homeassistant_configured(tool["name"], manager)
+            or _check_standard_tool_configured(tool, manager)
+        ):
+            tool["status"] = "available"
 
     return ToolsResponse(tools=tools)
