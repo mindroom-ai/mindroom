@@ -326,6 +326,39 @@ export function Integrations() {
     }
 
     if (integration.status === 'connected') {
+      // For Google-managed tools, show Configure button if they have config fields
+      if (isGoogleManagedTool(integration.id)) {
+        const tool = integration as any;
+        if (tool.config_fields && tool.config_fields.length > 0) {
+          return (
+            <div className="flex gap-2 items-center">
+              <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+                <CheckCircle2 className="h-3 w-3 mr-1" />
+                Via Google Services
+              </Badge>
+              <Button
+                onClick={() => handleIntegrationAction(integration)}
+                disabled={loading}
+                variant="outline"
+                size="sm"
+              >
+                <Settings className="h-4 w-4 mr-1" />
+                Configure
+              </Button>
+            </div>
+          );
+        } else {
+          // Google tool with no additional config
+          return (
+            <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              Via Google Services
+            </Badge>
+          );
+        }
+      }
+
+      // For other connected tools, show Edit/Disconnect
       return (
         <div className="flex gap-2">
           <Button

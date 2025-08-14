@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from loguru import logger
-
 from mindroom.tools_metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 from .agentql import agentql_tools
@@ -46,6 +44,7 @@ from .firecrawl import firecrawl_tools
 from .gemini import gemini_tools
 from .giphy import giphy_tools
 from .github import github_tools
+from .gmail import gmail_tools
 from .google_calendar import google_calendar_tools
 from .google_maps import google_maps_tools
 from .google_sheets import google_sheets_tools
@@ -100,8 +99,6 @@ from .zoom import zoom_tools
 if TYPE_CHECKING:
     from agno.tools import Toolkit
 
-    from mindroom.custom_tools.gmail import GmailTools
-
 
 __all__ = [
     "agentql_tools",
@@ -138,6 +135,7 @@ __all__ = [
     "gemini_tools",
     "giphy_tools",
     "github_tools",
+    "gmail_tools",
     "google_calendar_tools",
     "google_maps_tools",
     "google_sheets_tools",
@@ -226,61 +224,6 @@ def homeassistant_tools() -> type[Toolkit]:
     from mindroom.custom_tools.homeassistant import HomeAssistantTools
 
     return HomeAssistantTools
-
-
-# Email Category
-@register_tool_with_metadata(
-    name="gmail",
-    display_name="Gmail",
-    description="Read, search, and manage Gmail emails",
-    category=ToolCategory.EMAIL,
-    status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.OAUTH,
-    icon="FaGoogle",
-    icon_color="text-red-500",
-    config_fields=[
-        ConfigField(
-            name="GOOGLE_CLIENT_ID",
-            label="Client ID",
-            type="text",
-            required=True,
-            placeholder="123456789.apps.googleusercontent.com",
-            description="Google OAuth client ID",
-        ),
-        ConfigField(
-            name="GOOGLE_CLIENT_SECRET",
-            label="Client Secret",
-            type="password",
-            required=True,
-            placeholder="GOCSPX-...",
-            description="Google OAuth client secret",
-        ),
-        ConfigField(
-            name="GOOGLE_PROJECT_ID",
-            label="Project ID",
-            type="text",
-            required=True,
-            placeholder="my-project-123456",
-            description="Google Cloud project ID",
-        ),
-        ConfigField(
-            name="GOOGLE_REDIRECT_URI",
-            label="Redirect URI",
-            type="url",
-            required=True,
-            placeholder="http://localhost:8080/callback",
-            description="OAuth redirect URI",
-        ),
-    ],
-    dependencies=["google-api-python-client", "google-auth", "google-auth-oauthlib", "google-auth-httplib2"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/gmail",
-)
-def gmail_tools() -> type[GmailTools]:
-    """Gmail tools using MindRoom's Gmail wrapper."""
-    from mindroom.custom_tools.gmail import GmailTools
-
-    logger.info("Using MindRoom's Gmail wrapper with unified credentials")
-    return GmailTools
 
 
 # Coming Soon Tools - These are planned integrations that are not yet implemented
