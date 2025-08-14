@@ -41,6 +41,10 @@ def test_all_tools_can_be_imported() -> None:
                 else:
                     config_msg = "Requires configuration"
                 print(f"⚠ {tool_name}: {config_msg}")
+            elif "not installed" in str(e):
+                # Handle missing optional dependencies
+                print(f"⚠ {tool_name}: Optional dependency missing - {e}")
+                # Don't count as failure - these are optional tools
             else:
                 failed.append((tool_name, str(e)))
                 print(f"✗ {tool_name}: {e}")

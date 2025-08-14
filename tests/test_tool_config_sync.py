@@ -22,6 +22,10 @@ def test_all(tool_name: str) -> None:
         tool_class = tool_factory()
     except NotImplementedError:
         pytest.skip(f"{tool_name} tool is not implemented, skipping test")
+    except (ImportError, ModuleNotFoundError) as e:
+        if "not installed" in str(e):
+            pytest.skip(f"{tool_name} has missing optional dependencies: {e}")
+        raise
     verify_tool_configfields(tool_name, tool_class)
 
 
