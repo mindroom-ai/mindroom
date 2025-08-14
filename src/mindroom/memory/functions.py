@@ -220,53 +220,32 @@ async def build_memory_enhanced_prompt(
     return enhanced_prompt
 
 
-def _convert_thread_history_to_mem0_format(
+def _build_conversation_context(
     thread_history: list[dict],
     current_prompt: str,
-) -> list[dict[str, str]]:
-    """Convert Matrix thread history to mem0 message format.
+) -> str:
+    """Build conversation context from thread history.
 
     Args:
         thread_history: List of messages with sender and body
         current_prompt: The current user prompt being processed
 
     Returns:
-        List of messages in mem0 format with role and content
-
+        Full conversation context as a single string
     """
-    messages = []
-
-    # Known agent patterns - agents have specific naming patterns in Matrix
-    # Agents are usually @agentname_... or have specific suffixes
-    agent_patterns = [
-        "_agent:",  # Common agent suffix pattern
-        "_bot:",  # Bot suffix pattern
-        "router",  # Router agent
-        ".agent.",  # Agent domain pattern
-    ]
-
+    # Collect all messages from the thread
+    context_parts = []
+    
     for msg in thread_history:
-        sender = msg.get("sender", "").lower()
-        body = msg.get("body", "")
-
-        if not body:
-            continue
-
-        # Determine if this is a user or assistant message
-        # Check if sender matches any known agent patterns
-        is_agent = any(pattern in sender for pattern in agent_patterns)
-
-        # Also check for @ mentions which indicate router suggestions
-        if not is_agent and body.startswith("@") and "could help" in body:
-            is_agent = True
-
-        role = "assistant" if is_agent else "user"
-        messages.append({"role": role, "content": body})
-
-    # Add the current prompt as the final user message
-    messages.append({"role": "user", "content": current_prompt})
-
-    return messages
+        body = msg.get("body", "").strip()
+        if body:
+            context_parts.append(body)
+    
+    # Add the current prompt
+    context_parts.append(current_prompt)
+    
+    # Join with clear separation
+    return "\n\n".join(context_parts)
 
 
 async def store_conversation_memory(
@@ -297,38 +276,31 @@ async def store_conversation_memory(
     if not prompt:
         return
 
-    # Build messages in mem0 format
+    # Build the full conversation context
     if thread_history:
-        messages = _convert_thread_history_to_mem0_format(
-            thread_history,
-            prompt,
-        )
+        # Include thread history for better context
+        full_context = _build_conversation_context(thread_history, prompt)
     else:
-        # No history, just the current prompt
-        messages = [{"role": "user", "content": prompt}]
+        # Just the current prompt
+        full_context = prompt
 
     # Let mem0 intelligently extract facts from the conversation
-    memory = await create_memory_instance(storage_path, config)
-
-    # Store for agent
-    await memory.add(
-        messages,
-        user_id=f"agent_{agent_name}",
+    # We pass it as a single user message and let mem0 decide what's important
+    await add_agent_memory(
+        full_context,
+        agent_name,
+        storage_path,
+        config,
         metadata={"type": "conversation", "session_id": session_id},
     )
-    logger.info("Memory added", agent=agent_name)
 
     if room_id:
-        # Store for room
-        safe_room_id = room_id.replace(":", "_").replace("!", "")
-        await memory.add(
-            messages,
-            user_id=f"room_{safe_room_id}",
-            metadata={
-                "type": "conversation",
-                "session_id": session_id,
-                "room_id": room_id,
-                "contributed_by": agent_name,
-            },
+        # Also store for room context
+        await add_room_memory(
+            full_context,
+            room_id,
+            storage_path,
+            config,
+            agent_name=agent_name,
+            metadata={"type": "conversation", "session_id": session_id},
         )
-        logger.debug("Room memory added", room_id=room_id)
