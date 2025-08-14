@@ -20,15 +20,6 @@ class ToolsResponse(BaseModel):
     tools: list[dict]
 
 
-def _check_google_tools_configured(tool_name: str, manager: CredentialsManager) -> bool:
-    """Check if Google tools are configured with the right scopes."""
-    if not is_google_managed_tool(tool_name):
-        return False
-
-    google_creds = manager.load_credentials("google")
-    return check_google_tool_configured(tool_name, google_creds)
-
-
 def _check_homeassistant_configured(tool_name: str, manager: CredentialsManager) -> bool:
     """Check if HomeAssistant is configured."""
     if tool_name == "homeassistant":
@@ -77,11 +68,15 @@ async def get_registered_tools() -> ToolsResponse:
 
     # Update status for tools that require configuration
     for tool in tools:
-        if tool.get("status") == "requires_config" and (
-            _check_google_tools_configured(tool["name"], manager)
-            or _check_homeassistant_configured(tool["name"], manager)
-            or _check_standard_tool_configured(tool, manager)
-        ):
-            tool["status"] = "available"
+        tool_name = tool["name"]
+        if tool.get("status") == "requires_config":
+            # Check Google tools
+            if is_google_managed_tool(tool_name):
+                google_creds = manager.load_credentials("google")
+                if check_google_tool_configured(tool_name, google_creds):
+                    tool["status"] = "available"
+            # Check other configured tools
+            elif _check_homeassistant_configured(tool_name, manager) or _check_standard_tool_configured(tool, manager):
+                tool["status"] = "available"
 
     return ToolsResponse(tools=tools)

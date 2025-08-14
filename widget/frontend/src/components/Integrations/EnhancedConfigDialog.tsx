@@ -103,25 +103,26 @@ export function EnhancedConfigDialog({
     });
   };
 
+  // Authentication fields to filter out for Google-managed tools
+  const GOOGLE_AUTH_FIELDS = [
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_PROJECT_ID',
+    'GOOGLE_REDIRECT_URI',
+    'scopes',
+    'credentials_path',
+    'token_path',
+    'access_token',
+    'creds',
+    'creds_path',
+    'oauth_port',
+    'port',
+  ];
+
   // Filter out authentication fields for Google-managed tools
   const filteredFields = useMemo(() => {
     if (isGoogleManagedTool(service)) {
-      // For Google tools, filter out OAuth authentication fields
-      const authFields = [
-        'GOOGLE_CLIENT_ID',
-        'GOOGLE_CLIENT_SECRET',
-        'GOOGLE_PROJECT_ID',
-        'GOOGLE_REDIRECT_URI',
-        'scopes',
-        'credentials_path',
-        'token_path',
-        'access_token',
-        'creds',
-        'creds_path',
-        'oauth_port',
-        'port',
-      ];
-      return configFields.filter(field => !authFields.includes(field.name));
+      return configFields.filter(field => !GOOGLE_AUTH_FIELDS.includes(field.name));
     }
     return configFields;
   }, [configFields, service]);
@@ -136,21 +137,7 @@ export function EnhancedConfigDialog({
       // Filter fields locally inside the effect to avoid dependency issues
       let fieldsToUse = configFields;
       if (isGoogleManagedTool(service)) {
-        const authFields = [
-          'GOOGLE_CLIENT_ID',
-          'GOOGLE_CLIENT_SECRET',
-          'GOOGLE_PROJECT_ID',
-          'GOOGLE_REDIRECT_URI',
-          'scopes',
-          'credentials_path',
-          'token_path',
-          'access_token',
-          'creds',
-          'creds_path',
-          'oauth_port',
-          'port',
-        ];
-        fieldsToUse = configFields.filter(field => !authFields.includes(field.name));
+        fieldsToUse = configFields.filter(field => !GOOGLE_AUTH_FIELDS.includes(field.name));
       }
 
       try {

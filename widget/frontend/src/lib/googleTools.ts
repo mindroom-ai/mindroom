@@ -14,10 +14,3 @@ const GOOGLE_MANAGED_TOOLS = ['google_calendar', 'google_sheets', 'gmail'];
 export function isGoogleManagedTool(toolName: string): boolean {
   return GOOGLE_MANAGED_TOOLS.includes(toolName);
 }
-
-/**
- * Get the list of all Google-managed tools.
- */
-export function getGoogleManagedTools(): string[] {
-  return [...GOOGLE_MANAGED_TOOLS];
-}
