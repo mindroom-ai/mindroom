@@ -2518,129 +2518,7 @@
     },
     {
       "category": "development",
-      "config_fields": [
-        {
-          "default": null,
-          "description": "Custom OAuth scopes. If None, determined by operations (read-only or read-write)",
-          "label": "OAuth Scopes",
-          "name": "scopes",
-          "options": null,
-          "placeholder": "https://www.googleapis.com/auth/spreadsheets",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Pre-existing Google OAuth credentials object",
-          "label": "Pre-existing Credentials",
-          "name": "creds",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Path to credentials JSON file from Google Cloud Console",
-          "label": "Credentials File Path",
-          "name": "creds_path",
-          "options": null,
-          "placeholder": "credentials.json",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Path to store OAuth token file for future authentication",
-          "label": "Token File Path",
-          "name": "token_path",
-          "options": null,
-          "placeholder": "token.json",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "default": 0,
-          "description": "Port to use for OAuth authentication callback (0 for auto-select)",
-          "label": "OAuth Port",
-          "name": "oauth_port",
-          "options": null,
-          "placeholder": "8080",
-          "required": false,
-          "type": "number",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "ID of the target spreadsheet (from the Google Sheets URL)",
-          "label": "Spreadsheet ID",
-          "name": "spreadsheet_id",
-          "options": null,
-          "placeholder": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Range within the spreadsheet (e.g., 'Sheet1!A1:E10')",
-          "label": "Spreadsheet Range",
-          "name": "spreadsheet_range",
-          "options": null,
-          "placeholder": "Sheet1!A1:E10",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": true,
-          "description": "Enable reading values from Google Sheets",
-          "label": "Enable Read Operations",
-          "name": "read",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable creating new Google Sheets",
-          "label": "Enable Create Operations",
-          "name": "create",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable updating data in Google Sheets",
-          "label": "Enable Update Operations",
-          "name": "update",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable duplicating existing Google Sheets",
-          "label": "Enable Duplicate Operations",
-          "name": "duplicate",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
+      "config_fields": null,
       "dependencies": [
         "google-api-python-client",
         "google-auth-httplib2",
@@ -2653,7 +2531,7 @@
       "icon": "FaGoogle",
       "icon_color": "text-green-600",
       "name": "google_sheets",
-      "setup_type": "oauth",
+      "setup_type": "special",
       "status": "requires_config"
     },
     {
@@ -4543,85 +4421,7 @@
     },
     {
       "category": "productivity",
-      "config_fields": [
-        {
-          "default": null,
-          "description": "Path to the OAuth 2.0 credentials JSON file from Google Cloud Console",
-          "label": "Credentials Path",
-          "name": "credentials_path",
-          "options": null,
-          "placeholder": "/path/to/credentials.json",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": "token.json",
-          "description": "Path where the user's access and refresh tokens will be stored",
-          "label": "Token Path",
-          "name": "token_path",
-          "options": null,
-          "placeholder": "token.json",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "OAuth access token (can also be set via environment variables)",
-          "label": "Access Token",
-          "name": "access_token",
-          "options": null,
-          "placeholder": "ya29.a0...",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "default": "primary",
-          "description": "ID of the calendar to use (default is the user's primary calendar)",
-          "label": "Calendar ID",
-          "name": "calendar_id",
-          "options": null,
-          "placeholder": "primary",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": 8080,
-          "description": "Port to use for OAuth callback during authentication flow",
-          "label": "OAuth Port",
-          "name": "oauth_port",
-          "options": null,
-          "placeholder": "8080",
-          "required": false,
-          "type": "number",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "List of OAuth scopes for calendar access (leave empty for defaults)",
-          "label": "Scopes",
-          "name": "scopes",
-          "options": null,
-          "placeholder": "https://www.googleapis.com/auth/calendar",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": false,
-          "description": "Enable creating, updating, and deleting calendar events (requires write scope)",
-          "label": "Allow Updates",
-          "name": "allow_update",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
+      "config_fields": null,
       "dependencies": [
         "google-api-python-client",
         "google-auth",
