@@ -15,7 +15,7 @@ import nio
 from . import interactive
 from .agents import create_agent, get_rooms_for_entity
 from .ai import ai_response, ai_response_streaming
-from .background_tasks import wait_for_background_tasks
+from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import (
     Command,
     CommandType,
@@ -50,6 +50,7 @@ from .matrix.mentions import create_mention_content_from_text
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
+from .memory import store_conversation_memory
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
@@ -1064,6 +1065,23 @@ class TeamBot(AgentBot):
             thread_history=thread_history,
             model_name=model_name,
         )
+
+        # Store memory for each team member
+        session_id = create_session_id(room_id, thread_id)
+        for agent_name in self.team_agents:
+            # Store the user's prompt as memory for each team member
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    agent_name,
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    room_id,
+                ),
+                name=f"memory_save_{agent_name}_{session_id}",
+            )
+            self.logger.info(f"Storing memory for team member: {agent_name}")
 
         # Send the response (reuse parent's method for consistency)
         assert self.client is not None
