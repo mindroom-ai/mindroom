@@ -93,18 +93,6 @@ export function Integrations() {
           const mapped = mapToolToIntegration(tool);
           // Mark Google-managed tools specially
           const isGoogleManaged = isGoogleManagedTool(tool.name);
-
-          // Debug logging for Google tools mapping
-          if (isGoogleManaged) {
-            console.log(`[DEBUG] Mapping Google tool ${tool.name}:`, {
-              originalStatus: tool.status,
-              mappedStatus: mapped.status,
-              setupType: tool.setup_type,
-              configFields: tool.config_fields?.length || 0,
-              firstConfigField: tool.config_fields?.[0]?.name || 'none',
-            });
-          }
-
           return {
             ...mapped,
             icon: getIconForTool(tool.icon, tool.icon_color),
@@ -278,15 +266,6 @@ export function Integrations() {
     // Special handling for Google-managed tools FIRST (regardless of status)
     if (isGoogleManagedTool(integration.id)) {
       const tool = integration as any;
-
-      // Debug logging to understand the issue
-      console.log(`[DEBUG] Google tool ${integration.id}:`, {
-        status: integration.status,
-        setup_type: integration.setup_type,
-        hasConfigFields: !!tool.config_fields,
-        configFieldsCount: tool.config_fields?.length || 0,
-        firstField: tool.config_fields?.[0]?.name || 'none',
-      });
 
       // If Google Services is connected (tool status is 'connected' or 'available')
       if (integration.status === 'connected' || integration.status === 'available') {
@@ -505,7 +484,7 @@ export function Integrations() {
       <CardContent>
         <div className="space-y-3">
           <div className="flex gap-2">
-            {!integration.isGoogleManaged && getActionButton(integration)}
+            {getActionButton(integration)}
             {integration.id === 'google' && (
               <Button
                 variant="outline"
