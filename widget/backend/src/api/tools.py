@@ -9,6 +9,8 @@ from pydantic import BaseModel
 
 from mindroom.credentials import CredentialsManager, get_credentials_manager
 
+from .google_tools_helper import check_google_tool_configured, is_google_managed_tool
+
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 
 
@@ -20,37 +22,11 @@ class ToolsResponse(BaseModel):
 
 def _check_google_tools_configured(tool_name: str, manager: CredentialsManager) -> bool:
     """Check if Google tools are configured with the right scopes."""
-    google_creds = manager.load_credentials("google")
-    if not google_creds or "token" not in google_creds:
+    if not is_google_managed_tool(tool_name):
         return False
 
-    scopes = google_creds.get("scopes", [])
-
-    if tool_name == "google_calendar":
-        # Check for calendar scopes
-        required_scopes = [
-            "https://www.googleapis.com/auth/calendar",
-            "https://www.googleapis.com/auth/calendar.readonly",
-        ]
-        return any(scope in scopes for scope in required_scopes)
-    if tool_name == "google_sheets":
-        # Check for spreadsheet scopes
-        required_scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/spreadsheets.readonly",
-        ]
-        return any(scope in scopes for scope in required_scopes)
-    if tool_name == "gmail":
-        # Check for Gmail scopes
-        required_scopes = [
-            "https://www.googleapis.com/auth/gmail.modify",
-            "https://www.googleapis.com/auth/gmail.readonly",
-            "https://www.googleapis.com/auth/gmail.compose",
-            "https://www.googleapis.com/auth/gmail.send",
-        ]
-        return any(scope in scopes for scope in required_scopes)
-
-    return False
+    google_creds = manager.load_credentials("google")
+    return check_google_tool_configured(tool_name, google_creds)
 
 
 def _check_homeassistant_configured(tool_name: str, manager: CredentialsManager) -> bool:

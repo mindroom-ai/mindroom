@@ -20,6 +20,7 @@ import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
 import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
 import { useTools } from '@/hooks/useTools';
+import { isGoogleManagedTool } from '@/lib/googleTools';
 
 export function AgentEditor() {
   const {
@@ -255,11 +256,7 @@ export function AgentEditor() {
                             tool.setup_type !== 'none' &&
                             tool.config_fields &&
                             tool.config_fields.length > 0;
-                          const isGoogleServiceTool = [
-                            'google_calendar',
-                            'google_sheets',
-                            'gmail',
-                          ].includes(tool.name);
+                          const isGoogleServiceTool = isGoogleManagedTool(tool.name);
 
                           return (
                             <div className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
