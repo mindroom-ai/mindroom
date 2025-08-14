@@ -23,6 +23,7 @@ dependencies = [
   "arxiv",                                                                                             # for Arxiv tool
   "atlassian-python-api",                                                                              # for Confluence tool
   "baidusearch",                                                                                       # for BaiduSearch tool
+  "beautifulsoup4",                                                                                    # for Website tool
   "boto3>=1.40.8",                                                                                     # for AWS Lambda and AWS SES tools
   "browserbase",                                                                                       # for Browserbase tool
   "cartesia",                                                                                          # for Cartesia tool
@@ -91,6 +92,7 @@ dependencies = [
   "slack-sdk",                                                                                         # for Slack tool
   "spider-client",                                                                                     # for Spider tool
   "spotipy>=2.25.1",                                                                                   # for Spotify tool
+  "sqlalchemy",                                                                                        # for SQL tool
   "streamlit",                                                                                         # for Streamlit components
   "structlog>=24.1",                                                                                   # for structured logging
   "tavily-python",                                                                                     # for Tavily tool
