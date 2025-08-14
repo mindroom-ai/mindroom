@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Loader2,
   Info,
@@ -104,7 +104,7 @@ export function EnhancedConfigDialog({
   };
 
   // Filter out authentication fields for Google-managed tools
-  const getFilteredFields = () => {
+  const filteredFields = useMemo(() => {
     if (isGoogleManagedTool(service)) {
       // For Google tools, filter out OAuth authentication fields
       const authFields = [
@@ -124,9 +124,7 @@ export function EnhancedConfigDialog({
       return configFields.filter(field => !authFields.includes(field.name));
     }
     return configFields;
-  };
-
-  const filteredFields = getFilteredFields();
+  }, [configFields, service]);
 
   // Initialize default values and load existing credentials
   useEffect(() => {
@@ -134,6 +132,27 @@ export function EnhancedConfigDialog({
 
     const loadExistingCredentials = async () => {
       setLoadingExisting(true);
+
+      // Filter fields locally inside the effect to avoid dependency issues
+      let fieldsToUse = configFields;
+      if (isGoogleManagedTool(service)) {
+        const authFields = [
+          'GOOGLE_CLIENT_ID',
+          'GOOGLE_CLIENT_SECRET',
+          'GOOGLE_PROJECT_ID',
+          'GOOGLE_REDIRECT_URI',
+          'scopes',
+          'credentials_path',
+          'token_path',
+          'access_token',
+          'creds',
+          'creds_path',
+          'oauth_port',
+          'port',
+        ];
+        fieldsToUse = configFields.filter(field => !authFields.includes(field.name));
+      }
+
       try {
         // Try to load existing credentials
         const response = await fetch(`${API_BASE}/api/credentials/${service}`);
@@ -142,7 +161,7 @@ export function EnhancedConfigDialog({
           if (data.credentials) {
             // Merge existing credentials with defaults
             const defaults: Record<string, string | boolean> = {};
-            filteredFields.forEach(field => {
+            fieldsToUse.forEach(field => {
               if (data.credentials[field.name] !== undefined) {
                 // Keep boolean values as boolean, convert others to string
                 if (field.type === 'boolean') {
@@ -162,18 +181,17 @@ export function EnhancedConfigDialog({
               }
             });
             setConfigValues(defaults);
+            setLoadingExisting(false);
             return;
           }
         }
       } catch (error) {
         console.log('No existing credentials found');
-      } finally {
-        setLoadingExisting(false);
       }
 
       // If no existing credentials, just use defaults
       const defaults: Record<string, string | boolean> = {};
-      filteredFields.forEach(field => {
+      fieldsToUse.forEach(field => {
         if (field.default !== undefined && field.default !== null) {
           if (field.type === 'boolean') {
             defaults[field.name] = field.default === true || field.default === 'true';
@@ -183,10 +201,11 @@ export function EnhancedConfigDialog({
         }
       });
       setConfigValues(defaults);
+      setLoadingExisting(false);
     };
 
     loadExistingCredentials();
-  }, [filteredFields, service, open]);
+  }, [service, open, configFields]); // Use stable dependencies
 
   const validateField = (field: ConfigField, value: string | boolean): string | null => {
     // Boolean fields don't need validation
