@@ -68,9 +68,18 @@ export function Integrations() {
     loadIntegrations();
   }, [backendTools]);
 
-  const loadIntegrations = async () => {
+  const loadIntegrations = async (forceRefresh = false) => {
     setLoading(true);
     try {
+      // Optionally refetch tools from backend to get updated statuses
+      // This is important after Google OAuth to get the new status for Google tools
+      if (forceRefresh) {
+        await refetchTools();
+        // Return early since refetchTools will trigger this useEffect again via backendTools update
+        setLoading(false);
+        return;
+      }
+
       const loadedIntegrations: Integration[] = [];
 
       // Load special integrations from providers
@@ -692,7 +701,8 @@ export function Integrations() {
                 onClose={() => setActiveDialog(null)}
                 onSuccess={async () => {
                   setActiveDialog(null);
-                  await loadIntegrations();
+                  // Force refresh to get updated Google tools status
+                  await loadIntegrations(true);
                 }}
               />
             )}
