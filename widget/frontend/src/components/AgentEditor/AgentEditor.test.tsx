@@ -30,8 +30,6 @@ vi.mock('@/hooks/useTools', () => ({
   })),
 }));
 
-// Mock Google tools helper
-
 describe('AgentEditor', () => {
   const mockAgent: Agent = {
     id: 'test_agent',

@@ -174,6 +174,7 @@ export function Integrations() {
             const icons = require('react-icons/fa');
             IconComponent = icons[iconName];
           } catch (e) {
+            console.log('Icon not found:', iconName);
             // Icon not found - will use default
           }
         }

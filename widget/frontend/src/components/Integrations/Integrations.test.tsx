@@ -74,8 +74,6 @@ vi.mock('@/lib/api', () => ({
   API_BASE: 'http://localhost:8080',
 }));
 
-// Mock Google tools helper
-
 // Mock EnhancedConfigDialog
 vi.mock('./EnhancedConfigDialog', () => ({
   EnhancedConfigDialog: ({ onSuccess }: any) => {
