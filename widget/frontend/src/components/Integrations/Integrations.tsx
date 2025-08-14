@@ -93,6 +93,18 @@ export function Integrations() {
           const mapped = mapToolToIntegration(tool);
           // Mark Google-managed tools specially
           const isGoogleManaged = isGoogleManagedTool(tool.name);
+
+          // Debug logging for Google tools mapping
+          if (isGoogleManaged) {
+            console.log(`[DEBUG] Mapping Google tool ${tool.name}:`, {
+              originalStatus: tool.status,
+              mappedStatus: mapped.status,
+              setupType: tool.setup_type,
+              configFields: tool.config_fields?.length || 0,
+              firstConfigField: tool.config_fields?.[0]?.name || 'none',
+            });
+          }
+
           return {
             ...mapped,
             icon: getIconForTool(tool.icon, tool.icon_color),
@@ -263,6 +275,74 @@ export function Integrations() {
       );
     }
 
+    // Special handling for Google-managed tools FIRST (regardless of status)
+    if (isGoogleManagedTool(integration.id)) {
+      const tool = integration as any;
+
+      // Debug logging to understand the issue
+      console.log(`[DEBUG] Google tool ${integration.id}:`, {
+        status: integration.status,
+        setup_type: integration.setup_type,
+        hasConfigFields: !!tool.config_fields,
+        configFieldsCount: tool.config_fields?.length || 0,
+        firstField: tool.config_fields?.[0]?.name || 'none',
+      });
+
+      // If Google Services is connected (tool status is 'connected' or 'available')
+      if (integration.status === 'connected' || integration.status === 'available') {
+        if (tool.config_fields && tool.config_fields.length > 0) {
+          return (
+            <div className="flex gap-2 items-center">
+              <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+                <CheckCircle2 className="h-3 w-3 mr-1" />
+                Via Google Services
+              </Badge>
+              <Button
+                onClick={() => handleIntegrationAction(integration)}
+                disabled={loading}
+                variant="outline"
+                size="sm"
+              >
+                <Settings className="h-4 w-4 mr-1" />
+                Configure
+              </Button>
+            </div>
+          );
+        } else {
+          // Google tool with no additional config
+          return (
+            <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              Via Google Services
+            </Badge>
+          );
+        }
+      } else {
+        // Google Services not connected - show message
+        return (
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-muted-foreground">
+              Requires Google Services
+            </Badge>
+            <Button
+              onClick={() => {
+                toast({
+                  title: 'Connect Google Services First',
+                  description: 'Please connect to Google Services to use this tool.',
+                });
+              }}
+              disabled={loading}
+              variant="outline"
+              size="sm"
+            >
+              <ExternalLink className="h-4 w-4 mr-1" />
+              Setup via Google
+            </Button>
+          </div>
+        );
+      }
+    }
+
     // Tools with no setup required
     if (integration.setup_type === 'none') {
       const tool = integration as any;
@@ -325,40 +405,8 @@ export function Integrations() {
       }
     }
 
+    // For other connected tools, show Edit/Disconnect
     if (integration.status === 'connected') {
-      // For Google-managed tools, show Configure button if they have config fields
-      if (isGoogleManagedTool(integration.id)) {
-        const tool = integration as any;
-        if (tool.config_fields && tool.config_fields.length > 0) {
-          return (
-            <div className="flex gap-2 items-center">
-              <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-                <CheckCircle2 className="h-3 w-3 mr-1" />
-                Via Google Services
-              </Badge>
-              <Button
-                onClick={() => handleIntegrationAction(integration)}
-                disabled={loading}
-                variant="outline"
-                size="sm"
-              >
-                <Settings className="h-4 w-4 mr-1" />
-                Configure
-              </Button>
-            </div>
-          );
-        } else {
-          // Google tool with no additional config
-          return (
-            <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
-              <CheckCircle2 className="h-3 w-3 mr-1" />
-              Via Google Services
-            </Badge>
-          );
-        }
-      }
-
-      // For other connected tools, show Edit/Disconnect
       return (
         <div className="flex gap-2">
           <Button
