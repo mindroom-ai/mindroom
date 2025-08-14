@@ -9,6 +9,27 @@ vi.mock('@/store/configStore', () => ({
   useConfigStore: vi.fn(),
 }));
 
+// Mock useTools hook
+vi.mock('@/hooks/useTools', () => ({
+  useTools: vi.fn(() => ({
+    tools: [
+      {
+        name: 'calculator',
+        display_name: 'Calculator',
+        setup_type: 'none',
+        status: 'available',
+      },
+      {
+        name: 'file',
+        display_name: 'File',
+        setup_type: 'none',
+        status: 'available',
+      },
+    ],
+    loading: false,
+  })),
+}));
+
 describe('AgentEditor', () => {
   const mockAgent: Agent = {
     id: 'test_agent',

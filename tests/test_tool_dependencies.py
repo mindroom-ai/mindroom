@@ -269,9 +269,9 @@ def test_tools_requiring_config_metadata() -> None:
             tools_with_status.append(tool_name)
 
         # Check for inconsistencies
-        if has_config_fields and not has_config_status:
-            inconsistent_tools.append((tool_name, "has config_fields but status is not REQUIRES_CONFIG"))
-        elif has_config_status and not has_config_fields:
+        # Only check that tools marked REQUIRES_CONFIG actually have fields
+        # Tools with optional config can have status AVAILABLE
+        if has_config_status and not has_config_fields and metadata.auth_provider is None:
             inconsistent_tools.append((tool_name, "status is REQUIRES_CONFIG but no config_fields specified"))
 
     # Report findings

@@ -23,8 +23,8 @@ dependencies = [
   "arxiv",                                                                                             # for Arxiv tool
   "atlassian-python-api",                                                                              # for Confluence tool
   "baidusearch",                                                                                       # for BaiduSearch tool
+  "beautifulsoup4",                                                                                    # for Website tool
   "boto3>=1.40.8",                                                                                     # for AWS Lambda and AWS SES tools
-  "brave-search",                                                                                      # for BraveSearch tool
   "browserbase",                                                                                       # for Browserbase tool
   "cartesia",                                                                                          # for Cartesia tool
   "chromadb>=1.0.15",
@@ -59,7 +59,7 @@ dependencies = [
   "linkup-sdk>=0.2.8",                                                                                 # for Linkup tool
   "loguru>=0.7.3",
   "lumaai",                                                                                            # for LumaLabs tool
-  "lxml-html-clean",                                                                                   # for Newspaper and Newspaper4K tools
+  "lxml-html-clean",                                                                                   # for Newspaper4K tools
   "markdown>=3.7",                                                                                     # for HTML formatting in Matrix messages
   "matplotlib",                                                                                        # for Visualization tool
   "matrix-nio>=0.24",
@@ -67,7 +67,6 @@ dependencies = [
   "mem0ai>=0.1.115",                                                                                   # for Mem0 tool
   "mlx-whisper",                                                                                       # for MLX Transcribe tool
   "moviepy",                                                                                           # for MoviePy tool
-  "newspaper3k",                                                                                       # for Newspaper tool
   "newspaper4k",                                                                                       # for Newspaper4K tool
   "openai",                                                                                            # for OpenAI and DALL-E tools, Morph model
   "opencv-python",                                                                                     # for OpenCV tool
@@ -92,6 +91,7 @@ dependencies = [
   "slack-sdk",                                                                                         # for Slack tool
   "spider-client",                                                                                     # for Spider tool
   "spotipy>=2.25.1",                                                                                   # for Spotify tool
+  "sqlalchemy",                                                                                        # for SQL tool
   "streamlit",                                                                                         # for Streamlit components
   "structlog>=24.1",                                                                                   # for structured logging
   "tavily-python",                                                                                     # for Tavily tool

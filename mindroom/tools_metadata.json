@@ -1,6 +1,7 @@
 {
   "tools": [
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -73,6 +74,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -145,6 +147,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -184,6 +187,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -278,6 +282,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -328,6 +333,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -400,6 +406,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -448,6 +455,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -487,6 +495,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -515,6 +524,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -621,6 +631,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -737,6 +748,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -820,6 +832,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -892,6 +905,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -997,6 +1011,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1080,6 +1095,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1295,6 +1311,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1356,6 +1373,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": null,
       "dependencies": null,
@@ -1370,6 +1388,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1497,6 +1516,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1569,6 +1589,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1608,6 +1629,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1680,6 +1702,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1796,6 +1819,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1879,6 +1903,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1918,6 +1943,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2386,6 +2412,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": null,
       "dependencies": null,
@@ -2400,6 +2427,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2517,88 +2545,34 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": "google",
       "category": "development",
       "config_fields": [
         {
           "default": null,
-          "description": "Custom OAuth scopes. If None, determined by operations (read-only or read-write)",
-          "label": "OAuth Scopes",
-          "name": "scopes",
-          "options": null,
-          "placeholder": "https://www.googleapis.com/auth/spreadsheets",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Pre-existing Google OAuth credentials object",
-          "label": "Pre-existing Credentials",
-          "name": "creds",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Path to credentials JSON file from Google Cloud Console",
-          "label": "Credentials File Path",
-          "name": "creds_path",
-          "options": null,
-          "placeholder": "credentials.json",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "Path to store OAuth token file for future authentication",
-          "label": "Token File Path",
-          "name": "token_path",
-          "options": null,
-          "placeholder": "token.json",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "default": 0,
-          "description": "Port to use for OAuth authentication callback (0 for auto-select)",
-          "label": "OAuth Port",
-          "name": "oauth_port",
-          "options": null,
-          "placeholder": "8080",
-          "required": false,
-          "type": "number",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "ID of the target spreadsheet (from the Google Sheets URL)",
+          "description": "The ID of the Google Spreadsheet to work with. If not specified, you can work with multiple spreadsheets.",
           "label": "Spreadsheet ID",
           "name": "spreadsheet_id",
           "options": null,
-          "placeholder": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+          "placeholder": "Leave empty to work with multiple spreadsheets",
           "required": false,
           "type": "text",
           "validation": null
         },
         {
           "default": null,
-          "description": "Range within the spreadsheet (e.g., 'Sheet1!A1:E10')",
-          "label": "Spreadsheet Range",
+          "description": "Default range to use for operations (optional)",
+          "label": "Default Range",
           "name": "spreadsheet_range",
           "options": null,
-          "placeholder": "Sheet1!A1:E10",
+          "placeholder": "e.g., Sheet1!A1:Z100",
           "required": false,
           "type": "text",
           "validation": null
         },
         {
           "default": true,
-          "description": "Enable reading values from Google Sheets",
+          "description": "Allow reading data from spreadsheets",
           "label": "Enable Read Operations",
           "name": "read",
           "options": null,
@@ -2609,7 +2583,7 @@
         },
         {
           "default": false,
-          "description": "Enable creating new Google Sheets",
+          "description": "Allow creating new spreadsheets",
           "label": "Enable Create Operations",
           "name": "create",
           "options": null,
@@ -2620,7 +2594,7 @@
         },
         {
           "default": false,
-          "description": "Enable updating data in Google Sheets",
+          "description": "Allow updating existing spreadsheets",
           "label": "Enable Update Operations",
           "name": "update",
           "options": null,
@@ -2631,7 +2605,7 @@
         },
         {
           "default": false,
-          "description": "Enable duplicating existing Google Sheets",
+          "description": "Allow duplicating spreadsheets",
           "label": "Enable Duplicate Operations",
           "name": "duplicate",
           "options": null,
@@ -2653,10 +2627,11 @@
       "icon": "FaGoogle",
       "icon_color": "text-green-600",
       "name": "google_sheets",
-      "setup_type": "oauth",
+      "setup_type": "special",
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2729,6 +2704,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2790,6 +2766,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2895,6 +2872,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2956,6 +2934,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3028,6 +3007,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3078,6 +3058,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3227,6 +3208,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3310,6 +3292,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3437,6 +3420,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3476,6 +3460,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3502,6 +3487,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [],
       "dependencies": [
@@ -3518,6 +3504,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3645,6 +3632,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [],
       "dependencies": [],
@@ -3659,6 +3647,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3709,6 +3698,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "email",
       "config_fields": [
         {
@@ -3759,6 +3749,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "email",
       "config_fields": [
         {
@@ -3818,50 +3809,95 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": "google",
       "category": "email",
       "config_fields": [
         {
-          "default": null,
-          "description": "Google OAuth client ID",
-          "label": "Client ID",
-          "name": "GOOGLE_CLIENT_ID",
+          "default": true,
+          "description": "Allow retrieving the latest emails",
+          "label": "Get Latest Emails",
+          "name": "get_latest_emails",
           "options": null,
-          "placeholder": "123456789.apps.googleusercontent.com",
-          "required": true,
-          "type": "text",
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         },
         {
-          "default": null,
-          "description": "Google OAuth client secret",
-          "label": "Client Secret",
-          "name": "GOOGLE_CLIENT_SECRET",
+          "default": true,
+          "description": "Allow retrieving emails from specific users",
+          "label": "Get Emails From User",
+          "name": "get_emails_from_user",
           "options": null,
-          "placeholder": "GOCSPX-...",
-          "required": true,
-          "type": "password",
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         },
         {
-          "default": null,
-          "description": "Google Cloud project ID",
-          "label": "Project ID",
-          "name": "GOOGLE_PROJECT_ID",
+          "default": true,
+          "description": "Allow retrieving unread emails",
+          "label": "Get Unread Emails",
+          "name": "get_unread_emails",
           "options": null,
-          "placeholder": "my-project-123456",
-          "required": true,
-          "type": "text",
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         },
         {
-          "default": null,
-          "description": "OAuth redirect URI",
-          "label": "Redirect URI",
-          "name": "GOOGLE_REDIRECT_URI",
+          "default": true,
+          "description": "Allow retrieving starred emails",
+          "label": "Get Starred Emails",
+          "name": "get_starred_emails",
           "options": null,
-          "placeholder": "http://localhost:8080/callback",
-          "required": true,
-          "type": "url",
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Allow searching through emails",
+          "label": "Search Emails",
+          "name": "search_emails",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Allow creating draft emails",
+          "label": "Create Draft Emails",
+          "name": "create_draft_email",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Allow sending emails",
+          "label": "Send Emails",
+          "name": "send_email",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Allow sending replies to emails",
+          "label": "Send Email Replies",
+          "name": "send_email_reply",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
           "validation": null
         }
       ],
@@ -3878,10 +3914,11 @@
       "icon": "FaGoogle",
       "icon_color": "text-red-500",
       "name": "gmail",
-      "setup_type": "oauth",
+      "setup_type": "special",
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "email",
       "config_fields": null,
       "dependencies": null,
@@ -3896,6 +3933,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "email",
       "config_fields": [
         {
@@ -3935,6 +3973,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "email",
       "config_fields": null,
       "dependencies": null,
@@ -3949,6 +3988,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": null,
       "dependencies": null,
@@ -3963,6 +4003,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": null,
       "dependencies": null,
@@ -3977,6 +4018,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": [
         {
@@ -4003,6 +4045,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": null,
       "dependencies": null,
@@ -4017,6 +4060,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": null,
       "dependencies": null,
@@ -4031,6 +4075,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": [
         {
@@ -4103,6 +4148,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "information",
       "config_fields": null,
       "dependencies": null,
@@ -4117,6 +4163,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "integrations",
       "config_fields": [
         {
@@ -4310,6 +4357,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -4415,6 +4463,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -4542,44 +4591,12 @@
       "status": "available"
     },
     {
+      "auth_provider": "google",
       "category": "productivity",
       "config_fields": [
         {
-          "default": null,
-          "description": "Path to the OAuth 2.0 credentials JSON file from Google Cloud Console",
-          "label": "Credentials Path",
-          "name": "credentials_path",
-          "options": null,
-          "placeholder": "/path/to/credentials.json",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": "token.json",
-          "description": "Path where the user's access and refresh tokens will be stored",
-          "label": "Token Path",
-          "name": "token_path",
-          "options": null,
-          "placeholder": "token.json",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "OAuth access token (can also be set via environment variables)",
-          "label": "Access Token",
-          "name": "access_token",
-          "options": null,
-          "placeholder": "ya29.a0...",
-          "required": false,
-          "type": "password",
-          "validation": null
-        },
-        {
           "default": "primary",
-          "description": "ID of the calendar to use (default is the user's primary calendar)",
+          "description": "The Google Calendar ID to use (default: 'primary' for the user's main calendar)",
           "label": "Calendar ID",
           "name": "calendar_id",
           "options": null,
@@ -4589,30 +4606,8 @@
           "validation": null
         },
         {
-          "default": 8080,
-          "description": "Port to use for OAuth callback during authentication flow",
-          "label": "OAuth Port",
-          "name": "oauth_port",
-          "options": null,
-          "placeholder": "8080",
-          "required": false,
-          "type": "number",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "List of OAuth scopes for calendar access (leave empty for defaults)",
-          "label": "Scopes",
-          "name": "scopes",
-          "options": null,
-          "placeholder": "https://www.googleapis.com/auth/calendar",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
           "default": false,
-          "description": "Enable creating, updating, and deleting calendar events (requires write scope)",
+          "description": "Allow the agent to create, update, and delete calendar events",
           "label": "Allow Updates",
           "name": "allow_update",
           "options": null,
@@ -4639,6 +4634,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -4722,6 +4718,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
       "dependencies": [
@@ -4738,6 +4735,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -4887,6 +4885,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -4992,6 +4991,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -5119,6 +5119,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -5235,6 +5236,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5286,6 +5288,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5337,6 +5340,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5421,6 +5425,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5537,6 +5542,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5588,6 +5594,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5682,6 +5689,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5798,6 +5806,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6090,6 +6099,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6217,6 +6227,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6290,6 +6301,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6329,6 +6341,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6435,6 +6448,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6485,35 +6499,7 @@
       "status": "requires_config"
     },
     {
-      "category": "research",
-      "config_fields": [
-        {
-          "default": true,
-          "description": "Enable extracting text content from article URLs",
-          "label": "Get Article Text",
-          "name": "get_article_text",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
-      "dependencies": [
-        "newspaper3k",
-        "lxml_html_clean"
-      ],
-      "description": "Extract and analyze news articles from URLs",
-      "display_name": "News Articles",
-      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper",
-      "helper_text": null,
-      "icon": "Newspaper",
-      "icon_color": "text-gray-600",
-      "name": "newspaper",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6565,6 +6551,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6604,6 +6591,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6654,6 +6642,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6726,6 +6715,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6851,6 +6841,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6890,6 +6881,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6962,6 +6954,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -7012,6 +7005,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -7124,6 +7118,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -7153,6 +7148,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -7181,6 +7177,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "shopping",
       "config_fields": null,
       "dependencies": null,
@@ -7195,6 +7192,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "shopping",
       "config_fields": null,
       "dependencies": null,
@@ -7209,6 +7207,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "shopping",
       "config_fields": null,
       "dependencies": null,
@@ -7223,6 +7222,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "shopping",
       "config_fields": null,
       "dependencies": null,
@@ -7237,6 +7237,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "smart_home",
       "config_fields": [
         {
@@ -7276,6 +7277,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": null,
       "dependencies": null,
@@ -7290,6 +7292,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": null,
       "dependencies": null,
@@ -7304,6 +7307,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": null,
       "dependencies": null,
@@ -7318,6 +7322,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": [
         {
@@ -7489,6 +7494,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": [
         {
@@ -7583,6 +7589,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": [
         {

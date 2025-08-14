@@ -13,7 +13,7 @@ from mindroom.tools_metadata import (
 )
 
 if TYPE_CHECKING:
-    from agno.tools.googlesheets import GoogleSheetsTools
+    from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 
 
 @register_tool_with_metadata(
@@ -22,82 +22,34 @@ if TYPE_CHECKING:
     description="Read, create, update, and duplicate Google Sheets spreadsheets",
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
-    setup_type=SetupType.OAUTH,
+    setup_type=SetupType.SPECIAL,
+    auth_provider="google",  # Authentication provided by Google Services integration
     icon="FaGoogle",
     icon_color="text-green-600",
     config_fields=[
-        # Authentication/OAuth Configuration
-        ConfigField(
-            name="scopes",
-            label="OAuth Scopes",
-            type="text",
-            required=False,
-            default=None,
-            placeholder="https://www.googleapis.com/auth/spreadsheets",
-            description="Custom OAuth scopes. If None, determined by operations (read-only or read-write)",
-        ),
-        ConfigField(
-            name="creds",
-            label="Pre-existing Credentials",
-            type="text",
-            required=False,
-            default=None,
-            description="Pre-existing Google OAuth credentials object",
-        ),
-        ConfigField(
-            name="creds_path",
-            label="Credentials File Path",
-            type="text",
-            required=False,
-            default=None,
-            placeholder="credentials.json",
-            description="Path to credentials JSON file from Google Cloud Console",
-        ),
-        ConfigField(
-            name="token_path",
-            label="Token File Path",
-            type="password",
-            required=False,
-            default=None,
-            placeholder="token.json",
-            description="Path to store OAuth token file for future authentication",
-        ),
-        ConfigField(
-            name="oauth_port",
-            label="OAuth Port",
-            type="number",
-            required=False,
-            default=0,
-            placeholder="8080",
-            description="Port to use for OAuth authentication callback (0 for auto-select)",
-        ),
-        # Spreadsheet Configuration
         ConfigField(
             name="spreadsheet_id",
             label="Spreadsheet ID",
             type="text",
             required=False,
-            default=None,
-            placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
-            description="ID of the target spreadsheet (from the Google Sheets URL)",
+            placeholder="Leave empty to work with multiple spreadsheets",
+            description="The ID of the Google Spreadsheet to work with. If not specified, you can work with multiple spreadsheets.",
         ),
         ConfigField(
             name="spreadsheet_range",
-            label="Spreadsheet Range",
+            label="Default Range",
             type="text",
             required=False,
-            default=None,
-            placeholder="Sheet1!A1:E10",
-            description="Range within the spreadsheet (e.g., 'Sheet1!A1:E10')",
+            placeholder="e.g., Sheet1!A1:Z100",
+            description="Default range to use for operations (optional)",
         ),
-        # Operation Permissions
         ConfigField(
             name="read",
             label="Enable Read Operations",
             type="boolean",
             required=False,
             default=True,
-            description="Enable reading values from Google Sheets",
+            description="Allow reading data from spreadsheets",
         ),
         ConfigField(
             name="create",
@@ -105,7 +57,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=False,
-            description="Enable creating new Google Sheets",
+            description="Allow creating new spreadsheets",
         ),
         ConfigField(
             name="update",
@@ -113,7 +65,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=False,
-            description="Enable updating data in Google Sheets",
+            description="Allow updating existing spreadsheets",
         ),
         ConfigField(
             name="duplicate",
@@ -121,7 +73,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=False,
-            description="Enable duplicating existing Google Sheets",
+            description="Allow duplicating spreadsheets",
         ),
     ],
     dependencies=["google-api-python-client", "google-auth-httplib2", "google-auth-oauthlib"],
@@ -129,6 +81,6 @@ if TYPE_CHECKING:
 )
 def google_sheets_tools() -> type[GoogleSheetsTools]:
     """Return Google Sheets tools for spreadsheet integration."""
-    from agno.tools.googlesheets import GoogleSheetsTools
+    from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 
     return GoogleSheetsTools
