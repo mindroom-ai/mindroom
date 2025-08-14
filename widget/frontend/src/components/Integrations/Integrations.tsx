@@ -67,9 +67,18 @@ export function Integrations() {
     loadIntegrations();
   }, [backendTools]);
 
-  const loadIntegrations = async () => {
+  const loadIntegrations = async (forceRefresh = false) => {
     setLoading(true);
     try {
+      // Optionally refetch tools from backend to get updated statuses
+      // This is important after Google OAuth to get the new status for Google tools
+      if (forceRefresh) {
+        await refetchTools();
+        // Return early since refetchTools will trigger this useEffect again via backendTools update
+        setLoading(false);
+        return;
+      }
+
       const loadedIntegrations: Integration[] = [];
 
       // Load special integrations from providers
@@ -85,6 +94,7 @@ export function Integrations() {
       // Load backend tools and map them to integrations
       // (excluding those already handled by providers)
       const providerIds = Object.keys(integrationProviders);
+
       const backendIntegrations = backendTools
         .filter(tool => !providerIds.includes(tool.name))
         .map(tool => {
@@ -93,7 +103,10 @@ export function Integrations() {
             ...mapped,
             icon: getIconForTool(tool.icon, tool.icon_color),
             connected: false,
-          } as Integration;
+            // Tools with auth_provider show as connected if their status is 'available'
+            status: tool.auth_provider && tool.status === 'available' ? 'connected' : mapped.status,
+            auth_provider: tool.auth_provider, // Pass through auth_provider
+          } as Integration & { auth_provider?: string };
         });
 
       setIntegrations([...loadedIntegrations, ...backendIntegrations]);
@@ -162,6 +175,7 @@ export function Integrations() {
             IconComponent = icons[iconName];
           } catch (e) {
             console.log('Icon not found:', iconName);
+            // Icon not found - will use default
           }
         }
 
@@ -256,6 +270,71 @@ export function Integrations() {
       );
     }
 
+    // Handle tools with delegated authentication
+    const tool = integration as any;
+    if (tool.auth_provider) {
+      // Check if the auth provider is connected
+      const authProvider = integrations.find(i => i.id === tool.auth_provider);
+
+      if (integration.status === 'connected' || integration.status === 'available') {
+        // Auth provider is connected
+        if (tool.config_fields && tool.config_fields.length > 0) {
+          return (
+            <div className="flex gap-2 items-center">
+              <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+                <CheckCircle2 className="h-3 w-3 mr-1" />
+                Connected
+              </Badge>
+              <Button
+                onClick={() => handleIntegrationAction(integration)}
+                disabled={loading}
+                variant="outline"
+                size="sm"
+              >
+                <Settings className="h-4 w-4 mr-1" />
+                Configure
+              </Button>
+            </div>
+          );
+        } else {
+          // Tool with no additional config
+          return (
+            <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              Connected
+            </Badge>
+          );
+        }
+      } else {
+        // Auth provider not connected
+        return (
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-muted-foreground">
+              Requires {authProvider?.name || tool.auth_provider}
+            </Badge>
+            <Button
+              onClick={() => {
+                if (authProvider) {
+                  handleIntegrationAction(authProvider);
+                } else {
+                  toast({
+                    title: `Connect ${tool.auth_provider} first`,
+                    description: `Please connect to ${tool.auth_provider} to use this tool.`,
+                  });
+                }
+              }}
+              disabled={loading}
+              variant="outline"
+              size="sm"
+            >
+              <ExternalLink className="h-4 w-4 mr-1" />
+              Setup
+            </Button>
+          </div>
+        );
+      }
+    }
+
     // Tools with no setup required
     if (integration.setup_type === 'none') {
       const tool = integration as any;
@@ -318,6 +397,7 @@ export function Integrations() {
       }
     }
 
+    // For other connected tools, show Edit/Disconnect
     if (integration.status === 'connected') {
       return (
         <div className="flex gap-2">
@@ -370,7 +450,11 @@ export function Integrations() {
     );
   };
 
-  const IntegrationCard = ({ integration }: { integration: Integration }) => (
+  const IntegrationCard = ({
+    integration,
+  }: {
+    integration: Integration & { auth_provider?: string };
+  }) => (
     <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
       <CardHeader>
         <div className="flex items-center justify-between">
@@ -609,7 +693,8 @@ export function Integrations() {
                 onClose={() => setActiveDialog(null)}
                 onSuccess={async () => {
                   setActiveDialog(null);
-                  await loadIntegrations();
+                  // Force refresh to get updated Google tools status
+                  await loadIntegrations(true);
                 }}
               />
             )}

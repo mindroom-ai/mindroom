@@ -279,14 +279,14 @@ describe('Integrations', () => {
       expect(screen.getByText('News')).toBeInTheDocument(); // Coming soon
     });
 
-    // Click "Available Only" toggle
-    const toggleButton = screen.getByRole('radio', { name: 'Show available only' });
-    fireEvent.click(toggleButton);
+    // Click "Available" filter button
+    const availableButton = screen.getByRole('button', { name: 'Available' });
+    fireEvent.click(availableButton);
 
     await waitFor(() => {
       expect(screen.queryByText('News')).not.toBeInTheDocument(); // Coming soon should be hidden
       expect(screen.getByText('Google Services')).toBeInTheDocument(); // Available
-      expect(screen.getByText('IMDb')).toBeInTheDocument(); // Connected (counts as available)
+      // IMDb is connected, not just available, so it won't show with 'available' filter
     });
   });
 
@@ -361,8 +361,27 @@ describe('Integrations', () => {
     render(<Integrations />);
 
     await waitFor(() => {
-      const comingSoonButton = screen.getAllByRole('button', { name: /Coming Soon/ })[0];
-      expect(comingSoonButton).toBeDisabled();
+      // First click the "Coming Soon" filter to show only coming soon integrations
+      const filterButton = screen.getByRole('button', { name: 'Coming Soon' });
+      fireEvent.click(filterButton);
+    });
+
+    await waitFor(() => {
+      // Now look for the actual integration buttons (not the filter button)
+      // These buttons will have "Coming Soon" text with a star icon
+      const buttons = screen.getAllByRole('button');
+      const comingSoonIntegrationButtons = buttons.filter(
+        btn =>
+          btn.textContent?.includes('Coming Soon') &&
+          btn.querySelector('svg') && // Has an icon (Star icon)
+          !btn.closest('[class*="FilterSelector"]') // Not part of the filter selector
+      );
+
+      // At least one coming soon integration button should exist and be disabled
+      expect(comingSoonIntegrationButtons.length).toBeGreaterThan(0);
+      comingSoonIntegrationButtons.forEach(btn => {
+        expect(btn).toBeDisabled();
+      });
     });
   });
 

@@ -1,6 +1,5 @@
 """Matrix user account management for agents."""
 
-import os
 from dataclasses import dataclass
 
 import nio
@@ -94,7 +93,7 @@ async def create_agent_user(
     else:
         # Generate new credentials
         username = f"mindroom_{agent_name}"
-        password = f"{agent_name}_secure_password_{os.urandom(8).hex()}"
+        password = f"{agent_name}_secure_password"  # _{os.urandom(8).hex()}"
 
         # Save to matrix_state.yaml
         save_agent_credentials(agent_name, username, password)

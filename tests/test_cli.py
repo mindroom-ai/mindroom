@@ -113,7 +113,7 @@ class TestUserAccountManagement:
 
             assert "agent_user" in state.accounts  # User is stored as agent_user
             assert state.accounts["agent_user"].username == "mindroom_user"
-            assert state.accounts["agent_user"].password.startswith("user_secure_password_")
+            assert state.accounts["agent_user"].password == "user_secure_password"  # noqa: S105
 
             # Verify registration was called
             mock_client.register.assert_called_once()

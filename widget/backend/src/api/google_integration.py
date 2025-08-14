@@ -35,6 +35,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
     # Calendar
     "https://www.googleapis.com/auth/calendar",
+    # Sheets
+    "https://www.googleapis.com/auth/spreadsheets",
     # Drive
     "https://www.googleapis.com/auth/drive.file",
     # User info
@@ -193,6 +195,8 @@ async def get_status() -> GoogleStatus:
             services.append("Gmail")
         if creds.has_scopes(["https://www.googleapis.com/auth/calendar"]):
             services.append("Google Calendar")
+        if creds.has_scopes(["https://www.googleapis.com/auth/spreadsheets"]):
+            services.append("Google Sheets")
         if creds.has_scopes(["https://www.googleapis.com/auth/drive.file"]):
             services.append("Google Drive")
 

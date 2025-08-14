@@ -65,28 +65,3 @@ export interface APIKey {
   key: string;
   isEncrypted: boolean;
 }
-
-// Available tools based on the config
-export const AVAILABLE_TOOLS = [
-  'calculator',
-  'file',
-  'shell',
-  'python',
-  'csv',
-  'pandas',
-  'yfinance',
-  'arxiv',
-  'duckduckgo',
-  'googlesearch',
-  'tavily',
-  'wikipedia',
-  'newspaper',
-  'website',
-  'jina',
-  'docker',
-  'github',
-  'email',
-  'telegram',
-] as const;
-
-export type ToolType = (typeof AVAILABLE_TOOLS)[number];
