@@ -271,8 +271,7 @@ def test_tools_requiring_config_metadata() -> None:
         # Check for inconsistencies
         # Only check that tools marked REQUIRES_CONFIG actually have fields
         # Tools with optional config can have status AVAILABLE
-        if has_config_status and not has_config_fields and tool_name not in ["google_calendar", "google_sheets"]:
-            # Exception for Google tools that use OAuth through Google Services
+        if has_config_status and not has_config_fields and metadata.auth_provider is None:
             inconsistent_tools.append((tool_name, "status is REQUIRES_CONFIG but no config_fields specified"))
 
     # Report findings

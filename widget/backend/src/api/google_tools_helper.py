@@ -3,19 +3,6 @@
 from typing import Any
 
 
-def is_google_managed_tool(tool_name: str) -> bool:
-    """Check if a tool is managed through Google Services OAuth.
-
-    A tool is considered Google-managed if it uses Google OAuth for authentication,
-    regardless of whether it has additional config fields for operational parameters.
-    """
-    # List of tools that use Google Services OAuth for authentication
-    # These tools may have additional config_fields for operational parameters
-    google_oauth_tools = {"google_calendar", "google_sheets", "gmail"}
-
-    return tool_name in google_oauth_tools
-
-
 def get_google_tool_scopes(tool_name: str) -> list[str]:
     """Get required OAuth scopes for a Google tool."""
     scope_map = {
