@@ -699,6 +699,20 @@ class AgentBot:
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
+        # Store memory for this agent (do this once, before generating response)
+        session_id = create_session_id(room_id, thread_id)
+        create_background_task(
+            store_conversation_memory(
+                prompt,
+                self.agent_name,
+                self.storage_path,
+                session_id,
+                self.config,
+                room_id,
+            ),
+            name=f"memory_save_{self.agent_name}_{session_id}",
+        )
+
         # Dispatch to appropriate method
         if self.enable_streaming:
             await self._process_and_respond_streaming(
