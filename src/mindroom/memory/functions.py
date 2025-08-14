@@ -220,32 +220,40 @@ async def build_memory_enhanced_prompt(
     return enhanced_prompt
 
 
-def _build_conversation_context(
+def _build_conversation_messages(
     thread_history: list[dict],
     current_prompt: str,
-) -> str:
-    """Build conversation context from thread history.
+    user_id: str,
+) -> list[dict]:
+    """Build conversation messages in mem0 format from thread history.
 
     Args:
         thread_history: List of messages with sender and body
         current_prompt: The current user prompt being processed
+        user_id: The Matrix user ID to identify user messages
 
     Returns:
-        Full conversation context as a single string
+        List of messages in mem0 format with role and content
+
     """
-    # Collect all messages from the thread
-    context_parts = []
-    
+    messages = []
+
+    # Process thread history
     for msg in thread_history:
         body = msg.get("body", "").strip()
-        if body:
-            context_parts.append(body)
-    
-    # Add the current prompt
-    context_parts.append(current_prompt)
-    
-    # Join with clear separation
-    return "\n\n".join(context_parts)
+        if not body:
+            continue
+
+        sender = msg.get("sender", "")
+        # Determine role based on sender
+        # If sender matches the user, it's a user message; otherwise it's assistant
+        role = "user" if sender == user_id else "assistant"
+        messages.append({"role": role, "content": body})
+
+    # Add the current prompt as a user message
+    messages.append({"role": "user", "content": current_prompt})
+
+    return messages
 
 
 async def store_conversation_memory(
@@ -256,6 +264,7 @@ async def store_conversation_memory(
     config: Config,
     room_id: str | None = None,
     thread_history: list[dict] | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Store conversation in memory for future recall.
 
@@ -271,36 +280,49 @@ async def store_conversation_memory(
         config: Application configuration
         room_id: Optional room ID for room memory
         thread_history: Optional thread history for context
+        user_id: Optional user ID to identify user messages in thread
 
     """
     if not prompt:
         return
 
-    # Build the full conversation context
-    if thread_history:
-        # Include thread history for better context
-        full_context = _build_conversation_context(thread_history, prompt)
+    # Build conversation messages in mem0 format
+    if thread_history and user_id:
+        # Use structured messages with roles for better context
+        messages = _build_conversation_messages(thread_history, prompt, user_id)
     else:
-        # Just the current prompt
-        full_context = prompt
+        # Fallback to simple user message
+        messages = [{"role": "user", "content": prompt}]
+
+    # Store for agent memory with structured messages
+    memory = await create_memory_instance(storage_path, config)
+
+    metadata = {
+        "type": "conversation",
+        "session_id": session_id,
+        "agent": agent_name,
+    }
 
     # Let mem0 intelligently extract facts from the conversation
-    # We pass it as a single user message and let mem0 decide what's important
-    await add_agent_memory(
-        full_context,
-        agent_name,
-        storage_path,
-        config,
-        metadata={"type": "conversation", "session_id": session_id},
-    )
+    # The structured format helps mem0 understand the conversation flow
+    try:
+        await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
+        logger.info("Memory added", agent=agent_name)
+    except Exception as e:
+        logger.exception("Failed to add memory", agent=agent_name, error=str(e))
 
     if room_id:
         # Also store for room context
-        await add_room_memory(
-            full_context,
-            room_id,
-            storage_path,
-            config,
-            agent_name=agent_name,
-            metadata={"type": "conversation", "session_id": session_id},
-        )
+        room_metadata = {
+            "type": "conversation",
+            "session_id": session_id,
+            "room_id": room_id,
+            "contributed_by": agent_name,
+        }
+
+        safe_room_id = room_id.replace(":", "_").replace("!", "")
+        try:
+            await memory.add(messages, user_id=f"room_{safe_room_id}", metadata=room_metadata)
+            logger.debug("Room memory added", room_id=room_id)
+        except Exception as e:
+            logger.exception("Failed to add room memory", room_id=room_id, error=str(e))

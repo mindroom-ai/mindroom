@@ -470,6 +470,7 @@ class AgentBot:
             reply_to_event_id=event.event_id,
             thread_id=context.thread_id,
             thread_history=context.thread_history,
+            user_id=event.sender,
         )
         # Mark as responded after response generation
         self.response_tracker.mark_responded(event.event_id)
@@ -520,6 +521,7 @@ class AgentBot:
                 thread_id=thread_id,
                 thread_history=thread_history,
                 existing_event_id=ack_event_id,  # Edit the acknowledgment
+                user_id=event.sender,
             )
             # Mark the original interactive question as responded
             self.response_tracker.mark_responded(event.reacts_to)
@@ -681,6 +683,7 @@ class AgentBot:
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         """Generate and send/edit a response using AI.
 
@@ -691,6 +694,7 @@ class AgentBot:
             thread_id: Thread ID if in a thread
             thread_history: Thread history for context
             existing_event_id: If provided, edit this message instead of sending a new one
+            user_id: User ID of the sender for identifying user messages in history
 
         """
         if not prompt.strip():
@@ -710,6 +714,7 @@ class AgentBot:
                 self.config,
                 room_id,
                 thread_history,
+                user_id,
             ),
             name=f"memory_save_{self.agent_name}_{session_id}",
         )
@@ -1060,6 +1065,7 @@ class TeamBot(AgentBot):
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
@@ -1094,6 +1100,7 @@ class TeamBot(AgentBot):
                     self.config,
                     room_id,
                     thread_history,
+                    user_id,
                 ),
                 name=f"memory_save_{agent_name}_{session_id}",
             )

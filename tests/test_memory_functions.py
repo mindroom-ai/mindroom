@@ -247,14 +247,18 @@ class TestMemoryFunctions:
             # Check agent memory call
             agent_call = mock_memory.add.call_args_list[0]
             agent_messages = agent_call[0][0]
-            assert agent_messages[0]["content"] == "What is 2+2?"  # Only user prompt stored
+            assert len(agent_messages) == 1
+            assert agent_messages[0]["role"] == "user"
+            assert agent_messages[0]["content"] == "What is 2+2?"
             assert agent_call[1]["user_id"] == "agent_calculator"
             assert agent_call[1]["metadata"]["type"] == "conversation"
 
             # Check room memory call
             room_call = mock_memory.add.call_args_list[1]
             room_messages = room_call[0][0]
-            assert room_messages[0]["content"] == "What is 2+2?"  # Only user prompt stored
+            assert len(room_messages) == 1
+            assert room_messages[0]["role"] == "user"
+            assert room_messages[0]["content"] == "What is 2+2?"
             assert room_call[1]["user_id"] == "room_room_server"
             assert room_call[1]["metadata"]["type"] == "conversation"
 
@@ -299,7 +303,46 @@ class TestMemoryFunctions:
             assert mock_memory.add.call_count == 1
             agent_call = mock_memory.add.call_args_list[0]
             agent_messages = agent_call[0][0]
+            assert len(agent_messages) == 1
+            assert agent_messages[0]["role"] == "user"
             assert agent_messages[0]["content"] == "What is 2+2?"
+
+    @pytest.mark.asyncio
+    async def test_store_conversation_memory_with_thread_history(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Test storing conversation memory with thread history and user identification."""
+        thread_history = [
+            {"sender": "@user:matrix.org", "body": "I need help with math"},
+            {"sender": "@router:matrix.org", "body": "@calculator can help with that"},
+            {"sender": "@user:matrix.org", "body": "Yes please"},
+        ]
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            await store_conversation_memory(
+                "What is 2+2?",
+                "calculator",
+                storage_path,
+                "session123",
+                config,
+                thread_history=thread_history,
+                user_id="@user:matrix.org",
+            )
+
+            # Should store structured messages with roles
+            assert mock_memory.add.call_count == 1
+            agent_call = mock_memory.add.call_args_list[0]
+            messages = agent_call[0][0]
+
+            # Check the structured messages
+            assert len(messages) == 4  # 3 from history + 1 current
+            assert messages[0] == {"role": "user", "content": "I need help with math"}
+            assert messages[1] == {"role": "assistant", "content": "@calculator can help with that"}
+            assert messages[2] == {"role": "user", "content": "Yes please"}
+            assert messages[3] == {"role": "user", "content": "What is 2+2?"}
 
     def test_memory_result_typed_dict(self) -> None:
         """Test MemoryResult TypedDict structure."""
