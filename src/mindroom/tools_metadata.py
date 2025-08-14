@@ -126,6 +126,7 @@ class ToolMetadata:
     icon_color: str | None = None  # Tailwind color class like "text-blue-500"
     config_fields: list[ConfigField] | None = None  # Detailed field definitions
     dependencies: list[str] | None = None  # Required pip packages
+    auth_provider: str | None = None  # Name of integration that provides auth (e.g., "google")
     docs_url: str | None = None  # Documentation URL
     helper_text: str | None = None  # Additional help text for setup
     factory: Callable | None = None  # Factory function to create tool instance
@@ -147,6 +148,7 @@ def register_tool_with_metadata(
     icon_color: str | None = None,
     config_fields: list[ConfigField] | None = None,
     dependencies: list[str] | None = None,
+    auth_provider: str | None = None,
     docs_url: str | None = None,
     helper_text: str | None = None,
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
@@ -166,6 +168,7 @@ def register_tool_with_metadata(
         icon_color: CSS color class for the icon
         config_fields: List of configuration fields
         dependencies: Required Python packages
+        auth_provider: Name of integration that provides authentication
         docs_url: Link to documentation
         helper_text: Additional setup instructions
 
@@ -187,6 +190,7 @@ def register_tool_with_metadata(
             icon_color=icon_color,
             config_fields=config_fields,
             dependencies=dependencies,
+            auth_provider=auth_provider,
             docs_url=docs_url,
             helper_text=helper_text,
             factory=func,

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
+    auth_provider="google",  # Authentication provided by Google Services integration
     icon="FaGoogle",
     icon_color="text-green-600",
     config_fields=[

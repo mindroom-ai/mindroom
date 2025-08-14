@@ -12,6 +12,7 @@ export interface ToolInfo {
   icon_color: string | null;
   config_fields: any[] | null;
   dependencies: string[] | null;
+  auth_provider?: string | null;
   docs_url?: string | null;
   helper_text?: string | null;
 }

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
+    auth_provider="google",  # Authentication provided by Google Services integration
     icon="FaCalendarAlt",
     icon_color="text-blue-600",  # Google Calendar blue
     config_fields=[

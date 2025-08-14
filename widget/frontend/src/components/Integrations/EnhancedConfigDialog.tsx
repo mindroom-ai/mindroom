@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Loader2,
   Info,
@@ -27,7 +27,6 @@ import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
 import { API_BASE } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { isGoogleManagedTool } from '@/lib/googleTools';
 
 interface ConfigField {
   name: string;
@@ -103,29 +102,8 @@ export function EnhancedConfigDialog({
     });
   };
 
-  // Authentication fields to filter out for Google-managed tools
-  const GOOGLE_AUTH_FIELDS = [
-    'GOOGLE_CLIENT_ID',
-    'GOOGLE_CLIENT_SECRET',
-    'GOOGLE_PROJECT_ID',
-    'GOOGLE_REDIRECT_URI',
-    'scopes',
-    'credentials_path',
-    'token_path',
-    'access_token',
-    'creds',
-    'creds_path',
-    'oauth_port',
-    'port',
-  ];
-
-  // Filter out authentication fields for Google-managed tools
-  const filteredFields = useMemo(() => {
-    if (isGoogleManagedTool(service)) {
-      return configFields.filter(field => !GOOGLE_AUTH_FIELDS.includes(field.name));
-    }
-    return configFields;
-  }, [configFields, service]);
+  // Just use the config fields as provided - no special filtering needed
+  const filteredFields = configFields;
 
   // Initialize default values and load existing credentials
   useEffect(() => {
@@ -134,11 +112,8 @@ export function EnhancedConfigDialog({
     const loadExistingCredentials = async () => {
       setLoadingExisting(true);
 
-      // Filter fields locally inside the effect to avoid dependency issues
+      // Use the config fields directly
       let fieldsToUse = configFields;
-      if (isGoogleManagedTool(service)) {
-        fieldsToUse = configFields.filter(field => !GOOGLE_AUTH_FIELDS.includes(field.name));
-      }
 
       try {
         // Try to load existing credentials
@@ -341,17 +316,6 @@ export function EnhancedConfigDialog({
             </Alert>
           )}
 
-          {/* Google Services Notice */}
-          {isGoogleManagedTool(service) && (
-            <Alert className="border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/30">
-              <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />
-              <AlertDescription className="text-xs text-green-900 dark:text-green-100">
-                Authentication is managed through Google Services. These are optional operational
-                settings.
-              </AlertDescription>
-            </Alert>
-          )}
-
           {/* Documentation Link - More Prominent */}
           {docsUrl && (
             <Button
@@ -375,12 +339,10 @@ export function EnhancedConfigDialog({
         ) : (
           <>
             <div className="space-y-4 py-2 max-h-[400px] overflow-y-auto px-1">
-              {filteredFields.length === 0 && isGoogleManagedTool(service) ? (
+              {filteredFields.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-8 text-center">
                   <CheckCircle className="h-12 w-12 text-green-500 mb-3" />
-                  <p className="text-sm text-muted-foreground">
-                    This Google service is fully configured through Google Services authentication.
-                  </p>
+                  <p className="text-sm text-muted-foreground">This service is fully configured.</p>
                   <p className="text-xs text-muted-foreground mt-1">
                     No additional configuration is required.
                   </p>

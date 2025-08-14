@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from mindroom.credentials import CredentialsManager, get_credentials_manager
 
-from .google_tools_helper import check_google_tool_configured, is_google_managed_tool
+from .google_tools_helper import check_google_tool_configured
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 
@@ -70,10 +70,15 @@ async def get_registered_tools() -> ToolsResponse:
     for tool in tools:
         tool_name = tool["name"]
         if tool.get("status") == "requires_config":
-            # Check Google tools
-            if is_google_managed_tool(tool_name):
-                google_creds = manager.load_credentials("google")
-                if check_google_tool_configured(tool_name, google_creds):
+            # Check if tool has delegated auth
+            auth_provider = tool.get("auth_provider")
+            if auth_provider:
+                # Check if the auth provider is configured
+                provider_creds = manager.load_credentials(auth_provider)
+                if provider_creds and (
+                    (auth_provider == "google" and check_google_tool_configured(tool_name, provider_creds))
+                    or auth_provider != "google"
+                ):
                     tool["status"] = "available"
             # Check other configured tools
             elif _check_homeassistant_configured(tool_name, manager) or _check_standard_tool_configured(tool, manager):

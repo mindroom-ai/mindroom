@@ -31,9 +31,6 @@ vi.mock('@/hooks/useTools', () => ({
 }));
 
 // Mock Google tools helper
-vi.mock('@/lib/googleTools', () => ({
-  isGoogleManagedTool: vi.fn(() => false),
-}));
 
 describe('AgentEditor', () => {
   const mockAgent: Agent = {

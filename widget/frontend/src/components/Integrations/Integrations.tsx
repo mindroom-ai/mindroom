@@ -25,7 +25,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { getIconForTool } from './iconMapping';
 import { API_BASE } from '@/lib/api';
-import { isGoogleManagedTool } from '@/lib/googleTools';
 import {
   Integration,
   IntegrationConfig,
@@ -100,16 +99,14 @@ export function Integrations() {
         .filter(tool => !providerIds.includes(tool.name))
         .map(tool => {
           const mapped = mapToolToIntegration(tool);
-          // Mark Google-managed tools specially
-          const isGoogleManaged = isGoogleManagedTool(tool.name);
           return {
             ...mapped,
             icon: getIconForTool(tool.icon, tool.icon_color),
             connected: false,
-            isGoogleManaged, // Add flag for special handling
-            // Google-managed tools show as connected if their status is 'available'
-            status: isGoogleManaged && tool.status === 'available' ? 'connected' : mapped.status,
-          } as Integration & { isGoogleManaged?: boolean };
+            // Tools with auth_provider show as connected if their status is 'available'
+            status: tool.auth_provider && tool.status === 'available' ? 'connected' : mapped.status,
+            auth_provider: tool.auth_provider, // Pass through auth_provider
+          } as Integration & { auth_provider?: string };
         });
 
       setIntegrations([...loadedIntegrations, ...backendIntegrations]);
@@ -272,18 +269,20 @@ export function Integrations() {
       );
     }
 
-    // Special handling for Google-managed tools FIRST (regardless of status)
-    if (isGoogleManagedTool(integration.id)) {
-      const tool = integration as any;
+    // Handle tools with delegated authentication
+    const tool = integration as any;
+    if (tool.auth_provider) {
+      // Check if the auth provider is connected
+      const authProvider = integrations.find(i => i.id === tool.auth_provider);
 
-      // If Google Services is connected (tool status is 'connected' or 'available')
       if (integration.status === 'connected' || integration.status === 'available') {
+        // Auth provider is connected
         if (tool.config_fields && tool.config_fields.length > 0) {
           return (
             <div className="flex gap-2 items-center">
               <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
                 <CheckCircle2 className="h-3 w-3 mr-1" />
-                Via Google Services
+                Connected
               </Badge>
               <Button
                 onClick={() => handleIntegrationAction(integration)}
@@ -297,34 +296,38 @@ export function Integrations() {
             </div>
           );
         } else {
-          // Google tool with no additional config
+          // Tool with no additional config
           return (
             <Badge className="bg-green-500/10 dark:bg-green-500/20 text-green-700 dark:text-green-300">
               <CheckCircle2 className="h-3 w-3 mr-1" />
-              Via Google Services
+              Connected
             </Badge>
           );
         }
       } else {
-        // Google Services not connected - show message
+        // Auth provider not connected
         return (
           <div className="flex items-center gap-2">
             <Badge variant="outline" className="text-muted-foreground">
-              Requires Google Services
+              Requires {authProvider?.name || tool.auth_provider}
             </Badge>
             <Button
               onClick={() => {
-                toast({
-                  title: 'Connect Google Services First',
-                  description: 'Please connect to Google Services to use this tool.',
-                });
+                if (authProvider) {
+                  handleIntegrationAction(authProvider);
+                } else {
+                  toast({
+                    title: `Connect ${tool.auth_provider} first`,
+                    description: `Please connect to ${tool.auth_provider} to use this tool.`,
+                  });
+                }
               }}
               disabled={loading}
               variant="outline"
               size="sm"
             >
               <ExternalLink className="h-4 w-4 mr-1" />
-              Setup via Google
+              Setup
             </Button>
           </div>
         );
@@ -449,7 +452,7 @@ export function Integrations() {
   const IntegrationCard = ({
     integration,
   }: {
-    integration: Integration & { isGoogleManaged?: boolean };
+    integration: Integration & { auth_provider?: string };
   }) => (
     <Card className="h-full hover:shadow-2xl hover:scale-[1.02] hover:-translate-y-1 transition-all duration-300">
       <CardHeader>
@@ -468,11 +471,6 @@ export function Integrations() {
               <Star className="h-3 w-3 mr-1" />
               Coming Soon
             </Badge>
-          ) : integration.isGoogleManaged ? (
-            <Badge className="bg-blue-500/10 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 backdrop-blur-md border-blue-500/20">
-              <CheckCircle2 className="h-3 w-3 mr-1" />
-              Via Google Services
-            </Badge>
           ) : (
             <Badge className="bg-amber-500/10 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300 backdrop-blur-md border-amber-500/20">
               <Circle className="h-3 w-3 mr-1" />
@@ -480,14 +478,7 @@ export function Integrations() {
             </Badge>
           )}
         </div>
-        <CardDescription>
-          {integration.description}
-          {integration.isGoogleManaged && (
-            <span className="block mt-1 text-xs text-muted-foreground">
-              Managed by Google Services
-            </span>
-          )}
-        </CardDescription>
+        <CardDescription>{integration.description}</CardDescription>
       </CardHeader>
 
       <CardContent>

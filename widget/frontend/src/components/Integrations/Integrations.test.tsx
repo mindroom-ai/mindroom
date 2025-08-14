@@ -75,9 +75,6 @@ vi.mock('@/lib/api', () => ({
 }));
 
 // Mock Google tools helper
-vi.mock('@/lib/googleTools', () => ({
-  isGoogleManagedTool: vi.fn(() => false),
-}));
 
 // Mock EnhancedConfigDialog
 vi.mock('./EnhancedConfigDialog', () => ({

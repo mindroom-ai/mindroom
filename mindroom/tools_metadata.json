@@ -1,6 +1,7 @@
 {
   "tools": [
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -73,6 +74,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -145,6 +147,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -184,6 +187,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -278,6 +282,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -328,6 +333,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "communication",
       "config_fields": [
         {
@@ -400,6 +406,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -448,6 +455,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -487,6 +495,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -515,6 +524,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -621,6 +631,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -737,6 +748,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -820,6 +832,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -892,6 +905,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -997,6 +1011,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1080,6 +1095,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1295,6 +1311,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1356,6 +1373,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": null,
       "dependencies": null,
@@ -1370,6 +1388,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1497,6 +1516,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1569,6 +1589,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1608,6 +1629,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1680,6 +1702,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1796,6 +1819,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1879,6 +1903,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -1918,6 +1943,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2386,6 +2412,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": null,
       "dependencies": null,
@@ -2400,6 +2427,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2517,6 +2545,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": "google",
       "category": "development",
       "config_fields": [
         {
@@ -2602,6 +2631,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2674,6 +2704,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2735,6 +2766,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2840,6 +2872,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2901,6 +2934,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -2973,6 +3007,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3023,6 +3058,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3172,6 +3208,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3255,6 +3292,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3382,6 +3420,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3421,6 +3460,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3447,6 +3487,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [],
       "dependencies": [
@@ -3463,6 +3504,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3590,6 +3632,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [],
       "dependencies": [],
@@ -3604,6 +3647,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "development",
       "config_fields": [
         {
@@ -3654,6 +3698,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "email",
       "config_fields": [
         {
@@ -3704,6 +3749,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "email",
       "config_fields": [
         {
@@ -3763,6 +3809,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": "google",
       "category": "email",
       "config_fields": [
         {
@@ -3871,6 +3918,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "email",
       "config_fields": null,
       "dependencies": null,
@@ -3885,6 +3933,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "email",
       "config_fields": [
         {
@@ -3924,6 +3973,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "email",
       "config_fields": null,
       "dependencies": null,
@@ -3938,6 +3988,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": null,
       "dependencies": null,
@@ -3952,6 +4003,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": null,
       "dependencies": null,
@@ -3966,6 +4018,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": [
         {
@@ -3992,6 +4045,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": null,
       "dependencies": null,
@@ -4006,6 +4060,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": null,
       "dependencies": null,
@@ -4020,6 +4075,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "entertainment",
       "config_fields": [
         {
@@ -4092,6 +4148,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "information",
       "config_fields": null,
       "dependencies": null,
@@ -4106,6 +4163,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "integrations",
       "config_fields": [
         {
@@ -4299,6 +4357,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -4404,6 +4463,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -4531,6 +4591,7 @@
       "status": "available"
     },
     {
+      "auth_provider": "google",
       "category": "productivity",
       "config_fields": [
         {
@@ -4573,6 +4634,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -4656,6 +4718,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
       "dependencies": [
@@ -4672,6 +4735,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -4821,6 +4885,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -4926,6 +4991,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -5053,6 +5119,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "productivity",
       "config_fields": [
         {
@@ -5169,6 +5236,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5220,6 +5288,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5271,6 +5340,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5355,6 +5425,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5471,6 +5542,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5522,6 +5594,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5616,6 +5689,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -5732,6 +5806,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6024,6 +6099,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6151,6 +6227,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6224,6 +6301,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6263,6 +6341,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6369,6 +6448,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6419,6 +6499,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6448,6 +6529,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6499,6 +6581,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6538,6 +6621,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6588,6 +6672,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6660,6 +6745,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6785,6 +6871,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6824,6 +6911,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6896,6 +6984,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -6946,6 +7035,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -7058,6 +7148,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -7087,6 +7178,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "research",
       "config_fields": [
         {
@@ -7115,6 +7207,7 @@
       "status": "available"
     },
     {
+      "auth_provider": null,
       "category": "shopping",
       "config_fields": null,
       "dependencies": null,
@@ -7129,6 +7222,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "shopping",
       "config_fields": null,
       "dependencies": null,
@@ -7143,6 +7237,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "shopping",
       "config_fields": null,
       "dependencies": null,
@@ -7157,6 +7252,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "shopping",
       "config_fields": null,
       "dependencies": null,
@@ -7171,6 +7267,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "smart_home",
       "config_fields": [
         {
@@ -7210,6 +7307,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": null,
       "dependencies": null,
@@ -7224,6 +7322,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": null,
       "dependencies": null,
@@ -7238,6 +7337,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": null,
       "dependencies": null,
@@ -7252,6 +7352,7 @@
       "status": "coming_soon"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": [
         {
@@ -7423,6 +7524,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": [
         {
@@ -7517,6 +7619,7 @@
       "status": "requires_config"
     },
     {
+      "auth_provider": null,
       "category": "social",
       "config_fields": [
         {
