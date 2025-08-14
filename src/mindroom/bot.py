@@ -709,6 +709,7 @@ class AgentBot:
                 session_id,
                 self.config,
                 room_id,
+                thread_history,
             ),
             name=f"memory_save_{self.agent_name}_{session_id}",
         )
@@ -1092,6 +1093,7 @@ class TeamBot(AgentBot):
                     session_id,
                     self.config,
                     room_id,
+                    thread_history,
                 ),
                 name=f"memory_save_{agent_name}_{session_id}",
             )

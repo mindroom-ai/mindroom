@@ -249,14 +249,14 @@ class TestMemoryFunctions:
             agent_messages = agent_call[0][0]
             assert agent_messages[0]["content"] == "What is 2+2?"  # Only user prompt stored
             assert agent_call[1]["user_id"] == "agent_calculator"
-            assert agent_call[1]["metadata"]["type"] == "user_input"
+            assert agent_call[1]["metadata"]["type"] == "conversation"
 
             # Check room memory call
             room_call = mock_memory.add.call_args_list[1]
             room_messages = room_call[0][0]
             assert room_messages[0]["content"] == "What is 2+2?"  # Only user prompt stored
             assert room_call[1]["user_id"] == "room_room_server"
-            assert room_call[1]["metadata"]["type"] == "user_input"
+            assert room_call[1]["metadata"]["type"] == "conversation"
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory_no_prompt(

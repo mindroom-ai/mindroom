@@ -220,6 +220,55 @@ async def build_memory_enhanced_prompt(
     return enhanced_prompt
 
 
+def _convert_thread_history_to_mem0_format(
+    thread_history: list[dict],
+    current_prompt: str,
+) -> list[dict[str, str]]:
+    """Convert Matrix thread history to mem0 message format.
+
+    Args:
+        thread_history: List of messages with sender and body
+        current_prompt: The current user prompt being processed
+
+    Returns:
+        List of messages in mem0 format with role and content
+
+    """
+    messages = []
+
+    # Known agent patterns - agents have specific naming patterns in Matrix
+    # Agents are usually @agentname_... or have specific suffixes
+    agent_patterns = [
+        "_agent:",  # Common agent suffix pattern
+        "_bot:",  # Bot suffix pattern
+        "router",  # Router agent
+        ".agent.",  # Agent domain pattern
+    ]
+
+    for msg in thread_history:
+        sender = msg.get("sender", "").lower()
+        body = msg.get("body", "")
+
+        if not body:
+            continue
+
+        # Determine if this is a user or assistant message
+        # Check if sender matches any known agent patterns
+        is_agent = any(pattern in sender for pattern in agent_patterns)
+
+        # Also check for @ mentions which indicate router suggestions
+        if not is_agent and body.startswith("@") and "could help" in body:
+            is_agent = True
+
+        role = "assistant" if is_agent else "user"
+        messages.append({"role": role, "content": body})
+
+    # Add the current prompt as the final user message
+    messages.append({"role": "user", "content": current_prompt})
+
+    return messages
+
+
 async def store_conversation_memory(
     prompt: str,
     agent_name: str,
@@ -227,41 +276,59 @@ async def store_conversation_memory(
     session_id: str,
     config: Config,
     room_id: str | None = None,
+    thread_history: list[dict] | None = None,
 ) -> None:
     """Store conversation in memory for future recall.
 
-    Following mem0 best practices, only stores user prompts to allow
-    intelligent extraction of relevant facts, preferences, and context.
-    AI responses are not stored as they don't contain valuable user information.
+    Uses mem0's intelligent extraction to identify relevant facts, preferences,
+    and context from the conversation. Provides full conversation context when
+    available to allow better understanding of user intent.
 
     Args:
-        prompt: The user's prompt
+        prompt: The current user prompt
         agent_name: Name of the agent
         storage_path: Path for memory storage
         session_id: Session ID for the conversation
         config: Application configuration
         room_id: Optional room ID for room memory
+        thread_history: Optional thread history for context
 
     """
     if not prompt:
         return
 
-    # Store only the user's input - let mem0 extract what's valuable
-    await add_agent_memory(
-        prompt,
-        agent_name,
-        storage_path,
-        config,
-        metadata={"type": "user_input", "session_id": session_id},
+    # Build messages in mem0 format
+    if thread_history:
+        messages = _convert_thread_history_to_mem0_format(
+            thread_history,
+            prompt,
+        )
+    else:
+        # No history, just the current prompt
+        messages = [{"role": "user", "content": prompt}]
+
+    # Let mem0 intelligently extract facts from the conversation
+    memory = await create_memory_instance(storage_path, config)
+
+    # Store for agent
+    await memory.add(
+        messages,
+        user_id=f"agent_{agent_name}",
+        metadata={"type": "conversation", "session_id": session_id},
     )
+    logger.info("Memory added", agent=agent_name)
 
     if room_id:
-        # For room memory, also store user input for room context
-        await add_room_memory(
-            prompt,
-            room_id,
-            storage_path,
-            config,
-            agent_name=agent_name,
-            metadata={"type": "user_input", "session_id": session_id},
+        # Store for room
+        safe_room_id = room_id.replace(":", "_").replace("!", "")
+        await memory.add(
+            messages,
+            user_id=f"room_{safe_room_id}",
+            metadata={
+                "type": "conversation",
+                "session_id": session_id,
+                "room_id": room_id,
+                "contributed_by": agent_name,
+            },
         )
+        logger.debug("Room memory added", room_id=room_id)
