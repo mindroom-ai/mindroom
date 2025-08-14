@@ -85,8 +85,13 @@ export function Integrations() {
       // Load backend tools and map them to integrations
       // (excluding those already handled by providers)
       const providerIds = Object.keys(integrationProviders);
+
+      // Also exclude Google tools that are managed through Google Services
+      const googleServicesManagedTools = ['google_calendar', 'google_sheets'];
+
       const backendIntegrations = backendTools
         .filter(tool => !providerIds.includes(tool.name))
+        .filter(tool => !googleServicesManagedTools.includes(tool.name)) // Exclude Google-managed tools
         .map(tool => {
           const mapped = mapToolToIntegration(tool);
           return {
@@ -143,10 +148,18 @@ export function Integrations() {
         title: 'Coming Soon',
         description: `${integration.name} integration is in development and will be available soon.`,
       });
+    } else if (integration.id === 'google_calendar' || integration.id === 'google_sheets') {
+      // Special message for Google-managed tools
+      toast({
+        title: 'Managed by Google Services',
+        description: `${integration.name} is configured through the Google Services integration. Please use the Google Services card to manage authentication.`,
+      });
     } else if (
       integration.setup_type === 'api_key' ||
       integration.setup_type === 'oauth' ||
-      integration.setup_type === 'special' ||
+      (integration.setup_type === 'special' &&
+        integration.id !== 'google_calendar' &&
+        integration.id !== 'google_sheets') ||
       integration.setup_type === 'none'
     ) {
       // Show generic config dialog for tools with config_fields
