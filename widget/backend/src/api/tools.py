@@ -19,10 +19,28 @@ class ToolsResponse(BaseModel):
 
 
 def _check_google_tools_configured(tool_name: str, manager: CredentialsManager) -> bool:
-    """Check if Google tools are configured."""
-    if tool_name in ["google_calendar", "google_sheets"]:
-        google_creds = manager.load_credentials("google")
-        return bool(google_creds and "token" in google_creds)
+    """Check if Google tools are configured with the right scopes."""
+    google_creds = manager.load_credentials("google")
+    if not google_creds or "token" not in google_creds:
+        return False
+
+    scopes = google_creds.get("scopes", [])
+
+    if tool_name == "google_calendar":
+        # Check for calendar scopes
+        required_scopes = [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.readonly",
+        ]
+        return any(scope in scopes for scope in required_scopes)
+    if tool_name == "google_sheets":
+        # Check for spreadsheet scopes
+        required_scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+        ]
+        return any(scope in scopes for scope in required_scopes)
+
     return False
 
 
