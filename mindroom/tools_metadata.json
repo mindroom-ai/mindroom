@@ -6504,36 +6504,6 @@
       "config_fields": [
         {
           "default": true,
-          "description": "Enable extracting text content from article URLs",
-          "label": "Get Article Text",
-          "name": "get_article_text",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        }
-      ],
-      "dependencies": [
-        "newspaper3k",
-        "lxml_html_clean"
-      ],
-      "description": "Extract and analyze news articles from URLs",
-      "display_name": "News Articles",
-      "docs_url": "https://docs.agno.com/tools/toolkits/web_scrape/newspaper",
-      "helper_text": null,
-      "icon": "Newspaper",
-      "icon_color": "text-gray-600",
-      "name": "newspaper",
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "auth_provider": null,
-      "category": "research",
-      "config_fields": [
-        {
-          "default": true,
           "description": "Enable the functionality to read the full content of an article",
           "label": "Read Article",
           "name": "read_article",

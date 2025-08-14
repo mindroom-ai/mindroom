@@ -59,7 +59,6 @@ from .lumalabs import lumalabs_tools
 from .mem0 import mem0_tools
 from .modelslabs import modelslabs_tools
 from .moviepy_video_tools import moviepy_video_tools
-from .newspaper import newspaper_tools
 from .newspaper4k import newspaper4k_tools
 from .openai import openai_tools
 from .openweather import openweather_tools
