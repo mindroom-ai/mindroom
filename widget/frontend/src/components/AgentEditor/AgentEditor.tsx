@@ -45,15 +45,7 @@ export function AgentEditor() {
     const configured: typeof backendTools = [];
     const unconfigured: typeof backendTools = [];
 
-    // Tools that are part of Google Services integration and shouldn't be shown separately
-    const googleServicesTools = ['google_calendar', 'google_sheets'];
-
     backendTools.forEach(tool => {
-      // Skip Google Services tools - they're implicitly available through Google integration
-      if (googleServicesTools.includes(tool.name)) {
-        return;
-      }
-
       // Tools that don't require configuration are "unconfigured but usable"
       if (tool.setup_type === 'none') {
         unconfigured.push(tool);
@@ -263,6 +255,9 @@ export function AgentEditor() {
                             tool.setup_type !== 'none' &&
                             tool.config_fields &&
                             tool.config_fields.length > 0;
+                          const isGoogleServiceTool = ['google_calendar', 'google_sheets'].includes(
+                            tool.name
+                          );
 
                           return (
                             <div className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
@@ -285,6 +280,14 @@ export function AgentEditor() {
                                 >
                                   {tool.display_name}
                                 </label>
+                                {isGoogleServiceTool && (
+                                  <Badge
+                                    variant="outline"
+                                    className="text-xs border-blue-200 dark:border-blue-800 text-blue-600 dark:text-blue-400"
+                                  >
+                                    Via Google Services
+                                  </Badge>
+                                )}
                               </div>
                               {isChecked && hasSchema && needsConfig && (
                                 <Button
