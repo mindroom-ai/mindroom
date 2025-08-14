@@ -2518,7 +2518,74 @@
     },
     {
       "category": "development",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "default": null,
+          "description": "The ID of the Google Spreadsheet to work with. If not specified, you can work with multiple spreadsheets.",
+          "label": "Spreadsheet ID",
+          "name": "spreadsheet_id",
+          "options": null,
+          "placeholder": "Leave empty to work with multiple spreadsheets",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": null,
+          "description": "Default range to use for operations (optional)",
+          "label": "Default Range",
+          "name": "spreadsheet_range",
+          "options": null,
+          "placeholder": "e.g., Sheet1!A1:Z100",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": true,
+          "description": "Allow reading data from spreadsheets",
+          "label": "Enable Read Operations",
+          "name": "read",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Allow creating new spreadsheets",
+          "label": "Enable Create Operations",
+          "name": "create",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Allow updating existing spreadsheets",
+          "label": "Enable Update Operations",
+          "name": "update",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Allow duplicating spreadsheets",
+          "label": "Enable Duplicate Operations",
+          "name": "duplicate",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "google-api-python-client",
         "google-auth-httplib2",
@@ -4421,7 +4488,30 @@
     },
     {
       "category": "productivity",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "default": "primary",
+          "description": "The Google Calendar ID to use (default: 'primary' for the user's main calendar)",
+          "label": "Calendar ID",
+          "name": "calendar_id",
+          "options": null,
+          "placeholder": "primary",
+          "required": false,
+          "type": "text",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Allow the agent to create, update, and delete calendar events",
+          "label": "Allow Updates",
+          "name": "allow_update",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "dependencies": [
         "google-api-python-client",
         "google-auth",

@@ -150,16 +150,10 @@ export function Integrations() {
         title: 'Coming Soon',
         description: `${integration.name} integration is in development and will be available soon.`,
       });
-    } else if (isGoogleManagedTool(integration.id)) {
-      // Special message for Google-managed tools
-      toast({
-        title: 'Managed by Google Services',
-        description: `${integration.name} is configured through the Google Services integration. Please use the Google Services card to manage authentication.`,
-      });
     } else if (
       integration.setup_type === 'api_key' ||
       integration.setup_type === 'oauth' ||
-      (integration.setup_type === 'special' && !isGoogleManagedTool(integration.id)) ||
+      integration.setup_type === 'special' ||
       integration.setup_type === 'none'
     ) {
       // Show generic config dialog for tools with config_fields

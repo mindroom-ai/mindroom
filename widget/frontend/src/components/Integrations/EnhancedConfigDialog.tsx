@@ -27,6 +27,7 @@ import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
 import { API_BASE } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { isGoogleManagedTool } from '@/lib/googleTools';
 
 interface ConfigField {
   name: string;
@@ -102,6 +103,31 @@ export function EnhancedConfigDialog({
     });
   };
 
+  // Filter out authentication fields for Google-managed tools
+  const getFilteredFields = () => {
+    if (isGoogleManagedTool(service)) {
+      // For Google tools, filter out OAuth authentication fields
+      const authFields = [
+        'GOOGLE_CLIENT_ID',
+        'GOOGLE_CLIENT_SECRET',
+        'GOOGLE_PROJECT_ID',
+        'GOOGLE_REDIRECT_URI',
+        'scopes',
+        'credentials_path',
+        'token_path',
+        'access_token',
+        'creds',
+        'creds_path',
+        'oauth_port',
+        'port',
+      ];
+      return configFields.filter(field => !authFields.includes(field.name));
+    }
+    return configFields;
+  };
+
+  const filteredFields = getFilteredFields();
+
   // Initialize default values and load existing credentials
   useEffect(() => {
     if (!open) return;
@@ -116,7 +142,7 @@ export function EnhancedConfigDialog({
           if (data.credentials) {
             // Merge existing credentials with defaults
             const defaults: Record<string, string | boolean> = {};
-            configFields.forEach(field => {
+            filteredFields.forEach(field => {
               if (data.credentials[field.name] !== undefined) {
                 // Keep boolean values as boolean, convert others to string
                 if (field.type === 'boolean') {
@@ -147,7 +173,7 @@ export function EnhancedConfigDialog({
 
       // If no existing credentials, just use defaults
       const defaults: Record<string, string | boolean> = {};
-      configFields.forEach(field => {
+      filteredFields.forEach(field => {
         if (field.default !== undefined && field.default !== null) {
           if (field.type === 'boolean') {
             defaults[field.name] = field.default === true || field.default === 'true';
@@ -160,7 +186,7 @@ export function EnhancedConfigDialog({
     };
 
     loadExistingCredentials();
-  }, [configFields, service, open]);
+  }, [filteredFields, service, open]);
 
   const validateField = (field: ConfigField, value: string | boolean): string | null => {
     // Boolean fields don't need validation
@@ -204,7 +230,7 @@ export function EnhancedConfigDialog({
   const handleSave = async () => {
     // Validate all fields
     const errors: Record<string, string> = {};
-    configFields.forEach(field => {
+    filteredFields.forEach(field => {
       const error = validateField(field, configValues[field.name]);
       if (error) {
         errors[field.name] = error;
@@ -309,6 +335,17 @@ export function EnhancedConfigDialog({
             </Alert>
           )}
 
+          {/* Google Services Notice */}
+          {isGoogleManagedTool(service) && (
+            <Alert className="border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/30">
+              <CheckCircle className="h-4 w-4 text-green-600 dark:text-green-400" />
+              <AlertDescription className="text-xs text-green-900 dark:text-green-100">
+                Authentication is managed through Google Services. These are optional operational
+                settings.
+              </AlertDescription>
+            </Alert>
+          )}
+
           {/* Documentation Link - More Prominent */}
           {docsUrl && (
             <Button
@@ -332,127 +369,139 @@ export function EnhancedConfigDialog({
         ) : (
           <>
             <div className="space-y-4 py-2 max-h-[400px] overflow-y-auto px-1">
-              {configFields.map((field, index) => {
-                const FieldIcon = getFieldIcon(field);
-                const isPasswordField =
-                  field.type === 'password' ||
-                  field.name.toLowerCase().includes('token') ||
-                  field.name.toLowerCase().includes('key') ||
-                  field.name.toLowerCase().includes('secret');
-                const hasError = !!fieldErrors[field.name];
+              {filteredFields.length === 0 && isGoogleManagedTool(service) ? (
+                <div className="flex flex-col items-center justify-center py-8 text-center">
+                  <CheckCircle className="h-12 w-12 text-green-500 mb-3" />
+                  <p className="text-sm text-muted-foreground">
+                    This Google service is fully configured through Google Services authentication.
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    No additional configuration is required.
+                  </p>
+                </div>
+              ) : (
+                filteredFields.map((field, index) => {
+                  const FieldIcon = getFieldIcon(field);
+                  const isPasswordField =
+                    field.type === 'password' ||
+                    field.name.toLowerCase().includes('token') ||
+                    field.name.toLowerCase().includes('key') ||
+                    field.name.toLowerCase().includes('secret');
+                  const hasError = !!fieldErrors[field.name];
 
-                return (
-                  <div key={field.name} className="space-y-2">
-                    {index > 0 && <Separator className="my-4" />}
+                  return (
+                    <div key={field.name} className="space-y-2">
+                      {index > 0 && <Separator className="my-4" />}
 
-                    {field.type === 'boolean' ? (
-                      <div className="flex items-center space-x-3 p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
-                        <Checkbox
-                          id={field.name}
-                          checked={configValues[field.name] === true}
-                          onCheckedChange={checked => handleFieldChange(field, checked === true)}
-                          className="h-5 w-5"
-                        />
-                        <label htmlFor={field.name} className="flex-1 cursor-pointer select-none">
-                          <div className="flex items-center space-x-2">
-                            {FieldIcon && <FieldIcon className="h-4 w-4 text-muted-foreground" />}
-                            <span className="font-medium text-sm">{field.label}</span>
-                            {field.required && (
-                              <Badge variant="secondary" className="ml-2 text-xs px-1.5 py-0">
-                                Required
-                              </Badge>
+                      {field.type === 'boolean' ? (
+                        <div className="flex items-center space-x-3 p-3 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
+                          <Checkbox
+                            id={field.name}
+                            checked={configValues[field.name] === true}
+                            onCheckedChange={checked => handleFieldChange(field, checked === true)}
+                            className="h-5 w-5"
+                          />
+                          <label htmlFor={field.name} className="flex-1 cursor-pointer select-none">
+                            <div className="flex items-center space-x-2">
+                              {FieldIcon && <FieldIcon className="h-4 w-4 text-muted-foreground" />}
+                              <span className="font-medium text-sm">{field.label}</span>
+                              {field.required && (
+                                <Badge variant="secondary" className="ml-2 text-xs px-1.5 py-0">
+                                  Required
+                                </Badge>
+                              )}
+                            </div>
+                            {field.description && (
+                              <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6">
+                                {field.description}
+                              </div>
+                            )}
+                          </label>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="space-y-1">
+                            <Label
+                              htmlFor={field.name}
+                              className={cn(
+                                'flex items-center space-x-2',
+                                hasError && 'text-destructive'
+                              )}
+                            >
+                              {FieldIcon && <FieldIcon className="h-4 w-4 text-muted-foreground" />}
+                              <span>{field.label}</span>
+                              {field.required && (
+                                <Badge variant="secondary" className="ml-2 text-xs px-1.5 py-0">
+                                  Required
+                                </Badge>
+                              )}
+                            </Label>
+                            {field.description && (
+                              <p className="text-xs text-muted-foreground ml-6">
+                                {field.description}
+                              </p>
                             )}
                           </div>
-                          {field.description && (
-                            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6">
-                              {field.description}
+                          <div className="relative">
+                            <Input
+                              id={field.name}
+                              type={
+                                isPasswordField && !showPassword[field.name]
+                                  ? 'password'
+                                  : field.type === 'number'
+                                    ? 'number'
+                                    : 'text'
+                              }
+                              placeholder={field.placeholder}
+                              value={(configValues[field.name] as string) || ''}
+                              onChange={e => handleFieldChange(field, e.target.value)}
+                              min={field.validation?.min}
+                              max={field.validation?.max}
+                              className={cn(
+                                'pr-10',
+                                hasError && 'border-destructive focus-visible:ring-destructive',
+                                isPasswordField && 'font-mono'
+                              )}
+                            />
+
+                            {isPasswordField && (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
+                                onClick={() => togglePasswordVisibility(field.name)}
+                              >
+                                {showPassword[field.name] ? (
+                                  <Lock className="h-4 w-4 text-muted-foreground" />
+                                ) : (
+                                  <Lock className="h-4 w-4 text-muted-foreground" />
+                                )}
+                              </Button>
+                            )}
+                          </div>
+
+                          {hasError && (
+                            <div className="flex items-center space-x-1 text-destructive">
+                              <AlertCircle className="h-3 w-3" />
+                              <p className="text-xs">{fieldErrors[field.name]}</p>
                             </div>
                           )}
-                        </label>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="space-y-1">
-                          <Label
-                            htmlFor={field.name}
-                            className={cn(
-                              'flex items-center space-x-2',
-                              hasError && 'text-destructive'
-                            )}
-                          >
-                            {FieldIcon && <FieldIcon className="h-4 w-4 text-muted-foreground" />}
-                            <span>{field.label}</span>
-                            {field.required && (
-                              <Badge variant="secondary" className="ml-2 text-xs px-1.5 py-0">
-                                Required
-                              </Badge>
-                            )}
-                          </Label>
-                          {field.description && (
-                            <p className="text-xs text-muted-foreground ml-6">
-                              {field.description}
+
+                          {field.validation && (
+                            <p className="text-xs text-muted-foreground">
+                              {field.type === 'number' &&
+                                field.validation.min !== undefined &&
+                                field.validation.max !== undefined &&
+                                `Value must be between ${field.validation.min} and ${field.validation.max}`}
                             </p>
                           )}
-                        </div>
-                        <div className="relative">
-                          <Input
-                            id={field.name}
-                            type={
-                              isPasswordField && !showPassword[field.name]
-                                ? 'password'
-                                : field.type === 'number'
-                                  ? 'number'
-                                  : 'text'
-                            }
-                            placeholder={field.placeholder}
-                            value={(configValues[field.name] as string) || ''}
-                            onChange={e => handleFieldChange(field, e.target.value)}
-                            min={field.validation?.min}
-                            max={field.validation?.max}
-                            className={cn(
-                              'pr-10',
-                              hasError && 'border-destructive focus-visible:ring-destructive',
-                              isPasswordField && 'font-mono'
-                            )}
-                          />
-
-                          {isPasswordField && (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="absolute right-0 top-0 h-full px-3 hover:bg-transparent"
-                              onClick={() => togglePasswordVisibility(field.name)}
-                            >
-                              {showPassword[field.name] ? (
-                                <Lock className="h-4 w-4 text-muted-foreground" />
-                              ) : (
-                                <Lock className="h-4 w-4 text-muted-foreground" />
-                              )}
-                            </Button>
-                          )}
-                        </div>
-
-                        {hasError && (
-                          <div className="flex items-center space-x-1 text-destructive">
-                            <AlertCircle className="h-3 w-3" />
-                            <p className="text-xs">{fieldErrors[field.name]}</p>
-                          </div>
-                        )}
-
-                        {field.validation && (
-                          <p className="text-xs text-muted-foreground">
-                            {field.type === 'number' &&
-                              field.validation.min !== undefined &&
-                              field.validation.max !== undefined &&
-                              `Value must be between ${field.validation.min} and ${field.validation.max}`}
-                          </p>
-                        )}
-                      </>
-                    )}
-                  </div>
-                );
-              })}
+                        </>
+                      )}
+                    </div>
+                  );
+                })
+              )}
             </div>
 
             <Separator className="my-4" />

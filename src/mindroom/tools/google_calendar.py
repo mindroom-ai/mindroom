@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tools_metadata import (
+    ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -24,7 +25,25 @@ if TYPE_CHECKING:
     setup_type=SetupType.SPECIAL,
     icon="FaCalendarAlt",
     icon_color="text-blue-600",  # Google Calendar blue
-    config_fields=None,  # No config fields - uses Google Services OAuth
+    config_fields=[
+        ConfigField(
+            name="calendar_id",
+            label="Calendar ID",
+            type="text",
+            required=False,
+            default="primary",
+            placeholder="primary",
+            description="The Google Calendar ID to use (default: 'primary' for the user's main calendar)",
+        ),
+        ConfigField(
+            name="allow_update",
+            label="Allow Updates",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Allow the agent to create, update, and delete calendar events",
+        ),
+    ],
     dependencies=["google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib"],
     docs_url="https://docs.agno.com/tools/toolkits/others/googlecalendar",
 )
