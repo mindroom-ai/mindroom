@@ -45,7 +45,15 @@ export function AgentEditor() {
     const configured: typeof backendTools = [];
     const unconfigured: typeof backendTools = [];
 
+    // Tools that are part of Google Services integration and shouldn't be shown separately
+    const googleServicesTools = ['google_calendar', 'google_sheets'];
+
     backendTools.forEach(tool => {
+      // Skip Google Services tools - they're implicitly available through Google integration
+      if (googleServicesTools.includes(tool.name)) {
+        return;
+      }
+
       // Tools that don't require configuration are "unconfigured but usable"
       if (tool.setup_type === 'none') {
         unconfigured.push(tool);
