@@ -61,8 +61,10 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
         email: data.email,
         services: data.services || [],
       });
+      return data.connected;
     } catch (error) {
       console.error('Failed to check Google status:', error);
+      return false;
     }
   };
 
@@ -108,11 +110,16 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
       const authWindow = window.open(data.auth_url, '_blank', 'width=500,height=600');
 
       // Poll for connection status
+      let wasConnected = status.connected;
       const pollInterval = setInterval(async () => {
-        await checkGoogleStatus();
+        const currentStatus = await checkGoogleStatus();
         if (authWindow?.closed) {
           clearInterval(pollInterval);
           setLoading(false);
+          // If we're now connected and weren't before, call onSuccess
+          if (!wasConnected && currentStatus && onSuccess) {
+            onSuccess();
+          }
         }
       }, 2000);
     } catch (error) {
@@ -139,6 +146,10 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
           title: 'Disconnected',
           description: 'Your Google account has been disconnected.',
         });
+        // Notify parent component to refresh
+        if (onSuccess) {
+          onSuccess();
+        }
       }
     } catch (error) {
       console.error('Failed to disconnect:', error);
