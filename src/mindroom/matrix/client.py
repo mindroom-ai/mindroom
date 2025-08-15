@@ -496,7 +496,6 @@ async def set_avatar_from_file(
 
     file_size = len(avatar_data)
 
-    # nio requires a callable that returns a file-like object
     def data_provider(_upload_monitor: object, _unused_data: object) -> io.BytesIO:
         return io.BytesIO(avatar_data)
 
