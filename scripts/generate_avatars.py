@@ -5,8 +5,11 @@ This script:
 2. Uses AI to generate custom prompts based on agent roles and room purposes
 3. Generates consistent-style avatars using GPT Image 1
 4. Stores avatars in avatars/ directory
-5. Sets avatars in Matrix for agents and rooms
+5. Sets/updates avatars in Matrix for rooms
 6. Only regenerates missing avatars (idempotent)
+
+Note: New rooms also get avatars set automatically when created, but this
+script allows updating avatars for existing rooms.
 
 Usage:
     python scripts/generate_avatars.py [--set-only]

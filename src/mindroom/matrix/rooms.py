@@ -156,13 +156,14 @@ async def ensure_room_exists(
         add_room(room_key, created_room_id, full_alias, room_name)
         logger.info(f"Created room {room_key} with ID {created_room_id}")
 
-        # Try to set room avatar if available
+        # Set room avatar if available (for newly created rooms)
+        # Note: Avatars can also be updated later using scripts/generate_avatars.py
         from pathlib import Path  # noqa: PLC0415
 
         avatar_path = Path(__file__).parent.parent.parent.parent / "avatars" / "rooms" / f"{room_key}.png"
         if avatar_path.exists():
             if await check_and_set_room_avatar(client, created_room_id, avatar_path):
-                logger.info(f"Set avatar for room {room_key}")
+                logger.info(f"Set avatar for newly created room {room_key}")
             else:
                 logger.warning(f"Failed to set avatar for room {room_key}")
 
