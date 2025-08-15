@@ -215,8 +215,8 @@ Agents ONLY respond in threads - never in main room messages. Within threads, th
 
 When multiple agents work together, they can operate in different modes:
 
-- **Coordinate Mode**: Agents work sequentially, building on each other's contributions
-- **Collaborate Mode**: Agents work in parallel, with responses synthesized into a unified answer
+- **Coordinate Mode**: Team leader delegates different subtasks to members (sequential or parallel as needed)
+- **Collaborate Mode**: All agents work on the SAME task simultaneously, providing diverse perspectives
 - **Route Mode**: A lead agent delegates to the most appropriate specialist
 
 These rules ensure:
