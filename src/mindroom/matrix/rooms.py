@@ -8,7 +8,7 @@ import nio
 
 from mindroom.logging_config import get_logger
 
-from .client import create_room, join_room, matrix_client
+from .client import check_and_set_room_avatar, create_room, join_room, matrix_client
 from .identity import MatrixID, extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
 
@@ -155,6 +155,17 @@ async def ensure_room_exists(
         # Save room info
         add_room(room_key, created_room_id, full_alias, room_name)
         logger.info(f"Created room {room_key} with ID {created_room_id}")
+
+        # Try to set room avatar if available
+        from pathlib import Path  # noqa: PLC0415
+
+        avatar_path = Path(__file__).parent.parent.parent.parent / "avatars" / "rooms" / f"{room_key}.png"
+        if avatar_path.exists():
+            if await check_and_set_room_avatar(client, created_room_id, avatar_path):
+                logger.info(f"Set avatar for room {room_key}")
+            else:
+                logger.warning(f"Failed to set avatar for room {room_key}")
+
         return created_room_id
     logger.error(f"Failed to create room {room_key}")
     return None

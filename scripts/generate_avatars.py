@@ -1,9 +1,9 @@
 #!/usr/bin/env -S uv run
-"""Generate avatars for all agents and teams using OpenAI GPT Image model.
+"""Generate avatars for all agents, teams, and rooms using OpenAI GPT Image model.
 
 This script:
-1. Reads all agents and teams from config.yaml
-2. Uses AI to generate custom prompts based on agent roles
+1. Reads all agents, teams, and rooms from config.yaml
+2. Uses AI to generate custom prompts based on agent roles and room purposes
 3. Generates consistent-style avatars using GPT Image 1
 4. Stores avatars in avatars/ directory
 5. Only regenerates missing avatars (idempotent)
@@ -66,6 +66,17 @@ Examples:
 - For a code agent: "keyboard fingers, screen face with code scrolling, USB port accessories, binary code patterns"
 """
 
+ROOM_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for friendly Pixar-style robot meeting spaces and environments.
+Given a room's name, suggest 5-7 environmental features that show this is a welcoming robot gathering space.
+Think about: holographic displays, cozy charging stations, data streams, robot-friendly furniture, ambient lighting, tech decorations.
+The avatar should depict a warm, inviting space where robots would gather and collaborate.
+Output ONLY the visual elements as a comma-separated list, no other text.
+Examples:
+- For a lobby: "circular gathering space with soft blue lights, central hologram projector, comfortable charging pods, welcome banner with binary code, floating data orbs"
+- For research room: "walls lined with data screens, floating holographic books, analysis stations, green scanning beams, knowledge crystals"
+- For automation room: "conveyor belts, robotic arms on walls, gear decorations, orange industrial lighting, efficiency meters"
+"""
+
 
 def get_project_root() -> Path:
     """Get the project root directory."""
@@ -95,7 +106,11 @@ async def generate_prompt(
 ) -> str:
     """Generate a DALL-E prompt based on the entity's role using AI."""
     # Use a simple AI model to generate visual themes based on the role
-    if entity_type == "teams" and team_members:
+    if entity_type == "rooms":
+        # For rooms, create a prompt for a robot gathering space
+        system_prompt = ROOM_SYSTEM_PROMPT
+        user_prompt = f"Room name: {entity_name}\nPurpose: {role}"
+    elif entity_type == "teams" and team_members:
         # For teams, create a prompt that combines the team members' roles
         system_prompt = TEAM_SYSTEM_PROMPT
         members_info = "\n".join([f"- {m['name']}: {m['role']}" for m in team_members])
@@ -170,15 +185,23 @@ async def generate_avatar(
         console.print(f"   [dim]Team members: {', '.join([m['name'] for m in team_members])}[/dim]")
 
     # Generate a custom prompt using AI based on the role
-    prompt = await generate_prompt(client, entity_type, entity_name, role, team_members)
+    try:
+        prompt = await generate_prompt(client, entity_type, entity_name, role, team_members)
+    except Exception as e:
+        console.print(f"[red]✗ Failed to generate prompt for {entity_type}/{entity_name}: {e}[/red]")
+        return
 
-    response = await client.images.generate(
-        model="gpt-image-1",
-        prompt=prompt,
-        size="1024x1024",  # API minimum size
-        quality="low",  # Use low quality for cheaper generation
-        n=1,
-    )
+    try:
+        response = await client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1024",  # API minimum size
+            quality="low",  # Use low quality for cheaper generation
+            n=1,
+        )
+    except Exception as e:
+        console.print(f"[red]✗ Failed to generate image for {entity_type}/{entity_name}: {e}[/red]")
+        return
 
     if response.data and len(response.data) > 0:
         image_data = response.data[0]
@@ -226,9 +249,29 @@ async def main() -> None:
     for team_name, team_data in teams.items():
         tasks.append(generate_avatar(client, "teams", team_name, team_data, agents))
 
+    # Process rooms
+    # Get unique rooms from all agents
+    all_rooms = set()
+    for agent_data in agents.values():
+        rooms = agent_data.get("rooms", [])
+        all_rooms.update(rooms)
+
+    # Define room purposes
+    room_purposes = {
+        "lobby": "Central meeting space for initial interactions and general discussions",
+        "research": "Knowledge discovery, data analysis, and investigation space",
+        "docs": "Documentation, writing, and knowledge management space",
+        "ops": "Operations, DevOps, and system management space",
+        "automation": "Workflow automation and process optimization space",
+    }
+
+    for room_name in all_rooms:
+        room_data = {"role": room_purposes.get(room_name, f"Collaboration space for {room_name} activities")}
+        tasks.append(generate_avatar(client, "rooms", room_name, room_data))
+
     # Generate avatars
     console.print(
-        f"\n[bold cyan]🚀 Generating avatars for {len(agents) + 1} agents and {len(teams)} teams...[/bold cyan]\n",
+        f"\n[bold cyan]🚀 Generating avatars for {len(agents) + 1} agents, {len(teams)} teams, and {len(all_rooms)} rooms...[/bold cyan]\n",
     )
 
     # Process all tasks (OpenAI handles rate limiting)

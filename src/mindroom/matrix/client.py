@@ -551,3 +551,100 @@ async def check_and_set_avatar(
         return True
 
     return await set_avatar_from_file(client, avatar_path)
+
+
+async def set_room_avatar_from_file(
+    client: nio.AsyncClient,
+    room_id: str,
+    avatar_path: Path,
+) -> bool:
+    """Set the avatar for a Matrix room from a file.
+
+    Args:
+        client: Authenticated Matrix client
+        room_id: The room ID to set the avatar for
+        avatar_path: Path to the avatar image file
+
+    Returns:
+        True if avatar was successfully set, False otherwise
+
+    """
+    if not avatar_path.exists():
+        logger.warning(f"Avatar file not found: {avatar_path}")
+        return False
+
+    # Read the file
+    with avatar_path.open("rb") as avatar_file:
+        avatar_data = avatar_file.read()
+
+    # Detect content type
+    content_type = "image/png" if avatar_path.suffix.lower() == ".png" else "image/jpeg"
+    file_size = len(avatar_data)
+
+    # Create data provider function for upload
+    def data_provider(_upload_monitor: object, _unused_data: object) -> io.BytesIO:
+        return io.BytesIO(avatar_data)
+
+    # Upload the avatar
+    upload_result = await client.upload(
+        data_provider=data_provider,
+        content_type=content_type,
+        filename=avatar_path.name,
+        filesize=file_size,
+    )
+
+    # Handle tuple response from nio
+    if isinstance(upload_result, tuple):
+        upload_response, error = upload_result
+        if error:
+            logger.error(f"Upload error: {error}")
+            return False
+    else:
+        upload_response = upload_result
+
+    if not isinstance(upload_response, nio.UploadResponse):
+        logger.error(f"Failed to upload room avatar: {upload_response}")
+        return False
+
+    avatar_url = upload_response.content_uri
+
+    # Set room avatar using room state
+    response = await client.room_put_state(
+        room_id=room_id,
+        event_type="m.room.avatar",
+        content={"url": avatar_url},
+    )
+
+    if isinstance(response, nio.RoomPutStateResponse):
+        logger.info(f"✅ Successfully set avatar for room {room_id}")
+        return True
+
+    logger.error(f"Failed to set avatar for room {room_id}: {response}")
+    return False
+
+
+async def check_and_set_room_avatar(
+    client: nio.AsyncClient,
+    room_id: str,
+    avatar_path: Path,
+) -> bool:
+    """Check if room has an avatar and set it if it doesn't.
+
+    Args:
+        client: Authenticated Matrix client
+        room_id: The room ID to check/set avatar for
+        avatar_path: Path to the avatar image file
+
+    Returns:
+        True if avatar was already set or successfully set, False otherwise
+
+    """
+    # Get current room state for avatar
+    response = await client.room_get_state_event(room_id, "m.room.avatar")
+
+    if isinstance(response, nio.RoomGetStateEventResponse) and response.content and response.content.get("url"):
+        logger.debug(f"Avatar already set for room {room_id}")
+        return True
+
+    # No avatar set, set it now
+    return await set_room_avatar_from_file(client, room_id, avatar_path)
