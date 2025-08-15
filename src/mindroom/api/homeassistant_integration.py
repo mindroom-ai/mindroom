@@ -29,7 +29,7 @@ creds_manager = CredentialsManager()
 
 # OAuth scopes for Home Assistant
 # Home Assistant doesn't use traditional OAuth scopes, but we request full API access
-SCOPES = []
+SCOPES: list[str] = []
 
 # Environment path for OAuth configuration
 ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
@@ -155,7 +155,7 @@ async def test_connection(instance_url: str, token: str) -> dict[str, Any]:
                 "entities_count": len(entities),
             }
 
-        except httpx.TimeoutError as e:
+        except httpx.TimeoutException as e:
             raise HTTPException(
                 status_code=504,
                 detail="Connection timeout - check if the URL is correct and accessible",
@@ -317,7 +317,7 @@ async def callback(request: Request) -> RedirectResponse:
     instance_url = config.get("instance_url")
     client_id = config.get("client_id")
 
-    if not all([instance_url, client_id]):
+    if not all([instance_url, client_id]) or not isinstance(instance_url, str):
         raise HTTPException(status_code=503, detail="Incomplete configuration")
 
     try:

@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from spotipy import Spotify, SpotifyOAuth
+from spotipy import Spotify, SpotifyOAuth  # type: ignore[import-untyped]
 
 from mindroom.credentials import CredentialsManager
 

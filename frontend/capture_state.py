@@ -19,7 +19,7 @@ def capture_widget_state() -> None:
     try:
         # Get the current configuration
         req = urllib.request.Request(
-            "http://localhost:8000/api/config/load",
+            "http://localhost:8765/api/config/load",
             method="POST",
             headers={"Content-Type": "application/json"},
         )
@@ -34,15 +34,15 @@ def capture_widget_state() -> None:
         print(f"✓ Configuration state saved to: {state_file}")
 
         # Get list of agents
-        with urllib.request.urlopen("http://localhost:8000/api/config/agents") as response:
+        with urllib.request.urlopen("http://localhost:8765/api/config/agents") as response:
             agents = json.loads(response.read().decode())
 
         # Get available tools
-        with urllib.request.urlopen("http://localhost:8000/api/tools") as response:
+        with urllib.request.urlopen("http://localhost:8765/api/tools") as response:
             tools = json.loads(response.read().decode())
 
         # Get rooms
-        with urllib.request.urlopen("http://localhost:8000/api/rooms") as response:
+        with urllib.request.urlopen("http://localhost:8765/api/rooms") as response:
             rooms = json.loads(response.read().decode())
 
         # Create a summary

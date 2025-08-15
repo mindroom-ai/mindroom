@@ -34,7 +34,6 @@ trap cleanup EXIT INT TERM
 
 # Start backend (now from main mindroom package)
 echo -e "${GREEN}Starting backend server on port $BACKEND_PORT...${NC}"
-cd ..  # Go to project root
 
 echo "Using uv for Python dependencies..."
 if [ ! -d ".venv" ]; then
@@ -42,8 +41,6 @@ if [ ! -d ".venv" ]; then
 fi
 uv run uvicorn mindroom.api.main:app --reload --host $HOST --port $BACKEND_PORT &
 BACKEND_PID=$!
-
-cd widget
 
 # Wait a moment for backend to start
 sleep 2
@@ -62,7 +59,7 @@ else
     VITE_BACKEND_PORT=$BACKEND_PORT BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev &
 fi
 FRONTEND_PID=$!
-cd ..
+cd ..  # Return to root directory
 
 echo -e "${GREEN}Widget is running!${NC}"
 echo -e "Frontend: http://$HOST:$FRONTEND_PORT"

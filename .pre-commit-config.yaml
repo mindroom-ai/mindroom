@@ -40,15 +40,15 @@ repos:
     rev: v3.1.0
     hooks:
       - id: prettier
-        files: ^widget/frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
-        exclude: ^(widget/frontend/package-lock\.json|widget/frontend/tsconfig.*\.json|.*\.min\.(js|css))$
+        files: ^frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md)$
+        exclude: ^(frontend/package-lock\.json|frontend/tsconfig.*\.json|.*\.min\.(js|css))$
 
   - repo: https://github.com/pre-commit/mirrors-eslint
     rev: v8.56.0
     hooks:
       - id: eslint
-        files: ^widget/frontend/.*\.(js|jsx|ts|tsx)$
-        args: ['--fix', '--config', 'widget/frontend/.eslintrc.json']
+        files: ^frontend/.*\.(js|jsx|ts|tsx)$
+        args: ['--fix', '--config', 'frontend/.eslintrc.json']
         additional_dependencies:
           - eslint@8.56.0
           - '@typescript-eslint/eslint-plugin@6.19.0'
@@ -62,25 +62,25 @@ repos:
     hooks:
       - id: typescript-check
         name: TypeScript type checking
-        entry: bash -c 'cd widget/frontend && pnpm run type-check'
+        entry: bash -c 'cd frontend && pnpm run type-check'
         language: system
-        files: ^widget/frontend/.*\.(ts|tsx)$
+        files: ^frontend/.*\.(ts|tsx)$
         pass_filenames: false
 
       - id: check-package-lock
         name: Check pnpm-lock.yaml is up to date
-        entry: bash -c 'cd widget/frontend && pnpm ls >/dev/null 2>&1'
+        entry: bash -c 'cd frontend && pnpm ls >/dev/null 2>&1'
         language: system
-        files: ^widget/frontend/package\.json$
+        files: ^frontend/package\.json$
         pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: check-json
-        files: ^widget/frontend/.*\.json$
-        exclude: ^(widget/frontend/tsconfig.*\.json)$
+        files: ^frontend/.*\.json$
+        exclude: ^(frontend/tsconfig.*\.json)$
       - id: pretty-format-json
         args: ['--autofix', '--indent=2']
-        files: ^widget/frontend/.*\.json$
-        exclude: ^(widget/frontend/package(-lock)?\.json|widget/frontend/tsconfig.*\.json|widget/frontend/\.eslintrc\.json)$
+        files: ^frontend/.*\.json$
+        exclude: ^(frontend/package(-lock)?\.json|frontend/tsconfig.*\.json|frontend/\.eslintrc\.json)$

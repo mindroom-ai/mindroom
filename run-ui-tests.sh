@@ -14,7 +14,7 @@ pnpm exec vitest run
 echo ""
 echo "Running Backend Tests (Python/FastAPI)..."
 echo "----------------------------------------"
-cd ../..  # Go to project root
+cd ..  # Return to project root
 uv run pytest tests/api/ -v -o addopts=""
 
 echo ""

@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from watchdog.events import FileSystemEventHandler
+from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 # Import routers
@@ -66,10 +66,13 @@ class TestModelRequest(BaseModel):
 class ConfigFileHandler(FileSystemEventHandler):
     """Watch for changes to config.yaml."""
 
-    def on_modified(self, event: object) -> None:
+    def on_modified(self, event: FileSystemEvent) -> None:
         """Handle file modification events."""
-        if event.src_path.endswith("config.yaml"):
-            print(f"Config file changed: {event.src_path}")
+        src_path = event.src_path
+        if isinstance(src_path, bytes):
+            src_path = src_path.decode("utf-8")
+        if src_path.endswith("config.yaml"):
+            print(f"Config file changed: {src_path}")
             load_config_from_file()
 
 
@@ -319,7 +322,8 @@ async def delete_team(team_id: str) -> dict[str, bool]:
 async def get_models() -> dict[str, Any]:
     """Get all model configurations."""
     with config_lock:
-        return config.get("models", {})
+        models = config.get("models", {})
+        return dict(models) if models else {}
 
 
 @app.put("/api/config/models/{model_id}")
@@ -344,7 +348,8 @@ async def update_model(model_id: str, model_data: dict[str, Any]) -> dict[str, b
 async def get_room_models() -> dict[str, Any]:
     """Get room-specific model overrides."""
     with config_lock:
-        return config.get("room_models", {})
+        room_models = config.get("room_models", {})
+        return dict(room_models) if room_models else {}
 
 
 @app.put("/api/config/room-models")

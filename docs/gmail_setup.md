@@ -55,10 +55,10 @@ This guide explains how to set up Google Services integration with MindRoom, all
 
 ### Option A: Using .env File (Recommended)
 
-Create a `.env` file in the `widget/backend` directory:
+Create a `.env` file in the project root directory:
 
 ```bash
-cd /path/to/mindroom/widget/backend
+cd /path/to/mindroom
 cp .env.example .env  # if it exists
 ```
 

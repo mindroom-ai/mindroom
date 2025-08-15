@@ -50,7 +50,7 @@ This document outlines the core principles and practices for developing this pro
 
 ### Step 6: Viewing the Widget
 
-- **Taking Screenshots**: To view the widget without Jupyter, use `python widget/take_screenshot.py` from the project root.
+- **Taking Screenshots**: To view the widget without Jupyter, use `python frontend/take_screenshot.py` from the project root.
 - **Manual Screenshot**: From the frontend directory, run `pnpm run dev` to start the development server, then run `pnpm run screenshot` in another terminal.
 - **Screenshot Location**: Screenshots are saved to `frontend/screenshots/` with timestamps.
 - **Use Cases**: This is helpful for visual verification, documentation, and sharing the widget appearance.
