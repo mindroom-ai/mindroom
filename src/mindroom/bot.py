@@ -204,10 +204,12 @@ class AgentBot:
         for room_id in self.rooms:
             if await join_room(self.client, room_id):
                 self.logger.info("Joined room", room_id=room_id)
-                # Restore scheduled tasks for this room
-                restored = await restore_scheduled_tasks(self.client, room_id, self.config)
-                if restored > 0:
-                    self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
+                # Only the router agent should restore scheduled tasks
+                # to avoid duplicate task instances after restart
+                if self.agent_name == ROUTER_AGENT_NAME:
+                    restored = await restore_scheduled_tasks(self.client, room_id, self.config)
+                    if restored > 0:
+                        self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
@@ -1177,7 +1179,7 @@ class MultiAgentOrchestrator:
         # Run all sync tasks
         await asyncio.gather(*sync_tasks)
 
-    async def update_config(self) -> bool:  # noqa: C901
+    async def update_config(self) -> bool:  # noqa: C901, PLR0912
         """Update configuration with simplified self-managing agents.
 
         Each agent handles its own user account creation and room management.
@@ -1210,6 +1212,11 @@ class MultiAgentOrchestrator:
 
         # Update config
         self.config = new_config
+
+        # Update config for all existing bots that aren't being restarted
+        for entity_name, bot in self.agent_bots.items():
+            if entity_name not in entities_to_restart:
+                bot.config = new_config
 
         # Recreate entities that need restarting using self-management
         for entity_name in entities_to_restart:

@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 from agno.agent import Agent
+from cron_descriptor import get_description  # type: ignore[import-untyped]
 from croniter import croniter  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field
 
@@ -36,6 +37,23 @@ class CronSchedule(BaseModel):
     def to_cron_string(self) -> str:
         """Convert to standard cron format."""
         return f"{self.minute} {self.hour} {self.day} {self.month} {self.weekday}"
+
+    def to_natural_language(self) -> str:
+        """Convert cron schedule to natural language description.
+
+        Examples:
+        - "*/2 * * * *" → "Every 2 minutes"
+        - "0 9 * * 1" → "At 09:00 AM, only on Monday"
+        - "0 */4 * * *" → "Every 4 hours"
+
+        """
+        try:
+            cron_str = self.to_cron_string()
+            # Use cron-descriptor to get natural language
+            return str(get_description(cron_str))
+        except Exception:
+            # Fallback to cron string if description fails
+            return f"Cron: {self.to_cron_string()}"
 
 
 class ScheduledWorkflow(BaseModel):
@@ -102,6 +120,19 @@ Your task is to:
 
 Available agents: {agent_list}
 
+IMPORTANT: Event-based and conditional requests:
+When users say "if", "when", "whenever", "once X happens" or describe events/conditions:
+1. Convert to an appropriate recurring (cron) schedule for polling
+2. Include BOTH the condition check AND the action in the message
+3. Choose polling frequency based on urgency and type:
+   - Email/message checks: 1-5 minutes (urgent: 1 min, normal: 3-5 min)
+   - System/server monitoring: 30 seconds - 5 minutes based on criticality
+   - File/code changes: 1-5 minutes
+   - Market/price data: 1-10 minutes based on volatility
+   - Social media mentions: 5-15 minutes
+   - General status checks: 5-15 minutes
+4. The message should instruct agents to CHECK for the condition FIRST, then act only if true
+
 Examples:
 
 "Every Monday at 9am, research AI news and send me an email summary"
@@ -109,6 +140,42 @@ Examples:
    cron_schedule: {{minute: "0", hour: "9", day: "*", month: "*", weekday: "1"}}
    message: "@research @email_assistant Please research the latest AI news and developments from the past week, then send me an email summary of the most important findings."
    description: "Weekly AI news research and email"
+
+"If I get an email about 'urgent', call me"
+-> schedule_type: "cron"
+   cron_schedule: {{minute: "*/2", hour: "*", day: "*", month: "*", weekday: "*"}}
+   message: "@email_assistant Check for emails containing 'urgent' in subject or body. If found, @phone_agent please call the user immediately about the urgent email."
+   description: "Monitor for urgent emails and alert"
+
+"When someone mentions our product on Reddit, analyze it"
+-> schedule_type: "cron"
+   cron_schedule: {{minute: "*/10", hour: "*", day: "*", month: "*", weekday: "*"}}
+   message: "@reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points of the discussions."
+   description: "Monitor Reddit mentions and analyze"
+
+"If server CPU goes above 80%, scale up"
+-> schedule_type: "cron"
+   cron_schedule: {{minute: "*", hour: "*", day: "*", month: "*", weekday: "*"}}
+   message: "@monitoring_agent Check server CPU usage. If above 80%, @ops_agent scale up the servers immediately."
+   description: "Monitor CPU and auto-scale"
+
+"When the build fails, create a ticket"
+-> schedule_type: "cron"
+   cron_schedule: {{minute: "*/5", hour: "*", day: "*", month: "*", weekday: "*"}}
+   message: "@ci_agent Check the latest build status. If failed, @ticket_agent create a high-priority ticket with the failure details."
+   description: "Monitor builds and create failure tickets"
+
+"If Bitcoin drops below $40k, notify me"
+-> schedule_type: "cron"
+   cron_schedule: {{minute: "*/5", hour: "*", day: "*", month: "*", weekday: "*"}}
+   message: "@crypto_agent Check Bitcoin price. If below $40,000, @notification_agent alert the user about the price drop."
+   description: "Monitor Bitcoin price threshold"
+
+"Whenever I get an email from my boss, notify me immediately"
+-> schedule_type: "cron"
+   cron_schedule: {{minute: "*", hour: "*", day: "*", month: "*", weekday: "*"}}
+   message: "@email_assistant Check for new emails from boss. If any found, @notification_agent alert the user immediately."
+   description: "Monitor for boss emails"
 
 "Tomorrow at 3pm, check my Gmail"
 -> schedule_type: "once"
@@ -147,6 +214,7 @@ Examples:
    description: "Meeting reminder"
 
 Important rules:
+- For conditional/event-based requests, ALWAYS include the check condition in the message
 - The message should be natural and conversational
 - Mention relevant agents with @ at the beginning if the task requires specific agents
 - For simple reminders (ping, remind), don't mention agents unless specifically requested
@@ -221,25 +289,19 @@ async def execute_scheduled_workflow(
         return
 
     try:
-        # Build the message content
-        content: dict[str, Any] = {
-            "msgtype": "m.text",
-            "body": f"⏰ Scheduled task: {workflow.message}",
-            "format": "org.matrix.custom.html",
-            "formatted_body": f"⏰ <em>Scheduled task:</em> {workflow.message}",
-        }
+        # Build the message with clear automated task indicator
+        # This helps agents understand it's not an interactive conversation
+        automated_message = (
+            f"⏰ [Automated Task]\n{workflow.message}\n\n_Note: Automated task - no follow-up expected._"
+        )
 
-        # Add thread relation if specified
-        if workflow.thread_id:
-            content["m.relates_to"] = {
-                "rel_type": "m.thread",
-                "event_id": workflow.thread_id,
-            }
+        # Create mention content with the automated message
         content = create_mention_content_from_text(
             config,
-            f"⏰ Scheduled task: {workflow.message}",
+            automated_message,
             thread_event_id=workflow.thread_id,
         )
+
         # Send the message - agents will see their mentions and respond naturally!
         await send_message(client, workflow.room_id, content)
 

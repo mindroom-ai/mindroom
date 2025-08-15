@@ -212,6 +212,13 @@ Usage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent workfl
 - `ping me tomorrow about the meeting`
 - `remind me in 2 hours to review PRs`
 
+**Event-Driven Workflows (New!):**
+- `!schedule If I get an email about "urgent", @phone_agent call me`
+- `!schedule When Bitcoin drops below $40k, @crypto_agent notify me`
+- `!schedule If server CPU > 80%, @ops_agent scale up`
+- `!schedule When someone mentions our product on Reddit, @analyst summarize it`
+- `!schedule Whenever I get email from boss, @notification_agent alert me immediately`
+
 **Agent Workflows:**
 - `!schedule Daily at 9am, @finance give me a market analysis`
 - `!schedule Every Monday, @research AI news and @email_assistant send me a summary`
@@ -221,13 +228,13 @@ Usage: `!schedule <time> <message>` - Schedule tasks, reminders, or agent workfl
 - `!schedule Every hour, @shell check server status`
 - `!schedule Daily at 9am, @finance market report`
 - `!schedule Weekly on Friday, @analyst prepare weekly summary`
-- `!schedule Every Monday at 10am, @research @email_assistant gather news and email it`
 
-The system will:
-- Post messages mentioning agents at scheduled times
-- Agents will respond naturally in the thread
-- Multiple agents will collaborate when mentioned together
-- Support both one-time and recurring schedules"""
+How it works:
+- **Time-based**: Executes at specific times or intervals
+- **Event-based**: Automatically converts to smart polling (e.g., "if email" → check every 1-2 min)
+- Agents receive clear instructions about conditions to check
+- Multiple agents collaborate when mentioned together
+- Automated tasks are clearly marked so agents don't wait for follow-up"""
 
     if topic == "list_schedules":
         return """**List Schedules Command**
@@ -268,7 +275,7 @@ Note: Widget support requires Element Desktop or self-hosted Element Web."""
 - `!invite <agent>` - Invite an agent to this thread
 - `!uninvite <agent>` - Remove an agent from this thread
 - `!list_invites` - List all invited agents
-- `!schedule <time> <message>` - Schedule tasks, reminders, or agent workflows
+- `!schedule <time|condition> <message>` - Schedule time-based or event-driven workflows
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id|all>` - Cancel a scheduled task or all tasks
 - `!widget [url]` - Add configuration widget to the room
