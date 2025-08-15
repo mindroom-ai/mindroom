@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils';
 import { ApiKeyConfig } from '@/components/ApiKeyConfig';
 import { FilterSelector } from '@/components/shared/FilterSelector';
 import { ProviderLogo } from './ProviderLogos';
+import { getProviderInfo, getProviderList } from '@/lib/providers';
 
 interface ModelFormData {
   provider: string;
@@ -59,71 +60,6 @@ export function ModelConfig() {
   }, [config?.models, selectedProvider]);
 
   if (!config) return null;
-
-  // Provider display names and colors
-  const getProviderInfo = (provider: string) => {
-    const info: Record<string, { name: string; color: string; icon?: any }> = {
-      openai: {
-        name: 'OpenAI',
-        color: 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20',
-      },
-      anthropic: {
-        name: 'Anthropic',
-        color: 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20',
-      },
-      ollama: {
-        name: 'Ollama',
-        color: 'bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20',
-      },
-      openrouter: {
-        name: 'OpenRouter',
-        color: 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
-      },
-      gemini: {
-        name: 'Google Gemini',
-        color: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
-      },
-      google: {
-        name: 'Google Gemini',
-        color: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
-      },
-      groq: {
-        name: 'Groq',
-        color: 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 border-yellow-500/20',
-      },
-      deepseek: {
-        name: 'DeepSeek',
-        color: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
-      },
-      together: {
-        name: 'Together AI',
-        color: 'bg-pink-500/10 text-pink-600 dark:text-pink-400 border-pink-500/20',
-      },
-      mistral: {
-        name: 'Mistral',
-        color: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
-      },
-      perplexity: {
-        name: 'Perplexity',
-        color: 'bg-teal-500/10 text-teal-600 dark:text-teal-400 border-teal-500/20',
-      },
-      cohere: {
-        name: 'Cohere',
-        color: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
-      },
-      xai: {
-        name: 'xAI',
-        color: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
-      },
-      grok: {
-        name: 'Grok',
-        color: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
-      },
-    };
-    return (
-      info[provider] || { name: provider, color: 'bg-gray-500/10 text-gray-600 dark:text-gray-400' }
-    );
-  };
 
   const handleTestModel = async (modelId: string) => {
     setTestingModel(modelId);
@@ -272,6 +208,7 @@ export function ModelConfig() {
                   label: provider === 'all' ? 'All' : providerInfo?.name || provider,
                   count,
                   showIcon: provider === 'all',
+                  icon: provider !== 'all' ? providerInfo?.icon('h-4 w-4') : undefined,
                 };
               })}
               value={selectedProvider}
@@ -317,78 +254,14 @@ export function ModelConfig() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="openai">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="openai" className="h-4 w-4" />
-                        <span>OpenAI</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="anthropic">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="anthropic" className="h-4 w-4" />
-                        <span>Anthropic</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="ollama">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="ollama" className="h-4 w-4" />
-                        <span>Ollama</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="openrouter">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="openrouter" className="h-4 w-4" />
-                        <span>OpenRouter</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="gemini">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="gemini" className="h-4 w-4" />
-                        <span>Google Gemini</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="groq">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="groq" className="h-4 w-4" />
-                        <span>Groq (Fast Inference)</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="deepseek">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="deepseek" className="h-4 w-4" />
-                        <span>DeepSeek</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="together">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="together" className="h-4 w-4" />
-                        <span>Together AI</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="mistral">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="mistral" className="h-4 w-4" />
-                        <span>Mistral</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="perplexity">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="perplexity" className="h-4 w-4" />
-                        <span>Perplexity</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="cohere">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="cohere" className="h-4 w-4" />
-                        <span>Cohere</span>
-                      </div>
-                    </SelectItem>
-                    <SelectItem value="xai">
-                      <div className="flex items-center gap-2">
-                        <ProviderLogo provider="xai" className="h-4 w-4" />
-                        <span>xAI (Grok)</span>
-                      </div>
-                    </SelectItem>
+                    {getProviderList().map(provider => (
+                      <SelectItem key={provider.id} value={provider.id}>
+                        <div className="flex items-center gap-2">
+                          <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                          <span>{provider.name}</span>
+                        </div>
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </FieldGroup>
@@ -563,78 +436,14 @@ export function ModelConfig() {
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="openai">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="openai" className="h-4 w-4" />
-                                  <span>OpenAI</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="anthropic">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="anthropic" className="h-4 w-4" />
-                                  <span>Anthropic</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="ollama">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="ollama" className="h-4 w-4" />
-                                  <span>Ollama</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="openrouter">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="openrouter" className="h-4 w-4" />
-                                  <span>OpenRouter</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="gemini">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="gemini" className="h-4 w-4" />
-                                  <span>Google Gemini</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="groq">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="groq" className="h-4 w-4" />
-                                  <span>Groq (Fast Inference)</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="deepseek">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="deepseek" className="h-4 w-4" />
-                                  <span>DeepSeek</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="together">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="together" className="h-4 w-4" />
-                                  <span>Together AI</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="mistral">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="mistral" className="h-4 w-4" />
-                                  <span>Mistral</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="perplexity">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="perplexity" className="h-4 w-4" />
-                                  <span>Perplexity</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="cohere">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="cohere" className="h-4 w-4" />
-                                  <span>Cohere</span>
-                                </div>
-                              </SelectItem>
-                              <SelectItem value="xai">
-                                <div className="flex items-center gap-2">
-                                  <ProviderLogo provider="xai" className="h-4 w-4" />
-                                  <span>xAI (Grok)</span>
-                                </div>
-                              </SelectItem>
+                              {getProviderList().map(provider => (
+                                <SelectItem key={provider.id} value={provider.id}>
+                                  <div className="flex items-center gap-2">
+                                    <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                                    <span>{provider.name}</span>
+                                  </div>
+                                </SelectItem>
+                              ))}
                             </SelectContent>
                           </Select>
                         </FieldGroup>
@@ -731,61 +540,16 @@ export function ModelConfig() {
         <div className="space-y-4 pt-6 border-t border-border">
           <h3 className="text-lg font-semibold mb-4">Provider API Keys</h3>
           <div className="grid gap-4 md:grid-cols-2">
-            <ApiKeyConfig
-              service="openai"
-              displayName="OpenAI"
-              description="Configure your OpenAI API key for GPT models"
-            />
-            <ApiKeyConfig
-              service="anthropic"
-              displayName="Anthropic"
-              description="Configure your Anthropic API key for Claude models"
-            />
-            <ApiKeyConfig
-              service="openrouter"
-              displayName="OpenRouter"
-              description="Configure your OpenRouter API key"
-            />
-            <ApiKeyConfig
-              service="google"
-              displayName="Google Gemini"
-              description="Configure your Google API key for Gemini models"
-            />
-            <ApiKeyConfig
-              service="groq"
-              displayName="Groq"
-              description="Configure your Groq API key for fast inference"
-            />
-            <ApiKeyConfig
-              service="deepseek"
-              displayName="DeepSeek"
-              description="Configure your DeepSeek API key"
-            />
-            <ApiKeyConfig
-              service="together"
-              displayName="Together AI"
-              description="Configure your Together AI API key"
-            />
-            <ApiKeyConfig
-              service="mistral"
-              displayName="Mistral"
-              description="Configure your Mistral API key"
-            />
-            <ApiKeyConfig
-              service="perplexity"
-              displayName="Perplexity"
-              description="Configure your Perplexity API key"
-            />
-            <ApiKeyConfig
-              service="cohere"
-              displayName="Cohere"
-              description="Configure your Cohere API key"
-            />
-            <ApiKeyConfig
-              service="xai"
-              displayName="xAI"
-              description="Configure your xAI API key for Grok models"
-            />
+            {getProviderList()
+              .filter(provider => provider.requiresApiKey)
+              .map(provider => (
+                <ApiKeyConfig
+                  key={provider.id}
+                  service={provider.id === 'gemini' ? 'google' : provider.id}
+                  displayName={provider.name}
+                  description={provider.description || `Configure your ${provider.name} API key`}
+                />
+              ))}
           </div>
         </div>
 
