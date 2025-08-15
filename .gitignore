@@ -192,7 +192,7 @@ logs/
 matrix_state.yaml
 
 # Vite cache
-widget/frontend/.vite/
+frontend/.vite/
 # Test and setup files
 test_gmail*.py
 complete_gmail_oauth.py
@@ -203,5 +203,14 @@ google_token.json
 token.json
 
 # Frontend test files
-widget/frontend/test-*.js
-widget/frontend/test-*.html
+frontend/test-*.js
+frontend/test-*.html
+
+# Node.js logs
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Widget screenshots and captures
+screenshots/
+captures/
