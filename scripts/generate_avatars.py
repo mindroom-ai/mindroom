@@ -54,7 +54,7 @@ load_dotenv()
 # Note: These avatars are displayed small in Matrix but can be clicked to view larger
 CHARACTER_STYLE = "cute cartoon robot portrait, 3D rendered, glossy finish, vibrant colors, expressive digital eyes, smooth rounded design, friendly appearance, detailed but clean, modern tech aesthetic, centered composition, colorful background gradient, no text"
 
-ROOM_STYLE = "isometric room illustration, 3D rendered, vibrant colors, modern tech space, clean geometric design, atmospheric lighting, stylized furniture and tech elements, inviting atmosphere, detailed but not cluttered, distinctive theme, no text"
+ROOM_STYLE = "flat minimalist icon, bold solid color background, simple geometric shapes, high contrast, clean vector style, centered symbol, no gradients, no shadows, no 3D effects, distinctive single color theme, ultra simple design, easily recognizable at small size, no text"
 
 TEAM_SYSTEM_PROMPT = """You are creating distinctive visual elements for a cute robot team avatar.
 Given a team's name and purpose, suggest creative features that make this team memorable:
@@ -78,17 +78,27 @@ Examples:
 - Researcher: "teal and copper, magnifying glass monocle, curious expression, floating holographic data, antenna with blinking lights"
 Be creative and give each agent character!"""
 
-ROOM_SYSTEM_PROMPT = """You are creating distinctive visual elements for an isometric tech room illustration.
-Given a room's purpose, suggest creative environmental details that make this space unique and inviting:
-- Distinctive color palette for the room
-- Specific furniture and tech equipment
-- Atmospheric lighting effects
-- Decorative elements that hint at the room's purpose
-Output visual elements as a comma-separated list.
+ROOM_SYSTEM_PROMPT = """You are creating a flat, minimalist icon design for a room avatar.
+Given a room's purpose, suggest a SIMPLE icon and DISTINCTIVE color scheme:
+- ONE bold, unique background color (avoid similar colors for different rooms)
+- ONE simple icon/symbol that represents the room's purpose
+- Keep it ultra minimal - think app icon simplicity
+Output as: "background color, icon description"
+
+IMPORTANT: Each room MUST have a VERY DIFFERENT color. Spread across the spectrum:
+- Use colors like: bright red, deep purple, electric blue, lime green, hot pink, orange, teal, yellow, etc.
+- NEVER use similar shades for different rooms
+
 Examples:
-- Lobby: "warm orange and cream tones, circular reception desk with holographic displays, comfortable modern seating, potted tech-plants, welcoming ambient lighting"
-- Research: "deep blue and silver, floating holographic data visualizations, adjustable smart desks, wall of interactive screens, focused spot lighting"
-Make each room feel unique and interesting!"""
+- Lobby: "bright orange background, simple door outline icon"
+- Research: "deep purple background, magnifying glass icon"
+- Docs: "electric blue background, document icon with lines"
+- Ops: "lime green background, gear icon"
+- Communication: "hot pink background, speech bubble icon"
+- Finance: "golden yellow background, dollar sign icon"
+- Home: "warm red background, house outline icon"
+
+BE BOLD with colors! Make each room instantly distinguishable!"""
 
 
 def get_project_root() -> Path:
@@ -342,13 +352,23 @@ async def main() -> None:  # noqa: C901
             rooms = agent_data.get("rooms", [])
             all_rooms.update(rooms)
 
-        # Define room purposes
+        # Define room purposes with color hints for distinctive avatars
         room_purposes = {
-            "lobby": "Central meeting space for initial interactions and general discussions",
-            "research": "Knowledge discovery, data analysis, and investigation space",
-            "docs": "Documentation, writing, and knowledge management space",
-            "ops": "Operations, DevOps, and system management space",
-            "automation": "Workflow automation and process optimization space",
+            "lobby": "Central meeting space, entrance and welcome area",
+            "research": "Scientific investigation and data analysis",
+            "docs": "Documentation and writing center",
+            "ops": "Operations and system management",
+            "automation": "Workflow automation and bot control",
+            "analysis": "Data analysis and insights",
+            "business": "Business strategy and planning",
+            "communication": "Messages and team communication",
+            "dev": "Software development and coding",
+            "finance": "Financial analysis and trading",
+            "help": "Support and assistance center",
+            "home": "Personal home base and dashboard",
+            "news": "News updates and current events",
+            "productivity": "Task management and efficiency",
+            "science": "Scientific research and experiments",
         }
 
         for room_name in all_rooms:
