@@ -268,12 +268,7 @@ class AgentBot:
         if not self.client:
             return
 
-        # Determine if this is an agent or team
-        entity_type = "agents"
-        if self.agent_name in self.config.teams:
-            entity_type = "teams"
-
-        # Construct avatar path
+        entity_type = "teams" if self.agent_name in self.config.teams else "agents"
         avatar_path = Path(__file__).parent.parent.parent / "avatars" / entity_type / f"{self.agent_name}.png"
 
         if avatar_path.exists():
