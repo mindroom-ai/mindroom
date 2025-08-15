@@ -73,28 +73,31 @@ async def generate_prompt(
     team_members: list[dict] | None = None,
 ) -> str:
     """Generate a DALL-E prompt based on the entity's role using AI."""
-    base_style = "minimalist modern avatar portrait, clean geometric shapes, vibrant gradient colors, professional, friendly, tech-inspired, flat design, no text, centered composition"
+    base_style = "adorable Pixar-style robot character portrait, big emotive eyes, soft rounded design, vibrant metallic colors, friendly smile, expressive antenna or unique head features, helper robot personality, warm lighting, 3D rendered look, approachable and huggable, centered composition, no text"
 
     # Use a simple AI model to generate visual themes based on the role
     if entity_type == "teams" and team_members:
         # For teams, create a prompt that combines the team members' roles
-        system_prompt = """You are an expert at creating visual descriptions for team avatars.
-Given a team's name, description, and the roles of its members, suggest 5-7 visual elements that would represent this collaborative team well.
-The avatar should represent the combination and synergy of the team members.
+        system_prompt = """You are an expert at creating visual descriptions for friendly Pixar-style robot team avatars.
+Given a team's name, description, and the roles of its members, suggest 5-7 unique robot features and characteristics.
+Think about: special attachments, unique colors, multiple connected robots, special tools or gadgets, distinctive shapes.
+The avatar should show multiple robots working together or a single robot with features from all team members.
 Output ONLY the visual elements as a comma-separated list, no other text.
-Example: "collaborative nodes, interconnected gears, diverse symbols merging, team synergy, unified elements"
+Example: "multiple small robots holding hands, interconnected with glowing data streams, different colored robots in a group hug, modular robot with swappable parts, rainbow metallic finish"
 """
 
         members_info = "\n".join([f"- {m['name']}: {m['role']}" for m in team_members])
         user_prompt = f"Team name: {entity_name}\nTeam role: {role}\nTeam members:\n{members_info}"
     else:
         # For individual agents
-        system_prompt = """You are an expert at creating visual descriptions for avatars.
-Given an agent's name and role description, suggest 3-5 visual elements that would represent them well in an avatar.
+        system_prompt = """You are an expert at creating visual descriptions for friendly Pixar-style robot avatars.
+Given an agent's name and role, suggest 3-5 unique robot characteristics and features that match their personality.
+Think about: special tools or attachments, unique antenna designs, eye shapes and colors, body modifications, special badges or emblems.
 Output ONLY the visual elements as a comma-separated list, no other text.
 Examples:
-- For a calculator agent: "mathematical symbols, numbers, geometric patterns"
-- For a research agent: "magnifying glass, book, knowledge symbols"
+- For a calculator agent: "calculator screen chest display, number pad buttons, mathematical equation hologram, protractor antenna"
+- For a research agent: "magnifying glass eye, book-shaped chest compartment, data scanner antenna, holographic display"
+- For a code agent: "keyboard fingers, screen face with code scrolling, USB port accessories, binary code patterns"
 """
         user_prompt = f"Agent name: {entity_name}\nRole: {role}\nType: {entity_type}"
 

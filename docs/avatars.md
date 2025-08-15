@@ -7,7 +7,7 @@ The MindRoom avatar system automatically generates and sets unique avatars for a
 ## Features
 
 - **Automatic Generation**: Creates avatars for all configured agents and teams
-- **Consistent Style**: Uses a unified minimalist, modern design language
+- **Consistent Style**: Uses a unified Pixar-style friendly robot design language
 - **Smart Regeneration**: Only generates missing avatars (idempotent operation)
 - **Git LFS Integration**: Stores avatars efficiently using Git Large File Storage
 - **Matrix Integration**: Automatically sets avatars during bot initialization
@@ -62,15 +62,15 @@ python scripts/generate_avatars.py
 
 ## Visual Themes
 
-Each agent type has a unique visual theme:
+Each agent type has unique Pixar-style robot characteristics:
 
-- **Calculator**: Mathematical symbols, geometric patterns
-- **Code**: Terminal windows, code brackets
-- **Research**: Magnifying glass, knowledge symbols
-- **Finance**: Currency symbols, stock charts
-- **Security**: Shield and lock elements
-- **Router**: Network hub, routing pathways
-- **Teams**: Collaborative elements, interconnected nodes
+- **Calculator**: Calculator screen display, number pad buttons, mathematical hologram projections
+- **Code**: Keyboard fingers, code-scrolling screen face, USB port accessories
+- **Research**: Magnifying glass eye, book compartment, data scanner antenna
+- **Finance**: Currency display screens, stock chart projectors, golden metallic finish
+- **Security**: Shield attachments, lock mechanisms, protective armor plating
+- **Router**: Network hub design, multiple connection ports, data stream effects
+- **Teams**: Multiple robots together, interconnected designs, combined features from members
 
 ## Customization
 
