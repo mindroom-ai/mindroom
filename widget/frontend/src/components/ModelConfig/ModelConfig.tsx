@@ -87,6 +87,38 @@ export function ModelConfig() {
         name: 'Google Gemini',
         color: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
       },
+      groq: {
+        name: 'Groq',
+        color: 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 border-yellow-500/20',
+      },
+      deepseek: {
+        name: 'DeepSeek',
+        color: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
+      },
+      together: {
+        name: 'Together AI',
+        color: 'bg-pink-500/10 text-pink-600 dark:text-pink-400 border-pink-500/20',
+      },
+      mistral: {
+        name: 'Mistral',
+        color: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
+      },
+      perplexity: {
+        name: 'Perplexity',
+        color: 'bg-teal-500/10 text-teal-600 dark:text-teal-400 border-teal-500/20',
+      },
+      cohere: {
+        name: 'Cohere',
+        color: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+      },
+      xai: {
+        name: 'xAI',
+        color: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
+      },
+      grok: {
+        name: 'Grok',
+        color: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
+      },
     };
     return (
       info[provider] || { name: provider, color: 'bg-gray-500/10 text-gray-600 dark:text-gray-400' }
@@ -285,11 +317,78 @@ export function ModelConfig() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="openai">OpenAI</SelectItem>
-                    <SelectItem value="anthropic">Anthropic</SelectItem>
-                    <SelectItem value="ollama">Ollama</SelectItem>
-                    <SelectItem value="openrouter">OpenRouter</SelectItem>
-                    <SelectItem value="gemini">Google Gemini</SelectItem>
+                    <SelectItem value="openai">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="openai" className="h-4 w-4" />
+                        <span>OpenAI</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="anthropic">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="anthropic" className="h-4 w-4" />
+                        <span>Anthropic</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="ollama">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="ollama" className="h-4 w-4" />
+                        <span>Ollama</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="openrouter">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="openrouter" className="h-4 w-4" />
+                        <span>OpenRouter</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="gemini">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="gemini" className="h-4 w-4" />
+                        <span>Google Gemini</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="groq">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="groq" className="h-4 w-4" />
+                        <span>Groq (Fast Inference)</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="deepseek">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="deepseek" className="h-4 w-4" />
+                        <span>DeepSeek</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="together">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="together" className="h-4 w-4" />
+                        <span>Together AI</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="mistral">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="mistral" className="h-4 w-4" />
+                        <span>Mistral</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="perplexity">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="perplexity" className="h-4 w-4" />
+                        <span>Perplexity</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="cohere">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="cohere" className="h-4 w-4" />
+                        <span>Cohere</span>
+                      </div>
+                    </SelectItem>
+                    <SelectItem value="xai">
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="xai" className="h-4 w-4" />
+                        <span>xAI (Grok)</span>
+                      </div>
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </FieldGroup>
@@ -363,7 +462,10 @@ export function ModelConfig() {
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
-                          <ProviderLogo provider={modelConfig.provider} className="h-5 w-5 opacity-70" />
+                          <ProviderLogo
+                            provider={modelConfig.provider}
+                            className="h-5 w-5 opacity-70"
+                          />
                           <CardTitle className="text-base font-semibold truncate">
                             {modelId}
                           </CardTitle>
@@ -461,11 +563,78 @@ export function ModelConfig() {
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="openai">OpenAI</SelectItem>
-                              <SelectItem value="anthropic">Anthropic</SelectItem>
-                              <SelectItem value="ollama">Ollama</SelectItem>
-                              <SelectItem value="openrouter">OpenRouter</SelectItem>
-                              <SelectItem value="gemini">Google Gemini</SelectItem>
+                              <SelectItem value="openai">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="openai" className="h-4 w-4" />
+                                  <span>OpenAI</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="anthropic">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="anthropic" className="h-4 w-4" />
+                                  <span>Anthropic</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="ollama">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="ollama" className="h-4 w-4" />
+                                  <span>Ollama</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="openrouter">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="openrouter" className="h-4 w-4" />
+                                  <span>OpenRouter</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="gemini">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="gemini" className="h-4 w-4" />
+                                  <span>Google Gemini</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="groq">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="groq" className="h-4 w-4" />
+                                  <span>Groq (Fast Inference)</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="deepseek">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="deepseek" className="h-4 w-4" />
+                                  <span>DeepSeek</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="together">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="together" className="h-4 w-4" />
+                                  <span>Together AI</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="mistral">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="mistral" className="h-4 w-4" />
+                                  <span>Mistral</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="perplexity">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="perplexity" className="h-4 w-4" />
+                                  <span>Perplexity</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="cohere">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="cohere" className="h-4 w-4" />
+                                  <span>Cohere</span>
+                                </div>
+                              </SelectItem>
+                              <SelectItem value="xai">
+                                <div className="flex items-center gap-2">
+                                  <ProviderLogo provider="xai" className="h-4 w-4" />
+                                  <span>xAI (Grok)</span>
+                                </div>
+                              </SelectItem>
                             </SelectContent>
                           </Select>
                         </FieldGroup>
@@ -581,6 +750,41 @@ export function ModelConfig() {
               service="google"
               displayName="Google Gemini"
               description="Configure your Google API key for Gemini models"
+            />
+            <ApiKeyConfig
+              service="groq"
+              displayName="Groq"
+              description="Configure your Groq API key for fast inference"
+            />
+            <ApiKeyConfig
+              service="deepseek"
+              displayName="DeepSeek"
+              description="Configure your DeepSeek API key"
+            />
+            <ApiKeyConfig
+              service="together"
+              displayName="Together AI"
+              description="Configure your Together AI API key"
+            />
+            <ApiKeyConfig
+              service="mistral"
+              displayName="Mistral"
+              description="Configure your Mistral API key"
+            />
+            <ApiKeyConfig
+              service="perplexity"
+              displayName="Perplexity"
+              description="Configure your Perplexity API key"
+            />
+            <ApiKeyConfig
+              service="cohere"
+              displayName="Cohere"
+              description="Configure your Cohere API key"
+            />
+            <ApiKeyConfig
+              service="xai"
+              displayName="xAI"
+              description="Configure your xAI API key for Grok models"
             />
           </div>
         </div>
