@@ -616,24 +616,3 @@ async def set_room_avatar_from_file(
 
     logger.error(f"Failed to set avatar for room {room_id}: {response}")
     return False
-
-
-async def check_and_set_room_avatar(
-    client: nio.AsyncClient,
-    room_id: str,
-    avatar_path: Path,
-) -> bool:
-    """Check if room has an avatar and set it if it doesn't.
-
-    Deprecated: Use check_and_set_avatar with room_id parameter instead.
-
-    Args:
-        client: Authenticated Matrix client
-        room_id: The room ID to check/set avatar for
-        avatar_path: Path to the avatar image file
-
-    Returns:
-        True if avatar was already set or successfully set, False otherwise
-
-    """
-    return await check_and_set_avatar(client, avatar_path, room_id=room_id)
