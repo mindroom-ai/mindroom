@@ -51,35 +51,39 @@ console = Console()
 load_dotenv()
 
 # Avatar generation prompts
-BASE_STYLE = "adorable Pixar-style robot character portrait, big emotive eyes, soft rounded design, vibrant metallic colors, friendly smile, expressive antenna or unique head features, helper robot personality, warm lighting, 3D rendered look, approachable and huggable, centered composition, no text"
+# Note: These avatars are displayed VERY small (1cm) in Matrix, so they need to be simple and bold
+CHARACTER_STYLE = "simple cartoon robot face, close-up portrait, bold colors, high contrast, minimal details, large expressive eyes, distinctive silhouette, flat design style, centered composition, works well as tiny icon, no text, no background clutter"
 
-TEAM_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for friendly Pixar-style robot team avatars.
-Given a team's name, description, and the roles of its members, suggest 5-7 unique robot features and characteristics.
-Think about: special attachments, unique colors, multiple connected robots, special tools or gadgets, distinctive shapes.
-The avatar should show multiple robots working together or a single robot with features from all team members.
+ROOM_STYLE = "simple geometric room icon, bold single color theme, minimal design, high contrast, distinctive shape, flat design style, easily recognizable at small size, centered composition, works well as tiny icon, no text, no fine details"
+
+TEAM_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for simple robot team icons.
+IMPORTANT: These will be displayed as TINY avatars (1cm wide), so they must be extremely simple and bold.
+Given a team's name and members, suggest 2-3 SIMPLE visual elements that will be visible at small size.
+Think about: bold color schemes, simple geometric shapes, ONE distinctive feature maximum.
 Output ONLY the visual elements as a comma-separated list, no other text.
-Example: "multiple small robots holding hands, interconnected with glowing data streams, different colored robots in a group hug, modular robot with swappable parts, rainbow metallic finish"
+Example: "bright orange circle, two dots for eyes, simple smile"
 """
 
-AGENT_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for friendly Pixar-style robot avatars.
-Given an agent's name and role, suggest 3-5 unique robot characteristics and features that match their personality.
-Think about: special tools or attachments, unique antenna designs, eye shapes and colors, body modifications, special badges or emblems.
+AGENT_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for simple robot face icons.
+IMPORTANT: These will be displayed as TINY avatars (1cm wide), so they must be extremely simple and bold.
+Given an agent's name and role, suggest 2-3 SIMPLE visual elements that will be visible at small size.
+Think about: distinctive color, simple eye shape, ONE unique feature maximum.
 Output ONLY the visual elements as a comma-separated list, no other text.
 Examples:
-- For a calculator agent: "calculator screen chest display, number pad buttons, mathematical equation hologram, protractor antenna"
-- For a research agent: "magnifying glass eye, book-shaped chest compartment, data scanner antenna, holographic display"
-- For a code agent: "keyboard fingers, screen face with code scrolling, USB port accessories, binary code patterns"
+- For a calculator: "square head, digital display eyes, blue color"
+- For research: "round head, magnifying glass monocle, green color"
+- For code: "rectangular head, pixel eyes, purple color"
 """
 
-ROOM_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for friendly Pixar-style robot meeting spaces and environments.
-Given a room's name, suggest 5-7 environmental features that show this is a welcoming robot gathering space.
-Think about: holographic displays, cozy charging stations, data streams, robot-friendly furniture, ambient lighting, tech decorations.
-The avatar should depict a warm, inviting space where robots would gather and collaborate.
+ROOM_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for simple room/space icons.
+IMPORTANT: These will be displayed as TINY avatars (1cm wide), so they must be extremely simple and bold.
+Given a room's purpose, suggest 2-3 SIMPLE visual elements that will be visible at small size.
+Think about: single bold color, basic geometric shape, ONE iconic element maximum.
 Output ONLY the visual elements as a comma-separated list, no other text.
 Examples:
-- For a lobby: "circular gathering space with soft blue lights, central hologram projector, comfortable charging pods, welcome banner with binary code, floating data orbs"
-- For research room: "walls lined with data screens, floating holographic books, analysis stations, green scanning beams, knowledge crystals"
-- For automation room: "conveyor belts, robotic arms on walls, gear decorations, orange industrial lighting, efficiency meters"
+- For a lobby: "circular icon, warm yellow, simple door symbol"
+- For research: "square icon, deep blue, simple book symbol"
+- For automation: "hexagon icon, orange, simple gear symbol"
 """
 
 
@@ -137,7 +141,10 @@ async def generate_prompt(
     )
 
     visual_elements = response.choices[0].message.content.strip()
-    final_prompt = f"{BASE_STYLE}, {visual_elements}"
+
+    # Use appropriate base style based on entity type
+    base_style = ROOM_STYLE if entity_type == "rooms" else CHARACTER_STYLE
+    final_prompt = f"{base_style}, {visual_elements}"
 
     # Print the prompt with rich formatting
     console.print(
