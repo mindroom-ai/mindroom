@@ -1,4 +1,3 @@
-#!/usr/bin/env -S uv run
 """Generate and set avatars for all agents, teams, and rooms.
 
 This script:
@@ -10,7 +9,7 @@ This script:
 6. Only regenerates missing avatars (idempotent)
 
 Usage:
-    uv run scripts/generate_avatars.py [--set-only]
+    python scripts/generate_avatars.py [--set-only]
 
 Options:
     --set-only    Skip generation and only set existing avatars in Matrix
@@ -18,19 +17,6 @@ Options:
 Requires:
     OPENAI_API_KEY environment variable to be set (or in .env file)
 """
-# /// script
-# dependencies = [
-#   "openai",
-#   "pyyaml",
-#   "httpx",
-#   "aiofiles",
-#   "python-dotenv",
-#   "rich",
-#   "matrix-nio",
-#   "markdown",
-#   "structlog",
-# ]
-# ///
 
 import asyncio
 import base64
@@ -48,22 +34,18 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix import MATRIX_HOMESERVER
+from mindroom.matrix.client import check_and_set_room_avatar
+from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
+from mindroom.matrix.rooms import get_room_id
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.users import AgentMatrixUser, login_agent_user
+
 console = Console()
 
 # Load environment variables from .env file
 load_dotenv()
-
-# Add the src directory to the path for Matrix imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
-# Import Matrix-related modules (must be after sys.path modification)
-from mindroom.constants import ROUTER_AGENT_NAME  # noqa: E402
-from mindroom.matrix import MATRIX_HOMESERVER  # noqa: E402
-from mindroom.matrix.client import check_and_set_room_avatar  # noqa: E402
-from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver  # noqa: E402
-from mindroom.matrix.rooms import get_room_id  # noqa: E402
-from mindroom.matrix.state import MatrixState  # noqa: E402
-from mindroom.matrix.users import AgentMatrixUser, login_agent_user  # noqa: E402
 
 # Avatar generation prompts
 BASE_STYLE = "adorable Pixar-style robot character portrait, big emotive eyes, soft rounded design, vibrant metallic colors, friendly smile, expressive antenna or unique head features, helper robot personality, warm lighting, 3D rendered look, approachable and huggable, centered composition, no text"
