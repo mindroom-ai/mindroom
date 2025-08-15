@@ -219,9 +219,9 @@ class TestBotTaskRestoration:
     async def test_restore_tasks_on_room_join(self) -> None:
         """Test that scheduled tasks are restored when joining rooms."""
         agent_user = AgentMatrixUser(
-            agent_name="general",
-            user_id="@mindroom_general:localhost",
-            display_name="General Agent",
+            agent_name="router",
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
             password=TEST_PASSWORD,
             access_token=TEST_ACCESS_TOKEN,
         )
