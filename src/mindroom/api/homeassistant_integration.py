@@ -11,7 +11,6 @@ Uses the official Home Assistant REST API.
 """
 
 import os
-from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
@@ -30,9 +29,6 @@ creds_manager = CredentialsManager()
 # OAuth scopes for Home Assistant
 # Home Assistant doesn't use traditional OAuth scopes, but we request full API access
 SCOPES: list[str] = []
-
-# Environment path for OAuth configuration
-ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
 
 # Get configuration from environment
 BACKEND_PORT = os.getenv("BACKEND_PORT", "8765")
@@ -73,40 +69,6 @@ def get_stored_config() -> dict[str, Any] | None:
 def save_config(config: dict[str, Any]) -> None:
     """Save Home Assistant configuration."""
     creds_manager.save_credentials("homeassistant", config)
-
-
-def save_env_config(instance_url: str, client_id: str | None = None) -> None:
-    """Save Home Assistant configuration to .env file."""
-    env_lines = []
-    if ENV_PATH.exists():
-        with ENV_PATH.open() as f:
-            env_lines = f.readlines()
-
-    # Update or add configuration
-    env_vars = {
-        "HOMEASSISTANT_URL": instance_url,
-    }
-
-    if client_id:
-        env_vars["HOMEASSISTANT_CLIENT_ID"] = client_id
-
-    for key, value in env_vars.items():
-        found = False
-        for i, line in enumerate(env_lines):
-            if line.startswith(f"{key}="):
-                env_lines[i] = f"{key}={value}\n"
-                found = True
-                break
-        if not found:
-            env_lines.append(f"{key}={value}\n")
-
-    # Write back to .env file
-    with ENV_PATH.open("w") as f:
-        f.writelines(env_lines)
-
-    # Also set in current environment
-    for key, value in env_vars.items():
-        os.environ[key] = value
 
 
 async def test_connection(instance_url: str, token: str) -> dict[str, Any]:
@@ -230,9 +192,6 @@ async def connect_oauth(config: HomeAssistantConfig) -> HomeAssistantAuthUrl:
             detail="OAuth Client ID is required for OAuth flow",
         )
 
-    # Save initial configuration
-    save_env_config(config.instance_url, config.client_id)
-
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
     redirect_uri = f"{FRONTEND_URL}/homeassistant-callback"
@@ -296,7 +255,6 @@ async def connect_token(config: HomeAssistantConfig) -> dict[str, str]:
             "long_lived_token": config.long_lived_token,
         },
     )
-    save_env_config(instance_url)
 
     return {"status": "connected", "message": "Successfully connected to Home Assistant"}
 
@@ -365,22 +323,6 @@ async def disconnect() -> dict[str, str]:
     try:
         # Remove credentials using the manager
         creds_manager.delete_credentials("homeassistant")
-
-        # Remove from environment variables
-        if ENV_PATH.exists():
-            with ENV_PATH.open() as f:
-                lines = f.readlines()
-
-            # Filter out Home Assistant-related variables
-            ha_vars = [
-                "HOMEASSISTANT_URL",
-                "HOMEASSISTANT_CLIENT_ID",
-            ]
-            filtered_lines = [line for line in lines if not any(line.startswith(f"{var}=") for var in ha_vars)]
-
-            with ENV_PATH.open("w") as f:
-                f.writelines(filtered_lines)
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
     else:
