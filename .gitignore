@@ -214,3 +214,4 @@ yarn-error.log*
 # Widget screenshots and captures
 screenshots/
 captures/
+frontend/node_modules/
