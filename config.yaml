@@ -304,10 +304,10 @@ models:
     id: devstral:24b
     provider: ollama
   opus:
-    id: claude-3-5-haiku-latest
+    id: claude-opus-4-latest
     provider: anthropic
   sonnet:
-    id: claude-3-5-sonnet-latest
+    id: claude-sonnet-4-latest
     provider: anthropic
 room_models:
   research: haiku
