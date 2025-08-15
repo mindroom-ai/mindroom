@@ -1177,7 +1177,7 @@ class MultiAgentOrchestrator:
         # Run all sync tasks
         await asyncio.gather(*sync_tasks)
 
-    async def update_config(self) -> bool:  # noqa: C901
+    async def update_config(self) -> bool:  # noqa: C901, PLR0912
         """Update configuration with simplified self-managing agents.
 
         Each agent handles its own user account creation and room management.
@@ -1210,6 +1210,11 @@ class MultiAgentOrchestrator:
 
         # Update config
         self.config = new_config
+
+        # Update config for all existing bots that aren't being restarted
+        for entity_name, bot in self.agent_bots.items():
+            if entity_name not in entities_to_restart:
+                bot.config = new_config
 
         # Recreate entities that need restarting using self-management
         for entity_name in entities_to_restart:
