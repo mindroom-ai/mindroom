@@ -32,15 +32,15 @@ MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response log
 class TeamMode(str, Enum):
     """Team collaboration modes."""
 
-    COORDINATE = "coordinate"  # Sequential, building on each other
-    COLLABORATE = "collaborate"  # Parallel, synthesized
+    COORDINATE = "coordinate"  # Leader delegates and synthesizes (can be sequential OR parallel)
+    COLLABORATE = "collaborate"  # All members work on same task in parallel
 
 
 class TeamModeDecision(BaseModel):
     """AI decision for team collaboration mode."""
 
     mode: Literal["coordinate", "collaborate"] = Field(
-        description="coordinate for sequential tasks, collaborate for parallel tasks",
+        description="coordinate for delegation and synthesis, collaborate for all working on same task",
     )
     reasoning: str = Field(description="Brief explanation of why this mode was chosen")
 
@@ -176,20 +176,27 @@ async def determine_team_mode(
         TeamMode.COORDINATE or TeamMode.COLLABORATE
 
     """
-    prompt = f"""Determine if these agents should work sequentially or in parallel.
+    prompt = f"""Determine the best team collaboration mode for this task.
 
 Task: {message}
 Agents: {", ".join(agent_names)}
 
-Rules:
-- Use "coordinate" if tasks must happen in order (one depends on another)
-- Use "collaborate" if tasks can happen at the same time
+Team Modes (from Agno documentation):
+- "coordinate": Team leader delegates tasks to members and synthesizes their outputs.
+               The leader decides whether to send tasks sequentially or in parallel based on what's appropriate.
+- "collaborate": All team members are given the SAME task and work on it simultaneously.
+                The leader synthesizes all their outputs into a cohesive response.
+
+Decision Guidelines:
+- Use "coordinate" when agents need to do DIFFERENT subtasks (whether sequential or parallel)
+- Use "collaborate" when you want ALL agents working on the SAME problem for diverse perspectives
 
 Examples:
-- "Email me then call me" → coordinate
-- "Get weather and news" → collaborate
-- "Write code then test it" → coordinate
-- "Research and analyze data" → collaborate
+- "Email me then call me" → coordinate (different tasks: email agent sends email, phone agent makes call)
+- "Get weather and news" → coordinate (different tasks: weather agent gets weather, news agent gets news)
+- "Research this topic and analyze the data" → coordinate (different subtasks for each agent)
+- "What do you think about X?" → collaborate (all agents provide their perspective on the same question)
+- "Brainstorm solutions" → collaborate (all agents work on the same brainstorming task)
 
 Return the mode and a one-sentence reason why."""
 
@@ -267,7 +274,9 @@ async def should_form_team(
     if use_ai_decision and message and config:
         mode = await determine_team_mode(message, team_agents, config)
     else:
-        # Fallback to original hardcoded logic
+        # Fallback to hardcoded logic when AI decision is disabled or unavailable
+        # Use COORDINATE when agents are explicitly tagged (they likely have different roles)
+        # Use COLLABORATE when agents are from thread history (likely discussing same topic)
         mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
         logger.info(f"Using hardcoded mode selection: {mode.value}")
 

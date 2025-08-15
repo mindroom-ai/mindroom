@@ -85,15 +85,15 @@ class TestDetermineTeamMode:
     """Test the AI-powered team mode determination."""
 
     @pytest.mark.asyncio
-    async def test_determine_team_mode_sequential(self, mock_config):
-        """Test AI correctly identifies sequential tasks."""
+    async def test_determine_team_mode_coordinate(self, mock_config):
+        """Test AI correctly identifies coordination tasks (different subtasks)."""
         with patch("mindroom.teams.get_model_instance") as mock_get_model:
             # Mock the AI agent response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = TeamModeDecision(
                 mode="coordinate",
-                reasoning="Email must be sent before making the call",
+                reasoning="Different agents handle different subtasks",
             )
             mock_agent.arun.return_value = mock_response
 
@@ -108,21 +108,21 @@ class TestDetermineTeamMode:
                 mock_agent.arun.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_determine_team_mode_parallel(self, mock_config):
-        """Test AI correctly identifies parallel tasks."""
+    async def test_determine_team_mode_collaborate(self, mock_config):
+        """Test AI correctly identifies collaboration tasks (same task for all)."""
         with patch("mindroom.teams.get_model_instance") as mock_get_model:
             # Mock the AI agent response
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = TeamModeDecision(
                 mode="collaborate",
-                reasoning="Research and analysis can happen simultaneously",
+                reasoning="All agents work on the same brainstorming task",
             )
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await determine_team_mode(
-                    "Research the topic and analyze the data",
+                    "What do you think about this idea?",
                     ["research", "analyst"],
                     mock_config,
                 )
@@ -307,14 +307,14 @@ class TestIntegrationScenarios:
 
     @pytest.mark.asyncio
     async def test_email_then_call_scenario(self, mock_config):
-        """Test the email-then-call scenario mentioned in requirements."""
+        """Test the email-then-call scenario - coordinate mode for different tasks."""
         with patch("mindroom.teams.get_model_instance") as mock_get_model:
-            # Mock the AI to recognize sequential dependency
+            # Mock the AI to recognize different subtasks
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = TeamModeDecision(
                 mode="coordinate",
-                reasoning="The call depends on the email being sent first",
+                reasoning="Different tasks: email agent sends email, phone agent makes call",
             )
             mock_agent.arun.return_value = mock_response
 
@@ -333,15 +333,15 @@ class TestIntegrationScenarios:
                 assert set(result.agents) == {"email", "phone"}
 
     @pytest.mark.asyncio
-    async def test_parallel_research_scenario(self, mock_config):
-        """Test parallel research and analysis scenario."""
+    async def test_brainstorming_scenario(self, mock_config):
+        """Test brainstorming scenario - collaborate mode for same task."""
         with patch("mindroom.teams.get_model_instance") as mock_get_model:
-            # Mock the AI to recognize parallel capability
+            # Mock the AI to recognize same task for all
             mock_agent = AsyncMock()
             mock_response = MagicMock()
             mock_response.content = TeamModeDecision(
                 mode="collaborate",
-                reasoning="Research and analysis can proceed independently",
+                reasoning="All agents provide their perspective on the same question",
             )
             mock_agent.arun.return_value = mock_response
 
@@ -350,7 +350,7 @@ class TestIntegrationScenarios:
                     tagged_agents=["research", "analyst"],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
-                    message="Research the market trends and analyze the financial data",
+                    message="What are your thoughts on this approach?",
                     config=mock_config,
                     use_ai_decision=True,
                 )
