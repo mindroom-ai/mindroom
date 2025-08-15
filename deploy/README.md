@@ -45,7 +45,7 @@ tail -f /var/log/mindroom-widget.log
 cd /path/to/mindroom
 git pull origin main
 uv sync --all-extras  # Installs main package with API
-cd widget/frontend && pnpm install && cd ../..
+cd frontend && pnpm install && cd ../..
 
 # Restart services if running
 sudo systemctl restart mindroom-backend

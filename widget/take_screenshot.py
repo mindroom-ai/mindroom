@@ -27,7 +27,7 @@ def take_screenshot(port: int = 3003) -> bool:
     result = subprocess.run(
         ["pnpm", "run", "screenshot"],
         check=False,
-        cwd=Path(__file__).parent / "frontend",
+        cwd=Path(__file__).parent.parent / "frontend",  # Frontend is now at root level
         env={**os.environ, **env},
         capture_output=True,
         text=True,
@@ -61,7 +61,7 @@ def main() -> None:
     success = take_screenshot(port)
 
     if success:
-        print("\n📸 Screenshots saved to widget/frontend/screenshots/")
+        print("\n📸 Screenshots saved to frontend/screenshots/")
         print("You can now view the MindRoom Configuration Widget appearance!")
     else:
         print("\n❌ Failed to take screenshots.")

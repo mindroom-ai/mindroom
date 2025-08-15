@@ -21,7 +21,7 @@ The frontend uses Vitest as the test runner with React Testing Library for compo
 ### Running Frontend Tests
 
 ```bash
-cd widget/frontend
+cd frontend
 
 # Run all tests once
 pnpm test
@@ -150,8 +150,8 @@ jobs:
       - uses: actions/setup-node@v3
         with:
           node-version: '20'
-      - run: cd widget/frontend && pnpm install --frozen-lockfile
-      - run: cd widget/frontend && pnpm test
+      - run: cd frontend && pnpm install --frozen-lockfile
+      - run: cd frontend && pnpm test
 
   backend-tests:
     runs-on: ubuntu-latest

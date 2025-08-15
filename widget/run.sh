@@ -50,7 +50,7 @@ sleep 2
 
 # Start frontend
 echo -e "${GREEN}Starting frontend development server...${NC}"
-cd frontend
+cd ../frontend  # Frontend is now at root level
 if [ ! -d "node_modules" ]; then
     echo "Installing frontend dependencies with pnpm..."
     pnpm install
@@ -62,7 +62,7 @@ else
     VITE_BACKEND_PORT=$BACKEND_PORT BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev &
 fi
 FRONTEND_PID=$!
-cd ..
+cd ../widget  # Return to widget directory
 
 echo -e "${GREEN}Widget is running!${NC}"
 echo -e "Frontend: http://$HOST:$FRONTEND_PORT"

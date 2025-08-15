@@ -25,7 +25,7 @@ nix-shell shell.nix --run "python take_screenshot.py 3003"
 Replace `3003` with the actual port number if you're using a custom port.
 
 ### 3. Find screenshots
-Screenshots are saved in: `widget/frontend/screenshots/`
+Screenshots are saved in: `frontend/screenshots/`
 
 ## Detailed Instructions
 
@@ -64,7 +64,7 @@ The script captures:
 
 Screenshots are saved with timestamps:
 ```
-widget/frontend/screenshots/
+frontend/screenshots/
 ├── mindroom-config-fullpage-YYYY-MM-DDTHH-mm-ss-sssZ.png
 ├── mindroom-config-agents-YYYY-MM-DDTHH-mm-ss-sssZ.png
 └── mindroom-config-models-YYYY-MM-DDTHH-mm-ss-sssZ.png

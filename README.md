@@ -145,7 +145,7 @@ uv sync --all-extras
 source .venv/bin/activate
 
 # If using the widget, also install frontend dependencies
-cd widget/frontend
+cd frontend
 pnpm install
 cd ../..
 

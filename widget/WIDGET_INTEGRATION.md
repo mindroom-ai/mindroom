@@ -47,7 +47,7 @@ This starts:
 
 1. **Build the frontend:**
    ```bash
-   cd widget/frontend
+   cd frontend
    pnpm run build
    ```
 
@@ -59,7 +59,7 @@ This starts:
 
        # Frontend
        location / {
-           root /path/to/widget/frontend/dist;
+           root /path/to/frontend/dist;
            try_files $uri $uri/ /index.html;
        }
 

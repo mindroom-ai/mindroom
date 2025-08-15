@@ -13,21 +13,21 @@ RUN uv sync --all-extras
 
 # Frontend deps stage
 FROM base as frontend-deps
-WORKDIR /app/widget/frontend
-COPY widget/frontend/package.json widget/frontend/pnpm-lock.yaml ./
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
 # Build frontend
 FROM frontend-deps as frontend-build
-COPY widget/frontend .
+COPY frontend .
 RUN pnpm run build
 
 # Final stage
 FROM base as final
 WORKDIR /app
 COPY --from=backend-deps /app/.venv /app/.venv
-COPY --from=frontend-deps /app/widget/frontend/node_modules /app/widget/frontend/node_modules
-COPY --from=frontend-build /app/widget/frontend/dist /app/widget/frontend/dist
+COPY --from=frontend-deps /app/frontend/node_modules /app/frontend/node_modules
+COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
 COPY . /app/
 RUN mkdir -p /app/logs /app/config
 RUN chmod +x /app/widget/run.sh

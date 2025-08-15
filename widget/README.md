@@ -41,7 +41,7 @@ uv sync --all-extras
 uv run uvicorn mindroom.api.main:app --reload --port 8765
 
 # Terminal 2: Start frontend
-cd widget/frontend
+cd frontend
 pnpm install  # Note: You'll see a warning about build scripts - this is safe to ignore
 pnpm run dev
 
@@ -58,7 +58,7 @@ nix-shell widget/shell.nix --run "python widget/take_screenshot.py"
 ## Architecture
 
 ### Frontend (React/TypeScript)
-- **Location**: `widget/frontend/`
+- **Location**: `frontend/`
 - **Port**: 3003 (default, configurable via `FRONTEND_PORT` environment variable)
 - **Technologies**: React 18, TypeScript, Tailwind CSS, Zustand, Vite
 - **Key Files**:
@@ -134,7 +134,7 @@ This automatically:
 - Provides Chromium and all dependencies
 - Starts both servers
 - Takes screenshots (full page, agent selected, models tab)
-- Saves to `widget/frontend/screenshots/`
+- Saves to `frontend/screenshots/`
 - Stops servers when done
 
 ### Without Nix
@@ -157,19 +157,22 @@ This captures the widget state as JSON instead of screenshots.
 ## File Structure
 
 ```
+frontend/                    # React application (now at root level)
+├── src/
+│   ├── components/         # UI components
+│   ├── store/             # State management
+│   ├── services/          # API client
+│   └── types/             # TypeScript types
+├── public/                # Static assets
+└── package.json           # Node dependencies
+
+src/mindroom/api/           # Backend API (integrated into main package)
+├── main.py                # API and file watching
+├── credentials.py         # Credentials management
+├── google_integration.py  # Google integration
+└── tools.py              # Tools metadata
+
 widget/
-├── frontend/                 # React application
-│   ├── src/
-│   │   ├── components/      # UI components
-│   │   ├── store/          # State management
-│   │   ├── services/       # API client
-│   │   └── types/          # TypeScript types
-│   ├── public/             # Static assets
-│   └── package.json        # Node dependencies
-├── backend/                # FastAPI server
-│   ├── src/
-│   │   └── main.py        # API and file watching
-│   └── pyproject.toml     # Python config
 ├── run.sh                 # Start both servers
 ├── take_screenshot.py     # Screenshot automation
 ├── capture_state.py       # Alternative state capture

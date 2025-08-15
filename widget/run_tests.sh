@@ -7,7 +7,7 @@ echo "============================="
 echo ""
 echo "Running Frontend Tests (TypeScript/React)..."
 echo "-------------------------------------------"
-cd frontend
+cd ../frontend  # Frontend is now at root level
 pnpm exec vitest run
 
 # Backend tests (now in main project)
