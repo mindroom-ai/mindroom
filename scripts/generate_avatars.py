@@ -39,7 +39,7 @@ from rich.text import Text
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import MATRIX_HOMESERVER
-from mindroom.matrix.client import check_and_set_room_avatar
+from mindroom.matrix.client import check_and_set_avatar
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import get_room_id
 from mindroom.matrix.state import MatrixState
@@ -287,7 +287,7 @@ async def set_room_avatars_in_matrix() -> None:
             continue
 
         # Set avatar
-        if await check_and_set_room_avatar(client, room_id, avatar_path):
+        if await check_and_set_avatar(client, avatar_path, room_id=room_id):
             console.print(f"[green]✓ Set avatar for room '{room_name}'[/green]")
             success_count += 1
         else:
