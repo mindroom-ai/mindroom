@@ -150,11 +150,7 @@ async def register_user(
                 logger.warning(f"Failed to set display name: {display_response}")
 
             return user_id
-        if (
-            isinstance(response, nio.ErrorResponse)
-            and hasattr(response, "status_code")
-            and response.status_code == "M_USER_IN_USE"
-        ):
+        if isinstance(response, nio.ErrorResponse) and response.status_code == "M_USER_IN_USE":
             logger.info(f"User {user_id} already exists")
             return user_id
         msg = f"Failed to register user {username}: {response}"
@@ -375,7 +371,7 @@ async def fetch_thread_history(
             direction=nio.MessageDirection.back,
         )
 
-        if not hasattr(response, "chunk"):
+        if not isinstance(response, nio.RoomMessagesResponse):
             logger.error("Failed to fetch thread history", room_id=room_id, error=str(response))
             break
 
