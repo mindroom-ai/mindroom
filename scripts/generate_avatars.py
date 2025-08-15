@@ -45,6 +45,27 @@ console = Console()
 # Load environment variables from .env file
 load_dotenv()
 
+# Avatar generation prompts
+BASE_STYLE = "adorable Pixar-style robot character portrait, big emotive eyes, soft rounded design, vibrant metallic colors, friendly smile, expressive antenna or unique head features, helper robot personality, warm lighting, 3D rendered look, approachable and huggable, centered composition, no text"
+
+TEAM_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for friendly Pixar-style robot team avatars.
+Given a team's name, description, and the roles of its members, suggest 5-7 unique robot features and characteristics.
+Think about: special attachments, unique colors, multiple connected robots, special tools or gadgets, distinctive shapes.
+The avatar should show multiple robots working together or a single robot with features from all team members.
+Output ONLY the visual elements as a comma-separated list, no other text.
+Example: "multiple small robots holding hands, interconnected with glowing data streams, different colored robots in a group hug, modular robot with swappable parts, rainbow metallic finish"
+"""
+
+AGENT_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for friendly Pixar-style robot avatars.
+Given an agent's name and role, suggest 3-5 unique robot characteristics and features that match their personality.
+Think about: special tools or attachments, unique antenna designs, eye shapes and colors, body modifications, special badges or emblems.
+Output ONLY the visual elements as a comma-separated list, no other text.
+Examples:
+- For a calculator agent: "calculator screen chest display, number pad buttons, mathematical equation hologram, protractor antenna"
+- For a research agent: "magnifying glass eye, book-shaped chest compartment, data scanner antenna, holographic display"
+- For a code agent: "keyboard fingers, screen face with code scrolling, USB port accessories, binary code patterns"
+"""
+
 
 def get_project_root() -> Path:
     """Get the project root directory."""
@@ -73,32 +94,15 @@ async def generate_prompt(
     team_members: list[dict] | None = None,
 ) -> str:
     """Generate a DALL-E prompt based on the entity's role using AI."""
-    base_style = "adorable Pixar-style robot character portrait, big emotive eyes, soft rounded design, vibrant metallic colors, friendly smile, expressive antenna or unique head features, helper robot personality, warm lighting, 3D rendered look, approachable and huggable, centered composition, no text"
-
     # Use a simple AI model to generate visual themes based on the role
     if entity_type == "teams" and team_members:
         # For teams, create a prompt that combines the team members' roles
-        system_prompt = """You are an expert at creating visual descriptions for friendly Pixar-style robot team avatars.
-Given a team's name, description, and the roles of its members, suggest 5-7 unique robot features and characteristics.
-Think about: special attachments, unique colors, multiple connected robots, special tools or gadgets, distinctive shapes.
-The avatar should show multiple robots working together or a single robot with features from all team members.
-Output ONLY the visual elements as a comma-separated list, no other text.
-Example: "multiple small robots holding hands, interconnected with glowing data streams, different colored robots in a group hug, modular robot with swappable parts, rainbow metallic finish"
-"""
-
+        system_prompt = TEAM_SYSTEM_PROMPT
         members_info = "\n".join([f"- {m['name']}: {m['role']}" for m in team_members])
         user_prompt = f"Team name: {entity_name}\nTeam role: {role}\nTeam members:\n{members_info}"
     else:
         # For individual agents
-        system_prompt = """You are an expert at creating visual descriptions for friendly Pixar-style robot avatars.
-Given an agent's name and role, suggest 3-5 unique robot characteristics and features that match their personality.
-Think about: special tools or attachments, unique antenna designs, eye shapes and colors, body modifications, special badges or emblems.
-Output ONLY the visual elements as a comma-separated list, no other text.
-Examples:
-- For a calculator agent: "calculator screen chest display, number pad buttons, mathematical equation hologram, protractor antenna"
-- For a research agent: "magnifying glass eye, book-shaped chest compartment, data scanner antenna, holographic display"
-- For a code agent: "keyboard fingers, screen face with code scrolling, USB port accessories, binary code patterns"
-"""
+        system_prompt = AGENT_SYSTEM_PROMPT
         user_prompt = f"Agent name: {entity_name}\nRole: {role}\nType: {entity_type}"
 
     # Use a cheaper/faster model for prompt generation
@@ -113,7 +117,7 @@ Examples:
     )
 
     visual_elements = response.choices[0].message.content.strip()
-    final_prompt = f"{base_style}, {visual_elements}"
+    final_prompt = f"{BASE_STYLE}, {visual_elements}"
 
     # Print the prompt with rich formatting
     console.print(
