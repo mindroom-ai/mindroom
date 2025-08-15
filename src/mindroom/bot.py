@@ -278,7 +278,11 @@ class AgentBot:
 
         if avatar_path.exists():
             try:
-                await check_and_set_avatar(self.client, avatar_path)
+                success = await check_and_set_avatar(self.client, avatar_path)
+                if success:
+                    self.logger.info(f"Successfully set avatar for {self.agent_name}")
+                else:
+                    self.logger.warning(f"Failed to set avatar for {self.agent_name}")
             except Exception as e:
                 self.logger.warning(f"Failed to set avatar: {e}")
 

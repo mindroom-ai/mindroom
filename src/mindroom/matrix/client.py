@@ -1,5 +1,6 @@
 """Matrix client operations and utilities."""
 
+import io
 import os
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
@@ -481,10 +482,6 @@ async def set_avatar_from_file(
         logger.warning(f"Avatar file not found: {avatar_path}")
         return False
 
-    # Read the file
-    with avatar_path.open("rb") as f:
-        avatar_data = f.read()
-
     # Determine content type based on file extension
     extension = avatar_path.suffix.lower()
     content_type = {
@@ -495,15 +492,43 @@ async def set_avatar_from_file(
         ".gif": "image/gif",
     }.get(extension, "image/png")
 
-    # Upload the avatar
-    upload_response = await client.upload(
-        data_provider=avatar_data,
+    # Read the file data
+    with avatar_path.open("rb") as f:
+        avatar_data = f.read()
+
+    # Get file size for Content-Length
+    file_size = len(avatar_data)
+
+    # Create a lambda that returns a BytesIO object
+    # This ensures proper Content-Length handling
+    # The data_provider function gets called with (upload_monitor, unused_data)
+    def data_provider(_upload_monitor: object, _unused_data: object) -> io.BytesIO:
+        return io.BytesIO(avatar_data)
+
+    # Upload the avatar with explicit file size
+    upload_result = await client.upload(
+        data_provider=data_provider,
         content_type=content_type,
         filename=avatar_path.name,
+        filesize=file_size,
     )
+
+    # Handle the response - nio might return a tuple (response, error)
+    if isinstance(upload_result, tuple):
+        upload_response, error = upload_result
+        if error:
+            logger.error(f"Upload error: {error}")
+            return False
+    else:
+        upload_response = upload_result
 
     if not isinstance(upload_response, nio.UploadResponse):
         logger.error(f"Failed to upload avatar: {upload_response}")
+        return False
+
+    # Check if we have a content_uri
+    if not hasattr(upload_response, "content_uri") or not upload_response.content_uri:
+        logger.error("Upload response missing content_uri")
         return False
 
     # Set the avatar URL
