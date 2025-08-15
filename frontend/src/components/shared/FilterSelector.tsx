@@ -7,6 +7,7 @@ interface FilterOption {
   label: string | ReactNode;
   count?: number;
   showIcon?: boolean;
+  icon?: ReactNode;
 }
 
 interface FilterSelectorProps {
@@ -84,14 +85,16 @@ export function FilterSelector({
           )}
         >
           <span className="flex items-center gap-1.5">
-            {(showFilterIcon || option.showIcon) && (
-              <Filter
-                className={cn(
-                  'w-3.5 h-3.5',
-                  isSelected(option.value) && 'text-amber-600 dark:text-amber-400'
+            {option.icon
+              ? option.icon
+              : (showFilterIcon || option.showIcon) && (
+                  <Filter
+                    className={cn(
+                      'w-3.5 h-3.5',
+                      isSelected(option.value) && 'text-amber-600 dark:text-amber-400'
+                    )}
+                  />
                 )}
-              />
-            )}
             {option.label}
             {option.count !== undefined && (
               <span
