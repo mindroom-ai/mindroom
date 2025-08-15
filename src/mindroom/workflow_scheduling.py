@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 from agno.agent import Agent
+from cron_descriptor import get_description  # type: ignore[import-untyped]
 from croniter import croniter  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field
 
@@ -36,6 +37,23 @@ class CronSchedule(BaseModel):
     def to_cron_string(self) -> str:
         """Convert to standard cron format."""
         return f"{self.minute} {self.hour} {self.day} {self.month} {self.weekday}"
+
+    def to_natural_language(self) -> str:
+        """Convert cron schedule to natural language description.
+
+        Examples:
+        - "*/2 * * * *" → "Every 2 minutes"
+        - "0 9 * * 1" → "At 09:00 AM, only on Monday"
+        - "0 */4 * * *" → "Every 4 hours"
+
+        """
+        try:
+            cron_str = self.to_cron_string()
+            # Use cron-descriptor to get natural language
+            return str(get_description(cron_str))
+        except Exception:
+            # Fallback to cron string if description fails
+            return f"Cron: {self.to_cron_string()}"
 
 
 class ScheduledWorkflow(BaseModel):

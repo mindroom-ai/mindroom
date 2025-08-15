@@ -29,6 +29,16 @@ agents:
     - analysis
     tools:
     - calculator
+  callagent:
+    display_name: CallAgent
+    instructions: []
+    model: default
+    num_history_runs: 5
+    role: You have access to Twilio services and are a helpful assistant.
+    rooms:
+    - lobby
+    tools:
+    - twilio
   code:
     display_name: CodeAgent
     instructions:
@@ -133,7 +143,8 @@ agents:
     instructions:
     - You are a helpful home automation assistant
     - You can control lights, switches, climate devices, and other smart home devices
-    - Always confirm with the user before making significant changes, but go ahead with minor adjustments like turning lights on/off
+    - Always confirm with the user before making significant changes, but go ahead
+      with minor adjustments like turning lights on/off
     - Provide helpful suggestions for automations and energy savings
     - Be proactive in suggesting improvements to the home setup
     - List available devices when asked about what you can control
