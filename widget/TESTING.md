@@ -65,25 +65,23 @@ The backend uses pytest with FastAPI's TestClient for API testing.
 ### Running Backend Tests
 
 ```bash
-cd widget/backend
-
-# Activate virtual environment
+# From project root
 source .venv/bin/activate
 
 # Install test dependencies (if not already installed)
 uv sync --all-extras
 
-# Run all tests
-python -m pytest
+# Run all API tests
+python -m pytest tests/api/
 
 # Run with verbose output
-python -m pytest -v
+python -m pytest tests/api/ -v
 
 # Run specific test file
-python -m pytest tests/test_api.py
+python -m pytest tests/api/test_api.py
 
 # Run with coverage
-python -m pytest --cov=src
+python -m pytest tests/api/ --cov=mindroom.api
 ```
 
 ### Writing Backend Tests
@@ -163,8 +161,8 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install uv
-      - run: cd widget/backend && uv sync --all-extras
-      - run: cd widget/backend && python -m pytest
+      - run: uv sync --all-extras
+      - run: python -m pytest tests/api/
 ```
 
 ## Troubleshooting

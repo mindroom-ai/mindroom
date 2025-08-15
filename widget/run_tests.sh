@@ -10,12 +10,12 @@ echo "-------------------------------------------"
 cd frontend
 pnpm exec vitest run
 
-# Backend tests
+# Backend tests (now in main project)
 echo ""
 echo "Running Backend Tests (Python/FastAPI)..."
 echo "----------------------------------------"
-cd ../backend
-uv run pytest tests/ -v -o addopts=""
+cd ../..  # Go to project root
+uv run pytest tests/api/ -v -o addopts=""
 
 echo ""
 echo "Test run complete!"

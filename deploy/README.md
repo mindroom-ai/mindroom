@@ -44,8 +44,7 @@ tail -f /var/log/mindroom-widget.log
 ```bash
 cd /path/to/mindroom
 git pull origin main
-uv sync --all-extras
-cd widget/backend && uv sync && cd ../..
+uv sync --all-extras  # Installs main package with API
 cd widget/frontend && pnpm install && cd ../..
 
 # Restart services if running

@@ -36,10 +36,9 @@ FRONTEND_PORT=3005 BACKEND_PORT=8080 ./widget/run.sh
 #### Manual Start
 
 ```bash
-# Terminal 1: Start backend
-cd widget/backend
-uv sync
-uv run uvicorn src.main:app --reload --port 8001
+# Terminal 1: Start backend (from project root)
+uv sync --all-extras
+uv run uvicorn mindroom.api.main:app --reload --port 8765
 
 # Terminal 2: Start frontend
 cd widget/frontend
@@ -69,12 +68,12 @@ nix-shell widget/shell.nix --run "python widget/take_screenshot.py"
   - `src/components/ModelConfig/` - Model configuration UI
 
 ### Backend (FastAPI/Python)
-- **Location**: `widget/backend/`
-- **Port**: 8001 (configurable via `BACKEND_PORT` environment variable)
+- **Location**: `src/mindroom/api/` (integrated into main package)
+- **Port**: 8765 (configurable via `BACKEND_PORT` environment variable)
 - **Technologies**: FastAPI, PyYAML, Watchdog, Pydantic
 - **Dependencies**: Uses `mindroom` as an editable package dependency
 - **Key Files**:
-  - `src/main.py` - API endpoints and file watching
+  - `src/mindroom/api/main.py` - API endpoints and file watching
   - `pyproject.toml` - Python dependencies (includes mindroom)
 
 ## Features
@@ -195,7 +194,7 @@ widget/
 ### Adding New Features
 
 1. **New Agent Properties**: Update types in `frontend/src/types/config.ts`
-2. **New API Endpoints**: Add to `backend/src/main.py`
+2. **New API Endpoints**: Add to `src/mindroom/api/main.py`
 3. **New UI Components**: Add to `frontend/src/components/`
 4. **State Changes**: Update `frontend/src/store/configStore.ts`
 

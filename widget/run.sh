@@ -32,18 +32,18 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-# Start backend
+# Start backend (now from main mindroom package)
 echo -e "${GREEN}Starting backend server on port $BACKEND_PORT...${NC}"
-cd backend
+cd ..  # Go to project root
 
 echo "Using uv for Python dependencies..."
 if [ ! -d ".venv" ]; then
-    uv sync
+    uv sync --all-extras
 fi
-uv run uvicorn src.main:app --reload --host $HOST --port $BACKEND_PORT &
+uv run uvicorn mindroom.api.main:app --reload --host $HOST --port $BACKEND_PORT &
 BACKEND_PID=$!
 
-cd ..
+cd widget
 
 # Wait a moment for backend to start
 sleep 2
