@@ -31,12 +31,20 @@ agents:
     - calculator
   callagent:
     display_name: CallAgent
-    instructions: []
+    instructions:
+    - Make and receive phone calls using Twilio services
+    - Send SMS text messages to specified phone numbers
+    - Always confirm the phone number before making calls or sending texts
+    - Provide clear status updates after each action
+    - Handle phone numbers in international format when possible
+    - Be concise and clear in SMS messages due to character limits
+    - For calls, prepare a brief script of what will be communicated
     model: default
     num_history_runs: 5
-    role: You have access to Twilio services and are a helpful assistant.
+    role: Manage phone calls and SMS messages through Twilio integration.
     rooms:
     - lobby
+    - communication
     tools:
     - twilio
   code:
