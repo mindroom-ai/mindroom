@@ -204,10 +204,12 @@ class AgentBot:
         for room_id in self.rooms:
             if await join_room(self.client, room_id):
                 self.logger.info("Joined room", room_id=room_id)
-                # Restore scheduled tasks for this room
-                restored = await restore_scheduled_tasks(self.client, room_id, self.config)
-                if restored > 0:
-                    self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
+                # Only the router agent should restore scheduled tasks
+                # to avoid duplicate task instances after restart
+                if self.agent_name == ROUTER_AGENT_NAME:
+                    restored = await restore_scheduled_tasks(self.client, room_id, self.config)
+                    if restored > 0:
+                        self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
