@@ -306,6 +306,9 @@ models:
   sonnet:
     id: claude-3-5-sonnet-latest
     provider: anthropic
+  gemini_flash:
+    id: gemini-2.5-flash
+    provider: google
 room_models:
   research: haiku
 router:
