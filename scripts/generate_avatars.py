@@ -1,15 +1,19 @@
 #!/usr/bin/env -S uv run
-"""Generate avatars for all agents, teams, and rooms using OpenAI GPT Image model.
+"""Generate and set avatars for all agents, teams, and rooms.
 
 This script:
 1. Reads all agents, teams, and rooms from config.yaml
 2. Uses AI to generate custom prompts based on agent roles and room purposes
 3. Generates consistent-style avatars using GPT Image 1
 4. Stores avatars in avatars/ directory
-5. Only regenerates missing avatars (idempotent)
+5. Sets avatars in Matrix for agents and rooms
+6. Only regenerates missing avatars (idempotent)
 
 Usage:
-    uv run scripts/generate_avatars.py
+    uv run scripts/generate_avatars.py [--set-only]
+
+Options:
+    --set-only    Skip generation and only set existing avatars in Matrix
 
 Requires:
     OPENAI_API_KEY environment variable to be set (or in .env file)
@@ -22,12 +26,16 @@ Requires:
 #   "aiofiles",
 #   "python-dotenv",
 #   "rich",
+#   "matrix-nio",
+#   "markdown",
+#   "structlog",
 # ]
 # ///
 
 import asyncio
 import base64
 import os
+import sys
 from pathlib import Path
 
 import aiofiles
@@ -44,6 +52,18 @@ console = Console()
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Add the src directory to the path for Matrix imports
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+# Import Matrix-related modules (must be after sys.path modification)
+from mindroom.constants import ROUTER_AGENT_NAME  # noqa: E402
+from mindroom.matrix import MATRIX_HOMESERVER  # noqa: E402
+from mindroom.matrix.client import check_and_set_room_avatar  # noqa: E402
+from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver  # noqa: E402
+from mindroom.matrix.rooms import get_room_id  # noqa: E402
+from mindroom.matrix.state import MatrixState  # noqa: E402
+from mindroom.matrix.users import AgentMatrixUser, login_agent_user  # noqa: E402
 
 # Avatar generation prompts
 BASE_STYLE = "adorable Pixar-style robot character portrait, big emotive eyes, soft rounded design, vibrant metallic colors, friendly smile, expressive antenna or unique head features, helper robot personality, warm lighting, 3D rendered look, approachable and huggable, centered composition, no text"
@@ -221,70 +241,161 @@ async def generate_avatar(
             console.print(f"[red]✗ No image data found for {entity_type}/{entity_name}[/red]")
 
 
-async def main() -> None:
-    """Main function to generate all avatars."""
-    # Check for OpenAI API key
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        console.print("[red]Error: OPENAI_API_KEY environment variable not set[/red]")
-        console.print("Please set it in your .env file or environment")
+async def set_room_avatars_in_matrix() -> None:
+    """Set avatars for all rooms in Matrix."""
+    console.print("\n[bold cyan]Setting room avatars in Matrix...[/bold cyan]")
+
+    # Get the router account from state (router has permission to modify rooms)
+    state = MatrixState.load()
+    router_account = state.get_account(f"agent_{ROUTER_AGENT_NAME}")
+    if not router_account:
+        console.print("[red]No router account found in Matrix state[/red]")
+        console.print("[dim]Make sure mindroom has been started at least once[/dim]")
         return
 
-    client = AsyncOpenAI(api_key=api_key)
-    config = load_config()
-
-    # Collect all entities to generate
-    tasks = []
-
-    # Process agents
-    agents = config.get("agents", {})
-    for agent_name, agent_data in agents.items():
-        tasks.append(generate_avatar(client, "agents", agent_name, agent_data))
-
-    # Add router agent (special system agent)
-    tasks.append(generate_avatar(client, "agents", "router", {"role": "Intelligent routing and agent selection"}))
-
-    # Process teams (pass agents dict for team member info)
-    teams = config.get("teams", {})
-    for team_name, team_data in teams.items():
-        tasks.append(generate_avatar(client, "teams", team_name, team_data, agents))
-
-    # Process rooms
-    # Get unique rooms from all agents
-    all_rooms = set()
-    for agent_data in agents.values():
-        rooms = agent_data.get("rooms", [])
-        all_rooms.update(rooms)
-
-    # Define room purposes
-    room_purposes = {
-        "lobby": "Central meeting space for initial interactions and general discussions",
-        "research": "Knowledge discovery, data analysis, and investigation space",
-        "docs": "Documentation, writing, and knowledge management space",
-        "ops": "Operations, DevOps, and system management space",
-        "automation": "Workflow automation and process optimization space",
-    }
-
-    for room_name in all_rooms:
-        room_data = {"role": room_purposes.get(room_name, f"Collaboration space for {room_name} activities")}
-        tasks.append(generate_avatar(client, "rooms", room_name, room_data))
-
-    # Generate avatars
-    console.print(
-        f"\n[bold cyan]🚀 Generating avatars for {len(agents) + 1} agents, {len(teams)} teams, and {len(all_rooms)} rooms...[/bold cyan]\n",
+    # Create router user object
+    server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+    router_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id=MatrixID.from_username(router_account.username, server_name).full_id,
+        display_name="Router",
+        password=router_account.password,
+        access_token=None,
     )
 
-    # Process all tasks (OpenAI handles rate limiting)
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task_id = progress.add_task("Processing avatars...", total=None)
-        await asyncio.gather(*tasks)
-        progress.update(task_id, completed=True)
+    # Login as router
+    client = await login_agent_user(MATRIX_HOMESERVER, router_user)
+    console.print("[green]✓ Logged in to Matrix as router[/green]")
 
-    console.print("\n[bold green]✨ Avatar generation complete![/bold green]")
+    # Get all rooms
+    config = load_config()
+    all_rooms = set()
+    for agent_data in config.get("agents", {}).values():
+        all_rooms.update(agent_data.get("rooms", []))
+
+    avatars_dir = get_project_root() / "avatars" / "rooms"
+    success_count = 0
+    skip_count = 0
+
+    for room_name in sorted(all_rooms):
+        avatar_path = avatars_dir / f"{room_name}.png"
+
+        if not avatar_path.exists():
+            skip_count += 1
+            continue
+
+        # Get room ID
+        room_id = get_room_id(room_name)
+        if not room_id:
+            console.print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
+            continue
+
+        # Set avatar
+        if await check_and_set_room_avatar(client, room_id, avatar_path):
+            console.print(f"[green]✓ Set avatar for room '{room_name}'[/green]")
+            success_count += 1
+        else:
+            console.print(f"[yellow]⊘ Avatar already set or failed for room '{room_name}'[/yellow]")
+
+    await client.close()
+
+    if success_count > 0:
+        console.print(f"\n[green]✓ Set {success_count} room avatars[/green]")
+    if skip_count > 0:
+        console.print(f"[dim]⊘ Skipped {skip_count} rooms (no avatar file)[/dim]")
+
+
+async def main() -> None:  # noqa: C901
+    """Main function to generate and set avatars."""
+    # Check for --set-only flag
+    set_only = "--set-only" in sys.argv
+
+    if not set_only:
+        # Check for OpenAI API key
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            console.print("[red]Error: OPENAI_API_KEY environment variable not set[/red]")
+            console.print("Please set it in your .env file or environment")
+            return
+
+        client = AsyncOpenAI(api_key=api_key)
+
+    config = load_config()
+
+    if not set_only:
+        # Collect all entities to generate
+        tasks = []
+
+        # Process agents
+        agents = config.get("agents", {})
+        for agent_name, agent_data in agents.items():
+            tasks.append(generate_avatar(client, "agents", agent_name, agent_data))
+
+        # Add router agent (special system agent)
+        tasks.append(generate_avatar(client, "agents", "router", {"role": "Intelligent routing and agent selection"}))
+
+        # Process teams (pass agents dict for team member info)
+        teams = config.get("teams", {})
+        for team_name, team_data in teams.items():
+            tasks.append(generate_avatar(client, "teams", team_name, team_data, agents))
+
+        # Process rooms
+        # Get unique rooms from all agents
+        all_rooms = set()
+        for agent_data in agents.values():
+            rooms = agent_data.get("rooms", [])
+            all_rooms.update(rooms)
+
+        # Define room purposes
+        room_purposes = {
+            "lobby": "Central meeting space for initial interactions and general discussions",
+            "research": "Knowledge discovery, data analysis, and investigation space",
+            "docs": "Documentation, writing, and knowledge management space",
+            "ops": "Operations, DevOps, and system management space",
+            "automation": "Workflow automation and process optimization space",
+        }
+
+        for room_name in all_rooms:
+            room_data = {"role": room_purposes.get(room_name, f"Collaboration space for {room_name} activities")}
+            tasks.append(generate_avatar(client, "rooms", room_name, room_data))
+
+        # Get counts for display
+        agents = config.get("agents", {})
+        teams = config.get("teams", {})
+        all_rooms_count = len(all_rooms)
+    else:
+        # For set-only mode, just get counts for display
+        agents = config.get("agents", {})
+        teams = config.get("teams", {})
+        all_rooms = set()
+        for agent_data in agents.values():
+            all_rooms.update(agent_data.get("rooms", []))
+        all_rooms_count = len(all_rooms)
+
+    if not set_only:
+        # Generate avatars
+        console.print(
+            f"\n[bold cyan]🚀 Generating avatars for {len(agents) + 1} agents, {len(teams)} teams, and {all_rooms_count} rooms...[/bold cyan]\n",
+        )
+
+        # Process all tasks (OpenAI handles rate limiting)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            task_id = progress.add_task("Processing avatars...", total=None)
+            await asyncio.gather(*tasks)
+            progress.update(task_id, completed=True)
+
+        console.print("\n[bold green]✨ Avatar generation complete![/bold green]")
+
+    # Set room avatars in Matrix (always try, even in set-only mode)
+    try:
+        await set_room_avatars_in_matrix()
+    except Exception as e:
+        console.print(f"\n[yellow]Warning: Could not set Matrix avatars: {e}[/yellow]")
+        console.print("[dim]This is normal if Matrix server is not running[/dim]")
 
 
 if __name__ == "__main__":
