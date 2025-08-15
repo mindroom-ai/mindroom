@@ -51,40 +51,44 @@ console = Console()
 load_dotenv()
 
 # Avatar generation prompts
-# Note: These avatars are displayed VERY small (1cm) in Matrix, so they need to be simple and bold
-CHARACTER_STYLE = "simple cartoon robot face, close-up portrait, bold colors, high contrast, minimal details, large expressive eyes, distinctive silhouette, flat design style, centered composition, works well as tiny icon, no text, no background clutter"
+# Note: These avatars are displayed small in Matrix but can be clicked to view larger
+CHARACTER_STYLE = "cute cartoon robot portrait, 3D rendered, glossy finish, vibrant colors, expressive digital eyes, smooth rounded design, friendly appearance, detailed but clean, modern tech aesthetic, centered composition, colorful background gradient, no text"
 
-ROOM_STYLE = "simple geometric room icon, bold single color theme, minimal design, high contrast, distinctive shape, flat design style, easily recognizable at small size, centered composition, works well as tiny icon, no text, no fine details"
+ROOM_STYLE = "isometric room illustration, 3D rendered, vibrant colors, modern tech space, clean geometric design, atmospheric lighting, stylized furniture and tech elements, inviting atmosphere, detailed but not cluttered, distinctive theme, no text"
 
-TEAM_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for simple robot team icons.
-IMPORTANT: These will be displayed as TINY avatars (1cm wide), so they must be extremely simple and bold.
-Given a team's name and members, suggest 2-3 SIMPLE visual elements that will be visible at small size.
-Think about: bold color schemes, simple geometric shapes, ONE distinctive feature maximum.
-Output ONLY the visual elements as a comma-separated list, no other text.
-Example: "bright orange circle, two dots for eyes, simple smile"
-"""
+TEAM_SYSTEM_PROMPT = """You are creating distinctive visual elements for a cute robot team avatar.
+Given a team's name and purpose, suggest creative features that make this team memorable:
+- Unique color scheme (can be multiple colors)
+- Special eye design (LED matrix, holographic, star-shaped, etc.)
+- Distinctive accessories or modifications
+- Fun personality traits shown visually
+Output visual elements as a comma-separated list.
+Example: "purple and gold color scheme, holographic visor eyes, multiple mini-robots stacked, glowing team badge, excited expression"
+Be creative and make each team visually distinct!"""
 
-AGENT_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for simple robot face icons.
-IMPORTANT: These will be displayed as TINY avatars (1cm wide), so they must be extremely simple and bold.
-Given an agent's name and role, suggest 2-3 SIMPLE visual elements that will be visible at small size.
-Think about: distinctive color, simple eye shape, ONE unique feature maximum.
-Output ONLY the visual elements as a comma-separated list, no other text.
+AGENT_SYSTEM_PROMPT = """You are creating distinctive visual elements for a cute robot character avatar.
+Given an agent's name and role, suggest creative features that reflect their personality and function:
+- Unique color palette
+- Expressive eye design (screens, LEDs, mechanical irises, etc.)
+- Role-specific accessories or tools
+- Personality shown through expression and details
+Output visual elements as a comma-separated list.
 Examples:
-- For a calculator: "square head, digital display eyes, blue color"
-- For research: "round head, magnifying glass monocle, green color"
-- For code: "rectangular head, pixel eyes, purple color"
-"""
+- Calculator: "blue and silver, calculator screen for chest, LED grid eyes, number pad buttons, mathematical symbols floating around"
+- Researcher: "teal and copper, magnifying glass monocle, curious expression, floating holographic data, antenna with blinking lights"
+Be creative and give each agent character!"""
 
-ROOM_SYSTEM_PROMPT = """You are an expert at creating visual descriptions for simple room/space icons.
-IMPORTANT: These will be displayed as TINY avatars (1cm wide), so they must be extremely simple and bold.
-Given a room's purpose, suggest 2-3 SIMPLE visual elements that will be visible at small size.
-Think about: single bold color, basic geometric shape, ONE iconic element maximum.
-Output ONLY the visual elements as a comma-separated list, no other text.
+ROOM_SYSTEM_PROMPT = """You are creating distinctive visual elements for an isometric tech room illustration.
+Given a room's purpose, suggest creative environmental details that make this space unique and inviting:
+- Distinctive color palette for the room
+- Specific furniture and tech equipment
+- Atmospheric lighting effects
+- Decorative elements that hint at the room's purpose
+Output visual elements as a comma-separated list.
 Examples:
-- For a lobby: "circular icon, warm yellow, simple door symbol"
-- For research: "square icon, deep blue, simple book symbol"
-- For automation: "hexagon icon, orange, simple gear symbol"
-"""
+- Lobby: "warm orange and cream tones, circular reception desk with holographic displays, comfortable modern seating, potted tech-plants, welcoming ambient lighting"
+- Research: "deep blue and silver, floating holographic data visualizations, adjustable smart desks, wall of interactive screens, focused spot lighting"
+Make each room feel unique and interesting!"""
 
 
 def get_project_root() -> Path:
