@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -1019,6 +1019,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/17/07/99f5210f804fe318ca6104bf938374b988f9f8a84ac4953f5a324b58c924/crawl4ai-0.7.3.tar.gz", hash = "sha256:020b6a376cdaddc734eb0624730778ee235b0772c08578ada8d905e609befbb5", size = 415620, upload-time = "2025-08-09T12:12:37.969Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/da/11/73d9c7b83e7874e44405bc82fd08e20843e423d8625d4a2e7b4f2e5105e6/crawl4ai-0.7.3-py3-none-any.whl", hash = "sha256:e84996b5f3d838f0a9ba62a720fb7b0b84f7012b4f2f9fa1fa477e76bc4aa864", size = 408951, upload-time = "2025-08-09T12:12:36.301Z" },
+]
+
+[[package]]
+name = "cron-descriptor"
+version = "1.4.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/02/83/70bd410dc6965e33a5460b7da84cf0c5a7330a68d6d5d4c3dfdb72ca117e/cron_descriptor-1.4.5.tar.gz", hash = "sha256:f51ce4ffc1d1f2816939add8524f206c376a42c87a5fca3091ce26725b3b1bca", size = 30666, upload-time = "2024-08-24T18:16:48.654Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/20/2cfe598ead23a715a00beb716477cfddd3e5948cf203c372d02221e5b0c6/cron_descriptor-1.4.5-py3-none-any.whl", hash = "sha256:736b3ae9d1a99bc3dbfc5b55b5e6e7c12031e7ba5de716625772f8b02dcd6013", size = 50370, upload-time = "2024-08-24T18:16:46.783Z" },
 ]
 
 [[package]]
@@ -3028,6 +3037,7 @@ dependencies = [
     { name = "chromadb" },
     { name = "composio-agno" },
     { name = "crawl4ai" },
+    { name = "cron-descriptor" },
     { name = "croniter" },
     { name = "daytona" },
     { name = "diskcache" },
@@ -3123,6 +3133,7 @@ requires-dist = [
     { name = "chromadb", specifier = ">=1.0.15" },
     { name = "composio-agno" },
     { name = "crawl4ai", specifier = ">=0.7.3" },
+    { name = "cron-descriptor", specifier = ">=1.4.5" },
     { name = "croniter", specifier = ">=6" },
     { name = "daytona" },
     { name = "diskcache", specifier = ">=5.6.3" },

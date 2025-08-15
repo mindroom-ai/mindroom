@@ -18,6 +18,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { ApiKeyConfig } from '@/components/ApiKeyConfig';
 import { FilterSelector } from '@/components/shared/FilterSelector';
+import { ProviderLogo } from './ProviderLogos';
 
 interface ModelFormData {
   provider: string;
@@ -77,6 +78,14 @@ export function ModelConfig() {
       openrouter: {
         name: 'OpenRouter',
         color: 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
+      },
+      gemini: {
+        name: 'Google Gemini',
+        color: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
+      },
+      google: {
+        name: 'Google Gemini',
+        color: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
       },
     };
     return (
@@ -280,6 +289,7 @@ export function ModelConfig() {
                     <SelectItem value="anthropic">Anthropic</SelectItem>
                     <SelectItem value="ollama">Ollama</SelectItem>
                     <SelectItem value="openrouter">OpenRouter</SelectItem>
+                    <SelectItem value="gemini">Google Gemini</SelectItem>
                   </SelectContent>
                 </Select>
               </FieldGroup>
@@ -352,9 +362,12 @@ export function ModelConfig() {
                   <CardHeader className="pb-3">
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
-                        <CardTitle className="text-base font-semibold truncate">
-                          {modelId}
-                        </CardTitle>
+                        <div className="flex items-center gap-2 mb-1">
+                          <ProviderLogo provider={modelConfig.provider} className="h-5 w-5 opacity-70" />
+                          <CardTitle className="text-base font-semibold truncate">
+                            {modelId}
+                          </CardTitle>
+                        </div>
                         <Badge
                           variant="outline"
                           className={cn('mt-1.5 text-xs', providerInfo.color)}
@@ -452,6 +465,7 @@ export function ModelConfig() {
                               <SelectItem value="anthropic">Anthropic</SelectItem>
                               <SelectItem value="ollama">Ollama</SelectItem>
                               <SelectItem value="openrouter">OpenRouter</SelectItem>
+                              <SelectItem value="gemini">Google Gemini</SelectItem>
                             </SelectContent>
                           </Select>
                         </FieldGroup>
@@ -562,6 +576,11 @@ export function ModelConfig() {
               service="openrouter"
               displayName="OpenRouter"
               description="Configure your OpenRouter API key"
+            />
+            <ApiKeyConfig
+              service="google"
+              displayName="Google Gemini"
+              description="Configure your Google API key for Gemini models"
             />
           </div>
         </div>
