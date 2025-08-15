@@ -3,10 +3,10 @@
 
 This script:
 1. Reads all agents and teams from config.yaml
-2. Generates consistent-style avatars using GPT Image 1
-3. Stores avatars in avatars/ directory with Git LFS tracking
-4. Only regenerates missing avatars (idempotent)
-5. Sets up Git LFS tracking automatically
+2. Uses AI to generate custom prompts based on agent roles
+3. Generates consistent-style avatars using GPT Image 1
+4. Stores avatars in avatars/ directory
+5. Only regenerates missing avatars (idempotent)
 
 Usage:
     uv run scripts/generate_avatars.py
@@ -21,6 +21,7 @@ Requires:
 #   "httpx",
 #   "aiofiles",
 #   "python-dotenv",
+#   "rich",
 # ]
 # ///
 
@@ -34,6 +35,12 @@ import httpx
 import yaml
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.text import Text
+
+console = Console()
 
 # Load environment variables from .env file
 load_dotenv()
@@ -58,35 +65,63 @@ def get_avatar_path(entity_type: str, entity_name: str) -> Path:
     return avatars_dir / f"{entity_name}.png"
 
 
-def generate_prompt(entity_type: str, entity_name: str, role: str) -> str:
-    """Generate a DALL-E prompt for consistent avatar style."""
+async def generate_prompt(
+    client: AsyncOpenAI,
+    entity_type: str,
+    entity_name: str,
+    role: str,
+    team_members: list[dict] | None = None,
+) -> str:
+    """Generate a DALL-E prompt based on the entity's role using AI."""
     base_style = "minimalist modern avatar portrait, clean geometric shapes, vibrant gradient colors, professional, friendly, tech-inspired, flat design, no text, centered composition"
 
-    if entity_type == "agents":
-        # Customize based on agent role/name
-        agent_themes = {
-            "calculator": "mathematical symbols, numbers, geometric patterns",
-            "code": "code brackets, terminal window, syntax highlighting colors",
-            "research": "magnifying glass, book, knowledge symbols",
-            "analyst": "charts, graphs, data visualization elements",
-            "finance": "currency symbols, stock charts, financial graphs",
-            "security": "shield, lock, protective elements",
-            "general": "friendly robot, conversational bubbles",
-            "home": "smart home, house, connected devices",
-            "news": "newspaper, broadcast, information flow",
-            "shell": "terminal, command line interface, console",
-            "summary": "document, condensed text, bullet points",
-            "email_assistant": "envelope, inbox, communication",
-            "data_analyst": "data points, analytics dashboard, insights",
-            "callagent": "phone, communication waves, calling",
-            "router": "network hub, interconnected pathways, routing arrows, central node",
-        }
+    # Use a simple AI model to generate visual themes based on the role
+    if entity_type == "teams" and team_members:
+        # For teams, create a prompt that combines the team members' roles
+        system_prompt = """You are an expert at creating visual descriptions for team avatars.
+Given a team's name, description, and the roles of its members, suggest 5-7 visual elements that would represent this collaborative team well.
+The avatar should represent the combination and synergy of the team members.
+Output ONLY the visual elements as a comma-separated list, no other text.
+Example: "collaborative nodes, interconnected gears, diverse symbols merging, team synergy, unified elements"
+"""
 
-        theme = agent_themes.get(entity_name.lower(), "abstract technological patterns")
-        return f"{base_style}, {theme}, representing {role}"
+        members_info = "\n".join([f"- {m['name']}: {m['role']}" for m in team_members])
+        user_prompt = f"Team name: {entity_name}\nTeam role: {role}\nTeam members:\n{members_info}"
+    else:
+        # For individual agents
+        system_prompt = """You are an expert at creating visual descriptions for avatars.
+Given an agent's name and role description, suggest 3-5 visual elements that would represent them well in an avatar.
+Output ONLY the visual elements as a comma-separated list, no other text.
+Examples:
+- For a calculator agent: "mathematical symbols, numbers, geometric patterns"
+- For a research agent: "magnifying glass, book, knowledge symbols"
+"""
+        user_prompt = f"Agent name: {entity_name}\nRole: {role}\nType: {entity_type}"
 
-    # teams
-    return f"{base_style}, collaborative elements, team unity, interconnected nodes, representing a team that {role}"
+    # Use a cheaper/faster model for prompt generation
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.7,
+        max_tokens=150,
+    )
+
+    visual_elements = response.choices[0].message.content.strip()
+    final_prompt = f"{base_style}, {visual_elements}"
+
+    # Print the prompt with rich formatting
+    console.print(
+        Panel(
+            Text(final_prompt, style="cyan"),
+            title=f"[bold yellow]{entity_type}/{entity_name}[/bold yellow]",
+            border_style="green",
+        ),
+    )
+
+    return final_prompt
 
 
 async def download_image(url: str, save_path: Path) -> None:
@@ -104,47 +139,56 @@ async def generate_avatar(
     entity_type: str,
     entity_name: str,
     entity_data: dict,
+    all_agents: dict | None = None,
 ) -> None:
     """Generate an avatar for a single entity if it doesn't exist."""
     avatar_path = get_avatar_path(entity_type, entity_name)
 
     if avatar_path.exists():
-        print(f"✓ Avatar already exists for {entity_type}/{entity_name}")
+        console.print(f"[green]✓[/green] Avatar already exists for [bold]{entity_type}/{entity_name}[/bold]")
         return
 
     role = entity_data.get("role", "AI assistant")
-    prompt = generate_prompt(entity_type, entity_name, role)
+    console.print(f"\n[yellow]🎨 Generating avatar for {entity_type}/{entity_name}...[/yellow]")
+    console.print(f"   [dim]Role: {role}[/dim]")
 
-    print(f"🎨 Generating avatar for {entity_type}/{entity_name}...")
+    # For teams, gather member information
+    team_members = None
+    if entity_type == "teams" and all_agents:
+        team_members = []
+        for agent_name in entity_data.get("agents", []):
+            if agent_name in all_agents:
+                agent_role = all_agents[agent_name].get("role", "Team member")
+                team_members.append({"name": agent_name, "role": agent_role})
+        console.print(f"   [dim]Team members: {', '.join([m['name'] for m in team_members])}[/dim]")
 
-    try:
-        response = await client.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            size="1024x1024",  # API minimum size
-            quality="high",
-            n=1,
-        )
+    # Generate a custom prompt using AI based on the role
+    prompt = await generate_prompt(client, entity_type, entity_name, role, team_members)
 
-        if response.data and len(response.data) > 0:
-            image_data = response.data[0]
+    response = await client.images.generate(
+        model="gpt-image-1",
+        prompt=prompt,
+        size="1024x1024",  # API minimum size
+        quality="low",  # Use low quality for cheaper generation
+        n=1,
+    )
 
-            # Check if we have base64 data or URL
-            if hasattr(image_data, "b64_json") and image_data.b64_json:
-                # Decode base64 image
-                image_bytes = base64.b64decode(image_data.b64_json)
-                async with aiofiles.open(avatar_path, "wb") as f:
-                    await f.write(image_bytes)
-                print(f"✓ Generated avatar for {entity_type}/{entity_name}")
-            elif hasattr(image_data, "url") and image_data.url:
-                # Download from URL
-                await download_image(image_data.url, avatar_path)
-                print(f"✓ Generated avatar for {entity_type}/{entity_name}")
-            else:
-                print(f"✗ No image data found for {entity_type}/{entity_name}")
+    if response.data and len(response.data) > 0:
+        image_data = response.data[0]
 
-    except Exception as e:
-        print(f"✗ Error generating avatar for {entity_type}/{entity_name}: {e}")
+        # Check if we have base64 data or URL
+        if hasattr(image_data, "b64_json") and image_data.b64_json:
+            # Decode base64 image
+            image_bytes = base64.b64decode(image_data.b64_json)
+            async with aiofiles.open(avatar_path, "wb") as f:
+                await f.write(image_bytes)
+            console.print(f"[green]✓ Generated avatar for {entity_type}/{entity_name}[/green]")
+        elif hasattr(image_data, "url") and image_data.url:
+            # Download from URL
+            await download_image(image_data.url, avatar_path)
+            console.print(f"[green]✓ Generated avatar for {entity_type}/{entity_name}[/green]")
+        else:
+            console.print(f"[red]✗ No image data found for {entity_type}/{entity_name}[/red]")
 
 
 async def main() -> None:
@@ -152,8 +196,8 @@ async def main() -> None:
     # Check for OpenAI API key
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        print("Error: OPENAI_API_KEY environment variable not set")
-        print("Please set it in your .env file or environment")
+        console.print("[red]Error: OPENAI_API_KEY environment variable not set[/red]")
+        console.print("Please set it in your .env file or environment")
         return
 
     client = AsyncOpenAI(api_key=api_key)
@@ -166,50 +210,31 @@ async def main() -> None:
     agents = config.get("agents", {})
     for agent_name, agent_data in agents.items():
         tasks.append(generate_avatar(client, "agents", agent_name, agent_data))
-        break
 
     # Add router agent (special system agent)
     tasks.append(generate_avatar(client, "agents", "router", {"role": "Intelligent routing and agent selection"}))
 
-    # Process teams
+    # Process teams (pass agents dict for team member info)
     teams = config.get("teams", {})
     for team_name, team_data in teams.items():
-        tasks.append(generate_avatar(client, "teams", team_name, team_data))
+        tasks.append(generate_avatar(client, "teams", team_name, team_data, agents))
 
     # Generate avatars
-    print(f"🚀 Generating avatars for {len(agents) + 1} agents and {len(teams)} teams...")
+    console.print(
+        f"\n[bold cyan]🚀 Generating avatars for {len(agents) + 1} agents and {len(teams)} teams...[/bold cyan]\n",
+    )
 
     # Process all tasks (OpenAI handles rate limiting)
-    await asyncio.gather(*tasks)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("Processing avatars...", total=None)
+        await asyncio.gather(*tasks)
+        progress.update(task_id, completed=True)
 
-    print("✨ Avatar generation complete!")
-
-    # Initialize git LFS if needed
-    gitattributes_path = get_project_root() / ".gitattributes"
-
-    # Check if we need to add LFS tracking
-    lfs_patterns = [
-        "avatars/**/*.png filter=lfs diff=lfs merge=lfs -text",
-        "avatars/**/*.jpg filter=lfs diff=lfs merge=lfs -text",
-        "avatars/**/*.webp filter=lfs diff=lfs merge=lfs -text",
-    ]
-
-    existing_content = ""
-    if gitattributes_path.exists():
-        with gitattributes_path.open() as f:
-            existing_content = f.read()
-
-    patterns_to_add = [pattern for pattern in lfs_patterns if pattern not in existing_content]
-
-    if patterns_to_add:
-        print("\n📦 Setting up Git LFS tracking...")
-        with gitattributes_path.open("a") as f:
-            if existing_content and not existing_content.endswith("\n"):
-                f.write("\n")
-            for pattern in patterns_to_add:
-                f.write(f"{pattern}\n")
-        print("✓ Added Git LFS tracking for avatar images")
-        print("  Run 'git lfs install' if you haven't already")
+    console.print("\n[bold green]✨ Avatar generation complete![/bold green]")
 
 
 if __name__ == "__main__":
