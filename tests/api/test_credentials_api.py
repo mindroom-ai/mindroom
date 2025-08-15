@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from src.main import app
+from mindroom.api.main import app
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ def client() -> TestClient:
 @pytest.fixture
 def mock_credentials_manager() -> Generator[MagicMock, None, None]:
     """Mock the credentials manager."""
-    with patch("src.api.credentials.get_credentials_manager") as mock:
+    with patch("mindroom.api.credentials.get_credentials_manager") as mock:
         mock_manager = MagicMock()
         mock.return_value = mock_manager
         yield mock_manager

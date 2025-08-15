@@ -4,13 +4,12 @@ RUN apt-get update && apt-get install -y git curl python3 python3-pip python3-ve
 RUN npm install -g pnpm
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Backend deps stage
+# Backend deps stage (backend is now part of main package)
 FROM base as backend-deps
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
-COPY widget/backend/pyproject.toml widget/backend/uv.lock ./widget/backend/
 COPY src ./src
-RUN cd widget/backend && uv sync
+RUN uv sync --all-extras
 
 # Frontend deps stage
 FROM base as frontend-deps
@@ -25,13 +24,14 @@ RUN pnpm run build
 
 # Final stage
 FROM base as final
-WORKDIR /app/widget
-COPY --from=backend-deps /app/widget/backend/.venv /app/widget/backend/.venv
+WORKDIR /app
+COPY --from=backend-deps /app/.venv /app/.venv
 COPY --from=frontend-deps /app/widget/frontend/node_modules /app/widget/frontend/node_modules
 COPY --from=frontend-build /app/widget/frontend/dist /app/widget/frontend/dist
 COPY . /app/
 RUN mkdir -p /app/logs /app/config
 RUN chmod +x /app/widget/run.sh
-EXPOSE 3003 8001
+EXPOSE 3003 8765
 ENV DOCKER_CONTAINER=1
+WORKDIR /app/widget
 CMD ["./run.sh"]

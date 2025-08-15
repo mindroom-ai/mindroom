@@ -1,7 +1,6 @@
 """Pytest configuration and fixtures for widget backend tests."""
 
 # Import the app after we can mock the config path
-import sys
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
@@ -10,8 +9,6 @@ from typing import Any
 import pytest
 import yaml
 from fastapi.testclient import TestClient
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
 @pytest.fixture
@@ -45,7 +42,7 @@ def temp_config_file() -> Generator[Path, None, None]:
 def test_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Create a test client with mocked config file."""
     # Mock the config file path before importing
-    import main  # noqa: PLC0415
+    from mindroom.api import main  # noqa: PLC0415
 
     monkeypatch.setattr(main, "CONFIG_PATH", temp_config_file)
 
