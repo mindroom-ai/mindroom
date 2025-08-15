@@ -276,10 +276,13 @@ memory:
       top_p: 1
     provider: ollama
 models:
+  default:
+    id: claude-sonnet-4-20250514
+    provider: anthropic
   deepseek:
     id: deepseek-ai/deepseek-chat:free
     provider: openrouter
-  default:
+  devstral:
     id: devstral:24b
     provider: ollama
   glm45:
@@ -301,10 +304,10 @@ models:
     id: devstral:24b
     provider: ollama
   opus:
-    id: claude-3-5-haiku-latest
+    id: claude-opus-4-latest
     provider: anthropic
   sonnet:
-    id: claude-3-5-sonnet-latest
+    id: claude-sonnet-4-latest
     provider: anthropic
   gemini_flash:
     id: gemini-2.5-flash
