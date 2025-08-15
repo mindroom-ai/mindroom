@@ -21,13 +21,9 @@ from agno.run.response import (
 from dotenv import load_dotenv
 
 from .agents import create_agent
-from .background_tasks import create_background_task
 from .credentials import get_credentials_manager
 from .logging_config import get_logger
-from .memory import (
-    build_memory_enhanced_prompt,
-    store_conversation_memory,
-)
+from .memory import build_memory_enhanced_prompt
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -279,12 +275,6 @@ async def ai_response(
 
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
         response_text = _extract_response_content(response)
-
-        # Save memory in background to avoid blocking
-        create_background_task(
-            store_conversation_memory(prompt, agent_name, storage_path, session_id, config, room_id),
-            name=f"memory_save_{agent_name}_{session_id}",
-        )
     except Exception as e:
         # AI models can fail for various reasons (network, API limits, etc)
         logger.exception("Error generating AI response for agent %s", agent_name)
@@ -346,11 +336,6 @@ async def ai_response_streaming(  # noqa: C901
             logger.info("Cache hit", agent=agent_name)
             response_text = cached_result.content or ""
             yield response_text
-            # Save memory in background to avoid blocking
-            create_background_task(
-                store_conversation_memory(prompt, agent_name, storage_path, session_id, config, room_id),
-                name=f"memory_save_{agent_name}_{session_id}_cached",
-            )
             return
 
     full_response = ""
@@ -385,10 +370,3 @@ async def ai_response_streaming(  # noqa: C901
         cached_response = RunResponse(content=full_response)
         cache.set(cache_key, cached_response)
         logger.info("Response cached", agent=agent_name)
-
-    if full_response:
-        # Save memory in background to avoid blocking streaming finalization
-        create_background_task(
-            store_conversation_memory(prompt, agent_name, storage_path, session_id, config, room_id),
-            name=f"memory_save_{agent_name}_{session_id}_stream",
-        )
