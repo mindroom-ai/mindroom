@@ -146,7 +146,8 @@ def create_bot_for_entity(
         rooms = resolve_room_aliases(agent_config.rooms)
         return AgentBot(agent_user, storage_path, config, rooms, enable_streaming=enable_streaming)
 
-    return None
+    msg = f"Entity '{entity_name}' not found in configuration."
+    raise ValueError(msg)
 
 
 @dataclass
@@ -1229,7 +1230,7 @@ class MultiAgentOrchestrator:
             if entity_name in all_new_entities:
                 # Create temporary user object (will be updated by ensure_user_account)
                 temp_user = _create_temp_user(entity_name, new_config)
-                bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
+                bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)  # type: ignore[assignment]
                 if bot:
                     bot.orchestrator = self
                     self.agent_bots[entity_name] = bot
@@ -1244,7 +1245,7 @@ class MultiAgentOrchestrator:
         # Create new entities
         for entity_name in new_entities:
             temp_user = _create_temp_user(entity_name, new_config)
-            bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
+            bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)  # type: ignore[assignment]
             if bot:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot
