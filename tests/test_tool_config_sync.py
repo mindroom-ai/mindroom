@@ -7,7 +7,7 @@ import pytest
 
 # Import tools to ensure they're registered
 import mindroom.tools  # noqa: F401
-from mindroom.tools_metadata import TOOL_REGISTRY, get_tool_metadata
+from mindroom.tools_metadata import TOOL_METADATA, TOOL_REGISTRY
 
 SKIP_CUSTOM = {"homeassistant", "imdb", "gmail", "google_calendar", "google_sheets"}
 
@@ -48,8 +48,7 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
         }
 
     # Get our ConfigFields for the tool
-    tool_metadata = get_tool_metadata(tool_name)
-    assert tool_metadata is not None, f"{tool_name} tool not found in registry"
+    tool_metadata = TOOL_METADATA[tool_name]
 
     config_fields = tool_metadata.config_fields or []
     config_field_map = {field.name: field for field in config_fields}

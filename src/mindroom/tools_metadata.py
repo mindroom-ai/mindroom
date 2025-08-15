@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
+from mindroom.credentials import get_credentials_manager
+
 # Registry mapping tool names to their factory functions
 TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 
@@ -36,18 +38,7 @@ def register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable
 
 
 def get_tool_by_name(tool_name: str) -> Toolkit:
-    """Get a tool instance by its registered name.
-
-    Args:
-        tool_name: The registered name of the tool
-
-    Returns:
-        An instance of the requested tool
-
-    Raises:
-        ValueError: If the tool name is not registered
-
-    """
+    """Get a tool instance by its registered name."""
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))
         msg = f"Unknown tool: {tool_name}. Available tools: {available}"
@@ -56,7 +47,19 @@ def get_tool_by_name(tool_name: str) -> Toolkit:
     try:
         tool_factory = TOOL_REGISTRY[tool_name]
         tool_class = tool_factory()
-        return tool_class()
+
+        creds_manager = get_credentials_manager()
+        credentials = creds_manager.load_credentials(tool_name) or {}
+        metadata = TOOL_METADATA[tool_name]
+
+        init_kwargs = {}
+        if metadata.config_fields:
+            for field in metadata.config_fields:
+                if field.name in credentials:
+                    init_kwargs[field.name] = credentials[field.name]
+
+        return tool_class(**init_kwargs)
+
     except ImportError as e:
         logger.warning(f"Could not import tool '{tool_name}': {e}")
         logger.warning(f"Make sure the required dependencies are installed for {tool_name}")

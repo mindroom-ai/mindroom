@@ -15,7 +15,7 @@ import nio
 from . import interactive
 from .agents import create_agent, get_rooms_for_entity
 from .ai import ai_response, ai_response_streaming
-from .background_tasks import wait_for_background_tasks
+from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import (
     Command,
     CommandType,
@@ -51,6 +51,7 @@ from .matrix.mentions import create_mention_content_from_text
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
+from .memory import store_conversation_memory
 from .response_tracker import ResponseTracker
 from .room_cleanup import cleanup_all_orphaned_bots
 from .routing import suggest_agent_for_message
@@ -147,7 +148,8 @@ def create_bot_for_entity(
         rooms = resolve_room_aliases(agent_config.rooms)
         return AgentBot(agent_user, storage_path, config, rooms, enable_streaming=enable_streaming)
 
-    return None
+    msg = f"Entity '{entity_name}' not found in configuration."
+    raise ValueError(msg)
 
 
 @dataclass
@@ -443,7 +445,13 @@ class AgentBot:
         # Check if we should form a team first
         agents_in_thread = get_agents_in_thread(context.thread_history, self.config)  # Excludes router
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
-        form_team = should_form_team(context.mentioned_agents, agents_in_thread, all_mentioned_in_thread)
+        form_team = await should_form_team(
+            context.mentioned_agents,
+            agents_in_thread,
+            all_mentioned_in_thread,
+            message=event.body,
+            config=self.config,
+        )
 
         # Simple team formation: only the first agent (alphabetically) handles team formation
         if form_team.should_form_team and self.agent_name in form_team.agents:
@@ -494,6 +502,7 @@ class AgentBot:
             reply_to_event_id=event.event_id,
             thread_id=context.thread_id,
             thread_history=context.thread_history,
+            user_id=event.sender,
         )
         # Mark as responded after response generation
         self.response_tracker.mark_responded(event.event_id)
@@ -544,6 +553,7 @@ class AgentBot:
                 thread_id=thread_id,
                 thread_history=thread_history,
                 existing_event_id=ack_event_id,  # Edit the acknowledgment
+                user_id=event.sender,
             )
             # Mark the original interactive question as responded
             self.response_tracker.mark_responded(event.reacts_to)
@@ -705,6 +715,7 @@ class AgentBot:
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         """Generate and send/edit a response using AI.
 
@@ -715,6 +726,7 @@ class AgentBot:
             thread_id: Thread ID if in a thread
             thread_history: Thread history for context
             existing_event_id: If provided, edit this message instead of sending a new one
+            user_id: User ID of the sender for identifying user messages in history
 
         """
         if not prompt.strip():
@@ -722,6 +734,22 @@ class AgentBot:
 
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
+
+        # Store memory for this agent (do this once, before generating response)
+        session_id = create_session_id(room_id, thread_id)
+        create_background_task(
+            store_conversation_memory(
+                prompt,
+                self.agent_name,
+                self.storage_path,
+                session_id,
+                self.config,
+                room_id,
+                thread_history,
+                user_id,
+            ),
+            name=f"memory_save_{self.agent_name}_{session_id}",
+        )
 
         # Dispatch to appropriate method
         if self.enable_streaming:
@@ -1069,6 +1097,7 @@ class TeamBot(AgentBot):
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         """Generate a team response instead of individual agent response."""
         if not prompt.strip():
@@ -1089,6 +1118,23 @@ class TeamBot(AgentBot):
             thread_history=thread_history,
             model_name=model_name,
         )
+
+        # Store memory once for the entire team (avoids duplicate LLM processing)
+        session_id = create_session_id(room_id, thread_id)
+        create_background_task(
+            store_conversation_memory(
+                prompt,
+                self.team_agents,  # Pass list of agents for team storage
+                self.storage_path,
+                session_id,
+                self.config,
+                room_id,
+                thread_history,
+                user_id,
+            ),
+            name=f"memory_save_team_{session_id}",
+        )
+        self.logger.info(f"Storing memory for team: {self.team_agents}")
 
         # Send the response (reuse parent's method for consistency)
         assert self.client is not None
@@ -1246,7 +1292,7 @@ class MultiAgentOrchestrator:
             if entity_name in all_new_entities:
                 # Create temporary user object (will be updated by ensure_user_account)
                 temp_user = _create_temp_user(entity_name, new_config)
-                bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
+                bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)  # type: ignore[assignment]
                 if bot:
                     bot.orchestrator = self
                     self.agent_bots[entity_name] = bot
@@ -1261,7 +1307,7 @@ class MultiAgentOrchestrator:
         # Create new entities
         for entity_name in new_entities:
             temp_user = _create_temp_user(entity_name, new_config)
-            bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
+            bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)  # type: ignore[assignment]
             if bot:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot

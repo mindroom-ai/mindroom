@@ -8,11 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.ai import ai_response
-from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config import Config
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
     from pathlib import Path
 
 
@@ -27,18 +25,15 @@ class TestMemoryIntegration:
         return mock
 
     @pytest.fixture
-    def mock_memory_functions(self) -> Generator[tuple[AsyncMock, AsyncMock], None, None]:
-        """Mock all memory functions."""
-        with (
-            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock) as mock_build,
-            patch("mindroom.ai.store_conversation_memory", new_callable=AsyncMock) as mock_store,
-        ):
+    def mock_memory_functions(self) -> AsyncMock:
+        """Mock memory enhancement function."""
+        with patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock) as mock_build:
             # Set up async side effects
             async def build_side_effect(prompt: str, *_args: object, **_kwargs: dict[str, object]) -> str:
                 return f"[Enhanced] {prompt}"
 
             mock_build.side_effect = build_side_effect
-            yield mock_build, mock_store
+            yield mock_build
 
     @pytest.fixture
     def config(self) -> Config:
@@ -49,12 +44,12 @@ class TestMemoryIntegration:
     async def test_ai_response_with_memory(
         self,
         mock_agent_run: AsyncMock,
-        mock_memory_functions: tuple[AsyncMock, AsyncMock],
+        mock_memory_functions: AsyncMock,
         tmp_path: Path,
         config: Config,
     ) -> None:
         """Test that AI response uses memory enhancement."""
-        mock_build, mock_store = mock_memory_functions
+        mock_build = mock_memory_functions
 
         with (
             patch("mindroom.ai._cached_agent_run", mock_agent_run),
@@ -80,28 +75,18 @@ class TestMemoryIntegration:
             call_args = mock_agent_run.call_args[0]
             assert call_args[1] == "[Enhanced] What is 2+2?"  # Enhanced prompt
 
-            await wait_for_background_tasks(timeout=1.0)
-
-            # Verify conversation was stored
-            mock_store.assert_called_once_with(
-                "What is 2+2?",
-                "calculator",
-                tmp_path,
-                "test_session",
-                config,
-                "!test:room",
-            )
+            # Note: Memory storage now happens at the bot level, not in ai_response
 
     @pytest.mark.asyncio
     async def test_ai_response_without_room_id(
         self,
         mock_agent_run: AsyncMock,
-        mock_memory_functions: tuple[AsyncMock, AsyncMock],
+        mock_memory_functions: AsyncMock,
         tmp_path: Path,
         config: Config,
     ) -> None:
         """Test AI response without room context."""
-        mock_build, mock_store = mock_memory_functions
+        mock_build = mock_memory_functions
 
         with (
             patch("mindroom.ai._cached_agent_run", mock_agent_run),
@@ -119,10 +104,7 @@ class TestMemoryIntegration:
             # Verify memory enhancement without room_id
             mock_build.assert_called_once_with("Hello", "general", tmp_path, config, None)
 
-            await wait_for_background_tasks(timeout=1.0)
-
-            # Verify storage without room_id
-            mock_store.assert_called_once_with("Hello", "general", tmp_path, "test_session", config, None)
+            # Note: Memory storage now happens at the bot level, not in ai_response
 
     @pytest.mark.asyncio
     async def test_ai_response_error_handling(self, tmp_path: Path, config: Config) -> None:
@@ -171,12 +153,8 @@ class TestMemoryIntegration:
                 config=config,
             )
 
-            await wait_for_background_tasks(timeout=1.0)
-
-            # Verify memory was stored (only user prompt)
-            assert mock_memory.add.called
-            stored_content = mock_memory.add.call_args[0][0][0]["content"]
-            assert stored_content == "Remember this: A=1"
+            # Note: Memory storage now happens at the bot level, not in ai_response
+            # This test just demonstrates the memory integration with prompt enhancement
 
             # Reset for second call
             mock_memory.reset_mock()

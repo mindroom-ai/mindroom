@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
+from agno.agent import Agent
 from agno.models.message import Message
 from agno.run.response import RunResponse
 from agno.run.team import TeamRunResponse
 from agno.team import Team
+from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
 from .constants import ROUTER_AGENT_NAME
@@ -16,8 +18,6 @@ from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
 
 if TYPE_CHECKING:
-    from agno.agent import Agent
-
     from .bot import MultiAgentOrchestrator
     from .config import Config
 
@@ -32,8 +32,17 @@ MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response log
 class TeamMode(str, Enum):
     """Team collaboration modes."""
 
-    COORDINATE = "coordinate"  # Sequential, building on each other
-    COLLABORATE = "collaborate"  # Parallel, synthesized
+    COORDINATE = "coordinate"  # Leader delegates and synthesizes (can be sequential OR parallel)
+    COLLABORATE = "collaborate"  # All members work on same task in parallel
+
+
+class TeamModeDecision(BaseModel):
+    """AI decision for team collaboration mode."""
+
+    mode: Literal["coordinate", "collaborate"] = Field(
+        description="coordinate for delegation and synthesis, collaborate for all working on same task",
+    )
+    reasoning: str = Field(description="Brief explanation of why this mode was chosen")
 
 
 def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -> list[str]:
@@ -151,43 +160,130 @@ class ShouldFormTeamResult(NamedTuple):
     mode: TeamMode
 
 
-def should_form_team(
+async def determine_team_mode(
+    message: str,
+    agent_names: list[str],
+    config: Config,
+) -> TeamMode:
+    """Use AI to determine optimal team collaboration mode.
+
+    Args:
+        message: The user's message/task
+        agent_names: List of agents that will form the team
+        config: Application configuration for model access
+
+    Returns:
+        TeamMode.COORDINATE or TeamMode.COLLABORATE
+
+    """
+    prompt = f"""Determine the best team collaboration mode for this task.
+
+Task: {message}
+Agents: {", ".join(agent_names)}
+
+Team Modes (from Agno documentation):
+- "coordinate": Team leader delegates tasks to members and synthesizes their outputs.
+               The leader decides whether to send tasks sequentially or in parallel based on what's appropriate.
+- "collaborate": All team members are given the SAME task and work on it simultaneously.
+                The leader synthesizes all their outputs into a cohesive response.
+
+Decision Guidelines:
+- Use "coordinate" when agents need to do DIFFERENT subtasks (whether sequential or parallel)
+- Use "collaborate" when you want ALL agents working on the SAME problem for diverse perspectives
+
+Examples:
+- "Email me then call me" → coordinate (different tasks: email agent sends email, phone agent makes call)
+- "Get weather and news" → coordinate (different tasks: weather agent gets weather, news agent gets news)
+- "Research this topic and analyze the data" → coordinate (different subtasks for each agent)
+- "What do you think about X?" → collaborate (all agents provide their perspective on the same question)
+- "Brainstorm solutions" → collaborate (all agents work on the same brainstorming task)
+
+Return the mode and a one-sentence reason why."""
+
+    model = get_model_instance(config, "default")
+    agent = Agent(
+        name="TeamModeDecider",
+        role="Determine team mode",
+        model=model,
+        response_model=TeamModeDecision,
+    )
+
+    try:
+        response = await agent.arun(prompt, session_id="team_mode_decision")
+        decision = response.content
+        if isinstance(decision, TeamModeDecision):
+            logger.info(f"Team mode: {decision.mode} - {decision.reasoning}")
+            return TeamMode.COORDINATE if decision.mode == "coordinate" else TeamMode.COLLABORATE
+        # Fallback if response is unexpected
+        logger.warning("Unexpected response type from AI, defaulting to collaborate")
+        return TeamMode.COLLABORATE  # noqa: TRY300
+    except Exception as e:
+        logger.warning(f"AI decision failed: {e}, defaulting to collaborate")
+        return TeamMode.COLLABORATE
+
+
+async def should_form_team(
     tagged_agents: list[str],
     agents_in_thread: list[str],
     all_mentioned_in_thread: list[str],
+    message: str | None = None,
+    config: Config | None = None,
+    use_ai_decision: bool = True,
 ) -> ShouldFormTeamResult:
-    """Determine if a team should form and with which mode."""
+    """Determine if a team should form and with which mode.
+
+    Args:
+        tagged_agents: Agents explicitly mentioned in the current message
+        agents_in_thread: Agents that have participated in the thread
+        all_mentioned_in_thread: All agents ever mentioned in the thread
+        message: The user's message (for AI decision context)
+        config: Application configuration (for AI model access)
+        use_ai_decision: Whether to use AI for mode selection
+
+    Returns:
+        ShouldFormTeamResult with team formation decision
+
+    """
+    # Determine which agents will form the team
+    team_agents: list[str] = []
+
     # Case 1: Multiple agents explicitly tagged
     if len(tagged_agents) > 1:
         logger.info(f"Team formation needed for tagged agents: {tagged_agents}")
-        return ShouldFormTeamResult(
-            should_form_team=True,
-            agents=tagged_agents,
-            mode=TeamMode.COORDINATE,
-        )
+        team_agents = tagged_agents
 
     # Case 2: No agents tagged but multiple were mentioned before in thread
-    if not tagged_agents and len(all_mentioned_in_thread) > 1:
+    elif not tagged_agents and len(all_mentioned_in_thread) > 1:
         logger.info(f"Team formation needed for previously mentioned agents: {all_mentioned_in_thread}")
-        return ShouldFormTeamResult(
-            should_form_team=True,
-            agents=all_mentioned_in_thread,
-            mode=TeamMode.COLLABORATE,
-        )
+        team_agents = all_mentioned_in_thread
 
     # Case 3: No agents tagged but multiple in thread
-    if not tagged_agents and len(agents_in_thread) > 1:
+    elif not tagged_agents and len(agents_in_thread) > 1:
         logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
+        team_agents = agents_in_thread
+
+    # No team needed
+    if not team_agents:
         return ShouldFormTeamResult(
-            should_form_team=True,
-            agents=agents_in_thread,
+            should_form_team=False,
+            agents=[],
             mode=TeamMode.COLLABORATE,
         )
 
+    # Determine the mode - use AI if enabled and we have the necessary context
+    if use_ai_decision and message and config:
+        mode = await determine_team_mode(message, team_agents, config)
+    else:
+        # Fallback to hardcoded logic when AI decision is disabled or unavailable
+        # Use COORDINATE when agents are explicitly tagged (they likely have different roles)
+        # Use COLLABORATE when agents are from thread history (likely discussing same topic)
+        mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
+        logger.info(f"Using hardcoded mode selection: {mode.value}")
+
     return ShouldFormTeamResult(
-        should_form_team=False,
-        agents=[],
-        mode=TeamMode.COLLABORATE,
+        should_form_team=True,
+        agents=team_agents,
+        mode=mode,
     )
 
 

@@ -34,16 +34,20 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
 
     Note: Router agent is excluded from the participant list as it's not
     a conversation participant.
+
+    Preserves the order of first participation while preventing duplicates.
     """
-    agents = set()
+    agents = []
+    seen_agents = set()
 
     for msg in thread_history:
         sender = msg.get("sender", "")
         agent_name = extract_agent_name(sender, config)
-        if agent_name and agent_name != ROUTER_AGENT_NAME:
-            agents.add(agent_name)
+        if agent_name and agent_name != ROUTER_AGENT_NAME and agent_name not in seen_agents:
+            agents.append(agent_name)
+            seen_agents.add(agent_name)
 
-    return sorted(agents)
+    return agents
 
 
 def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[str]:
@@ -108,16 +112,25 @@ def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], confi
 
 
 def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[str]:
-    """Get all unique agents that have been mentioned anywhere in the thread."""
-    mentioned_agents = set()
+    """Get all unique agents that have been mentioned anywhere in the thread.
+
+    Preserves the order of first mention while preventing duplicates.
+    """
+    mentioned_agents = []
+    seen_agents = set()
 
     for msg in thread_history:
         content = msg.get("content", {})
         mentions = content.get("m.mentions", {})
         agents = get_mentioned_agents(mentions, config)
-        mentioned_agents.update(agents)
 
-    return sorted(mentioned_agents)
+        # Add agents in order, but only if not seen before
+        for agent in agents:
+            if agent not in seen_agents:
+                mentioned_agents.append(agent)
+                seen_agents.add(agent)
+
+    return mentioned_agents
 
 
 def should_agent_respond(
