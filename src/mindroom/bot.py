@@ -31,6 +31,7 @@ from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import MATRIX_HOMESERVER
 from .matrix.client import (
+    check_and_set_avatar,
     edit_message,
     extract_thread_info,
     fetch_thread_history,
@@ -260,6 +261,25 @@ class AgentBot:
         )
         self.logger.info(f"Ensured Matrix user account: {self.agent_user.user_id}")
 
+    async def _set_avatar_if_available(self) -> None:
+        """Set avatar for the agent if an avatar file exists."""
+        if not self.client:
+            return
+
+        # Determine if this is an agent or team
+        entity_type = "agents"
+        if self.agent_name in self.config.teams:
+            entity_type = "teams"
+
+        # Construct avatar path
+        avatar_path = Path(__file__).parent.parent.parent / "avatars" / entity_type / f"{self.agent_name}.png"
+
+        if avatar_path.exists():
+            try:
+                await check_and_set_avatar(self.client, avatar_path)
+            except Exception as e:
+                self.logger.warning(f"Failed to set avatar: {e}")
+
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
 
@@ -277,6 +297,9 @@ class AgentBot:
 
         # Login with the account
         self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
+
+        # Set avatar if available
+        await self._set_avatar_if_available()
 
         # Initialize response tracker and thread invite manager
         self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)

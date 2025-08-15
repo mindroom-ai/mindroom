@@ -4,6 +4,7 @@ import os
 import ssl as ssl_module
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import markdown
@@ -460,3 +461,83 @@ async def edit_message(
     }
 
     return await send_message(client, room_id, edit_content)
+
+
+async def set_avatar_from_file(
+    client: nio.AsyncClient,
+    avatar_path: Path,
+) -> bool:
+    """Set a user's avatar from a local file.
+
+    Args:
+        client: Authenticated Matrix client
+        avatar_path: Path to the avatar image file
+
+    Returns:
+        True if successful, False otherwise
+
+    """
+    if not avatar_path.exists():
+        logger.warning(f"Avatar file not found: {avatar_path}")
+        return False
+
+    # Read the file
+    with avatar_path.open("rb") as f:
+        avatar_data = f.read()
+
+    # Determine content type based on file extension
+    extension = avatar_path.suffix.lower()
+    content_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }.get(extension, "image/png")
+
+    # Upload the avatar
+    upload_response = await client.upload(
+        data_provider=avatar_data,
+        content_type=content_type,
+        filename=avatar_path.name,
+    )
+
+    if not isinstance(upload_response, nio.UploadResponse):
+        logger.error(f"Failed to upload avatar: {upload_response}")
+        return False
+
+    # Set the avatar URL
+    avatar_url = upload_response.content_uri
+    response = await client.set_avatar(avatar_url)
+
+    if isinstance(response, nio.ProfileSetAvatarResponse):
+        logger.info(f"✅ Successfully set avatar for {client.user_id}")
+        return True
+
+    logger.error(f"Failed to set avatar for {client.user_id}: {response}")
+    return False
+
+
+async def check_and_set_avatar(
+    client: nio.AsyncClient,
+    avatar_path: Path,
+) -> bool:
+    """Check if user has an avatar and set it if they don't.
+
+    Args:
+        client: Authenticated Matrix client
+        avatar_path: Path to the avatar image file
+
+    Returns:
+        True if avatar was already set or successfully set, False otherwise
+
+    """
+    # Get current profile
+    response = await client.get_profile(client.user_id)
+
+    if isinstance(response, nio.ProfileGetResponse) and response.avatar_url:
+        logger.debug(f"Avatar already set for {client.user_id}")
+        return True
+
+    # No avatar set, upload one
+    return await set_avatar_from_file(client, avatar_path)

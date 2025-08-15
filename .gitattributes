@@ -1,0 +1,4 @@
+# Git LFS tracking for avatar images
+avatars/**/*.png filter=lfs diff=lfs merge=lfs -text
+avatars/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+avatars/**/*.webp filter=lfs diff=lfs merge=lfs -text
