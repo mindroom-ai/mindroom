@@ -1087,24 +1087,22 @@ class TeamBot(AgentBot):
             model_name=model_name,
         )
 
-        # Store memory for each team member
+        # Store memory once for the entire team (avoids duplicate LLM processing)
         session_id = create_session_id(room_id, thread_id)
-        for agent_name in self.team_agents:
-            # Store the user's prompt as memory for each team member
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    agent_name,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    room_id,
-                    thread_history,
-                    user_id,
-                ),
-                name=f"memory_save_{agent_name}_{session_id}",
-            )
-            self.logger.info(f"Storing memory for team member: {agent_name}")
+        create_background_task(
+            store_conversation_memory(
+                prompt,
+                self.team_agents,  # Pass list of agents for team storage
+                self.storage_path,
+                session_id,
+                self.config,
+                room_id,
+                thread_history,
+                user_id,
+            ),
+            name=f"memory_save_team_{session_id}",
+        )
+        self.logger.info(f"Storing memory for team: {self.team_agents}")
 
         # Send the response (reuse parent's method for consistency)
         assert self.client is not None

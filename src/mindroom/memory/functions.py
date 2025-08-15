@@ -63,6 +63,32 @@ async def add_agent_memory(
         logger.exception("Failed to add memory", agent=agent_name, error=str(e))
 
 
+def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
+    """Get all team IDs that include the specified agent.
+
+    Args:
+        agent_name: Name of the agent to find teams for
+        config: Application configuration containing team definitions
+
+    Returns:
+        List of team IDs (in the format "team_agent1+agent2+...")
+
+    """
+    team_ids: list[str] = []
+
+    if not config.teams:
+        return team_ids
+
+    for team_config in config.teams.values():
+        if agent_name in team_config.agents:
+            # Create the same team ID format used in storage
+            sorted_agents = sorted(team_config.agents)
+            team_id = f"team_{'+'.join(sorted_agents)}"
+            team_ids.append(team_id)
+
+    return team_ids
+
+
 async def search_agent_memories(
     query: str,
     agent_name: str,
@@ -70,7 +96,7 @@ async def search_agent_memories(
     config: Config,
     limit: int = 3,
 ) -> list[MemoryResult]:
-    """Search agent memories.
+    """Search agent memories including team memories.
 
     Args:
         query: Search query
@@ -80,16 +106,33 @@ async def search_agent_memories(
         limit: Maximum number of results
 
     Returns:
-        List of relevant memories
+        List of relevant memories from both individual and team contexts
 
     """
     memory = await create_memory_instance(storage_path, config)
-    search_result = await memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
 
+    # Search individual agent memories
+    search_result = await memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
     results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
 
-    logger.debug("Memories found", count=len(results), agent=agent_name)
-    return results
+    # Also search team memories
+    team_ids = get_team_ids_for_agent(agent_name, config)
+    for team_id in team_ids:
+        team_result = await memory.search(query, user_id=team_id, limit=limit)
+        team_memories = team_result["results"] if isinstance(team_result, dict) and "results" in team_result else []
+
+        # Merge results, avoiding duplicates based on memory content
+        existing_memories = {r.get("memory", "") for r in results}
+        for mem in team_memories:
+            if mem.get("memory", "") not in existing_memories:
+                results.append(mem)
+
+        logger.debug("Team memories found", team_id=team_id, count=len(team_memories))
+
+    logger.debug("Total memories found", count=len(results), agent=agent_name)
+
+    # Return top results after merging
+    return results[:limit]
 
 
 async def add_room_memory(
@@ -258,7 +301,7 @@ def _build_conversation_messages(
 
 async def store_conversation_memory(
     prompt: str,
-    agent_name: str,
+    agent_name: str | list[str],
     storage_path: Path,
     session_id: str,
     config: Config,
@@ -272,9 +315,12 @@ async def store_conversation_memory(
     and context from the conversation. Provides full conversation context when
     available to allow better understanding of user intent.
 
+    For teams, pass a list of agent names to store memory once under a shared
+    namespace, avoiding duplicate LLM processing.
+
     Args:
         prompt: The current user prompt
-        agent_name: Name of the agent
+        agent_name: Name of the agent or list of agent names for teams
         storage_path: Path for memory storage
         session_id: Session ID for the conversation
         config: Application configuration
@@ -297,27 +343,49 @@ async def store_conversation_memory(
     # Store for agent memory with structured messages
     memory = await create_memory_instance(storage_path, config)
 
-    metadata = {
-        "type": "conversation",
-        "session_id": session_id,
-        "agent": agent_name,
-    }
+    # Handle both single agents and teams
+    is_team = isinstance(agent_name, list)
 
-    # Let mem0 intelligently extract facts from the conversation
-    # The structured format helps mem0 understand the conversation flow
-    try:
-        await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
-        logger.info("Memory added", agent=agent_name)
-    except Exception as e:
-        logger.exception("Failed to add memory", agent=agent_name, error=str(e))
+    if is_team:
+        # For teams, store once under a team namespace
+        # Sort agent names for consistent team ID
+        sorted_agents = sorted(agent_name)
+        team_id = f"team_{'+'.join(sorted_agents)}"
+
+        metadata = {
+            "type": "conversation",
+            "session_id": session_id,
+            "is_team": True,
+            "team_members": agent_name,  # Keep original order for reference
+        }
+
+        try:
+            await memory.add(messages, user_id=team_id, metadata=metadata)
+            logger.info("Team memory added", team_id=team_id, members=agent_name)
+        except Exception as e:
+            logger.exception("Failed to add team memory", team_id=team_id, error=str(e))
+    else:
+        # Single agent - store normally
+        metadata = {
+            "type": "conversation",
+            "session_id": session_id,
+            "agent": agent_name,
+        }
+
+        try:
+            await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
+            logger.info("Memory added", agent=agent_name)
+        except Exception as e:
+            logger.exception("Failed to add memory", agent=agent_name, error=str(e))
 
     if room_id:
         # Also store for room context
+        contributed_by = agent_name if isinstance(agent_name, str) else f"team:{','.join(agent_name)}"
         room_metadata = {
             "type": "conversation",
             "session_id": session_id,
             "room_id": room_id,
-            "contributed_by": agent_name,
+            "contributed_by": contributed_by,
         }
 
         safe_room_id = room_id.replace(":", "_").replace("!", "")

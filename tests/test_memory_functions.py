@@ -22,6 +22,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+class MockTeamConfig:
+    """Mock team configuration for tests."""
+
+    def __init__(self, agents: list[str]) -> None:
+        """Initialize mock team config."""
+        self.agents = agents
+
+
 class TestMemoryFunctions:
     """Test memory management functions."""
 
@@ -343,6 +351,118 @@ class TestMemoryFunctions:
             assert messages[1] == {"role": "assistant", "content": "@calculator can help with that"}
             assert messages[2] == {"role": "user", "content": "Yes please"}
             assert messages[3] == {"role": "user", "content": "What is 2+2?"}
+
+    @pytest.mark.asyncio
+    async def test_store_conversation_memory_for_team(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Test storing conversation memory for a team (stores once, not per member)."""
+        team_agents = ["calculator", "data_analyst", "finance"]
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            await store_conversation_memory(
+                "Analyze our Q4 financial data",
+                team_agents,  # Pass list of agents for team
+                storage_path,
+                "session123",
+                config,
+            )
+
+            # Should be called only ONCE for the team (not 3 times)
+            assert mock_memory.add.call_count == 1
+
+            team_call = mock_memory.add.call_args_list[0]
+
+            # Check team user_id format (sorted for consistency)
+            expected_team_id = "team_calculator+data_analyst+finance"
+            assert team_call[1]["user_id"] == expected_team_id
+
+            # Check metadata
+            metadata = team_call[1]["metadata"]
+            assert metadata["type"] == "conversation"
+            assert metadata["is_team"] is True
+            assert metadata["team_members"] == team_agents  # Original order preserved
+
+    @pytest.mark.asyncio
+    async def test_search_agent_memories_with_teams(
+        self,
+        mock_memory: AsyncMock,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Test that agents can find both individual and team memories."""
+        # Setup config with a team
+        config.teams = {
+            "finance_team": MockTeamConfig(agents=["calculator", "data_analyst", "finance"]),
+        }
+
+        # Mock search results
+        individual_result = {
+            "results": [
+                {"id": "1", "memory": "Individual fact", "score": 0.9},
+            ],
+        }
+        team_result = {
+            "results": [
+                {"id": "2", "memory": "Team fact", "score": 0.85},
+            ],
+        }
+
+        # Setup mock to return different results for different user_ids
+        def search_side_effect(query: str, user_id: str, limit: int) -> dict:  # noqa: ARG001
+            if user_id == "agent_calculator":
+                return individual_result
+            if user_id == "team_calculator+data_analyst+finance":
+                return team_result
+            return {"results": []}
+
+        mock_memory.search = AsyncMock(side_effect=search_side_effect)
+
+        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
+            results = await search_agent_memories(
+                "test query",
+                "calculator",
+                storage_path,
+                config,
+                limit=5,
+            )
+
+            # Should have both individual and team memories
+            assert len(results) == 2
+            assert results[0]["memory"] == "Individual fact"
+            assert results[1]["memory"] == "Team fact"
+
+            # Should have called search twice (once for agent, once for team)
+            assert mock_memory.search.call_count == 2
+
+    def test_get_team_ids_for_agent(self, config: Config) -> None:
+        """Test getting team IDs for an agent."""
+        from mindroom.memory.functions import get_team_ids_for_agent  # noqa: PLC0415
+
+        # Setup config with multiple teams
+        config.teams = {
+            "finance_team": MockTeamConfig(agents=["calculator", "data_analyst", "finance"]),
+            "science_team": MockTeamConfig(agents=["calculator", "researcher"]),
+            "other_team": MockTeamConfig(agents=["general", "assistant"]),
+        }
+
+        # Calculator is in two teams
+        team_ids = get_team_ids_for_agent("calculator", config)
+        assert len(team_ids) == 2
+        assert "team_calculator+data_analyst+finance" in team_ids
+        assert "team_calculator+researcher" in team_ids
+
+        # General is in one team
+        team_ids = get_team_ids_for_agent("general", config)
+        assert len(team_ids) == 1
+        assert "team_assistant+general" in team_ids  # Sorted alphabetically
+
+        # Unknown agent has no teams
+        team_ids = get_team_ids_for_agent("unknown", config)
+        assert len(team_ids) == 0
 
     def test_memory_result_typed_dict(self) -> None:
         """Test MemoryResult TypedDict structure."""
