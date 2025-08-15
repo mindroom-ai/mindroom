@@ -51,7 +51,7 @@ async def get_registered_tools() -> ToolsResponse:
     It also checks if credentials exist for tools that require them.
     """
     # Path to the generated JSON file
-    json_path = Path(__file__).parent.parent.parent.parent.parent / "mindroom/tools_metadata.json"
+    json_path = Path(__file__).parent.parent / "tools_metadata.json"
 
     if not json_path.exists():
         raise HTTPException(

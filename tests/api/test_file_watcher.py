@@ -32,7 +32,7 @@ def test_file_watcher_detects_changes(test_client: TestClient, temp_config_file:
 
     # In a real scenario, the file watcher would auto-reload
     # For testing, we manually trigger a reload
-    import main  # noqa: PLC0415
+    from mindroom.api import main  # noqa: PLC0415
 
     main.load_config_from_file()
 
