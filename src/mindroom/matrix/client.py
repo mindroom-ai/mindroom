@@ -549,12 +549,10 @@ async def check_and_set_avatar(
         True if avatar was already set or successfully set, False otherwise
 
     """
-    # Get current profile
     response = await client.get_profile(client.user_id)
 
     if isinstance(response, nio.ProfileGetResponse) and response.avatar_url:
         logger.debug(f"Avatar already set for {client.user_id}")
         return True
 
-    # No avatar set, upload one
     return await set_avatar_from_file(client, avatar_path)
