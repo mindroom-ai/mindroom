@@ -9,4 +9,4 @@ echo "Running MindRoom Widget Tests with Nix..."
 echo "========================================="
 
 # Use nix-shell to run the tests
-nix-shell "$SCRIPT_DIR/shell.nix" --run "$SCRIPT_DIR/run_tests.sh"
+nix-shell "$SCRIPT_DIR/shell.nix" --run "$SCRIPT_DIR/run-ui-tests.sh"

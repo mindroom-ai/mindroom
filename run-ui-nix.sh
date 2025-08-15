@@ -7,5 +7,5 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 echo "Starting MindRoom Configuration Widget with Nix..."
 
-# Use nix-shell to run the regular run.sh script
-nix-shell "$SCRIPT_DIR/shell.nix" --run "$SCRIPT_DIR/run.sh"
+# Use nix-shell to run the regular run-ui.sh script
+nix-shell "$SCRIPT_DIR/shell.nix" --run "$SCRIPT_DIR/run-ui.sh"

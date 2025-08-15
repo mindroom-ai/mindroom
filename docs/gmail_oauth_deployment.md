@@ -47,7 +47,7 @@ With this approach, you create ONE OAuth app that all your users share. Users ju
 
 4. **Configure MindRoom Backend**
 
-   Create `.env` file in `widget/backend/` directory:
+   Create `.env` file in project root directory:
    ```bash
    BACKEND_PORT=8765
    GOOGLE_CLIENT_ID=your-app-client-id.apps.googleusercontent.com

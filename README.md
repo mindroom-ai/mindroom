@@ -179,6 +179,10 @@ scripts/start
 
 # To stop everything
 scripts/stop
+
+# Or run the UI separately:
+./run-ui.sh                    # Start the configuration UI
+./run-ui-tests.sh             # Run UI tests
 ```
 
 The helper script (`scripts/start`) runs both MindRoom and the widget in a [Zellij](https://zellij.dev/) terminal multiplexer session, giving you:

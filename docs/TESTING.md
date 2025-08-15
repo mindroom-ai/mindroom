@@ -101,14 +101,12 @@ def test_endpoint(test_client: TestClient):
 Use the convenience script to run both frontend and backend tests:
 
 ```bash
-cd widget
-./run_tests.sh
+./run-ui-tests.sh
 ```
 
 Or with Nix for all dependencies:
 ```bash
-cd widget
-./run_tests_nix.sh
+./run-ui-tests-nix.sh
 ```
 
 ## Test Coverage
