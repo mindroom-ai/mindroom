@@ -519,7 +519,7 @@ async def set_avatar_from_file(
         logger.error(f"Failed to upload avatar: {upload_response}")
         return False
 
-    if not hasattr(upload_response, "content_uri") or not upload_response.content_uri:
+    if not upload_response.content_uri:
         logger.error("Upload response missing content_uri")
         return False
 
