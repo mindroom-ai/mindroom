@@ -1104,6 +1104,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cron-descriptor"
+version = "1.4.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/02/83/70bd410dc6965e33a5460b7da84cf0c5a7330a68d6d5d4c3dfdb72ca117e/cron_descriptor-1.4.5.tar.gz", hash = "sha256:f51ce4ffc1d1f2816939add8524f206c376a42c87a5fca3091ce26725b3b1bca", size = 30666, upload-time = "2024-08-24T18:16:48.654Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/20/2cfe598ead23a715a00beb716477cfddd3e5948cf203c372d02221e5b0c6/cron_descriptor-1.4.5-py3-none-any.whl", hash = "sha256:736b3ae9d1a99bc3dbfc5b55b5e6e7c12031e7ba5de716625772f8b02dcd6013", size = 50370, upload-time = "2024-08-24T18:16:46.783Z" },
+]
+
+[[package]]
 name = "croniter"
 version = "6.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3073,6 +3082,7 @@ dependencies = [
     { name = "chromadb" },
     { name = "composio-agno" },
     { name = "crawl4ai" },
+    { name = "cron-descriptor" },
     { name = "croniter" },
     { name = "daytona" },
     { name = "diskcache" },
@@ -3187,6 +3197,7 @@ requires-dist = [
     { name = "chromadb", specifier = ">=1.0.15" },
     { name = "composio-agno" },
     { name = "crawl4ai", specifier = ">=0.7.3" },
+    { name = "cron-descriptor", specifier = ">=1.4.5" },
     { name = "croniter", specifier = ">=6" },
     { name = "daytona" },
     { name = "diskcache", specifier = ">=5.6.3" },

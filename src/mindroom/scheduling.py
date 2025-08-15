@@ -113,7 +113,11 @@ async def schedule_task(
         exec_time = workflow_result.execute_at.strftime("%Y-%m-%d %H:%M UTC")
         success_msg = f"✅ Scheduled for {exec_time}\n"
     elif workflow_result.cron_schedule:
-        success_msg = f"✅ Scheduled recurring task: {workflow_result.cron_schedule.to_cron_string()}\n"
+        # Show both natural language and cron syntax
+        natural_desc = workflow_result.cron_schedule.to_natural_language()
+        cron_str = workflow_result.cron_schedule.to_cron_string()
+        success_msg = f"✅ Scheduled recurring task: **{natural_desc}**\n"
+        success_msg += f"   _(Cron: `{cron_str}`)_\n"
     else:
         success_msg = "✅ Task scheduled\n"
 
@@ -153,11 +157,12 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
                         display_time = workflow.execute_at
                         schedule_type = "once"
                     else:
-                        # For cron, show the cron pattern
+                        # For cron, show the natural language description
                         display_time = None
-                        schedule_type = (
-                            workflow.cron_schedule.to_cron_string() if workflow.cron_schedule else "recurring"
-                        )
+                        if workflow.cron_schedule:
+                            schedule_type = workflow.cron_schedule.to_natural_language()
+                        else:
+                            schedule_type = "recurring"
 
                     task_info = {
                         "id": event["state_key"],
@@ -191,7 +196,8 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
         if task["schedule_type"] == "once" and task["time"]:
             time_str = task["time"].strftime("%Y-%m-%d %H:%M UTC")
         else:
-            time_str = f"Recurring: {task['schedule_type']}"
+            # For recurring tasks, schedule_type now contains the natural language description
+            time_str = task["schedule_type"]
 
         msg_preview = task["message"][:MESSAGE_PREVIEW_LENGTH] + (
             "..." if len(task["message"]) > MESSAGE_PREVIEW_LENGTH else ""

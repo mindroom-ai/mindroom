@@ -8,6 +8,7 @@ from agno.agent import Agent
 from agno.storage.sqlite import SqliteStorage
 
 from . import agent_prompts
+from . import tools as _tools_module  # noqa: F401
 from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .matrix import MATRIX_HOMESERVER

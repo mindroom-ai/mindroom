@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -3065,7 +3065,6 @@ dependencies = [
     { name = "mem0ai" },
     { name = "mlx-whisper" },
     { name = "moviepy" },
-    { name = "newspaper3k" },
     { name = "newspaper4k" },
     { name = "openai" },
     { name = "opencv-python" },
@@ -3161,7 +3160,6 @@ requires-dist = [
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mlx-whisper" },
     { name = "moviepy" },
-    { name = "newspaper3k" },
     { name = "newspaper4k" },
     { name = "openai" },
     { name = "opencv-python" },
