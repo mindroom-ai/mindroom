@@ -299,22 +299,53 @@ def start(  # noqa: PLR0912, PLR0915
 
     # Create data directories with proper permissions
     instance = registry.instances[name]
+    # Use UID/GID 1000 for Docker containers (standard non-root user)
+    docker_uid, docker_gid = 1000, 1000
+
     for subdir in ["config", "tmp", "logs", "mindroom", "mindroom/credentials", "mem0"]:
         dir_path = Path(f"{instance.data_dir}/{subdir}")
         dir_path.mkdir(parents=True, exist_ok=True)
-        # Ensure proper ownership if we can
+        # Ensure proper ownership and permissions for Docker containers
         with contextlib.suppress(OSError, PermissionError):
-            os.chown(dir_path, os.getuid(), os.getgid())
+            os.chown(dir_path, docker_uid, docker_gid)
+            os.chmod(dir_path, 0o755)
 
     # Create Matrix data directories if enabled
     matrix_type = instance.matrix_type
     if matrix_type == MatrixType.TUWUNEL:
-        Path(f"{instance.data_dir}/tuwunel").mkdir(parents=True, exist_ok=True)
+        tuwunel_dir = Path(f"{instance.data_dir}/tuwunel")
+
+        # Check if Tuwunel database exists and might have wrong server name
+        # If the .env file has a different MATRIX_SERVER_NAME than what's in the database,
+        # we need to clear the database
+        if tuwunel_dir.exists() and any(tuwunel_dir.iterdir()):
+            # Read current server name from env file
+            current_server_name = None
+            with open(env_file) as f:
+                for line in f:
+                    if line.startswith("MATRIX_SERVER_NAME="):
+                        current_server_name = line.split("=", 1)[1].strip()
+                        break
+
+            # If server name changed or we're having issues, clear the database
+            # This is safe because Tuwunel will recreate it
+            if current_server_name and current_server_name != instance.domain:
+                console.print("[yellow]ℹ[/yellow] Clearing Tuwunel database due to server name change")
+                shutil.rmtree(tuwunel_dir)
+                tuwunel_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            tuwunel_dir.mkdir(parents=True, exist_ok=True)
+
+        with contextlib.suppress(OSError, PermissionError):
+            os.chown(tuwunel_dir, docker_uid, docker_gid)
+            os.chmod(tuwunel_dir, 0o755)
     elif matrix_type == MatrixType.SYNAPSE:
-        Path(f"{instance.data_dir}/synapse").mkdir(parents=True, exist_ok=True)
-        Path(f"{instance.data_dir}/synapse/media_store").mkdir(parents=True, exist_ok=True)
-        Path(f"{instance.data_dir}/postgres").mkdir(parents=True, exist_ok=True)
-        Path(f"{instance.data_dir}/redis").mkdir(parents=True, exist_ok=True)
+        for matrix_dir in ["synapse", "synapse/media_store", "postgres", "redis"]:
+            dir_path = Path(f"{instance.data_dir}/{matrix_dir}")
+            dir_path.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError, PermissionError):
+                os.chown(dir_path, docker_uid, docker_gid)
+                os.chmod(dir_path, 0o755)
 
         # Copy Synapse config template if needed
         synapse_dir = Path(f"{instance.data_dir}/synapse")
@@ -420,6 +451,85 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
         console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' stopped!")
     else:
         console.print(f"[red]✗[/red] Failed to stop instance '{name}'")
+        if result.stderr:
+            console.print(f"[dim]{result.stderr}[/dim]")
+        raise typer.Exit(1)
+
+
+@app.command()
+def restart(
+    name: str = typer.Argument("default", help="Instance name to restart"),
+    no_frontend: bool = typer.Option(False, "--no-frontend", help="Skip starting the frontend"),
+) -> None:
+    """Restart a Mindroom instance (stop and start)."""
+    registry = load_registry()
+    if name not in registry.instances:
+        console.print(f"[red]✗[/red] Instance '{name}' not found!")
+        raise typer.Exit(1)
+
+    instance = registry.instances[name]
+    console.print(f"[yellow]Restarting instance '[cyan]{name}[/cyan]'...[/yellow]")
+
+    # Stop the instance
+    project_root = SCRIPT_DIR.parent
+    stop_cmd = f"cd {project_root} && docker compose -p {name} down"
+
+    with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
+        result = subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        console.print(f"[red]✗[/red] Failed to stop instance '{name}'")
+        if result.stderr:
+            console.print(f"[dim]{result.stderr}[/dim]")
+        raise typer.Exit(1)
+
+    # Start the instance
+    env_file = SCRIPT_DIR / f".env.{name}"
+    if not env_file.exists():
+        console.print(f"[red]✗[/red] Environment file not found: {env_file}")
+        raise typer.Exit(1)
+
+    # Get matrix type from registry
+    matrix_type = instance.matrix_type
+
+    # Build compose command
+    env_file_relative = f"deploy/.env.{name}"
+    base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
+
+    if matrix_type == "tuwunel":
+        compose_files = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
+    elif matrix_type == "synapse":
+        compose_files = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+    else:
+        compose_files = base_cmd
+
+    # Add services to start
+    services = "backend"
+    if matrix_type:
+        if matrix_type == "synapse":
+            services += " postgres redis synapse"
+        elif matrix_type == "tuwunel":
+            services += " tuwunel"
+
+    if not no_frontend:
+        services = "frontend " + services
+
+    start_cmd = f"{compose_files} -p {name} up -d --build {services}"
+
+    with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
+        result = subprocess.run(start_cmd, check=False, shell=True, capture_output=True, text=True)
+
+    if result.returncode == 0:
+        # Update status
+        if no_frontend:
+            registry.instances[name].status = InstanceStatus.BACKEND_ONLY
+        else:
+            registry.instances[name].status = InstanceStatus.RUNNING
+        save_registry(registry)
+
+        console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' restarted successfully!")
+    else:
+        console.print(f"[red]✗[/red] Failed to start instance '{name}'")
         if result.stderr:
             console.print(f"[dim]{result.stderr}[/dim]")
         raise typer.Exit(1)
