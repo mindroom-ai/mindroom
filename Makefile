@@ -68,3 +68,10 @@ logs:
 
 shell:
 	cd deploy && docker compose -p $(INSTANCE) exec backend bash
+
+old-reset:
+	docker compose down -v
+	rm -f matrix_state.yaml
+	docker volume prune -f
+	rm -rf tmp/
+	@echo "✅ Reset complete! Run 'make up' then 'mindroom run' to start fresh."
