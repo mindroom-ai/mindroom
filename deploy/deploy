@@ -2,7 +2,7 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["typer", "rich"]
+# dependencies = ["typer", "rich", "pydantic"]
 # ///
 """Ultra-simple Mindroom instance manager.
 
@@ -19,10 +19,11 @@ import secrets
 import shutil
 import subprocess
 import sys
+from enum import Enum
 from pathlib import Path
-from typing import Any
 
 import typer
+from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.table import Table
 
@@ -38,62 +39,113 @@ REGISTRY_FILE = SCRIPT_DIR / "instances.json"
 ENV_TEMPLATE = SCRIPT_DIR / ".env.template"
 
 
-def load_registry() -> dict[str, Any]:
+# Pydantic Models
+class InstanceStatus(str, Enum):
+    """Instance status enum."""
+
+    CREATED = "created"
+    RUNNING = "running"
+    BACKEND_ONLY = "backend-only"
+    STOPPED = "stopped"
+
+
+class MatrixType(str, Enum):
+    """Matrix server type enum."""
+
+    TUWUNEL = "tuwunel"
+    SYNAPSE = "synapse"
+
+
+class Instance(BaseModel):
+    """Instance configuration model."""
+
+    name: str
+    backend_port: int
+    frontend_port: int
+    matrix_port: int | None = None
+    data_dir: str
+    domain: str
+    status: InstanceStatus = InstanceStatus.CREATED
+    matrix_type: MatrixType | None = None
+
+
+class AllocatedPorts(BaseModel):
+    """Allocated ports tracking model."""
+
+    backend: list[int] = Field(default_factory=list)
+    frontend: list[int] = Field(default_factory=list)
+    matrix: list[int] = Field(default_factory=list)
+
+
+class RegistryDefaults(BaseModel):
+    """Registry defaults configuration."""
+
+    backend_port_start: int = 8765
+    frontend_port_start: int = 3003
+    matrix_port_start: int = 8448
+    data_dir_base: str = Field(default_factory=lambda: str(SCRIPT_DIR / "instance_data"))
+
+
+class Registry(BaseModel):
+    """Complete registry model."""
+
+    instances: dict[str, Instance] = Field(default_factory=dict)
+    allocated_ports: AllocatedPorts = Field(default_factory=AllocatedPorts)
+    defaults: RegistryDefaults = Field(default_factory=RegistryDefaults)
+
+
+def load_registry() -> Registry:
     """Load the instance registry."""
-    # Default structure - use absolute path for data directory
-    data_base = os.environ.get("MINDROOM_DATA_BASE", str(SCRIPT_DIR / "instance_data"))
-    default_registry = {
-        "instances": {},
-        "allocated_ports": {"backend": [], "frontend": [], "matrix": []},
-        "defaults": {
-            "backend_port_start": 8765,
-            "frontend_port_start": 3003,
-            "matrix_port_start": 8448,
-            "data_dir_base": data_base,
-        },
-    }
+    # Override default data base if env var is set
+    data_base = os.environ.get("MINDROOM_DATA_BASE")
 
     if not REGISTRY_FILE.exists():
-        return default_registry
+        registry = Registry()
+        if data_base:
+            registry.defaults.data_dir_base = data_base
+        return registry
 
     try:
         with REGISTRY_FILE.open() as f:
             data = json.load(f)
-            # Ensure the loaded data has the required structure
-            if not isinstance(data, dict):
-                return default_registry
-            # Merge with defaults to ensure all keys exist
-            for key, value in default_registry.items():
-                if key not in data:
-                    data[key] = value
-            return data
-    except (json.JSONDecodeError, OSError):
-        return default_registry
+            registry = Registry(**data)
+            if data_base:
+                registry.defaults.data_dir_base = data_base
+            return registry
+
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        console.print(f"[yellow]Warning: Could not load registry: {e}[/yellow]")
+        console.print("[yellow]Creating new registry.[/yellow]")
+        registry = Registry()
+        if data_base:
+            registry.defaults.data_dir_base = data_base
+        return registry
 
 
-def save_registry(registry: dict[str, Any]) -> None:
+def save_registry(registry: Registry) -> None:
     """Save the instance registry."""
     with REGISTRY_FILE.open("w") as f:
-        json.dump(registry, f, indent=2)
+        # Convert to dict for JSON serialization
+        data = registry.model_dump(mode="json")
+        json.dump(data, f, indent=2)
 
 
-def find_next_ports(registry: dict[str, Any]) -> tuple[int, int, int]:
+def find_next_ports(registry: Registry) -> tuple[int, int, int]:
     """Find the next available ports."""
-    defaults = registry["defaults"]
-    allocated = registry["allocated_ports"]
+    defaults = registry.defaults
+    allocated = registry.allocated_ports
 
-    backend_port = defaults["backend_port_start"]
-    while backend_port in allocated["backend"]:
+    backend_port = defaults.backend_port_start
+    while backend_port in allocated.backend:
         backend_port += 1
 
-    frontend_port = defaults["frontend_port_start"]
-    while frontend_port in allocated["frontend"]:
+    frontend_port = defaults.frontend_port_start
+    while frontend_port in allocated.frontend:
         frontend_port += 1
 
     # Matrix port allocation (starting at 8448)
-    matrix_port = defaults.get("matrix_port_start", 8448)
-    matrix_allocated = allocated.get("matrix", [])
-    while matrix_port in matrix_allocated:
+    matrix_port = defaults.matrix_port_start
+    while matrix_port in allocated.matrix:
         matrix_port += 1
 
     return backend_port, frontend_port, matrix_port
@@ -112,27 +164,32 @@ def create(
     """Create a new instance with automatic port allocation."""
     registry = load_registry()
 
-    if name in registry["instances"]:
+    if name in registry.instances:
         console.print(f"[red]✗[/red] Instance '{name}' already exists!")
         raise typer.Exit(1)
 
-    if matrix and matrix not in ["tuwunel", "synapse"]:
-        console.print(f"[red]✗[/red] Invalid matrix option '{matrix}'. Use 'tuwunel' or 'synapse'")
-        raise typer.Exit(1)
+    # Validate and convert matrix type to enum
+    matrix_type: MatrixType | None = None
+    if matrix:
+        try:
+            matrix_type = MatrixType(matrix)
+        except ValueError:
+            console.print(f"[red]✗[/red] Invalid matrix option '{matrix}'. Use 'tuwunel' or 'synapse'")
+            raise typer.Exit(1)
 
-    backend_port, frontend_port, matrix_port = find_next_ports(registry)
-    data_dir = f"{registry['defaults']['data_dir_base']}/{name}"
+    backend_port, frontend_port, matrix_port_value = find_next_ports(registry)
+    data_dir = f"{registry.defaults.data_dir_base}/{name}"
 
-    instance = {
-        "name": name,
-        "backend_port": backend_port,
-        "frontend_port": frontend_port,
-        "matrix_port": matrix_port if matrix else None,
-        "data_dir": data_dir,
-        "domain": domain or f"{name}.localhost",
-        "status": "created",
-        "matrix_type": matrix,  # 'tuwunel', 'synapse', or None
-    }
+    instance = Instance(
+        name=name,
+        backend_port=backend_port,
+        frontend_port=frontend_port,
+        matrix_port=matrix_port_value if matrix_type else None,
+        data_dir=data_dir,
+        domain=domain or f"{name}.localhost",
+        status=InstanceStatus.CREATED,
+        matrix_type=matrix_type,
+    )
 
     # Create instance env file in script directory
     env_file = SCRIPT_DIR / f".env.{name}"
@@ -153,12 +210,12 @@ def create(
         f.write(f"FRONTEND_PORT={frontend_port}\n")
         # Use absolute path to work correctly from any directory
         f.write(f"DATA_DIR={abs_data_dir}\n")
-        f.write(f"INSTANCE_DOMAIN={instance['domain']}\n")
+        f.write(f"INSTANCE_DOMAIN={instance.domain}\n")
 
         if matrix:
             f.write(f"\n# Matrix configuration ({matrix})\n")
-            f.write(f"MATRIX_PORT={matrix_port}\n")
-            f.write(f"MATRIX_SERVER_NAME={instance['domain']}\n")
+            f.write(f"MATRIX_PORT={matrix_port_value}\n")
+            f.write(f"MATRIX_SERVER_NAME={instance.domain}\n")
 
             if matrix == "tuwunel":
                 f.write("MATRIX_ALLOW_REGISTRATION=true\n")
@@ -184,11 +241,11 @@ def create(
                         with file.open() as f:
                             content = f.read()
                         # Replace hardcoded values with instance-specific ones
-                        server_name = instance.get("domain", f"{name}.localhost")
+                        server_name = instance.domain
                         content = content.replace('server_name: "localhost"', f'server_name: "{server_name}"')
                         content = content.replace(
                             "public_baseurl: http://localhost:8008/",
-                            f"public_baseurl: http://{server_name}:{matrix_port}/",
+                            f"public_baseurl: http://{server_name}:{matrix_port_value}/",
                         )
                         with (synapse_dir / file.name).open("w") as f:
                             f.write(content)
@@ -202,27 +259,25 @@ def create(
                         signing_key_content = f"ed25519 {key_id} {key_b64}\n"
                         with (synapse_dir / file.name).open("w") as f:
                             f.write(signing_key_content)
-                        console.print(f"  [dim]Generated unique signing key for instance[/dim]")
+                        console.print("  [dim]Generated unique signing key for instance[/dim]")
                     else:
                         shutil.copy(file, synapse_dir / file.name)
 
     # Update registry
-    registry["instances"][name] = instance
-    registry["allocated_ports"]["backend"].append(backend_port)
-    registry["allocated_ports"]["frontend"].append(frontend_port)
-    if matrix:
-        if "matrix" not in registry["allocated_ports"]:
-            registry["allocated_ports"]["matrix"] = []
-        registry["allocated_ports"]["matrix"].append(matrix_port)
+    registry.instances[name] = instance
+    registry.allocated_ports.backend.append(backend_port)
+    registry.allocated_ports.frontend.append(frontend_port)
+    if matrix_type:
+        registry.allocated_ports.matrix.append(matrix_port_value)
     save_registry(registry)
 
     console.print(f"[green]✓[/green] Created instance '[cyan]{name}[/cyan]'")
     console.print(f"  [dim]Backend port:[/dim] {backend_port}")
     console.print(f"  [dim]Frontend port:[/dim] {frontend_port}")
     if matrix:
-        console.print(f"  [dim]Matrix port:[/dim] {matrix_port}")
+        console.print(f"  [dim]Matrix port:[/dim] {matrix_port_value}")
     console.print(f"  [dim]Data dir:[/dim] {data_dir}")
-    console.print(f"  [dim]Domain:[/dim] {instance['domain']}")
+    console.print(f"  [dim]Domain:[/dim] {instance.domain}")
     console.print(f"  [dim]Env file:[/dim] .env.{name}")
     if matrix:
         matrix_name = "Tuwunel (lightweight)" if matrix == "tuwunel" else "Synapse (full)"
@@ -236,7 +291,7 @@ def start(
 ) -> None:
     """Start a Mindroom instance."""
     registry = load_registry()
-    if name not in registry["instances"]:
+    if name not in registry.instances:
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
         raise typer.Exit(1)
 
@@ -246,26 +301,26 @@ def start(
         raise typer.Exit(1)
 
     # Create data directories with proper permissions
-    instance = registry["instances"][name]
+    instance = registry.instances[name]
     for subdir in ["config", "tmp", "logs", "mindroom", "mindroom/credentials", "mem0"]:
-        dir_path = Path(f"{instance['data_dir']}/{subdir}")
+        dir_path = Path(f"{instance.data_dir}/{subdir}")
         dir_path.mkdir(parents=True, exist_ok=True)
         # Ensure proper ownership if we can
         with contextlib.suppress(OSError, PermissionError):
             os.chown(dir_path, os.getuid(), os.getgid())
 
     # Create Matrix data directories if enabled
-    matrix_type = instance.get("matrix_type")
-    if matrix_type == "tuwunel":
-        Path(f"{instance['data_dir']}/tuwunel").mkdir(parents=True, exist_ok=True)
-    elif matrix_type == "synapse":
-        Path(f"{instance['data_dir']}/synapse").mkdir(parents=True, exist_ok=True)
-        Path(f"{instance['data_dir']}/synapse/media_store").mkdir(parents=True, exist_ok=True)
-        Path(f"{instance['data_dir']}/postgres").mkdir(parents=True, exist_ok=True)
-        Path(f"{instance['data_dir']}/redis").mkdir(parents=True, exist_ok=True)
+    matrix_type = instance.matrix_type
+    if matrix_type == MatrixType.TUWUNEL:
+        Path(f"{instance.data_dir}/tuwunel").mkdir(parents=True, exist_ok=True)
+    elif matrix_type == MatrixType.SYNAPSE:
+        Path(f"{instance.data_dir}/synapse").mkdir(parents=True, exist_ok=True)
+        Path(f"{instance.data_dir}/synapse/media_store").mkdir(parents=True, exist_ok=True)
+        Path(f"{instance.data_dir}/postgres").mkdir(parents=True, exist_ok=True)
+        Path(f"{instance.data_dir}/redis").mkdir(parents=True, exist_ok=True)
 
         # Copy Synapse config template if needed
-        synapse_dir = Path(f"{instance['data_dir']}/synapse")
+        synapse_dir = Path(f"{instance.data_dir}/synapse")
         if not (synapse_dir / "homeserver.yaml").exists():
             template_dir = SCRIPT_DIR / "synapse-template"
             if template_dir.exists():
@@ -276,13 +331,13 @@ def start(
                             with file.open() as f:
                                 content = f.read()
                             # Replace hardcoded values with instance-specific ones
-                            server_name = instance.get("domain", f"{name}.localhost")
+                            server_name = instance.domain
                             # For public_baseurl, use the external port that will be mapped
-                            matrix_port = instance.get("matrix_port", 8008)
+                            matrix_port_display = instance.matrix_port or 8008
                             content = content.replace('server_name: "localhost"', f'server_name: "{server_name}"')
                             content = content.replace(
                                 "public_baseurl: http://localhost:8008/",
-                                f"public_baseurl: http://{server_name}:{matrix_port}/",
+                                f"public_baseurl: http://{server_name}:{matrix_port_display}/",
                             )
                             with (synapse_dir / file.name).open("w") as f:
                                 f.write(content)
@@ -299,7 +354,7 @@ def start(
 
     if matrix_type == "tuwunel":
         compose_files = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
-    elif matrix_type == "synapse":
+    elif matrix_type == MatrixType.SYNAPSE:
         compose_files = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
     else:
         compose_files = base_cmd
@@ -328,16 +383,16 @@ def start(
     if result.returncode == 0:
         # Update status to reflect what's actually running
         if no_frontend:
-            registry["instances"][name]["status"] = "backend-only"
+            registry.instances[name].status = InstanceStatus.BACKEND_ONLY
         else:
-            registry["instances"][name]["status"] = "running"
+            registry.instances[name].status = InstanceStatus.RUNNING
         save_registry(registry)
 
         if no_frontend:
             console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully (backend only)!")
-            console.print(f"  [dim]Backend:[/dim] http://localhost:{instance['backend_port']}")
+            console.print(f"  [dim]Backend:[/dim] http://localhost:{instance.backend_port}")
             if matrix_type:
-                console.print(f"  [dim]Matrix:[/dim] http://localhost:{instance.get('matrix_port', 8008)}")
+                console.print(f"  [dim]Matrix:[/dim] http://localhost:{instance.matrix_port or 8008}")
         else:
             console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully!")
     else:
@@ -351,7 +406,7 @@ def start(
 def stop(name: str = typer.Argument("default", help="Instance name to stop")) -> None:
     """Stop a running Mindroom instance."""
     registry = load_registry()
-    if name not in registry["instances"]:
+    if name not in registry.instances:
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
         raise typer.Exit(1)
 
@@ -363,7 +418,7 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
 
     if result.returncode == 0:
-        registry["instances"][name]["status"] = "stopped"
+        registry.instances[name].status = InstanceStatus.STOPPED
         save_registry(registry)
         console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' stopped!")
     else:
@@ -381,7 +436,7 @@ def remove(
 ) -> None:
     """Remove instance(s) completely (containers, data, and configuration)."""
     registry = load_registry()
-    instances = registry.get("instances", {})
+    instances = registry.instances
 
     # Handle --all flag
     if all:
@@ -392,7 +447,7 @@ def remove(
         # Confirmation prompt unless --force is used
         if not force:
             console.print(f"[red]⚠️  WARNING:[/red] This will permanently delete ALL {len(instances)} instance(s):")
-            for instance_name in instances.keys():
+            for instance_name in instances:
                 console.print(f"  - {instance_name}")
             console.print("\n[yellow]All data, containers, and configurations will be lost![/yellow]")
             confirm = typer.confirm("Are you absolutely sure?")
@@ -406,7 +461,7 @@ def remove(
 
         # Clear the registry completely
         REGISTRY_FILE.unlink(missing_ok=True)
-        console.print(f"\n[green]✓[/green] All instances removed!")
+        console.print("\n[green]✓[/green] All instances removed!")
         return
 
     # Handle single instance removal
@@ -423,9 +478,9 @@ def remove(
     # Confirmation prompt unless --force is used
     if not force:
         console.print(f"[yellow]⚠️  Warning:[/yellow] This will permanently delete instance '[cyan]{name}[/cyan]'")
-        console.print(f"  - All data in {instance['data_dir']}")
+        console.print(f"  - All data in {instance.data_dir}")
         console.print(f"  - Environment file .env.{name}")
-        console.print(f"  - All containers and volumes")
+        console.print("  - All containers and volumes")
         confirm = typer.confirm("Are you sure you want to continue?")
         if not confirm:
             console.print("[yellow]Cancelled.[/yellow]")
@@ -436,9 +491,9 @@ def remove(
     console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' completely removed!")
 
 
-def _remove_instance(name: str, registry: dict, console: Console) -> None:
+def _remove_instance(name: str, registry: Registry, console: Console) -> None:
     """Helper function to remove a single instance."""
-    instance = registry["instances"][name]
+    instance = registry.instances[name]
 
     with console.status(f"[yellow]Removing instance '{name}'...[/yellow]"):
         # Stop containers if running
@@ -447,7 +502,7 @@ def _remove_instance(name: str, registry: dict, console: Console) -> None:
         subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
 
         # Remove data directory
-        data_dir = Path(instance["data_dir"])
+        data_dir = Path(instance.data_dir)
         if data_dir.exists():
             shutil.rmtree(data_dir)
 
@@ -457,22 +512,22 @@ def _remove_instance(name: str, registry: dict, console: Console) -> None:
             env_file.unlink()
 
         # Update registry - remove instance and free up ports
-        del registry["instances"][name]
+        del registry.instances[name]
 
         # Remove allocated ports
-        if instance.get("backend_port") in registry["allocated_ports"]["backend"]:
-            registry["allocated_ports"]["backend"].remove(instance["backend_port"])
-        if instance.get("frontend_port") in registry["allocated_ports"]["frontend"]:
-            registry["allocated_ports"]["frontend"].remove(instance["frontend_port"])
-        if instance.get("matrix_port") and instance["matrix_port"] in registry["allocated_ports"]["matrix"]:
-            registry["allocated_ports"]["matrix"].remove(instance["matrix_port"])
+        if instance.backend_port in registry.allocated_ports.backend:
+            registry.allocated_ports.backend.remove(instance.backend_port)
+        if instance.frontend_port in registry.allocated_ports.frontend:
+            registry.allocated_ports.frontend.remove(instance.frontend_port)
+        if instance.matrix_port and instance.matrix_port in registry.allocated_ports.matrix:
+            registry.allocated_ports.matrix.remove(instance.matrix_port)
 
 
 @app.command("list")
 def list_instances() -> None:
     """List all configured instances."""
     registry = load_registry()
-    instances = registry.get("instances", {})
+    instances = registry.instances
 
     if not instances:
         console.print("[yellow]No instances configured.[/yellow]")
@@ -489,24 +544,23 @@ def list_instances() -> None:
     table.add_column("Domain")
     table.add_column("Data Directory")
 
-    for name, config in instances.items():
-        status = config["status"]
-        if status == "running":
+    for name, instance in instances.items():
+        status = instance.status
+        if status == InstanceStatus.RUNNING:
             status_display = "[green]● running[/green]"
-        elif status == "backend-only":
+        elif status == InstanceStatus.BACKEND_ONLY:
             status_display = "[blue]● backend[/blue]"
-        elif status == "stopped":
+        elif status == InstanceStatus.STOPPED:
             status_display = "[red]● stopped[/red]"
         else:
             status_display = "[yellow]● created[/yellow]"
 
         matrix_display = ""
-        matrix_type = config.get("matrix_type")
-        if matrix_type:
-            matrix_port = config.get("matrix_port", "N/A")
-            if matrix_type == "tuwunel":
+        if instance.matrix_type:
+            matrix_port = instance.matrix_port or "N/A"
+            if instance.matrix_type == MatrixType.TUWUNEL:
                 matrix_display = f"[cyan]{matrix_port}[/cyan] [dim](T)[/dim]"
-            elif matrix_type == "synapse":
+            elif instance.matrix_type == MatrixType.SYNAPSE:
                 matrix_display = f"[cyan]{matrix_port}[/cyan] [dim](S)[/dim]"
         else:
             matrix_display = "[dim]disabled[/dim]"
@@ -514,11 +568,11 @@ def list_instances() -> None:
         table.add_row(
             name,
             status_display,
-            str(config["backend_port"]),
-            str(config["frontend_port"]),
+            str(instance.backend_port),
+            str(instance.frontend_port),
             matrix_display,
-            config["domain"],
-            config["data_dir"],
+            instance.domain,
+            instance.data_dir,
         )
 
     console.print(table)
