@@ -78,7 +78,7 @@ class RegistryDefaults(BaseModel):
     """Registry defaults configuration."""
 
     backend_port_start: int = 8765
-    frontend_port_start: int = 3003
+    frontend_port_start: int = 3005
     matrix_port_start: int = 8448
     data_dir_base: str = Field(default_factory=lambda: str(SCRIPT_DIR / "instance_data"))
 
@@ -208,15 +208,20 @@ def create(  # noqa: PLR0912, PLR0915
         # Use absolute path to work correctly from any directory
         f.write(f"DATA_DIR={abs_data_dir}\n")
         f.write(f"INSTANCE_DOMAIN={instance.domain}\n")
+        # Extract base domain from instance domain (e.g., mindroom.chat from default.mindroom.chat)
+        if "." in instance.domain:
+            base_domain = ".".join(instance.domain.split(".")[1:])
+            f.write(f"DOMAIN={base_domain}\n")
 
         if matrix:
             f.write(f"\n# Matrix configuration ({matrix})\n")
             f.write(f"MATRIX_PORT={matrix_port_value}\n")
-            f.write(f"MATRIX_SERVER_NAME={instance.domain}\n")
+            # Matrix server name should be m-{instance.domain}
+            f.write(f"MATRIX_SERVER_NAME=m-{instance.domain}\n")
 
             if matrix == "tuwunel":
                 f.write("MATRIX_ALLOW_REGISTRATION=true\n")
-                f.write("MATRIX_ALLOW_FEDERATION=false\n")
+                f.write("MATRIX_ALLOW_FEDERATION=true\n")
             elif matrix == "synapse":
                 f.write("POSTGRES_PASSWORD=synapse_password\n")
                 f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
