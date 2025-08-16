@@ -30,8 +30,8 @@ COPY --from=frontend-deps /app/frontend/node_modules /app/frontend/node_modules
 COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
 COPY . /app/
 RUN mkdir -p /app/logs /app/config
-RUN chmod +x /app/widget/run.sh
+RUN chmod +x /app/run-ui.sh
 EXPOSE 3003 8765
 ENV DOCKER_CONTAINER=1
-WORKDIR /app/widget
-CMD ["./run.sh"]
+WORKDIR /app
+CMD ["./run-ui.sh"]
