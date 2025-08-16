@@ -148,8 +148,142 @@ def find_next_ports(registry: Registry) -> tuple[int, int, int]:
     return backend_port, frontend_port, matrix_port
 
 
+def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixType | None) -> None:
+    """Create and configure the environment file for an instance."""
+    env_file = SCRIPT_DIR / f".env.{name}"
+    if ENV_TEMPLATE.exists():
+        shutil.copy(ENV_TEMPLATE, env_file)
+    else:
+        env_file.touch()
+
+    # data_dir is already absolute from the registry defaults
+    abs_data_dir = (
+        instance.data_dir if Path(instance.data_dir).is_absolute() else str(Path(instance.data_dir).absolute())
+    )
+
+    with env_file.open("a") as f:
+        f.write("\n# Instance configuration\n")
+        f.write(f"INSTANCE_NAME={name}\n")
+        f.write(f"BACKEND_PORT={instance.backend_port}\n")
+        f.write(f"FRONTEND_PORT={instance.frontend_port}\n")
+        f.write(f"DATA_DIR={abs_data_dir}\n")
+        f.write(f"INSTANCE_DOMAIN={instance.domain}\n")
+
+        # Extract base domain from instance domain
+        if "." in instance.domain:
+            base_domain = ".".join(instance.domain.split(".")[1:])
+            f.write(f"DOMAIN={base_domain}\n")
+
+        if matrix_type:
+            f.write(f"\n# Matrix configuration ({matrix_type.value})\n")
+            f.write(f"MATRIX_PORT={instance.matrix_port}\n")
+            f.write(f"MATRIX_SERVER_NAME=m-{instance.domain}\n")
+
+            if matrix_type == MatrixType.TUWUNEL:
+                f.write("MATRIX_ALLOW_REGISTRATION=true\n")
+                f.write("MATRIX_ALLOW_FEDERATION=true\n")
+            elif matrix_type == MatrixType.SYNAPSE:
+                f.write("POSTGRES_PASSWORD=synapse_password\n")
+                f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
+                f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
+
+
+def _create_wellknown_files(name: str, instance: Instance) -> None:
+    """Create well-known files for Matrix federation."""
+    matrix_server_name = f"m-{instance.domain}"
+
+    # Server well-known (for federation discovery)
+    server_wellknown = {"m.server": f"{matrix_server_name}:443"}
+    with (SCRIPT_DIR / f"well-known-{name}.json").open("w") as wf:
+        json.dump(server_wellknown, wf, indent=2)
+
+    # Client well-known (for client discovery)
+    client_wellknown = {
+        "m.homeserver": {
+            "base_url": f"https://{matrix_server_name}",
+        },
+    }
+    with (SCRIPT_DIR / f"well-known-client-{name}.json").open("w") as wf:
+        json.dump(client_wellknown, wf, indent=2)
+
+
+def _setup_synapse_config(instance: Instance, name: str) -> None:
+    """Set up Synapse configuration directory and files."""
+    synapse_dir = Path(instance.data_dir) / "synapse"
+    synapse_dir.mkdir(parents=True, exist_ok=True)
+    (synapse_dir / "media_store").mkdir(parents=True, exist_ok=True)
+
+    template_dir = SCRIPT_DIR / "synapse-template"
+    if not template_dir.exists():
+        return
+
+    matrix_server_name = f"m-{instance.domain}"
+    matrix_port_value = instance.matrix_port or 8008
+
+    for file in template_dir.glob("*"):
+        if not file.is_file():
+            continue
+
+        if file.name == "homeserver.yaml":
+            # Generate homeserver.yaml with correct values
+            with file.open() as f:
+                content = f.read()
+
+            # Replace hardcoded values with instance-specific ones
+            content = content.replace('server_name: "localhost"', f'server_name: "{matrix_server_name}"')
+            content = content.replace(
+                "public_baseurl: http://localhost:8008/",
+                f"public_baseurl: http://{matrix_server_name}:{matrix_port_value}/",
+            )
+            # Replace postgres and redis hostnames with container names
+            content = content.replace("host: postgres", f"host: {name}-postgres")
+            content = content.replace("host: redis", f"host: {name}-redis")
+
+            with (synapse_dir / file.name).open("w") as f:
+                f.write(content)
+
+        elif file.name == "signing.key":
+            # Generate a unique signing key for this instance
+            key_bytes = secrets.token_bytes(32)
+            key_b64 = base64.b64encode(key_bytes).decode("ascii")
+            key_id = f"{name}_{secrets.token_hex(3)}"
+            signing_key_content = f"ed25519 {key_id} {key_b64}\n"
+
+            with (synapse_dir / file.name).open("w") as f:
+                f.write(signing_key_content)
+            console.print("  [dim]Generated unique signing key for instance[/dim]")
+
+        else:
+            shutil.copy(file, synapse_dir / file.name)
+
+
+def _update_registry(registry: Registry, instance: Instance, matrix_type: MatrixType | None) -> None:
+    """Update the registry with the new instance."""
+    registry.instances[instance.name] = instance
+    registry.allocated_ports.backend.append(instance.backend_port)
+    registry.allocated_ports.frontend.append(instance.frontend_port)
+    if matrix_type and instance.matrix_port:
+        registry.allocated_ports.matrix.append(instance.matrix_port)
+    save_registry(registry)
+
+
+def _print_instance_info(instance: Instance, matrix_type: MatrixType | None) -> None:
+    """Print information about the created instance."""
+    console.print(f"[green]✓[/green] Created instance '[cyan]{instance.name}[/cyan]'")
+    console.print(f"  [dim]Backend port:[/dim] {instance.backend_port}")
+    console.print(f"  [dim]Frontend port:[/dim] {instance.frontend_port}")
+    if matrix_type:
+        console.print(f"  [dim]Matrix port:[/dim] {instance.matrix_port}")
+    console.print(f"  [dim]Data dir:[/dim] {instance.data_dir}")
+    console.print(f"  [dim]Domain:[/dim] {instance.domain}")
+    console.print(f"  [dim]Env file:[/dim] .env.{instance.name}")
+    if matrix_type:
+        matrix_name = "Tuwunel (lightweight)" if matrix_type == MatrixType.TUWUNEL else "Synapse (full)"
+        console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
+
+
 @app.command()
-def create(  # noqa: PLR0912, PLR0915
+def create(
     name: str = typer.Argument("default", help="Instance name"),
     domain: str | None = typer.Option(None, help="Domain for the instance (default: NAME.localhost)"),
     matrix: str | None = typer.Option(
@@ -174,6 +308,7 @@ def create(  # noqa: PLR0912, PLR0915
             console.print(f"[red]✗[/red] Invalid matrix option '{matrix}'. Use 'tuwunel' or 'synapse'")
             raise typer.Exit(1)  # noqa: B904
 
+    # Allocate ports and create instance
     backend_port, frontend_port, matrix_port_value = find_next_ports(registry)
     data_dir = f"{registry.defaults.data_dir_base}/{name}"
 
@@ -188,142 +323,22 @@ def create(  # noqa: PLR0912, PLR0915
         matrix_type=matrix_type,
     )
 
-    # Create instance env file in script directory
-    env_file = SCRIPT_DIR / f".env.{name}"
-    if ENV_TEMPLATE.exists():
-        shutil.copy(ENV_TEMPLATE, env_file)
-    else:
-        # Create basic env file if template doesn't exist
-        env_file.touch()
+    # Create environment file
+    _create_environment_file(instance, name, matrix_type)
 
-    # Append instance-specific vars
-    # data_dir is already absolute from the registry defaults
-    abs_data_dir = data_dir if Path(data_dir).is_absolute() else str(Path(data_dir).absolute())
+    # Create well-known files for Matrix federation
+    if matrix_type:
+        _create_wellknown_files(name, instance)
 
-    with env_file.open("a") as f:
-        f.write("\n# Instance configuration\n")
-        f.write(f"INSTANCE_NAME={name}\n")
-        f.write(f"BACKEND_PORT={backend_port}\n")
-        f.write(f"FRONTEND_PORT={frontend_port}\n")
-        # Use absolute path to work correctly from any directory
-        f.write(f"DATA_DIR={abs_data_dir}\n")
-        f.write(f"INSTANCE_DOMAIN={instance.domain}\n")
-        # Extract base domain from instance domain (e.g., mindroom.chat from default.mindroom.chat)
-        if "." in instance.domain:
-            base_domain = ".".join(instance.domain.split(".")[1:])
-            f.write(f"DOMAIN={base_domain}\n")
-
-        if matrix:
-            f.write(f"\n# Matrix configuration ({matrix})\n")
-            f.write(f"MATRIX_PORT={matrix_port_value}\n")
-            # Matrix server name should be m-{instance.domain}
-            f.write(f"MATRIX_SERVER_NAME=m-{instance.domain}\n")
-
-            if matrix == "tuwunel":
-                f.write("MATRIX_ALLOW_REGISTRATION=true\n")
-                f.write("MATRIX_ALLOW_FEDERATION=true\n")
-
-                # Generate well-known files for federation
-                matrix_server_name = f"m-{instance.domain}"
-
-                # Server well-known (for federation discovery)
-                server_wellknown = {"m.server": f"{matrix_server_name}:443"}
-                with (SCRIPT_DIR / f"well-known-{name}.json").open("w") as wf:
-                    json.dump(server_wellknown, wf, indent=2)
-
-                # Client well-known (for client discovery)
-                client_wellknown = {
-                    "m.homeserver": {
-                        "base_url": f"https://{matrix_server_name}",
-                    },
-                }
-                with (SCRIPT_DIR / f"well-known-client-{name}.json").open("w") as wf:
-                    json.dump(client_wellknown, wf, indent=2)
-
-            elif matrix == "synapse":
-                f.write("POSTGRES_PASSWORD=synapse_password\n")
-                f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
-                f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
-
-                # Generate well-known files for Synapse federation too
-                matrix_server_name = f"m-{instance.domain}"
-
-                # Server well-known (for federation discovery)
-                server_wellknown = {"m.server": f"{matrix_server_name}:443"}
-                with (SCRIPT_DIR / f"well-known-{name}.json").open("w") as wf:
-                    json.dump(server_wellknown, wf, indent=2)
-
-                # Client well-known (for client discovery)
-                client_wellknown = {
-                    "m.homeserver": {
-                        "base_url": f"https://{matrix_server_name}",
-                    },
-                }
-                with (SCRIPT_DIR / f"well-known-client-{name}.json").open("w") as wf:
-                    json.dump(client_wellknown, wf, indent=2)
-
-    # If Synapse, prepare the config directory
-    if matrix == "synapse":
-        synapse_dir = Path(data_dir) / "synapse"
-        synapse_dir.mkdir(parents=True, exist_ok=True)
-        # Create media_store directory for Synapse
-        (synapse_dir / "media_store").mkdir(parents=True, exist_ok=True)
-
-        # Copy and customize Synapse config template
-        template_dir = SCRIPT_DIR / "synapse-template"
-        if template_dir.exists():
-            for file in template_dir.glob("*"):
-                if file.is_file():
-                    if file.name == "homeserver.yaml":
-                        # Generate homeserver.yaml with correct values
-                        with file.open() as f:
-                            content = f.read()
-                        # Replace hardcoded values with instance-specific ones
-                        # For Matrix federation, use the m- prefixed domain
-                        matrix_server_name = f"m-{instance.domain}"
-                        content = content.replace('server_name: "localhost"', f'server_name: "{matrix_server_name}"')
-                        content = content.replace(
-                            "public_baseurl: http://localhost:8008/",
-                            f"public_baseurl: http://{matrix_server_name}:{matrix_port_value}/",
-                        )
-                        # Replace postgres and redis hostnames with container names
-                        content = content.replace("host: postgres", f"host: {name}-postgres")
-                        content = content.replace("host: redis", f"host: {name}-redis")
-                        with (synapse_dir / file.name).open("w") as f:
-                            f.write(content)
-                    elif file.name == "signing.key":
-                        # Generate a unique signing key for this instance
-                        # Generate 32 random bytes for ed25519 key
-                        key_bytes = secrets.token_bytes(32)
-                        key_b64 = base64.b64encode(key_bytes).decode("ascii")
-                        # Use instance name as key ID for uniqueness
-                        key_id = f"{name}_{secrets.token_hex(3)}"
-                        signing_key_content = f"ed25519 {key_id} {key_b64}\n"
-                        with (synapse_dir / file.name).open("w") as f:
-                            f.write(signing_key_content)
-                        console.print("  [dim]Generated unique signing key for instance[/dim]")
-                    else:
-                        shutil.copy(file, synapse_dir / file.name)
+    # Set up Synapse configuration if needed
+    if matrix_type == MatrixType.SYNAPSE:
+        _setup_synapse_config(instance, name)
 
     # Update registry
-    registry.instances[name] = instance
-    registry.allocated_ports.backend.append(backend_port)
-    registry.allocated_ports.frontend.append(frontend_port)
-    if matrix_type:
-        registry.allocated_ports.matrix.append(matrix_port_value)
-    save_registry(registry)
+    _update_registry(registry, instance, matrix_type)
 
-    console.print(f"[green]✓[/green] Created instance '[cyan]{name}[/cyan]'")
-    console.print(f"  [dim]Backend port:[/dim] {backend_port}")
-    console.print(f"  [dim]Frontend port:[/dim] {frontend_port}")
-    if matrix:
-        console.print(f"  [dim]Matrix port:[/dim] {matrix_port_value}")
-    console.print(f"  [dim]Data dir:[/dim] {data_dir}")
-    console.print(f"  [dim]Domain:[/dim] {instance.domain}")
-    console.print(f"  [dim]Env file:[/dim] .env.{name}")
-    if matrix:
-        matrix_name = "Tuwunel (lightweight)" if matrix == "tuwunel" else "Synapse (full)"
-        console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
+    # Print instance information
+    _print_instance_info(instance, matrix_type)
 
 
 @app.command()
