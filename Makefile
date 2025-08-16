@@ -29,32 +29,32 @@ help:
 # Federation commands
 create:
 	@if [ "$(MATRIX)" = "none" ]; then \
-		cd deploy && ./deploy create $(INSTANCE); \
+		cd deploy && ./deploy.py create $(INSTANCE); \
 	else \
-		cd deploy && ./deploy create $(INSTANCE) --matrix $(MATRIX); \
+		cd deploy && ./deploy.py create $(INSTANCE) --matrix $(MATRIX); \
 	fi
 
 start:
-	cd deploy && ./deploy start $(INSTANCE)
+	cd deploy && ./deploy.py start $(INSTANCE)
 
 start-backend:
-	cd deploy && ./deploy start $(INSTANCE) --no-frontend
+	cd deploy && ./deploy.py start $(INSTANCE) --no-frontend
 
 stop:
-	cd deploy && ./deploy stop $(INSTANCE)
+	cd deploy && ./deploy.py stop $(INSTANCE)
 
 list:
-	cd deploy && ./deploy list
+	cd deploy && ./deploy.py list
 
 # Cleanup commands
 clean:
 	@echo "🧹 Removing instance: $(INSTANCE)"
-	@cd deploy && ./deploy remove $(INSTANCE) --force || true
+	@cd deploy && ./deploy.py remove $(INSTANCE) --force || true
 	@echo "✅ Cleanup complete"
 
 reset:
 	@echo "🔄 Full reset: removing all instances..."
-	cd deploy && ./deploy remove --all --force
+	cd deploy && ./deploy.py remove --all --force
 	@echo "Cleaning up any remaining files..."
 	rm -f matrix_state.yaml
 	find . -type d -name "__pycache__" -exec rm -rf {} +

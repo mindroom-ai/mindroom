@@ -4,10 +4,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["typer", "rich", "pydantic"]
 # ///
-"""Ultra-simple Mindroom instance manager.
-
-No over-engineering, just the basics.
-"""
+"""Docker Mindroom instance manager."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
 # ruff: noqa: C901  # complexity is acceptable for CLI commands
 
@@ -152,7 +149,7 @@ def find_next_ports(registry: Registry) -> tuple[int, int, int]:
 
 
 @app.command()
-def create(
+def create(  # noqa: PLR0912, PLR0915
     name: str = typer.Argument("default", help="Instance name"),
     domain: str | None = typer.Option(None, help="Domain for the instance (default: NAME.localhost)"),
     matrix: str | None = typer.Option(
@@ -175,7 +172,7 @@ def create(
             matrix_type = MatrixType(matrix)
         except ValueError:
             console.print(f"[red]✗[/red] Invalid matrix option '{matrix}'. Use 'tuwunel' or 'synapse'")
-            raise typer.Exit(1)
+            raise typer.Exit(1)  # noqa: B904
 
     backend_port, frontend_port, matrix_port_value = find_next_ports(registry)
     data_dir = f"{registry.defaults.data_dir_base}/{name}"
@@ -285,7 +282,7 @@ def create(
 
 
 @app.command()
-def start(
+def start(  # noqa: PLR0912, PLR0915
     name: str = typer.Argument("default", help="Instance name to start"),
     no_frontend: bool = typer.Option(False, "--no-frontend", help="Start without frontend (for development)"),
 ) -> None:
@@ -373,7 +370,7 @@ def start(
         status_msg = f"Starting instance '{name}'..."
     else:
         status_msg = f"Starting instance '{name}' (backend only)..."
-        console.print("[yellow]ℹ[/yellow] Starting without frontend (development mode)")
+        console.print("[yellow]ℹ[/yellow] Starting without frontend (development mode)")  # noqa: RUF001
 
     cmd = f"{compose_files} -p {name} up -d --build {services}"
 
@@ -431,7 +428,7 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
 @app.command()
 def remove(
     name: str = typer.Argument(None, help="Instance name to remove (or use --all)"),
-    all: bool = typer.Option(False, "--all", help="Remove ALL instances"),
+    all: bool = typer.Option(False, "--all", help="Remove ALL instances"),  # noqa: A002
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
 ) -> None:
     """Remove instance(s) completely (containers, data, and configuration)."""
@@ -560,7 +557,7 @@ def list_instances() -> None:
     if not instances:
         console.print("[yellow]No instances configured.[/yellow]")
         console.print("\n[dim]Create your first instance with:[/dim]")
-        console.print("  [cyan]./deploy create my-instance[/cyan]")
+        console.print("  [cyan]./deploy.py create my-instance[/cyan]")
         return
 
     table = Table(title="Mindroom Instances", show_header=True, header_style="bold magenta")

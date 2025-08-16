@@ -19,16 +19,16 @@ The `deploy` script manages multiple Mindroom instances with optional Matrix ser
 cd deploy
 
 # Basic instance (no Matrix server)
-./deploy create myapp
+./deploy.py create myapp
 
 # Instance with lightweight Tuwunel Matrix server
-./deploy create myapp --matrix tuwunel
+./deploy.py create myapp --matrix tuwunel
 
 # Instance with full Synapse Matrix server (PostgreSQL + Redis)
-./deploy create myapp --matrix synapse
+./deploy.py create myapp --matrix synapse
 
 # Instance with custom domain
-./deploy create myapp --domain myapp.example.com --matrix tuwunel
+./deploy.py create myapp --domain myapp.example.com --matrix tuwunel
 ```
 
 ### 2. Configure Your Instance
@@ -49,7 +49,7 @@ GOOGLE_API_KEY=...
 ### 3. Start Your Instance
 
 ```bash
-./deploy start myapp
+./deploy.py start myapp
 ```
 
 This will start:
@@ -67,30 +67,30 @@ After starting, your instance will be available at:
 
 To find your ports:
 ```bash
-./deploy list
+./deploy.py list
 ```
 
 ### 5. Stop Your Instance
 
 ```bash
-./deploy stop myapp
+./deploy.py stop myapp
 ```
 
 ### 6. Remove an Instance
 
 ```bash
 # Stop and remove containers, but keep data
-./deploy stop myapp
+./deploy.py stop myapp
 
 # Fully remove instance (including data)
-./deploy remove myapp
+./deploy.py remove myapp
 ```
 
 ## Managing Multiple Instances
 
 ### List All Instances
 ```bash
-./deploy list
+./deploy.py list
 ```
 
 Output:
@@ -110,22 +110,22 @@ Output:
 ### Running Multiple Instances Simultaneously
 ```bash
 # Create and start production instance with Synapse
-./deploy create prod --domain prod.mindroom.com --matrix synapse
+./deploy.py create prod --domain prod.mindroom.com --matrix synapse
 nano .env.prod  # Add API keys
-./deploy start prod
+./deploy.py start prod
 
 # Create and start development instance with Tuwunel
-./deploy create dev --domain dev.mindroom.com --matrix tuwunel
+./deploy.py create dev --domain dev.mindroom.com --matrix tuwunel
 nano .env.dev  # Add API keys
-./deploy start dev
+./deploy.py start dev
 
 # Create and start test instance without Matrix
-./deploy create test
+./deploy.py create test
 nano .env.test  # Add API keys
-./deploy start test
+./deploy.py start test
 
 # All three instances now running on different ports
-./deploy list
+./deploy.py list
 ```
 
 ## Matrix Server Options
@@ -208,7 +208,7 @@ docker stop $(docker ps -q)
 ### Clean Up Everything
 ```bash
 # Stop all instances
-./deploy reset
+./deploy.py reset
 
 # Remove all Docker resources
 docker system prune -a
@@ -273,7 +273,7 @@ OPENROUTER_API_KEY=
 OLLAMA_HOST=
 ```
 
-### Auto-generated (set by deploy)
+### Auto-generated (set by deploy.py)
 ```env
 # Instance configuration
 INSTANCE_NAME=myapp
@@ -292,10 +292,10 @@ MATRIX_SERVER_NAME=myapp.localhost
 ### Development Setup
 ```bash
 # Create a dev instance with all features
-./deploy create dev --matrix tuwunel
+./deploy.py create dev --matrix tuwunel
 echo "OPENAI_API_KEY=sk-..." >> .env.dev
 echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env.dev
-./deploy start dev
+./deploy.py start dev
 
 # Access at http://localhost:3004
 ```
@@ -303,7 +303,7 @@ echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env.dev
 ### Production Setup
 ```bash
 # Create production instance with Synapse
-./deploy create prod \
+./deploy.py create prod \
   --domain mindroom.example.com \
   --matrix synapse
 
@@ -311,18 +311,18 @@ echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env.dev
 nano .env.prod
 
 # Start the instance
-./deploy start prod
+./deploy.py start prod
 
 # Set up reverse proxy (nginx, etc.) to ports shown in:
-./deploy list
+./deploy.py list
 ```
 
 ### Testing Setup
 ```bash
 # Quick test instance without Matrix
-./deploy create test
+./deploy.py create test
 cp .env.template .env.test  # Use template
-./deploy start test
+./deploy.py start test
 # Run tests...
-./deploy remove test  # Clean up
+./deploy.py remove test  # Clean up
 ```
