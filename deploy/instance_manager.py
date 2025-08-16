@@ -1,16 +1,27 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["typer", "rich"]
+# ///
 """Ultra-simple Mindroom instance manager.
 
 No over-engineering, just the basics.
 """
-# ruff: noqa: ANN001, ANN201, PTH123, S602, D205
+# ruff: noqa: ANN001, ANN201, PTH123, S602
 
 import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+app = typer.Typer(help="Mindroom Instance Manager - Simple multi-instance deployment")
+console = Console()
 
 REGISTRY_FILE = "instances.json"
 ENV_TEMPLATE = ".env.template"
@@ -52,13 +63,17 @@ def find_next_ports(registry):
     return backend_port, frontend_port
 
 
-def create_instance(name, domain=None):
-    """Create a new instance."""
+@app.command()
+def create(
+    name: str = typer.Argument(..., help="Instance name"),
+    domain: str | None = typer.Option(None, help="Domain for the instance (default: NAME.localhost)"),
+):
+    """Create a new instance with automatic port allocation."""
     registry = load_registry()
 
     if name in registry["instances"]:
-        print(f"Instance '{name}' already exists!")
-        return False
+        console.print(f"[red]✗[/red] Instance '{name}' already exists!")
+        raise typer.Exit(1)
 
     backend_port, frontend_port = find_next_ports(registry)
     data_dir = f"{registry['defaults']['data_dir_base']}/{name}"
@@ -95,26 +110,26 @@ def create_instance(name, domain=None):
     registry["allocated_ports"]["frontend"].append(frontend_port)
     save_registry(registry)
 
-    print(f"Created instance '{name}':")
-    print(f"  Backend port: {backend_port}")
-    print(f"  Frontend port: {frontend_port}")
-    print(f"  Data dir: {data_dir}")
-    print(f"  Domain: {instance['domain']}")
-    print(f"  Env file: .env.{name}")
-    return True
+    console.print(f"[green]✓[/green] Created instance '[cyan]{name}[/cyan]'")
+    console.print(f"  [dim]Backend port:[/dim] {backend_port}")
+    console.print(f"  [dim]Frontend port:[/dim] {frontend_port}")
+    console.print(f"  [dim]Data dir:[/dim] {data_dir}")
+    console.print(f"  [dim]Domain:[/dim] {instance['domain']}")
+    console.print(f"  [dim]Env file:[/dim] .env.{name}")
 
 
-def start_instance(name):
-    """Start an instance."""
+@app.command()
+def start(name: str = typer.Argument(..., help="Instance name to start")):
+    """Start a Mindroom instance."""
     registry = load_registry()
     if name not in registry["instances"]:
-        print(f"Instance '{name}' not found!")
-        return False
+        console.print(f"[red]✗[/red] Instance '{name}' not found!")
+        raise typer.Exit(1)
 
     env_file = f".env.{name}"
     if not Path(env_file).exists():
-        print(f"Environment file {env_file} not found!")
-        return False
+        console.print(f"[red]✗[/red] Environment file {env_file} not found!")
+        raise typer.Exit(1)
 
     # Create data directories
     instance = registry["instances"][name]
@@ -123,97 +138,85 @@ def start_instance(name):
 
     # Start with docker compose (modern syntax)
     cmd = f"docker compose --env-file {env_file} -p {name} up -d"
-    print(f"Running: {cmd}")
-    result = subprocess.run(cmd, check=False, shell=True)
+
+    with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
+        result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
 
     if result.returncode == 0:
         registry["instances"][name]["status"] = "running"
         save_registry(registry)
-        print(f"Instance '{name}' started successfully!")
-        return True
-    print(f"Failed to start instance '{name}'")
-    return False
+        console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully!")
+    else:
+        console.print(f"[red]✗[/red] Failed to start instance '{name}'")
+        if result.stderr:
+            console.print(f"[dim]{result.stderr}[/dim]")
+        raise typer.Exit(1)
 
 
-def stop_instance(name):
-    """Stop an instance."""
+@app.command()
+def stop(name: str = typer.Argument(..., help="Instance name to stop")):
+    """Stop a running Mindroom instance."""
     registry = load_registry()
     if name not in registry["instances"]:
-        print(f"Instance '{name}' not found!")
-        return False
+        console.print(f"[red]✗[/red] Instance '{name}' not found!")
+        raise typer.Exit(1)
 
     cmd = f"docker compose -p {name} down"
-    print(f"Running: {cmd}")
-    result = subprocess.run(cmd, check=False, shell=True)
+
+    with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
+        result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
 
     if result.returncode == 0:
         registry["instances"][name]["status"] = "stopped"
         save_registry(registry)
-        print(f"Instance '{name}' stopped!")
-        return True
-    print(f"Failed to stop instance '{name}'")
-    return False
+        console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' stopped!")
+    else:
+        console.print(f"[red]✗[/red] Failed to stop instance '{name}'")
+        if result.stderr:
+            console.print(f"[dim]{result.stderr}[/dim]")
+        raise typer.Exit(1)
 
 
+@app.command("list")
 def list_instances():
-    """List all instances."""
+    """List all configured instances."""
     registry = load_registry()
     instances = registry["instances"]
 
     if not instances:
-        print("No instances configured.")
+        console.print("[yellow]No instances configured.[/yellow]")
+        console.print("\n[dim]Create your first instance with:[/dim]")
+        console.print("  [cyan]./instance_manager.py create my-instance[/cyan]")
         return
 
-    print("\nInstances:")
-    print("-" * 60)
+    table = Table(title="Mindroom Instances", show_header=True, header_style="bold magenta")
+    table.add_column("Name", style="cyan", no_wrap=True)
+    table.add_column("Status", justify="center")
+    table.add_column("Backend", justify="right")
+    table.add_column("Frontend", justify="right")
+    table.add_column("Domain")
+    table.add_column("Data Directory")
+
     for name, config in instances.items():
-        print(f"{name}:")
-        print(f"  Status: {config['status']}")
-        print(f"  Ports: {config['backend_port']} (backend), {config['frontend_port']} (frontend)")
-        print(f"  Domain: {config['domain']}")
-        print(f"  Data: {config['data_dir']}")
-        print()
+        status = config["status"]
+        if status == "running":
+            status_display = "[green]● running[/green]"
+        elif status == "stopped":
+            status_display = "[red]● stopped[/red]"
+        else:
+            status_display = "[yellow]● created[/yellow]"
 
+        table.add_row(
+            name,
+            status_display,
+            str(config["backend_port"]),
+            str(config["frontend_port"]),
+            config["domain"],
+            config["data_dir"],
+        )
 
-def main():
-    """Main entry point."""
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  python instance_manager.py create <name> [domain]")
-        print("  python instance_manager.py start <name>")
-        print("  python instance_manager.py stop <name>")
-        print("  python instance_manager.py list")
-        sys.exit(1)
-
-    command = sys.argv[1]
-
-    if command == "create":
-        if len(sys.argv) < 3:
-            print("Usage: python instance_manager.py create <name> [domain]")
-            sys.exit(1)
-        name = sys.argv[2]
-        domain = sys.argv[3] if len(sys.argv) > 3 else None
-        create_instance(name, domain)
-
-    elif command == "start":
-        if len(sys.argv) < 3:
-            print("Usage: python instance_manager.py start <name>")
-            sys.exit(1)
-        start_instance(sys.argv[2])
-
-    elif command == "stop":
-        if len(sys.argv) < 3:
-            print("Usage: python instance_manager.py stop <name>")
-            sys.exit(1)
-        stop_instance(sys.argv[2])
-
-    elif command == "list":
-        list_instances()
-
-    else:
-        print(f"Unknown command: {command}")
-        sys.exit(1)
+    console.print(table)
 
 
 if __name__ == "__main__":
-    main()
+    app()

@@ -7,7 +7,7 @@ This is the simplest possible federation setup for Mindroom. Each instance runs 
 
 ### 1. Create an instance
 ```bash
-python instance_manager.py create myinstance mydomain.com
+./instance_manager.py create myinstance --domain mydomain.com
 ```
 
 ### 2. Configure the instance
@@ -15,17 +15,23 @@ Edit `.env.myinstance` and add your API keys.
 
 ### 3. Start the instance
 ```bash
-python instance_manager.py start myinstance
+./instance_manager.py start myinstance
 ```
 
 ### 4. List all instances
 ```bash
-python instance_manager.py list
+./instance_manager.py list
 ```
 
 ### 5. Stop an instance
 ```bash
-python instance_manager.py stop myinstance
+./instance_manager.py stop myinstance
+```
+
+### Get help
+```bash
+./instance_manager.py --help
+./instance_manager.py create --help
 ```
 
 ## How It Works
