@@ -222,6 +222,24 @@ def create(  # noqa: PLR0912, PLR0915
             if matrix == "tuwunel":
                 f.write("MATRIX_ALLOW_REGISTRATION=true\n")
                 f.write("MATRIX_ALLOW_FEDERATION=true\n")
+
+                # Generate well-known files for federation
+                matrix_server_name = f"m-{instance.domain}"
+
+                # Server well-known (for federation discovery)
+                server_wellknown = {"m.server": f"{matrix_server_name}:443"}
+                with (SCRIPT_DIR / f"well-known-{name}.json").open("w") as wf:
+                    json.dump(server_wellknown, wf, indent=2)
+
+                # Client well-known (for client discovery)
+                client_wellknown = {
+                    "m.homeserver": {
+                        "base_url": f"https://{matrix_server_name}",
+                    },
+                }
+                with (SCRIPT_DIR / f"well-known-client-{name}.json").open("w") as wf:
+                    json.dump(client_wellknown, wf, indent=2)
+
             elif matrix == "synapse":
                 f.write("POSTGRES_PASSWORD=synapse_password\n")
                 f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
@@ -413,6 +431,14 @@ def start(  # noqa: PLR0912, PLR0915
     with console.status(f"[yellow]{status_msg}[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
 
+    # If Matrix is enabled, also start the well-known service for federation
+    if result.returncode == 0 and matrix_type == "tuwunel":
+        wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
+        with console.status(f"[yellow]Starting federation well-known service for '{name}'...[/yellow]"):
+            wellknown_result = subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
+            if wellknown_result.returncode != 0:
+                console.print("[yellow]ℹ[/yellow] Well-known service start skipped (optional for federation)")  # noqa: RUF001
+
     if result.returncode == 0:
         # Update status to reflect what's actually running
         if no_frontend:
@@ -524,6 +550,11 @@ def restart(
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
         result = subprocess.run(start_cmd, check=False, shell=True, capture_output=True, text=True)
 
+    # If Matrix is enabled, also restart the well-known service for federation
+    if result.returncode == 0 and matrix_type == "tuwunel":
+        wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
+        subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
+
     if result.returncode == 0:
         # Update status
         if no_frontend:
@@ -622,6 +653,14 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
         env_file = SCRIPT_DIR / f".env.{name}"
         if env_file.exists():
             env_file.unlink()
+
+        # Remove well-known files if they exist (for Matrix federation)
+        wellknown_server = SCRIPT_DIR / f"well-known-{name}.json"
+        if wellknown_server.exists():
+            wellknown_server.unlink()
+        wellknown_client = SCRIPT_DIR / f"well-known-client-{name}.json"
+        if wellknown_client.exists():
+            wellknown_client.unlink()
 
         # Update registry - remove instance and free up ports
         del registry.instances[name]
