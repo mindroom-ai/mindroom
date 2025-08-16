@@ -8,16 +8,20 @@ services:
     restart: always
     env_file:
       - ../.env
+    user: "${UID:-1000}:${GID:-1000}"
     ports:
       - "${BACKEND_PORT:-8765}:8765"
     volumes:
       - ${DATA_DIR:-/mnt/data/mindroom}/config:/app/config
       - ${DATA_DIR:-/mnt/data/mindroom}/tmp:/app/tmp
       - ${DATA_DIR:-/mnt/data/mindroom}/logs:/app/logs
+      - ${DATA_DIR:-/mnt/data/mindroom}/mindroom:/app/.mindroom
+      - ${DATA_DIR:-/mnt/data/mindroom}/mem0:/app/.mem0
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - STORAGE_PATH=/app/tmp
       - BACKEND_PORT=${BACKEND_PORT:-8765}
+      - HOME=/app
     networks:
       - mindroom-network
     labels:

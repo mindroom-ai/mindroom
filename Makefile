@@ -45,8 +45,8 @@ list:
 # Cleanup commands
 clean:
 	@echo "🧹 Removing instance: $(INSTANCE)"
-	cd deploy && ./deploy remove $(INSTANCE) --force
-	@echo "✅ Instance $(INSTANCE) removed"
+	@cd deploy && ./deploy remove $(INSTANCE) --force || true
+	@echo "✅ Cleanup complete"
 
 reset:
 	@echo "🔄 Full reset: removing all instances..."

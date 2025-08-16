@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar
@@ -139,7 +140,17 @@ def extract_agent_name(sender_id: str, config: Config) -> str | None:
 
 
 def extract_server_name_from_homeserver(homeserver: str) -> str:
-    """Extract server name from a homeserver URL like "http://localhost:8008"."""
+    """Extract server name from a homeserver URL like "http://localhost:8008".
+
+    If MATRIX_SERVER_NAME environment variable is set, use that instead.
+    This is needed for federation setups where the internal hostname differs
+    from the actual Matrix server name.
+    """
+    # Check for explicit server name override (for federation/docker setups)
+    if server_name := os.getenv("MATRIX_SERVER_NAME"):
+        return server_name
+
+    # Otherwise extract from homeserver URL
     # Remove protocol
     server_part = homeserver.split("://", 1)[1] if "://" in homeserver else homeserver
 

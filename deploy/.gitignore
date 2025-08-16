@@ -4,3 +4,4 @@ deploy/.env.*
 deploy/instances.json
 deploy/instance_data/
 *.yaml.backup
+deploy/matrix-data/

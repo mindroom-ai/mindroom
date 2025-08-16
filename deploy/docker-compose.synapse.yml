@@ -37,8 +37,6 @@ services:
   synapse:
     image: matrixdotorg/synapse:latest
     container_name: ${INSTANCE_NAME:-mindroom}-synapse
-    entrypoint: ["/bin/bash", "-c"]
-    command: ["sleep 2 && /data/entrypoint.sh"]
     environment:
       SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
       SYNAPSE_SERVER_NAME: ${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
@@ -48,8 +46,6 @@ services:
     volumes:
       # Bind mount the entire synapse config directory (like the original)
       - ${DATA_DIR:-./instance_data}/synapse:/data
-      # Named volume for media (persists across recreates)
-      - synapse-media:/data/media_store
     ports:
       - "${MATRIX_PORT:-8008}:8008"
     healthcheck:
@@ -86,5 +82,3 @@ volumes:
     name: ${INSTANCE_NAME:-mindroom}-postgres-data
   redis-data:
     name: ${INSTANCE_NAME:-mindroom}-redis-data
-  synapse-media:
-    name: ${INSTANCE_NAME:-mindroom}-synapse-media

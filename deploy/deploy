@@ -168,6 +168,8 @@ def create(
     if matrix == "synapse":
         synapse_dir = Path(data_dir) / "synapse"
         synapse_dir.mkdir(parents=True, exist_ok=True)
+        # Create media_store directory for Synapse
+        (synapse_dir / "media_store").mkdir(parents=True, exist_ok=True)
 
         # Copy and customize Synapse config template
         template_dir = SCRIPT_DIR / "synapse-template"
@@ -226,10 +228,17 @@ def start(name: str = typer.Argument("default", help="Instance name to start")) 
         console.print(f"[red]✗[/red] Environment file .env.{name} not found!")
         raise typer.Exit(1)
 
-    # Create data directories
+    # Create data directories with proper permissions
     instance = registry["instances"][name]
-    for subdir in ["config", "tmp", "logs"]:
-        Path(f"{instance['data_dir']}/{subdir}").mkdir(parents=True, exist_ok=True)
+    for subdir in ["config", "tmp", "logs", "mindroom", "mindroom/credentials", "mem0"]:
+        dir_path = Path(f"{instance['data_dir']}/{subdir}")
+        dir_path.mkdir(parents=True, exist_ok=True)
+        # Ensure proper ownership if we can
+        try:
+            import os
+            os.chown(dir_path, os.getuid(), os.getgid())
+        except (OSError, PermissionError):
+            pass  # Ignore if we can't change ownership
 
     # Create Matrix data directories if enabled
     matrix_type = instance.get("matrix_type")
@@ -237,7 +246,7 @@ def start(name: str = typer.Argument("default", help="Instance name to start")) 
         Path(f"{instance['data_dir']}/tuwunel").mkdir(parents=True, exist_ok=True)
     elif matrix_type == "synapse":
         Path(f"{instance['data_dir']}/synapse").mkdir(parents=True, exist_ok=True)
-        Path(f"{instance['data_dir']}/synapse/media").mkdir(parents=True, exist_ok=True)
+        Path(f"{instance['data_dir']}/synapse/media_store").mkdir(parents=True, exist_ok=True)
         Path(f"{instance['data_dir']}/postgres").mkdir(parents=True, exist_ok=True)
         Path(f"{instance['data_dir']}/redis").mkdir(parents=True, exist_ok=True)
 
