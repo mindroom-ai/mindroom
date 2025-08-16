@@ -1,7 +1,6 @@
 # Multi-stage build for fast rebuilds
-FROM python:3.13-slim as base
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as base
 RUN apt-get update && apt-get install -y git curl build-essential && rm -rf /var/lib/apt/lists/*
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 # Dependencies stage - only rebuild if deps change
 FROM base as deps
