@@ -243,6 +243,24 @@ def create(  # noqa: PLR0912, PLR0915
             elif matrix == "synapse":
                 f.write("POSTGRES_PASSWORD=synapse_password\n")
                 f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
+                f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
+
+                # Generate well-known files for Synapse federation too
+                matrix_server_name = f"m-{instance.domain}"
+
+                # Server well-known (for federation discovery)
+                server_wellknown = {"m.server": f"{matrix_server_name}:443"}
+                with (SCRIPT_DIR / f"well-known-{name}.json").open("w") as wf:
+                    json.dump(server_wellknown, wf, indent=2)
+
+                # Client well-known (for client discovery)
+                client_wellknown = {
+                    "m.homeserver": {
+                        "base_url": f"https://{matrix_server_name}",
+                    },
+                }
+                with (SCRIPT_DIR / f"well-known-client-{name}.json").open("w") as wf:
+                    json.dump(client_wellknown, wf, indent=2)
 
     # If Synapse, prepare the config directory
     if matrix == "synapse":
@@ -432,7 +450,7 @@ def start(  # noqa: PLR0912, PLR0915
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
 
     # If Matrix is enabled, also start the well-known service for federation
-    if result.returncode == 0 and matrix_type == "tuwunel":
+    if result.returncode == 0 and matrix_type in ["tuwunel", "synapse"]:
         wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
         with console.status(f"[yellow]Starting federation well-known service for '{name}'...[/yellow]"):
             wellknown_result = subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
@@ -551,7 +569,7 @@ def restart(
         result = subprocess.run(start_cmd, check=False, shell=True, capture_output=True, text=True)
 
     # If Matrix is enabled, also restart the well-known service for federation
-    if result.returncode == 0 and matrix_type == "tuwunel":
+    if result.returncode == 0 and matrix_type in ["tuwunel", "synapse"]:
         wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
         subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
 
