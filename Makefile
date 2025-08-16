@@ -9,14 +9,15 @@ MATRIX ?= tuwunel
 help:
 	@echo "mindroom - Federation commands:"
 	@echo "-------------------------------"
-	@echo "create  - Create new instance (INSTANCE=name MATRIX=tuwunel|synapse|none)"
-	@echo "start   - Start instance (INSTANCE=name)"
-	@echo "stop    - Stop instance (INSTANCE=name)"
-	@echo "list    - List all instances"
-	@echo "clean   - Clean instance data (INSTANCE=name)"
-	@echo "reset   - Full reset: remove all instances and data"
-	@echo "logs    - View logs (INSTANCE=name)"
-	@echo "shell   - Shell into backend container (INSTANCE=name)"
+	@echo "create        - Create new instance (INSTANCE=name MATRIX=tuwunel|synapse|none)"
+	@echo "start         - Start instance with all services (INSTANCE=name)"
+	@echo "start-backend - Start backend + Matrix only, no frontend (INSTANCE=name)"
+	@echo "stop          - Stop instance (INSTANCE=name)"
+	@echo "list          - List all instances"
+	@echo "clean         - Clean instance data (INSTANCE=name)"
+	@echo "reset         - Full reset: remove all instances and data"
+	@echo "logs          - View logs (INSTANCE=name)"
+	@echo "shell         - Shell into backend container (INSTANCE=name)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make create                        # Create default instance with Tuwunel"
@@ -35,6 +36,9 @@ create:
 
 start:
 	cd deploy && ./deploy start $(INSTANCE)
+
+start-backend:
+	cd deploy && ./deploy start $(INSTANCE) --no-frontend
 
 stop:
 	cd deploy && ./deploy stop $(INSTANCE)

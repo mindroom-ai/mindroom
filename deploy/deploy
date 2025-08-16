@@ -12,6 +12,7 @@ No over-engineering, just the basics.
 # ruff: noqa: C901  # complexity is acceptable for CLI commands
 
 import base64
+import contextlib
 import json
 import os
 import secrets
@@ -229,7 +230,10 @@ def create(
 
 
 @app.command()
-def start(name: str = typer.Argument("default", help="Instance name to start")) -> None:
+def start(
+    name: str = typer.Argument("default", help="Instance name to start"),
+    no_frontend: bool = typer.Option(False, "--no-frontend", help="Start without frontend (for development)")
+) -> None:
     """Start a Mindroom instance."""
     registry = load_registry()
     if name not in registry["instances"]:
@@ -247,11 +251,8 @@ def start(name: str = typer.Argument("default", help="Instance name to start")) 
         dir_path = Path(f"{instance['data_dir']}/{subdir}")
         dir_path.mkdir(parents=True, exist_ok=True)
         # Ensure proper ownership if we can
-        try:
-            import os
+        with contextlib.suppress(OSError, PermissionError):
             os.chown(dir_path, os.getuid(), os.getgid())
-        except (OSError, PermissionError):
-            pass  # Ignore if we can't change ownership
 
     # Create Matrix data directories if enabled
     matrix_type = instance.get("matrix_type")
@@ -293,20 +294,47 @@ def start(name: str = typer.Argument("default", help="Instance name to start")) 
     project_root = SCRIPT_DIR.parent
     env_file_relative = f"deploy/.env.{name}"
 
-    if matrix_type == "tuwunel":
-        cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml -f deploy/docker-compose.tuwunel.yml -p {name} up -d --build"
-    elif matrix_type == "synapse":
-        cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml -f deploy/docker-compose.synapse.yml -p {name} up -d --build"
-    else:
-        cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml -p {name} up -d --build"
+    # Build the docker compose command
+    base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
 
-    with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
+    if matrix_type == "tuwunel":
+        compose_files = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
+    elif matrix_type == "synapse":
+        compose_files = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+    else:
+        compose_files = base_cmd
+
+    # Add services to start (backend always, frontend only if not --no-frontend)
+    services = "backend"
+    if matrix_type:
+        # Add Matrix-related services
+        if matrix_type == "synapse":
+            services += " postgres redis synapse"
+        elif matrix_type == "tuwunel":
+            services += " tuwunel"
+
+    if not no_frontend:
+        services = "frontend " + services  # Add frontend to the list
+        status_msg = f"Starting instance '{name}'..."
+    else:
+        status_msg = f"Starting instance '{name}' (backend only)..."
+        console.print("[yellow]ℹ[/yellow] Starting without frontend (development mode)")
+
+    cmd = f"{compose_files} -p {name} up -d --build {services}"
+
+    with console.status(f"[yellow]{status_msg}[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
 
     if result.returncode == 0:
         registry["instances"][name]["status"] = "running"
         save_registry(registry)
-        console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully!")
+        if no_frontend:
+            console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully (backend only)!")
+            console.print(f"  [dim]Backend:[/dim] http://localhost:{instance['backend_port']}")
+            if matrix_type:
+                console.print(f"  [dim]Matrix:[/dim] http://localhost:{instance.get('matrix_port', 8008)}")
+        else:
+            console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully!")
     else:
         console.print(f"[red]✗[/red] Failed to start instance '{name}'")
         if result.stderr:
