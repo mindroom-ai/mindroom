@@ -59,6 +59,19 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Federation requires Matrix domains to resolve to Traefik
+    # For LOCAL deployments: Add your Matrix domains here pointing to your Docker network gateway
+    # To find your gateway IP, run: docker network inspect mynetwork | jq '.[0].IPAM.Config[0].Gateway'
+    # For PUBLIC deployments: Remove the entire extra_hosts section
+    extra_hosts:
+      - "m-default.mindroom.chat:172.20.0.1"
+      - "m-alt.mindroom.chat:172.20.0.1"
+      - "m-alt2.mindroom.chat:172.20.0.1"
+      - "m-syntest.mindroom.chat:172.20.0.1"
+      - "m-default.localhost:172.20.0.1"
+      - "m-alt.localhost:172.20.0.1"
+      - "m-alt2.localhost:172.20.0.1"
+      - "m-syntest.localhost:172.20.0.1"
     networks:
       - mindroom-network
       - mynetwork  # Add Traefik network

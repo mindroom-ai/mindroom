@@ -40,6 +40,10 @@ log_config: "/data/log.config"
 enable_registration: true
 enable_registration_without_verification: true
 
+# Allow federation to private IPs for local development
+# WARNING: Do not use this in production!
+federation_ip_range_blacklist: []
+
 # ========================================
 # COMPLETE RATE LIMITING CONFIGURATION
 # All values set to 10000 to effectively disable rate limiting

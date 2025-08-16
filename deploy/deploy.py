@@ -188,6 +188,55 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
                 f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
 
 
+def _verify_extra_hosts_for_federation(matrix_type: MatrixType | None, instances: dict[str, Instance]) -> None:
+    """Verify that docker-compose files have required extra_hosts entries for federation."""
+    if not matrix_type:
+        return
+
+    # Get all active Matrix domains that need to be in extra_hosts
+    required_domains = set()
+    for inst in instances.values():
+        if inst.matrix_type:
+            required_domains.add(f"m-{inst.domain}")
+
+    if not required_domains:
+        return
+
+    # Check the appropriate docker-compose file
+    compose_file = SCRIPT_DIR / f"docker-compose.{matrix_type.value}.yml"
+    if not compose_file.exists():
+        return
+
+    with compose_file.open() as f:
+        content = f.read()
+
+    # Check if extra_hosts section exists
+    if "extra_hosts:" not in content:
+        console.print("[yellow]⚠️  Federation Warning:[/yellow] Missing extra_hosts configuration")
+        console.print(f"[dim]Add the following to {compose_file.name} under the {matrix_type.value} service:[/dim]")
+        console.print("\n    extra_hosts:")
+        for domain in sorted(required_domains):
+            console.print(f'      - "{domain}:172.20.0.1"')
+        console.print(
+            "\n[dim]To find your gateway IP: docker network inspect mynetwork | jq '.[0].IPAM.Config[0].Gateway'[/dim]",
+        )
+        raise typer.Exit(1)
+
+    # Check which domains are missing
+    missing_domains = []
+    for domain in required_domains:
+        if f'"{domain}:' not in content and f"'{domain}:" not in content:
+            missing_domains.append(domain)
+
+    if missing_domains:
+        console.print(f"[yellow]⚠️  Federation Warning:[/yellow] Missing domains in extra_hosts for {compose_file.name}")
+        console.print("[dim]Add these entries to the extra_hosts section:[/dim]")
+        for domain in sorted(missing_domains):
+            console.print(f'      - "{domain}:172.20.0.1"')
+        console.print("\n[dim]This is required for local federation to work properly.[/dim]")
+        raise typer.Exit(1)
+
+
 def _create_wellknown_files(name: str, instance: Instance) -> None:
     """Create well-known files for Matrix federation."""
     matrix_server_name = f"m-{instance.domain}"
@@ -357,8 +406,12 @@ def start(  # noqa: PLR0912, PLR0915
         console.print(f"[red]✗[/red] Environment file .env.{name} not found!")
         raise typer.Exit(1)
 
-    # Create data directories with proper permissions
+    # Verify federation configuration if Matrix is enabled
     instance = registry.instances[name]
+    if instance.matrix_type:
+        _verify_extra_hosts_for_federation(instance.matrix_type, registry.instances)
+
+    # Create data directories with proper permissions
     # Use UID/GID 1000 for Docker containers (standard non-root user)
     docker_uid, docker_gid = 1000, 1000
 
@@ -447,7 +500,7 @@ def start(  # noqa: PLR0912, PLR0915
     # Build the docker compose command
     base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
 
-    if matrix_type == "tuwunel":
+    if matrix_type == MatrixType.TUWUNEL:
         compose_files = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
     elif matrix_type == MatrixType.SYNAPSE:
         compose_files = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
@@ -458,9 +511,9 @@ def start(  # noqa: PLR0912, PLR0915
     services = "backend"
     if matrix_type:
         # Add Matrix-related services
-        if matrix_type == "synapse":
+        if matrix_type == MatrixType.SYNAPSE:
             services += " postgres redis synapse"
-        elif matrix_type == "tuwunel":
+        elif matrix_type == MatrixType.TUWUNEL:
             services += " tuwunel"
 
     if not no_frontend:
@@ -476,7 +529,7 @@ def start(  # noqa: PLR0912, PLR0915
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
 
     # If Matrix is enabled, also start the well-known service for federation
-    if result.returncode == 0 and matrix_type in ["tuwunel", "synapse"]:
+    if result.returncode == 0 and matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
         wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
         with console.status(f"[yellow]Starting federation well-known service for '{name}'...[/yellow]"):
             wellknown_result = subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
@@ -543,6 +596,11 @@ def restart(  # noqa: PLR0912, PLR0915
         raise typer.Exit(1)
 
     instance = registry.instances[name]
+
+    # Verify federation configuration if Matrix is enabled
+    if instance.matrix_type:
+        _verify_extra_hosts_for_federation(instance.matrix_type, registry.instances)
+
     console.print(f"[yellow]Restarting instance '[cyan]{name}[/cyan]'...[/yellow]")
 
     # Stop the instance
@@ -571,9 +629,9 @@ def restart(  # noqa: PLR0912, PLR0915
     env_file_relative = f"deploy/.env.{name}"
     base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
 
-    if matrix_type == "tuwunel":
+    if matrix_type == MatrixType.TUWUNEL:
         compose_files = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
-    elif matrix_type == "synapse":
+    elif matrix_type == MatrixType.SYNAPSE:
         compose_files = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
     else:
         compose_files = base_cmd
@@ -581,9 +639,9 @@ def restart(  # noqa: PLR0912, PLR0915
     # Add services to start
     services = "backend"
     if matrix_type:
-        if matrix_type == "synapse":
+        if matrix_type == MatrixType.SYNAPSE:
             services += " postgres redis synapse"
-        elif matrix_type == "tuwunel":
+        elif matrix_type == MatrixType.TUWUNEL:
             services += " tuwunel"
 
     if not no_frontend:
@@ -595,7 +653,7 @@ def restart(  # noqa: PLR0912, PLR0915
         result = subprocess.run(start_cmd, check=False, shell=True, capture_output=True, text=True)
 
     # If Matrix is enabled, also restart the well-known service for federation
-    if result.returncode == 0 and matrix_type in ["tuwunel", "synapse"]:
+    if result.returncode == 0 and matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
         wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
         subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
 
