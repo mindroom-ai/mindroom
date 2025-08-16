@@ -1,6 +1,6 @@
 # Makefile for mindroom - Federation deployment
 
-.PHONY: help create start stop list clean reset test logs shell
+.PHONY: help create start stop list clean reset logs shell
 
 # Default instance name
 INSTANCE ?= default
@@ -15,7 +15,6 @@ help:
 	@echo "list    - List all instances"
 	@echo "clean   - Clean instance data (INSTANCE=name)"
 	@echo "reset   - Full reset: remove all instances and data"
-	@echo "test    - Test bot connection (INSTANCE=name)"
 	@echo "logs    - View logs (INSTANCE=name)"
 	@echo "shell   - Shell into backend container (INSTANCE=name)"
 	@echo ""
@@ -63,14 +62,6 @@ reset:
 	find . -type f -name "*.pyc" -delete
 	@echo "✅ Reset complete! Use 'make create' to start fresh."
 
-# Testing
-test:
-	@if [ -f "deploy/.env.$(INSTANCE)" ]; then \
-		echo "Testing instance: $(INSTANCE)"; \
-		cd deploy && source .env.$(INSTANCE) && python ../scripts/mindroom.py test; \
-	else \
-		echo "❌ Instance $(INSTANCE) not found. Create it first with: make create INSTANCE=$(INSTANCE)"; \
-	fi
 
 # Development helpers
 logs:
