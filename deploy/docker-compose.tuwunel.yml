@@ -11,33 +11,14 @@ services:
       - "${MATRIX_PORT:-8448}:6167"
     volumes:
       - ${DATA_DIR:-./instance_data}/${INSTANCE_NAME:-mindroom}/tuwunel:/var/lib/tuwunel
-      # Optional: Mount config file if you prefer file-based configuration
-      # - ./tuwunel.toml:/etc/tuwunel.toml:ro
+      - ./tuwunel.toml:/etc/tuwunel.toml:ro
+    command: ["-c", "/etc/tuwunel.toml"]
     environment:
+      # Instance-specific overrides via environment variables
       - TUWUNEL_SERVER_NAME=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
       - TUWUNEL_DATABASE_PATH=/var/lib/tuwunel
-      - TUWUNEL_PORT=6167
-      - TUWUNEL_ADDRESS=0.0.0.0
-      # Registration - open for development
-      - TUWUNEL_ALLOW_REGISTRATION=true
-      - TUWUNEL_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE=true
-      # Performance settings for development
-      - TUWUNEL_MAX_REQUEST_SIZE=104857600  # 100MB for large media
-      - TUWUNEL_MAX_FETCH_PREV_EVENTS=10000  # Allow fetching many events
-      - TUWUNEL_CACHE_CAPACITY_MODIFIER=2.0  # Double cache sizes
-      - TUWUNEL_DB_CACHE_CAPACITY_MB=512.0
-      - TUWUNEL_DB_WRITE_BUFFER_CAPACITY_MB=256.0
-      # Timeouts - very permissive for development
-      - TUWUNEL_CLIENT_REQUEST_TIMEOUT=600
-      - TUWUNEL_CLIENT_RESPONSE_TIMEOUT=300
-      - TUWUNEL_FEDERATION_TIMEOUT=600
-      # Features
+      - TUWUNEL_PORT=${TUWUNEL_INTERNAL_PORT:-6167}
       - TUWUNEL_ALLOW_FEDERATION=${MATRIX_ALLOW_FEDERATION:-false}
-      - TUWUNEL_ALLOW_ENCRYPTION=true
-      - TUWUNEL_ALLOW_ROOM_CREATION=true
-      - TUWUNEL_ALLOW_GUEST_REGISTRATION=true
-      # Logging
-      - TUWUNEL_LOG=info
     networks:
       - mindroom-network
     healthcheck:
