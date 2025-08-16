@@ -12,11 +12,11 @@ services:
     ports:
       - "${BACKEND_PORT:-8765}:8765"
     volumes:
-      - ${DATA_DIR:-/mnt/data/mindroom}/config:/app/config
-      - ${DATA_DIR:-/mnt/data/mindroom}/tmp:/app/tmp
-      - ${DATA_DIR:-/mnt/data/mindroom}/logs:/app/logs
-      - ${DATA_DIR:-/mnt/data/mindroom}/mindroom:/app/.mindroom
-      - ${DATA_DIR:-/mnt/data/mindroom}/mem0:/app/.mem0
+      - ${DATA_DIR}/config:/app/config
+      - ${DATA_DIR}/tmp:/app/tmp
+      - ${DATA_DIR}/logs:/app/logs
+      - ${DATA_DIR}/mindroom:/app/.mindroom
+      - ${DATA_DIR}/mem0:/app/.mem0
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - STORAGE_PATH=/app/tmp
@@ -39,8 +39,8 @@ services:
     ports:
       - "${FRONTEND_PORT:-3003}:3003"
     volumes:
-      - ${DATA_DIR:-/mnt/data/mindroom}/config:/app/config
-      - ${DATA_DIR:-/mnt/data/mindroom}/logs:/app/logs
+      - ${DATA_DIR}/config:/app/config
+      - ${DATA_DIR}/logs:/app/logs
     environment:
       - BACKEND_PORT=${BACKEND_PORT:-8765}
       - FRONTEND_PORT=${FRONTEND_PORT:-3003}

@@ -44,8 +44,9 @@ services:
       UID: 1000
       GID: 1000
     volumes:
-      # Bind mount the entire synapse config directory (like the original)
-      - ${DATA_DIR:-./instance_data}/synapse:/data
+      # Bind mount the entire synapse config directory
+      # DATA_DIR should be set in the .env file
+      - ${DATA_DIR}/synapse:/data
     ports:
       - "${MATRIX_PORT:-8008}:8008"
     healthcheck:
