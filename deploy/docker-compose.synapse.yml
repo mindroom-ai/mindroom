@@ -39,7 +39,7 @@ services:
     container_name: ${INSTANCE_NAME:-mindroom}-synapse
     environment:
       SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
-      SYNAPSE_SERVER_NAME: ${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
+      SYNAPSE_SERVER_NAME: m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}
       SYNAPSE_REPORT_STATS: "no"
       UID: 1000
       GID: 1000
@@ -49,6 +49,7 @@ services:
       - ${DATA_DIR}/synapse:/data
     ports:
       - "${MATRIX_PORT:-8008}:8008"
+      - "${MATRIX_FED_PORT:-8448}:8448"  # Federation port
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
       interval: 10s
@@ -62,12 +63,33 @@ services:
         condition: service_healthy
     networks:
       - mindroom-network
+      - mynetwork  # Add Traefik network
+    labels:
+      - traefik.enable=true
+
+      # Production HTTPS route (m-mything.lab.mydomain.com)
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.tls=true
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.tls.certresolver=le
+      - traefik.http.services.${INSTANCE_NAME}-matrix.loadbalancer.server.port=8008
+
+      # Local HTTP route (m-mything.local)
+      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.rule=Host(`m-${INSTANCE_NAME}.local`)
+      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.entrypoints=web
+      - traefik.http.services.${INSTANCE_NAME}-matrix-local.loadbalancer.server.port=8008
+
+      # Federation on port 8448 (both production and local)
+      - traefik.http.routers.${INSTANCE_NAME}-fed.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`) || Host(`m-${INSTANCE_NAME}.local`)
+      - traefik.http.routers.${INSTANCE_NAME}-fed.entrypoints=matrix-fed
+      - traefik.http.routers.${INSTANCE_NAME}-fed.tls=true
+      - traefik.http.services.${INSTANCE_NAME}-fed.loadbalancer.server.port=8448
 
   # Update backend to know about Matrix server
   backend:
     environment:
       - MATRIX_HOMESERVER=http://synapse:8008
-      - MATRIX_SERVER_NAME=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
+      - MATRIX_SERVER_NAME=m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}
     depends_on:
       synapse:
         condition: service_healthy
@@ -75,6 +97,8 @@ services:
 networks:
   mindroom-network:
     driver: bridge
+  mynetwork:
+    external: true
 
 volumes:
   # Named volumes for each instance (prefixed with instance name)
