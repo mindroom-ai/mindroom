@@ -265,12 +265,12 @@ defaults:
 memory:
   embedder:
     config:
-      host: http://localhost:11434
+      host: http://pc.local:11434
       model: nomic-embed-text
     provider: ollama
   llm:
     config:
-      host: http://localhost:11434
+      host: http://pc.local:11434
       model: devstral:24b
       temperature: 0.1
       top_p: 1
