@@ -352,7 +352,7 @@ def start(  # noqa: PLR0912, PLR0915
         # Ensure proper ownership and permissions for Docker containers
         with contextlib.suppress(OSError, PermissionError):
             os.chown(dir_path, docker_uid, docker_gid)
-            os.chmod(dir_path, 0o755)
+            dir_path.chmod(0o755)
 
     # Create Matrix data directories if enabled
     matrix_type = instance.matrix_type
@@ -365,7 +365,7 @@ def start(  # noqa: PLR0912, PLR0915
         if tuwunel_dir.exists() and any(tuwunel_dir.iterdir()):
             # Read current server name from env file
             current_server_name = None
-            with open(env_file) as f:
+            with env_file.open() as f:
                 for line in f:
                     if line.startswith("MATRIX_SERVER_NAME="):
                         current_server_name = line.split("=", 1)[1].strip()
@@ -374,7 +374,7 @@ def start(  # noqa: PLR0912, PLR0915
             # If server name changed or we're having issues, clear the database
             # This is safe because Tuwunel will recreate it
             if current_server_name and current_server_name != instance.domain:
-                console.print("[yellow]ℹ[/yellow] Clearing Tuwunel database due to server name change")
+                console.print("[yellow]i[/yellow] Clearing Tuwunel database due to server name change")
                 shutil.rmtree(tuwunel_dir)
                 tuwunel_dir.mkdir(parents=True, exist_ok=True)
         else:
@@ -382,14 +382,14 @@ def start(  # noqa: PLR0912, PLR0915
 
         with contextlib.suppress(OSError, PermissionError):
             os.chown(tuwunel_dir, docker_uid, docker_gid)
-            os.chmod(tuwunel_dir, 0o755)
+            tuwunel_dir.chmod(0o755)
     elif matrix_type == MatrixType.SYNAPSE:
         for matrix_dir in ["synapse", "synapse/media_store", "postgres", "redis"]:
             dir_path = Path(f"{instance.data_dir}/{matrix_dir}")
             dir_path.mkdir(parents=True, exist_ok=True)
             with contextlib.suppress(OSError, PermissionError):
                 os.chown(dir_path, docker_uid, docker_gid)
-                os.chmod(dir_path, 0o755)
+                dir_path.chmod(0o755)
 
         # Copy Synapse config template if needed
         synapse_dir = Path(f"{instance.data_dir}/synapse")
@@ -512,7 +512,7 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
 
 
 @app.command()
-def restart(
+def restart(  # noqa: PLR0912, PLR0915
     name: str = typer.Argument("default", help="Instance name to restart"),
     no_frontend: bool = typer.Option(False, "--no-frontend", help="Skip starting the frontend"),
 ) -> None:
