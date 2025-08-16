@@ -67,6 +67,14 @@ const chatHTML = `
       font-weight: 600;
       color: white;
       font-size: 16px;
+      overflow: hidden;
+      background: #f0f0f0;
+    }
+
+    .avatar img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
     }
 
     .message-content {
@@ -203,7 +211,9 @@ const chatHTML = `
 
       <!-- Assistant joins -->
       <div class="message">
-        <div class="avatar" style="background: linear-gradient(135deg, #667eea, #764ba2);">AI</div>
+        <div class="avatar">
+          <img src="../avatars/agents/general.png" alt="Assistant" />
+        </div>
         <div class="message-content">
           <div class="message-header">
             <span class="username">MindRoom Assistant</span>
@@ -218,7 +228,9 @@ const chatHTML = `
 
       <!-- Client's AI joins -->
       <div class="message">
-        <div class="avatar" style="background: linear-gradient(135deg, #ff6b6b, #feca57);">CA</div>
+        <div class="avatar">
+          <img src="../avatars/agents/analyst.png" alt="Analyst" />
+        </div>
         <div class="message-content">
           <div class="message-header">
             <span class="username">Client's Architect AI</span>
@@ -278,8 +290,9 @@ async function generateMockup() {
       deviceScaleFactor: 2 // High quality
     });
 
-    // Set the HTML content
-    await page.setContent(chatHTML);
+    // Navigate to the HTML file using file:// protocol
+    const htmlPath = path.resolve(__dirname, 'chat-mockup.html');
+    await page.goto(`file://${htmlPath}`, { waitUntil: 'networkidle0' });
 
     // Wait for animations
     await new Promise(resolve => setTimeout(resolve, 1000));
