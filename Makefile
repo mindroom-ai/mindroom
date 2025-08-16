@@ -51,9 +51,11 @@ clean:
 	@echo "✅ Instance $(INSTANCE) cleaned"
 
 reset:
-	@echo "🔄 Full reset: removing all instances and data..."
-	@cd deploy && docker ps -q --filter "name=mindroom-*" | xargs -r docker stop 2>/dev/null || true
-	@cd deploy && docker ps -aq --filter "name=mindroom-*" | xargs -r docker rm 2>/dev/null || true
+	@echo "🔄 Full reset: stopping all instances and removing all data..."
+	@echo "Stopping all running instances..."
+	@docker ps -q --filter "label=com.docker.compose.project" | xargs -r docker stop 2>/dev/null || true
+	@docker ps -aq --filter "label=com.docker.compose.project" | xargs -r docker rm 2>/dev/null || true
+	@echo "Removing all instance data..."
 	rm -rf deploy/instance_data/
 	rm -f deploy/.env.*
 	rm -f deploy/instances.json
