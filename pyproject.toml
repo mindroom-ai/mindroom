@@ -19,6 +19,8 @@ classifiers = [
 dependencies = [
   "agentql",                                     # for AgentQL tool
   "agno[anthropic,google,ollama,openai]>=1.7.6",
+  "aiofiles",                                    # for voice message handling
+  "aiohttp",                                     # for voice message STT API calls
   "apify-client>=1.12.2",                        # for Apify tool
   "arxiv",                                       # for Arxiv tool
   "atlassian-python-api",                        # for Confluence tool

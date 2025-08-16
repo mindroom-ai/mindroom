@@ -75,6 +75,7 @@ from .thread_utils import (
     has_user_responded_after_message,
     should_agent_respond,
 )
+from .voice_handler import VoiceHandler
 
 if TYPE_CHECKING:
     import structlog
@@ -177,6 +178,7 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
     thread_invite_manager: ThreadInviteManager = field(init=False)
+    voice_handler: VoiceHandler = field(init=False)
     invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
@@ -305,11 +307,17 @@ class AgentBot:
         # Initialize response tracker and thread invite manager
         self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
         self.thread_invite_manager = ThreadInviteManager(self.client)
+        self.voice_handler = VoiceHandler(self.config)
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
         self.client.add_event_callback(self._on_message, nio.RoomMessageText)
         self.client.add_event_callback(self._on_reaction, nio.ReactionEvent)
+
+        # Register voice message callbacks (only for router agent to avoid duplicates)
+        if self.agent_name == ROUTER_AGENT_NAME:
+            self.client.add_event_callback(self._on_voice_message, nio.RoomMessageAudio)
+            self.client.add_event_callback(self._on_voice_message, nio.RoomEncryptedAudio)
 
         self.running = True
 
@@ -557,6 +565,25 @@ class AgentBot:
             )
             # Mark the original interactive question as responded
             self.response_tracker.mark_responded(event.reacts_to)
+
+    async def _on_voice_message(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    ) -> None:
+        """Handle voice message events for transcription and processing."""
+        # Only process if voice handler is enabled
+        if not self.voice_handler.enabled:
+            return
+
+        # Don't process our own voice messages
+        if event.sender == self.agent_user.user_id:
+            return
+
+        self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
+
+        # Process the voice message
+        await self.voice_handler.handle_voice_message(self.client, room, event)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None

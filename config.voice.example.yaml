@@ -1,0 +1,51 @@
+# Voice Message Configuration Example
+# Add this section to your config.yaml to enable voice message transcription
+
+# Voice message handling configuration
+voice:
+  # Enable voice message processing
+  enabled: true
+
+  # Speech-to-text configuration
+  stt:
+    # Provider for STT (supports OpenAI-compatible APIs)
+    provider: openai
+
+    # Model name (whisper-1 for OpenAI, or model name for self-hosted)
+    model: whisper-1
+
+    # API key for STT service (optional, uses OPENAI_API_KEY env var by default)
+    # api_key: your-api-key-here
+
+    # For self-hosted STT services (e.g., LocalAI, Ollama with whisper)
+    # host: http://localhost:8080
+
+  # Intelligence configuration for command recognition
+  intelligence:
+    # Model to use for processing transcriptions into commands
+    # This should match one of your configured models
+    model: default
+
+    # Confidence threshold for command recognition (0.0 to 1.0)
+    confidence_threshold: 0.7
+
+# Example with self-hosted STT (e.g., LocalAI)
+# voice:
+#   enabled: true
+#   stt:
+#     provider: openai  # LocalAI provides OpenAI-compatible API
+#     model: whisper-1
+#     host: http://localhost:8080/v1
+#   intelligence:
+#     model: default
+#     confidence_threshold: 0.7
+
+# Example with different AI model for intelligence
+# voice:
+#   enabled: true
+#   stt:
+#     provider: openai
+#     model: whisper-1
+#   intelligence:
+#     model: gpt4o  # Use a more powerful model for better command recognition
+#     confidence_threshold: 0.8

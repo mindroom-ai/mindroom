@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13' and python_full_version < '4'",
@@ -3086,6 +3086,8 @@ source = { editable = "." }
 dependencies = [
     { name = "agentql" },
     { name = "agno", extra = ["anthropic", "google", "ollama", "openai"] },
+    { name = "aiofiles" },
+    { name = "aiohttp" },
     { name = "apify-client" },
     { name = "arxiv" },
     { name = "atlassian-python-api" },
@@ -3203,6 +3205,8 @@ dev = [
 requires-dist = [
     { name = "agentql" },
     { name = "agno", extras = ["anthropic", "google", "ollama", "openai"], specifier = ">=1.7.6" },
+    { name = "aiofiles" },
+    { name = "aiohttp" },
     { name = "apify-client", specifier = ">=1.12.2" },
     { name = "arxiv" },
     { name = "atlassian-python-api" },
