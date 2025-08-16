@@ -27,9 +27,9 @@ services:
         client=https://${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}},
         server=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}:443
         }
-    extra_hosts:
-      - "m-default.mindroom.chat:172.20.0.1"
-      - "m-alt.mindroom.chat:172.20.0.1"
+    # Federation requires hosts to resolve each other
+    # This uses host-gateway which resolves to the Docker host
+    # The actual domains will be dynamically set based on instance configuration
     ulimits:
       nofile:
         soft: 1048567

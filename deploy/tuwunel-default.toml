@@ -1,8 +1,0 @@
-# Tuwunel configuration for default instance
-# Based on main config with instance-specific well-known
-
-# Include all settings from main config
-# (Tuwunel should merge configs or we'll use this as override)
-
-[well_known]
-server = "m-default.mindroom.chat:8448"
