@@ -49,19 +49,14 @@ else
     echo "✅ config.yaml already exists"
 fi
 
-# Set up widget if available
+# Set up frontend if available
 if [ "$SETUP_WIDGET" = true ]; then
     echo ""
-    echo "🎨 Setting up widget UI..."
+    echo "🎨 Setting up frontend UI..."
 
-    if [ -d "widget/backend" ]; then
-        echo "  📦 Installing widget backend dependencies..."
-        (cd widget/backend && uv sync)
-    fi
-
-    if [ -d "widget/frontend" ]; then
-        echo "  📦 Installing widget frontend dependencies..."
-        (cd widget/frontend && pnpm install)
+    if [ -d "frontend" ]; then
+        echo "  📦 Installing frontend dependencies..."
+        (cd frontend && pnpm install)
     fi
 fi
 
