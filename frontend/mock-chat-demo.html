@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mock Chat Demo - MindRoom</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        .demo-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 30px;
+        }
+        .demo-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        .demo-card h2 {
+            margin-top: 0;
+            color: #333;
+        }
+        .chat-preview {
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            height: 400px;
+            background: #f5f5f5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+            font-size: 14px;
+            text-align: center;
+            padding: 20px;
+        }
+        .view-button {
+            display: inline-block;
+            margin-top: 15px;
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            transition: background 0.3s;
+        }
+        .view-button:hover {
+            background: #5a67d8;
+        }
+        .description {
+            color: #666;
+            font-size: 14px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎨 MindRoom Mock Chat Screenshots</h1>
+
+        <div class="demo-grid">
+            <div class="demo-card">
+                <h2>Matrix/Element</h2>
+                <p class="description">Clean, modern interface with message bubbles</p>
+                <div class="chat-preview">
+                    <div>
+                        <p>📱 Matrix Chat Preview</p>
+                        <p>Navigate to <a href="http://localhost:3003/mock-chat" target="_blank">http://localhost:3003/mock-chat</a></p>
+                        <p>The MockChat component will render here with Matrix styling</p>
+                    </div>
+                </div>
+                <a href="http://localhost:3003/mock-chat?platform=matrix" class="view-button" target="_blank">View Live Demo</a>
+            </div>
+
+            <div class="demo-card">
+                <h2>Slack</h2>
+                <p class="description">Familiar workspace chat with reactions and threads</p>
+                <div class="chat-preview">
+                    <div>
+                        <p>💼 Slack Chat Preview</p>
+                        <p>Channel: #general</p>
+                        <p>Features: Reactions ✅, Threads 🧵, Bot badges</p>
+                    </div>
+                </div>
+                <a href="http://localhost:3003/mock-chat?platform=slack" class="view-button" target="_blank">View Live Demo</a>
+            </div>
+
+            <div class="demo-card">
+                <h2>Discord</h2>
+                <p class="description">Gaming-inspired chat with bot badges and rich presence</p>
+                <div class="chat-preview">
+                    <div>
+                        <p>🎮 Discord Chat Preview</p>
+                        <p>Server: MindRoom Dev</p>
+                        <p>Features: Bot badges, Reactions, Round avatars</p>
+                    </div>
+                </div>
+                <a href="http://localhost:3003/mock-chat?platform=discord" class="view-button" target="_blank">View Live Demo</a>
+            </div>
+
+            <div class="demo-card">
+                <h2>Telegram</h2>
+                <p class="description">Secure messaging with directional bubbles</p>
+                <div class="chat-preview">
+                    <div>
+                        <p>✈️ Telegram Chat Preview</p>
+                        <p>Group: Tech Support</p>
+                        <p>Features: Message bubbles, Member count</p>
+                    </div>
+                </div>
+                <a href="http://localhost:3003/mock-chat?platform=telegram" class="view-button" target="_blank">View Live Demo</a>
+            </div>
+
+            <div class="demo-card">
+                <h2>WhatsApp</h2>
+                <p class="description">Popular messaging with green accent colors</p>
+                <div class="chat-preview">
+                    <div>
+                        <p>💬 WhatsApp Chat Preview</p>
+                        <p>Chat: Dev Team</p>
+                        <p>Features: Green bubbles, Timestamps</p>
+                    </div>
+                </div>
+                <a href="http://localhost:3003/mock-chat?platform=whatsapp" class="view-button" target="_blank">View Live Demo</a>
+            </div>
+
+            <div class="demo-card">
+                <h2>Multi-Agent Collaboration</h2>
+                <p class="description">Multiple AI agents working together</p>
+                <div class="chat-preview">
+                    <div>
+                        <p>🤖 Multi-Agent Preview</p>
+                        <p>Agents: Research, Analyst, Writer</p>
+                        <p>Features: Coordinated responses, Thread discussions</p>
+                    </div>
+                </div>
+                <a href="http://localhost:3003/mock-chat?scenario=multi-agent" class="view-button" target="_blank">View Live Demo</a>
+            </div>
+        </div>
+
+        <div style="text-align: center; margin-top: 40px; color: white;">
+            <h2>How to Generate Screenshots</h2>
+            <p>1. Install Chrome/Chromium: <code>sudo apt-get install chromium-browser</code></p>
+            <p>2. Run: <code>node generate-readme-screenshots.cjs</code></p>
+            <p>3. Screenshots will be saved to <code>screenshots/readme/</code></p>
+        </div>
+    </div>
+</body>
+</html>
