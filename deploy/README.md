@@ -9,7 +9,7 @@
 
 ### Using the Instance Manager
 
-The `instance_manager.py` script manages multiple Mindroom instances with optional Matrix server integration.
+The `deploy` script manages multiple Mindroom instances with optional Matrix server integration.
 
 ## Basic Commands
 
@@ -19,16 +19,16 @@ The `instance_manager.py` script manages multiple Mindroom instances with option
 cd deploy
 
 # Basic instance (no Matrix server)
-./instance_manager.py create myapp
+./deploy create myapp
 
 # Instance with lightweight Tuwunel Matrix server
-./instance_manager.py create myapp --matrix tuwunel
+./deploy create myapp --matrix tuwunel
 
 # Instance with full Synapse Matrix server (PostgreSQL + Redis)
-./instance_manager.py create myapp --matrix synapse
+./deploy create myapp --matrix synapse
 
 # Instance with custom domain
-./instance_manager.py create myapp --domain myapp.example.com --matrix tuwunel
+./deploy create myapp --domain myapp.example.com --matrix tuwunel
 ```
 
 ### 2. Configure Your Instance
@@ -49,7 +49,7 @@ GOOGLE_API_KEY=...
 ### 3. Start Your Instance
 
 ```bash
-./instance_manager.py start myapp
+./deploy start myapp
 ```
 
 This will start:
@@ -67,30 +67,30 @@ After starting, your instance will be available at:
 
 To find your ports:
 ```bash
-./instance_manager.py list
+./deploy list
 ```
 
 ### 5. Stop Your Instance
 
 ```bash
-./instance_manager.py stop myapp
+./deploy stop myapp
 ```
 
 ### 6. Remove an Instance
 
 ```bash
 # Stop and remove containers, but keep data
-./instance_manager.py stop myapp
+./deploy stop myapp
 
 # Fully remove instance (including data)
-./instance_manager.py remove myapp
+./deploy remove myapp
 ```
 
 ## Managing Multiple Instances
 
 ### List All Instances
 ```bash
-./instance_manager.py list
+./deploy list
 ```
 
 Output:
@@ -110,22 +110,22 @@ Output:
 ### Running Multiple Instances Simultaneously
 ```bash
 # Create and start production instance with Synapse
-./instance_manager.py create prod --domain prod.mindroom.com --matrix synapse
+./deploy create prod --domain prod.mindroom.com --matrix synapse
 nano .env.prod  # Add API keys
-./instance_manager.py start prod
+./deploy start prod
 
 # Create and start development instance with Tuwunel
-./instance_manager.py create dev --domain dev.mindroom.com --matrix tuwunel
+./deploy create dev --domain dev.mindroom.com --matrix tuwunel
 nano .env.dev  # Add API keys
-./instance_manager.py start dev
+./deploy start dev
 
 # Create and start test instance without Matrix
-./instance_manager.py create test
+./deploy create test
 nano .env.test  # Add API keys
-./instance_manager.py start test
+./deploy start test
 
 # All three instances now running on different ports
-./instance_manager.py list
+./deploy list
 ```
 
 ## Matrix Server Options
@@ -208,7 +208,7 @@ docker stop $(docker ps -q)
 ### Clean Up Everything
 ```bash
 # Stop all instances
-./instance_manager.py reset
+./deploy reset
 
 # Remove all Docker resources
 docker system prune -a
@@ -273,7 +273,7 @@ OPENROUTER_API_KEY=
 OLLAMA_HOST=
 ```
 
-### Auto-generated (set by instance_manager.py)
+### Auto-generated (set by deploy)
 ```env
 # Instance configuration
 INSTANCE_NAME=myapp
@@ -292,10 +292,10 @@ MATRIX_SERVER_NAME=myapp.localhost
 ### Development Setup
 ```bash
 # Create a dev instance with all features
-./instance_manager.py create dev --matrix tuwunel
+./deploy create dev --matrix tuwunel
 echo "OPENAI_API_KEY=sk-..." >> .env.dev
 echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env.dev
-./instance_manager.py start dev
+./deploy start dev
 
 # Access at http://localhost:3004
 ```
@@ -303,7 +303,7 @@ echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env.dev
 ### Production Setup
 ```bash
 # Create production instance with Synapse
-./instance_manager.py create prod \
+./deploy create prod \
   --domain mindroom.example.com \
   --matrix synapse
 
@@ -311,18 +311,18 @@ echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env.dev
 nano .env.prod
 
 # Start the instance
-./instance_manager.py start prod
+./deploy start prod
 
 # Set up reverse proxy (nginx, etc.) to ports shown in:
-./instance_manager.py list
+./deploy list
 ```
 
 ### Testing Setup
 ```bash
 # Quick test instance without Matrix
-./instance_manager.py create test
+./deploy create test
 cp .env.template .env.test  # Use template
-./instance_manager.py start test
+./deploy start test
 # Run tests...
-./instance_manager.py remove test  # Clean up
+./deploy remove test  # Clean up
 ```

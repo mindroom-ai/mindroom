@@ -28,24 +28,24 @@ help:
 # Federation commands
 create:
 	@if [ "$(MATRIX)" = "none" ]; then \
-		cd deploy && ./instance_manager.py create $(INSTANCE); \
+		cd deploy && ./deploy create $(INSTANCE); \
 	else \
-		cd deploy && ./instance_manager.py create $(INSTANCE) --matrix $(MATRIX); \
+		cd deploy && ./deploy create $(INSTANCE) --matrix $(MATRIX); \
 	fi
 
 start:
-	cd deploy && ./instance_manager.py start $(INSTANCE)
+	cd deploy && ./deploy start $(INSTANCE)
 
 stop:
-	cd deploy && ./instance_manager.py stop $(INSTANCE)
+	cd deploy && ./deploy stop $(INSTANCE)
 
 list:
-	cd deploy && ./instance_manager.py list
+	cd deploy && ./deploy list
 
 # Cleanup commands
 clean:
 	@echo "🧹 Cleaning instance: $(INSTANCE)"
-	cd deploy && ./instance_manager.py stop $(INSTANCE) 2>/dev/null || true
+	cd deploy && ./deploy stop $(INSTANCE) 2>/dev/null || true
 	rm -rf deploy/instance_data/$(INSTANCE)
 	rm -f deploy/.env.$(INSTANCE)
 	@echo "✅ Instance $(INSTANCE) cleaned"
