@@ -49,7 +49,6 @@ services:
       - ${DATA_DIR}/synapse:/data
     ports:
       - "${MATRIX_PORT:-8008}:8008"
-      - "${MATRIX_FED_PORT:-8448}:8448"  # Federation port
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
       interval: 10s
@@ -71,19 +70,22 @@ services:
       - traefik.http.routers.${INSTANCE_NAME}-matrix.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
       - traefik.http.routers.${INSTANCE_NAME}-matrix.entrypoints=websecure
       - traefik.http.routers.${INSTANCE_NAME}-matrix.tls=true
-      - traefik.http.routers.${INSTANCE_NAME}-matrix.tls.certresolver=le
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.service=${INSTANCE_NAME}-matrix
       - traefik.http.services.${INSTANCE_NAME}-matrix.loadbalancer.server.port=8008
 
       # Local HTTP route (m-mything.local)
       - traefik.http.routers.${INSTANCE_NAME}-matrix-local.rule=Host(`m-${INSTANCE_NAME}.local`)
       - traefik.http.routers.${INSTANCE_NAME}-matrix-local.entrypoints=web
-      - traefik.http.services.${INSTANCE_NAME}-matrix-local.loadbalancer.server.port=8008
+      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.service=${INSTANCE_NAME}-matrix
+      - traefik.http.services.${INSTANCE_NAME}-matrix.loadbalancer.server.port=8008
 
-      # Federation on port 8448 (both production and local)
-      - traefik.http.routers.${INSTANCE_NAME}-fed.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`) || Host(`m-${INSTANCE_NAME}.local`)
+      # Federation on port 8448
+      - traefik.http.routers.${INSTANCE_NAME}-fed.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
       - traefik.http.routers.${INSTANCE_NAME}-fed.entrypoints=matrix-fed
       - traefik.http.routers.${INSTANCE_NAME}-fed.tls=true
-      - traefik.http.services.${INSTANCE_NAME}-fed.loadbalancer.server.port=8448
+      - traefik.http.routers.${INSTANCE_NAME}-fed.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME}-fed.service=${INSTANCE_NAME}-matrix
 
   # Update backend to know about Matrix server
   backend:

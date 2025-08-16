@@ -7,9 +7,6 @@ services:
     image: ghcr.io/matrix-construct/tuwunel:latest
     container_name: ${INSTANCE_NAME:-mindroom}-tuwunel
     restart: unless-stopped
-    extra_hosts:
-      - "m-default.mindroom.chat:host-gateway"
-      - "m-alt.mindroom.chat:host-gateway"
     volumes:
       - ${DATA_DIR:-./instance_data}/tuwunel:/var/lib/tuwunel
       - ./tuwunel.toml:/etc/tuwunel.toml:ro
@@ -40,12 +37,11 @@ services:
       - traefik.http.routers.${INSTANCE_NAME}-matrix-local.service=${INSTANCE_NAME}-matrix
 
       # Federation on port 8448
-      - traefik.tcp.routers.${INSTANCE_NAME}-fed.rule=HostSNI(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
-      - traefik.tcp.routers.${INSTANCE_NAME}-fed.entrypoints=matrix-fed
-      - traefik.tcp.routers.${INSTANCE_NAME}-fed.tls=true
-      - traefik.tcp.routers.${INSTANCE_NAME}-fed.tls.certresolver=porkbun
-      - traefik.tcp.routers.${INSTANCE_NAME}-fed.service=${INSTANCE_NAME}-matrix-fed
-      - traefik.tcp.services.${INSTANCE_NAME}-matrix-fed.loadbalancer.server.port=6167
+      - traefik.http.routers.${INSTANCE_NAME}-fed.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
+      - traefik.http.routers.${INSTANCE_NAME}-fed.entrypoints=matrix-fed
+      - traefik.http.routers.${INSTANCE_NAME}-fed.tls=true
+      - traefik.http.routers.${INSTANCE_NAME}-fed.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME}-fed.service=${INSTANCE_NAME}-matrix
 
   # Update backend to know about Matrix server
   backend:
