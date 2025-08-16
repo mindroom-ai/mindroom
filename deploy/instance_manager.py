@@ -9,6 +9,7 @@
 No over-engineering, just the basics.
 """
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
+# ruff: noqa: C901, PLR0912, PLR0915  # complexity is acceptable for CLI commands
 
 import json
 import os
@@ -75,13 +76,21 @@ def find_next_ports(registry: dict[str, Any]) -> tuple[int, int, int]:
 def create(
     name: str = typer.Argument(..., help="Instance name"),
     domain: str | None = typer.Option(None, help="Domain for the instance (default: NAME.localhost)"),
-    with_matrix: bool = typer.Option(False, "--matrix", help="Include Tuwunel Matrix server"),
+    matrix: str | None = typer.Option(
+        None,
+        "--matrix",
+        help="Include Matrix server: 'tuwunel' (lightweight) or 'synapse' (full)",
+    ),
 ) -> None:
     """Create a new instance with automatic port allocation."""
     registry = load_registry()
 
     if name in registry["instances"]:
         console.print(f"[red]✗[/red] Instance '{name}' already exists!")
+        raise typer.Exit(1)
+
+    if matrix and matrix not in ["tuwunel", "synapse"]:
+        console.print(f"[red]✗[/red] Invalid matrix option '{matrix}'. Use 'tuwunel' or 'synapse'")
         raise typer.Exit(1)
 
     backend_port, frontend_port, matrix_port = find_next_ports(registry)
@@ -91,11 +100,11 @@ def create(
         "name": name,
         "backend_port": backend_port,
         "frontend_port": frontend_port,
-        "matrix_port": matrix_port if with_matrix else None,
+        "matrix_port": matrix_port if matrix else None,
         "data_dir": data_dir,
         "domain": domain or f"{name}.localhost",
         "status": "created",
-        "with_matrix": with_matrix,
+        "matrix_type": matrix,  # 'tuwunel', 'synapse', or None
     }
 
     # Create instance env file
@@ -115,18 +124,23 @@ def create(
         f.write(f"DATA_DIR={data_dir}\n")
         f.write(f"INSTANCE_DOMAIN={instance['domain']}\n")
 
-        if with_matrix:
-            f.write("\n# Matrix/Tuwunel configuration\n")
+        if matrix:
+            f.write(f"\n# Matrix configuration ({matrix})\n")
             f.write(f"MATRIX_PORT={matrix_port}\n")
             f.write(f"MATRIX_SERVER_NAME={instance['domain']}\n")
-            f.write("MATRIX_ALLOW_REGISTRATION=true\n")
-            f.write("MATRIX_ALLOW_FEDERATION=false\n")
+
+            if matrix == "tuwunel":
+                f.write("MATRIX_ALLOW_REGISTRATION=true\n")
+                f.write("MATRIX_ALLOW_FEDERATION=false\n")
+            elif matrix == "synapse":
+                f.write("POSTGRES_PASSWORD=synapse_password\n")
+                f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
 
     # Update registry
     registry["instances"][name] = instance
     registry["allocated_ports"]["backend"].append(backend_port)
     registry["allocated_ports"]["frontend"].append(frontend_port)
-    if with_matrix:
+    if matrix:
         if "matrix" not in registry["allocated_ports"]:
             registry["allocated_ports"]["matrix"] = []
         registry["allocated_ports"]["matrix"].append(matrix_port)
@@ -135,13 +149,14 @@ def create(
     console.print(f"[green]✓[/green] Created instance '[cyan]{name}[/cyan]'")
     console.print(f"  [dim]Backend port:[/dim] {backend_port}")
     console.print(f"  [dim]Frontend port:[/dim] {frontend_port}")
-    if with_matrix:
+    if matrix:
         console.print(f"  [dim]Matrix port:[/dim] {matrix_port}")
     console.print(f"  [dim]Data dir:[/dim] {data_dir}")
     console.print(f"  [dim]Domain:[/dim] {instance['domain']}")
     console.print(f"  [dim]Env file:[/dim] .env.{name}")
-    if with_matrix:
-        console.print("  [dim]Matrix:[/dim] [green]Enabled[/green] (Tuwunel)")
+    if matrix:
+        matrix_name = "Tuwunel (lightweight)" if matrix == "tuwunel" else "Synapse (full)"
+        console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
 
 
 @app.command()
@@ -162,14 +177,33 @@ def start(name: str = typer.Argument(..., help="Instance name to start")) -> Non
     for subdir in ["config", "tmp", "logs"]:
         Path(f"{instance['data_dir']}/{subdir}").mkdir(parents=True, exist_ok=True)
 
-    # Create Tuwunel data directory if Matrix is enabled
-    if instance.get("with_matrix"):
+    # Create Matrix data directories if enabled
+    matrix_type = instance.get("matrix_type")
+    if matrix_type == "tuwunel":
         Path(f"{instance['data_dir']}/tuwunel").mkdir(parents=True, exist_ok=True)
+    elif matrix_type == "synapse":
+        Path(f"{instance['data_dir']}/synapse").mkdir(parents=True, exist_ok=True)
+        Path(f"{instance['data_dir']}/synapse/media").mkdir(parents=True, exist_ok=True)
+        Path(f"{instance['data_dir']}/postgres").mkdir(parents=True, exist_ok=True)
+        Path(f"{instance['data_dir']}/redis").mkdir(parents=True, exist_ok=True)
+
+        # Copy Synapse config template if needed
+        synapse_dir = Path(f"{instance['data_dir']}/synapse")
+        if not (synapse_dir / "homeserver.yaml").exists():
+            template_dir = Path("synapse-template")
+            if template_dir.exists():
+                for file in template_dir.glob("*"):
+                    if file.is_file():
+                        shutil.copy(file, synapse_dir / file.name)
 
     # Start with docker compose (modern syntax)
-    if instance.get("with_matrix"):
+    if matrix_type == "tuwunel":
         cmd = (
             f"docker compose --env-file {env_file} -f docker-compose.yml -f docker-compose.tuwunel.yml -p {name} up -d"
+        )
+    elif matrix_type == "synapse":
+        cmd = (
+            f"docker compose --env-file {env_file} -f docker-compose.yml -f docker-compose.synapse.yml -p {name} up -d"
         )
     else:
         cmd = f"docker compose --env-file {env_file} -p {name} up -d"
@@ -243,9 +277,13 @@ def list_instances() -> None:
             status_display = "[yellow]● created[/yellow]"
 
         matrix_display = ""
-        if config.get("with_matrix"):
+        matrix_type = config.get("matrix_type")
+        if matrix_type:
             matrix_port = config.get("matrix_port", "N/A")
-            matrix_display = f"[cyan]{matrix_port}[/cyan]"
+            if matrix_type == "tuwunel":
+                matrix_display = f"[cyan]{matrix_port}[/cyan] [dim](T)[/dim]"
+            elif matrix_type == "synapse":
+                matrix_display = f"[cyan]{matrix_port}[/cyan] [dim](S)[/dim]"
         else:
             matrix_display = "[dim]disabled[/dim]"
 

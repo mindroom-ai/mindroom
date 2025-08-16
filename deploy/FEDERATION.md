@@ -10,8 +10,11 @@ This is the simplest possible federation setup for Mindroom. Each instance runs 
 # Basic instance (no Matrix)
 ./instance_manager.py create myinstance --domain mydomain.com
 
-# Instance with Tuwunel Matrix server
-./instance_manager.py create myinstance --domain mydomain.com --matrix
+# Instance with Tuwunel Matrix server (lightweight, Rust-based)
+./instance_manager.py create myinstance --domain mydomain.com --matrix tuwunel
+
+# Instance with Synapse Matrix server (full-featured, with PostgreSQL + Redis)
+./instance_manager.py create myinstance --domain mydomain.com --matrix synapse
 ```
 
 ### 2. Configure the instance
@@ -73,17 +76,17 @@ Each instance has its own:
 
 ### Run multiple instances on one server
 ```bash
-# Production instance
-python instance_manager.py create prod prod.mindroom.com
-python instance_manager.py start prod
+# Production instance with Synapse (full Matrix)
+./instance_manager.py create prod --domain prod.mindroom.com --matrix synapse
+./instance_manager.py start prod
 
-# Development instance
-python instance_manager.py create dev dev.mindroom.com
-python instance_manager.py start dev
+# Development instance with Tuwunel (lightweight Matrix)
+./instance_manager.py create dev --domain dev.mindroom.com --matrix tuwunel
+./instance_manager.py start dev
 
-# Personal instance
-python instance_manager.py create personal john.mindroom.com
-python instance_manager.py start personal
+# Personal instance without Matrix
+./instance_manager.py create personal --domain john.mindroom.com
+./instance_manager.py start personal
 ```
 
 ### Check what's running
@@ -99,49 +102,52 @@ docker ps | grep mindroom
 - Automatically tracked in `instances.json`
 - No manual port management needed!
 
-## Matrix Integration with Tuwunel
+## Matrix Server Options
 
-### What is Tuwunel?
-Tuwunel is a lightweight, high-performance Matrix homeserver written in Rust. It's perfect for Mindroom federation because:
-- Minimal resource usage compared to Synapse
-- Easy Docker deployment
-- Full Matrix specification support
-- Each instance gets its own isolated Matrix server
+### Choose Your Matrix Server
 
-### Matrix Options for Instances
-
-#### Option 1: With Tuwunel (--matrix flag)
-Each instance gets its own Tuwunel Matrix server:
+#### Option 1: Tuwunel (--matrix tuwunel)
+Lightweight, high-performance Matrix homeserver written in Rust:
 ```bash
-./instance_manager.py create prod --domain prod.mindroom.com --matrix
+./instance_manager.py create prod --domain prod.mindroom.com --matrix tuwunel
 ```
-- Isolated Matrix server per instance
-- No shared dependencies
-- Perfect for true federation
-- First user automatically becomes admin
+- **Pros**: Minimal resource usage, fast, simple setup
+- **Cons**: Newer, less ecosystem support
+- **Best for**: Small to medium deployments, resource-constrained environments
+- **Resources**: ~100MB RAM, minimal CPU
 
-#### Option 2: Without Matrix (default)
+#### Option 2: Synapse (--matrix synapse)
+Full-featured, production-ready Matrix homeserver with PostgreSQL and Redis:
+```bash
+./instance_manager.py create prod --domain prod.mindroom.com --matrix synapse
+```
+- **Pros**: Battle-tested, full Matrix spec, extensive ecosystem
+- **Cons**: Higher resource usage, more complex
+- **Best for**: Large deployments, production environments
+- **Resources**: ~500MB+ RAM, PostgreSQL + Redis
+
+#### Option 3: No Matrix (default)
 Instance runs without Matrix integration:
 ```bash
 ./instance_manager.py create dev --domain dev.mindroom.com
 ```
-- Lighter weight deployment
-- Good for instances that don't need chat features
+- **Best for**: Instances that don't need chat features
+- **Lighter weight**: No Matrix overhead
 
-#### Option 3: External Matrix Server
+#### Option 4: External Matrix Server
 Configure `.env.{instance}` to point to existing Matrix server:
-- Set custom `MATRIX_HOMESERVER` URL
-- Use existing Synapse or other Matrix server
+- Set custom `MATRIX_HOMESERVER` URL in env file
 - Share Matrix infrastructure across instances
 
-### Accessing Your Tuwunel Server
-Once started with --matrix, your Tuwunel server is available at:
+### Accessing Your Matrix Server
+Once started, your Matrix server is available at:
 - Client API: `http://localhost:{MATRIX_PORT}/_matrix/client/`
 - Federation (if enabled): `https://{domain}:8448/`
 
 Use any Matrix client (Element, FluffyChat, etc.) to connect:
 - Server: `http://localhost:{MATRIX_PORT}` or `https://{domain}`
-- First user to register becomes admin automatically
+- Tuwunel: First user to register becomes admin automatically
+- Synapse: Configure admin users via homeserver.yaml
 
 ## Inter-Instance Communication
 With Tuwunel, instances can communicate through:
