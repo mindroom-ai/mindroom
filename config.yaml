@@ -337,3 +337,6 @@ teams:
     role: A team with all the great agents.
     rooms:
     - research
+
+# Timezone for displaying scheduled tasks (Seattle/Pacific Time)
+timezone: America/Los_Angeles
