@@ -8,6 +8,8 @@ services:
     restart: always
     env_file:
       - ../.env
+    ports:
+      - "${BACKEND_PORT:-8765}:8765"
     volumes:
       - ${DATA_DIR:-/mnt/data/mindroom}/config:/app/config
       - ${DATA_DIR:-/mnt/data/mindroom}/tmp:/app/tmp
@@ -30,6 +32,8 @@ services:
     restart: always
     env_file:
       - ../.env
+    ports:
+      - "${FRONTEND_PORT:-3003}:3003"
     volumes:
       - ${DATA_DIR:-/mnt/data/mindroom}/config:/app/config
       - ${DATA_DIR:-/mnt/data/mindroom}/logs:/app/logs
