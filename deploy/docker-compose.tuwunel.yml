@@ -13,17 +13,34 @@ services:
     command: ["-c", "/etc/tuwunel.toml"]
     environment:
       # Instance-specific overrides via environment variables
-      - TUWUNEL_SERVER_NAME=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
-      - TUWUNEL_DATABASE_PATH=/var/lib/tuwunel
-      - TUWUNEL_PORT=${TUWUNEL_INTERNAL_PORT:-6167}
-      - TUWUNEL_ALLOW_FEDERATION=${MATRIX_ALLOW_FEDERATION:-false}
+      TUWUNEL_SERVER_NAME: ${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
+      TUWUNEL_DATABASE_PATH: /var/lib/tuwunel
+      TUWUNEL_PORT: ${TUWUNEL_INTERNAL_PORT:-6167}
+      TUWUNEL_ALLOW_FEDERATION: ${MATRIX_ALLOW_FEDERATION:-false}
+      TUWUNEL_ALLOW_REGISTRATION: ${MATRIX_ALLOW_REGISTRATION:-true}
+      TUWUNEL_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE: ${MATRIX_ALLOW_REGISTRATION:-true}
+      TUWUNEL_TRUSTED_SERVERS: '["matrix.org"]'
+      TUWUNEL_ADDRESS: 0.0.0.0
+      TUWUNEL_MAX_REQUEST_SIZE: 20000000
+      TUWUNEL_WELL_KNOWN: |
+        {
+        client=https://${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}},
+        server=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}:443
+        }
+    extra_hosts:
+      - "m-default.mindroom.chat:172.20.0.1"
+      - "m-alt.mindroom.chat:172.20.0.1"
+    ulimits:
+      nofile:
+        soft: 1048567
+        hard: 1048567
     networks:
       - mindroom-network
       - mynetwork
     labels:
       - traefik.enable=true
 
-      # Matrix Client API - HTTPS
+      # Matrix Client and Federation API - HTTPS
       - traefik.http.routers.${INSTANCE_NAME}-matrix.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
       - traefik.http.routers.${INSTANCE_NAME}-matrix.entrypoints=websecure
       - traefik.http.routers.${INSTANCE_NAME}-matrix.tls=true
@@ -46,8 +63,8 @@ services:
   # Update backend to know about Matrix server
   backend:
     environment:
-      - MATRIX_HOMESERVER=http://tuwunel:6167
-      - MATRIX_SERVER_NAME=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
+      MATRIX_HOMESERVER: http://tuwunel:6167
+      MATRIX_SERVER_NAME: ${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
     depends_on:
       - tuwunel
 
