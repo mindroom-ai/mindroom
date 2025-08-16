@@ -1,18 +1,8 @@
 services:
-  # Base image with Python dependencies - built first
-  mindroom-base:
-    image: mindroom-base:latest
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.base
-    command: echo "Base image built successfully"
-
   mindroom-backend:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.backend
-    depends_on:
-      - mindroom-base
     container_name: mindroom-backend
     restart: always
     env_file:
@@ -33,8 +23,6 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.frontend
-    depends_on:
-      - mindroom-base
     container_name: mindroom-frontend
     restart: always
     env_file:
