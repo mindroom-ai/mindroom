@@ -13,8 +13,9 @@ def test_format_scheduled_time_utc() -> None:
     dt = datetime.now(UTC) + timedelta(hours=2, minutes=30)
     result = _format_scheduled_time(dt, "UTC")
 
-    # Should contain relative time
-    assert "in 2 hours" in result
+    # Should contain relative time from humanize (e.g., "2 hours from now")
+    assert "from now" in result
+    assert "hour" in result or "hours" in result
     assert "UTC" in result
 
 
@@ -23,8 +24,9 @@ def test_format_scheduled_time_eastern() -> None:
     dt = datetime.now(UTC) + timedelta(days=1, hours=3)
     result = _format_scheduled_time(dt, "America/New_York")
 
-    # Should contain relative time (allowing for slight time differences)
-    assert "in 1 day" in result
+    # Should contain relative time from humanize (e.g., "a day from now")
+    assert "from now" in result
+    assert "day" in result or "hours" in result  # humanize might say "27 hours from now" or "a day from now"
     assert "EST" in result or "EDT" in result  # Depends on daylight savings
 
 
@@ -33,9 +35,9 @@ def test_format_scheduled_time_minutes() -> None:
     dt = datetime.now(UTC) + timedelta(minutes=45)
     result = _format_scheduled_time(dt, "UTC")
 
-    # Should show minutes when less than a day (allowing for execution time)
-    assert "minute" in result
-    assert "in" in result
+    # Should show minutes from humanize (e.g., "44 minutes from now")
+    assert "minute" in result or "minutes" in result
+    assert "from now" in result
 
 
 def test_format_scheduled_time_now() -> None:
@@ -43,8 +45,8 @@ def test_format_scheduled_time_now() -> None:
     dt = datetime.now(UTC) + timedelta(seconds=30)
     result = _format_scheduled_time(dt, "UTC")
 
-    # Should show "now" for very near future
-    assert "now" in result
+    # humanize shows "in a few seconds" or "in 30 seconds" for very near future
+    assert "second" in result or "few" in result or "moment" in result
 
 
 def test_format_scheduled_time_past() -> None:
@@ -52,8 +54,9 @@ def test_format_scheduled_time_past() -> None:
     dt = datetime.now(UTC) - timedelta(hours=1)
     result = _format_scheduled_time(dt, "UTC")
 
-    # Should indicate it's in the past
-    assert "in the past" in result
+    # humanize shows "an hour ago" for past times
+    assert "ago" in result
+    assert "hour" in result or "hours" in result
 
 
 def test_format_scheduled_time_invalid_timezone() -> None:

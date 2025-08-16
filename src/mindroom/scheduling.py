@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import humanize
 import nio
 import pytz
 
@@ -51,27 +52,9 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
         tz = pytz.timezone(timezone_str)
         local_dt = dt.astimezone(tz)
 
-        # Calculate time delta
+        # Get human-readable relative time using humanize
         now = datetime.now(UTC)
-        delta = dt - now
-
-        # Format the relative time
-        if delta.total_seconds() < 0:
-            relative_str = "in the past"
-        else:
-            days = delta.days
-            hours, remainder = divmod(delta.seconds, 3600)
-            minutes, _ = divmod(remainder, 60)
-
-            parts = []
-            if days > 0:
-                parts.append(f"{days} day{'s' if days != 1 else ''}")
-            if hours > 0:
-                parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
-            if minutes > 0 and days == 0:  # Only show minutes if less than a day away
-                parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
-
-            relative_str = "in " + " ".join(parts[:2]) if parts else "now"
+        relative_str = humanize.naturaltime(dt, when=now)
 
         # Format the datetime string
         time_str = local_dt.strftime("%Y-%m-%d %I:%M %p %Z")
