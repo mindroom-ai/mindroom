@@ -485,6 +485,7 @@ class AgentBot:
             thread_history=context.thread_history,
             config=self.config,
             is_invited_to_thread=context.is_invited_to_thread,
+            mentioned_agents=context.mentioned_agents,
         )
 
         if should_respond and not context.am_i_mentioned:
