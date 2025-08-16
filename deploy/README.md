@@ -230,24 +230,20 @@ Tuwunel should work out of the box. Check:
 docker logs {instance_name}-tuwunel
 ```
 
-## Advanced Usage
+## How It Works
 
-### Custom Port Ranges
-Edit `instances.json` to change default port ranges:
-```json
-{
-  "defaults": {
-    "backend_port_start": 8765,
-    "frontend_port_start": 3003,
-    "matrix_port_start": 8448
-  }
-}
-```
+### Instance Registry
+- `instances.json` - Tracks all instances, ports, and configuration
+- Automatically manages port allocation (no conflicts!)
+- Port allocation starts at: Backend (8765), Frontend (3003), Matrix (8448)
 
-### Using with Traefik
-If you have Traefik running, instances automatically get routes:
-- `http://{instance_name}.{domain}`
-- `http://{instance_domain}`
+### Docker Compose Structure
+The system uses parameterized Docker Compose files:
+- `docker-compose.yml` - Base Mindroom services (backend, frontend)
+- `docker-compose.tuwunel.yml` - Adds Tuwunel Matrix server
+- `docker-compose.synapse.yml` - Adds Synapse with PostgreSQL and Redis
+
+Container names use `${INSTANCE_NAME}` prefix to avoid conflicts.
 
 ### Direct Docker Compose Usage
 You can also use Docker Compose directly:
@@ -317,7 +313,7 @@ nano .env.prod
 # Start the instance
 ./instance_manager.py start prod
 
-# Set up reverse proxy (nginx/Traefik) to ports shown in:
+# Set up reverse proxy (nginx, etc.) to ports shown in:
 ./instance_manager.py list
 ```
 
