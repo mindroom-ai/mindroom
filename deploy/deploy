@@ -523,6 +523,34 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
             registry.allocated_ports.matrix.remove(instance.matrix_port)
 
 
+def get_actual_status(name: str) -> tuple[bool, bool, bool]:
+    """Check which containers are actually running.
+
+    Returns: (backend_running, frontend_running, matrix_running)
+    """
+    cmd = f"docker compose -p {name} ps --format json 2>/dev/null"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
+
+    if result.returncode != 0:
+        return False, False, False
+
+    running_containers = set()
+    for line in result.stdout.strip().split("\n"):
+        if line:
+            try:
+                data = json.loads(line)
+                if data.get("State") == "running":
+                    running_containers.add(data.get("Service"))
+            except json.JSONDecodeError:
+                pass
+
+    backend_running = "backend" in running_containers
+    frontend_running = "frontend" in running_containers
+    matrix_running = any(m in running_containers for m in ["synapse", "tuwunel", "postgres", "redis"])
+
+    return backend_running, frontend_running, matrix_running
+
+
 @app.command("list")
 def list_instances() -> None:
     """List all configured instances."""
@@ -545,15 +573,21 @@ def list_instances() -> None:
     table.add_column("Data Directory")
 
     for name, instance in instances.items():
-        status = instance.status
-        if status == InstanceStatus.RUNNING:
-            status_display = "[green]● running[/green]"
-        elif status == InstanceStatus.BACKEND_ONLY:
-            status_display = "[blue]● backend[/blue]"
-        elif status == InstanceStatus.STOPPED:
+        # Get actual container status
+        backend_up, frontend_up, matrix_up = get_actual_status(name)
+
+        # Determine status display based on actual running containers
+        if not any([backend_up, frontend_up, matrix_up]):
             status_display = "[red]● stopped[/red]"
+        elif frontend_up and backend_up:
+            status_display = "[green]● running[/green]"
+        elif backend_up and not frontend_up:
+            status_display = "[blue]● backend[/blue]"
+        elif frontend_up and not backend_up:
+            status_display = "[yellow]● frontend[/yellow]"
         else:
-            status_display = "[yellow]● created[/yellow]"
+            # Some containers running but not the main ones
+            status_display = "[yellow]● partial[/yellow]"
 
         matrix_display = ""
         if instance.matrix_type:
