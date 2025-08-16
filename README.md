@@ -27,34 +27,6 @@ MindRoom agents:
 - **Collaborate naturally** - Multiple agents working together in threads
 - **Respect boundaries** - You control which agent sees what data
 
-## Standing on Giants' Shoulders
-
-### The Matrix Advantage
-We didn't build a chat platform. We built AI orchestration on top of **10+ years of Matrix development**:
-
-- **€10M+ invested** in Matrix protocol development
-- **100+ developers** contributing to the ecosystem
-- **50+ million users** on Matrix already
-- **Battle-tested** by governments (France, Germany) for secure communications
-- **Existing bridges** to Slack, Discord, Telegram, WhatsApp, Signal, IRC, and more
-- **Professional clients** like Element, FluffyChat, Cinny already working
-
-**LobeChat spent years building chat infrastructure. We spent that time building AI orchestration.**
-
-### What This Means For You
-
-While others debug websockets and design chat bubbles, we focus on:
-- Agent collaboration protocols
-- Memory architectures  
-- Cross-organization federation
-- Tool integrations
-
-You get:
-- **Day 1**: Military-grade E2E encryption (Matrix built it)
-- **Day 1**: Professional mobile/desktop apps (Element, etc.)
-- **Day 1**: Bridges to every platform (community maintained)
-- **Day 1**: Proven scale (Matrix handles millions of users)
-- **Day 1**: Compliance ready (Matrix is GDPR compliant)
 
 ## See It In Action
 
