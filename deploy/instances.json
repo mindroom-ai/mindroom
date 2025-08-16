@@ -1,0 +1,35 @@
+{
+  "instances": {
+    "test1": {
+      "name": "test1",
+      "backend_port": 8765,
+      "frontend_port": 3003,
+      "data_dir": "./instance_data/test1",
+      "domain": "test1.localhost",
+      "status": "stopped"
+    },
+    "test2": {
+      "name": "test2",
+      "backend_port": 8766,
+      "frontend_port": 3004,
+      "data_dir": "./instance_data/test2",
+      "domain": "test2.localhost",
+      "status": "stopped"
+    }
+  },
+  "allocated_ports": {
+    "backend": [
+      8765,
+      8766
+    ],
+    "frontend": [
+      3003,
+      3004
+    ]
+  },
+  "defaults": {
+    "backend_port_start": 8765,
+    "frontend_port_start": 3003,
+    "data_dir_base": "./instance_data"
+  }
+}
