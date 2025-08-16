@@ -285,8 +285,8 @@ async function generateMockup() {
 
     // Set viewport for a nice screenshot - smaller to reduce background
     await page.setViewport({
-      width: 800,
-      height: 600,
+      width: 720,
+      height: 520,
       deviceScaleFactor: 2 // High quality
     });
 
