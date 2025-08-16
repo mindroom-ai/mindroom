@@ -17,7 +17,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
-import { MockChatPage } from '@/mockChat/MockChatPage';
 
 const queryClient = new QueryClient();
 
@@ -26,11 +25,6 @@ function AppContent() {
     useConfigStore();
   const navigate = useNavigate();
   const location = useLocation();
-
-  // Check if this is the mock chat page
-  if (location.pathname === '/mock-chat') {
-    return <MockChatPage />;
-  }
 
   // Get the current tab from URL or default to 'dashboard'
   const currentTab = location.pathname.slice(1) || 'dashboard';
