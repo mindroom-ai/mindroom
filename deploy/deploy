@@ -9,10 +9,12 @@
 No over-engineering, just the basics.
 """
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
-# ruff: noqa: C901, PLR0912, PLR0915  # complexity is acceptable for CLI commands
+# ruff: noqa: C901  # complexity is acceptable for CLI commands
 
+import base64
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -189,6 +191,17 @@ def create(
                         )
                         with (synapse_dir / file.name).open("w") as f:
                             f.write(content)
+                    elif file.name == "signing.key":
+                        # Generate a unique signing key for this instance
+                        # Generate 32 random bytes for ed25519 key
+                        key_bytes = secrets.token_bytes(32)
+                        key_b64 = base64.b64encode(key_bytes).decode('ascii')
+                        # Use instance name as key ID for uniqueness
+                        key_id = f"{name}_{secrets.token_hex(3)}"
+                        signing_key_content = f"ed25519 {key_id} {key_b64}\n"
+                        with (synapse_dir / file.name).open("w") as f:
+                            f.write(signing_key_content)
+                        console.print(f"  [dim]Generated unique signing key for instance[/dim]")
                     else:
                         shutil.copy(file, synapse_dir / file.name)
 
