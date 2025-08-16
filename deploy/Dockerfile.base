@@ -1,0 +1,24 @@
+# Shared base image with Python dependencies for both backend and frontend
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as mindroom-base
+
+# Install system dependencies that both containers need
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Set UV to use copy mode to avoid issues with cache mounts
+ENV UV_LINK_MODE=copy
+
+# Copy dependency files
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+# Install all Python dependencies with cache mount for speed
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --all-extras
+
+# The .venv is now available at /app/.venv for other stages to copy

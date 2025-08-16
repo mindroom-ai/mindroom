@@ -1,21 +1,11 @@
-# Multi-stage build for fast rebuilds
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as base
-RUN apt-get update && apt-get install -y git curl build-essential && rm -rf /var/lib/apt/lists/*
+# Build from shared base that has all Python dependencies
+FROM mindroom-base as deps
 
-# Dependencies stage - only rebuild if deps change
-FROM base as deps
+# Final stage - minimal runtime image
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as final
+RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-# Set UV to use copy mode to avoid issues with cache mounts
-ENV UV_LINK_MODE=copy
-COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
-# Use cache mount for UV packages to speed up builds
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --all-extras --no-dev
-
-# Final stage
-FROM base as final
-WORKDIR /app
+# Copy the virtual environment from the base image
 COPY --from=deps /app/.venv /app/.venv
 COPY . .
 RUN mkdir -p /app/tmp /app/logs /app/config

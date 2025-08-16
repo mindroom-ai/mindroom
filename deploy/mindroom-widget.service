@@ -1,5 +1,5 @@
 [Unit]
-Description=MindRoom Configuration Widget (Frontend + Backend)
+Description=MindRoom Frontend
 After=network.target
 Wants=network.target
 StartLimitIntervalSec=0
@@ -10,17 +10,17 @@ Restart=always
 RestartSec=5
 User=PROJECT_USER
 Group=PROJECT_GROUP
-WorkingDirectory=PROJECT_DIR/widget
+WorkingDirectory=PROJECT_DIR
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=BACKEND_PORT=8001
 Environment=FRONTEND_PORT=3003
 
-# Use the existing run.sh script (no auto-update)
-ExecStart=PROJECT_DIR/widget/run.sh
+# Use the existing run-ui.sh script (no auto-update)
+ExecStart=PROJECT_DIR/run-ui.sh
 
 # Logging
-StandardOutput=append:/var/log/mindroom-widget.log
-StandardError=append:/var/log/mindroom-widget.log
+StandardOutput=append:/var/log/mindroom-frontend.log
+StandardError=append:/var/log/mindroom-frontend.log
 
 # Security
 NoNewPrivileges=true

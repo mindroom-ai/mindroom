@@ -1,19 +1,10 @@
 # Multi-stage build for fast rebuilds
 FROM node:20-slim as base
-RUN apt-get update && apt-get install -y git curl python3 python3-pip python3-venv build-essential && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git curl python3 build-essential && rm -rf /var/lib/apt/lists/*
 RUN npm install -g pnpm
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Backend deps stage (backend is now part of main package)
-FROM base as backend-deps
-WORKDIR /app
-# Set UV to use copy mode to avoid issues with cache mounts
-ENV UV_LINK_MODE=copy
-COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
-# Use cache mount for UV packages to speed up builds
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --all-extras
+# Get Python dependencies from shared base
+FROM mindroom-base as python-deps
 
 # Frontend deps stage
 FROM base as frontend-deps
@@ -31,7 +22,7 @@ RUN pnpm run build
 # Final stage
 FROM base as final
 WORKDIR /app
-COPY --from=backend-deps /app/.venv /app/.venv
+COPY --from=python-deps /app/.venv /app/.venv
 COPY --from=frontend-deps /app/frontend/node_modules /app/frontend/node_modules
 COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
 COPY . /app/

@@ -20,7 +20,7 @@ sudo ./deploy/setup.sh
 
 # Start services
 sudo systemctl start mindroom-backend    # Main mindroom system
-sudo systemctl start mindroom-widget     # Widget frontend/backend
+sudo systemctl start mindroom-frontend   # frontend/backend
 ```
 
 ## Available Commands
@@ -28,15 +28,15 @@ sudo systemctl start mindroom-widget     # Widget frontend/backend
 ```bash
 # Service management
 sudo systemctl start mindroom-backend
-sudo systemctl start mindroom-widget
+sudo systemctl start mindroom-frontend
 sudo systemctl stop mindroom-backend
-sudo systemctl stop mindroom-widget
+sudo systemctl stop mindroom-frontend
 sudo systemctl status mindroom-backend
-sudo systemctl status mindroom-widget
+sudo systemctl status mindroom-frontend
 
 # View logs
 tail -f /var/log/mindroom-backend.log
-tail -f /var/log/mindroom-widget.log
+tail -f /var/log/mindroom-frontend.log
 ```
 
 ## Manual Updates
@@ -49,17 +49,17 @@ cd frontend && pnpm install && cd ../..
 
 # Restart services if running
 sudo systemctl restart mindroom-backend
-sudo systemctl restart mindroom-widget
+sudo systemctl restart mindroom-frontend
 ```
 
 ## File Structure
 
 ```
 deploy/
-├── README.md                    # This file
+├── README.md                   # This file
 ├── setup.sh                    # One-command setup script
-├── mindroom-backend.service     # Backend systemd service template
-└── mindroom-widget.service      # Widget systemd service template
+├── mindroom-backend.service    # Backend systemd service template
+└── mindroom-frontend.service   # UI systemd service template
 ```
 
 ## How It Works
