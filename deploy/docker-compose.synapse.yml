@@ -47,8 +47,7 @@ services:
       # Bind mount the entire synapse config directory
       # DATA_DIR should be set in the .env file
       - ${DATA_DIR}/synapse:/data
-    ports:
-      - "${MATRIX_PORT:-8008}:8008"
+    # Ports are handled by Traefik - no direct host exposure needed
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
       interval: 10s

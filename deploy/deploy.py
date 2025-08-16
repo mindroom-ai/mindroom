@@ -285,6 +285,9 @@ def create(  # noqa: PLR0912, PLR0915
                             "public_baseurl: http://localhost:8008/",
                             f"public_baseurl: http://{server_name}:{matrix_port_value}/",
                         )
+                        # Replace postgres and redis hostnames with container names
+                        content = content.replace("host: postgres", f"host: {name}-postgres")
+                        content = content.replace("host: redis", f"host: {name}-redis")
                         with (synapse_dir / file.name).open("w") as f:
                             f.write(content)
                     elif file.name == "signing.key":
@@ -408,6 +411,9 @@ def start(  # noqa: PLR0912, PLR0915
                                 "public_baseurl: http://localhost:8008/",
                                 f"public_baseurl: http://{server_name}:{matrix_port_display}/",
                             )
+                            # Replace postgres and redis hostnames with container names
+                            content = content.replace("host: postgres", f"host: {name}-postgres")
+                            content = content.replace("host: redis", f"host: {name}-redis")
                             with (synapse_dir / file.name).open("w") as f:
                                 f.write(content)
                         else:
