@@ -32,16 +32,36 @@ ENV_TEMPLATE = ".env.template"
 def load_registry() -> dict[str, Any]:
     """Load the instance registry."""
     registry_path = Path(REGISTRY_FILE)
+
+    # Default structure
+    data_base = os.environ.get("MINDROOM_DATA_BASE", "./instance_data")
+    default_registry = {
+        "instances": {},
+        "allocated_ports": {"backend": [], "frontend": [], "matrix": []},
+        "defaults": {
+            "backend_port_start": 8765,
+            "frontend_port_start": 3003,
+            "matrix_port_start": 8448,
+            "data_dir_base": data_base,
+        },
+    }
+
     if not registry_path.exists():
-        # Use local data directory for testing, can be changed to /mnt/data in production
-        data_base = os.environ.get("MINDROOM_DATA_BASE", "./instance_data")
-        return {
-            "instances": {},
-            "allocated_ports": {"backend": [], "frontend": []},
-            "defaults": {"backend_port_start": 8765, "frontend_port_start": 3003, "data_dir_base": data_base},
-        }
-    with registry_path.open() as f:
-        return json.load(f)
+        return default_registry
+
+    try:
+        with registry_path.open() as f:
+            data = json.load(f)
+            # Ensure the loaded data has the required structure
+            if not isinstance(data, dict):
+                return default_registry
+            # Merge with defaults to ensure all keys exist
+            for key, value in default_registry.items():
+                if key not in data:
+                    data[key] = value
+            return data
+    except (json.JSONDecodeError, OSError):
+        return default_registry
 
 
 def save_registry(registry: dict[str, Any]) -> None:
