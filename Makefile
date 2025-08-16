@@ -55,9 +55,7 @@ clean:
 reset:
 	@echo "🔄 Full reset: removing all instances..."
 	cd deploy && ./deploy.py remove --all --force
-	rm -f matrix_state.yaml
 	@echo "✅ Reset complete! Use 'make create' to start fresh."
-
 
 # Development helpers
 logs:
