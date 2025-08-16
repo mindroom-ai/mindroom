@@ -115,11 +115,15 @@ const examples = {
 async function generateScreenshot(browser, conversation, filename) {
   const page = await browser.newPage();
 
+  // Log console messages
+  page.on('console', msg => console.log('Browser console:', msg.text()));
+  page.on('pageerror', error => console.log('Browser error:', error.message));
+
   // Set viewport
   await page.setViewport({ width: 1200, height: 800 });
 
   // Navigate to mock chat page
-  await page.goto('http://localhost:3003/mock-chat');
+  await page.goto('http://localhost:3003/mock-chat', { waitUntil: 'networkidle0' });
 
   // Inject conversation data
   await page.evaluate((data) => {
@@ -127,21 +131,43 @@ async function generateScreenshot(browser, conversation, filename) {
   }, conversation);
 
   // Reload to render with data
-  await page.reload();
+  await page.reload({ waitUntil: 'networkidle0' });
 
-  // Wait for render
-  await page.waitForSelector('.mock-chat', { timeout: 5000 });
+  // Wait a bit for React to render
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  // Try to wait for the element, but continue if not found
+  try {
+    await page.waitForSelector('.mock-chat', { timeout: 3000 });
+  } catch (e) {
+    console.log('Warning: .mock-chat element not found, trying alternative approach');
+    // Try to find any rendered content
+    await page.waitForSelector('#root', { timeout: 5000 });
+  }
 
   // Wait a bit for styles
   await new Promise(resolve => setTimeout(resolve, 500));
 
   // Take screenshot of just the chat element
+  const outputPath = path.join(__dirname, 'screenshots', 'readme', `${filename}.png`);
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+
   const chatElement = await page.$('.mock-chat');
   if (chatElement) {
-    const outputPath = path.join(__dirname, 'screenshots', 'readme', `${filename}.png`);
-    await fs.mkdir(path.dirname(outputPath), { recursive: true });
     await chatElement.screenshot({ path: outputPath });
     console.log(`✅ Generated: ${outputPath}`);
+  } else {
+    // Fallback: take a screenshot of the visible content
+    await page.screenshot({
+      path: outputPath,
+      clip: {
+        x: 100,
+        y: 100,
+        width: 800,
+        height: 600
+      }
+    });
+    console.log(`⚠️ Generated fallback screenshot: ${outputPath}`);
   }
 
   await page.close();
