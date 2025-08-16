@@ -115,6 +115,7 @@ Lightweight, high-performance Matrix homeserver written in Rust:
 - **Cons**: Newer, less ecosystem support
 - **Best for**: Small to medium deployments, resource-constrained environments
 - **Resources**: ~100MB RAM, minimal CPU
+- **Rate Limits**: Disabled by default for development (see docker-compose.tuwunel.yml)
 
 #### Option 2: Synapse (--matrix synapse)
 Full-featured, production-ready Matrix homeserver with PostgreSQL and Redis:
@@ -125,6 +126,7 @@ Full-featured, production-ready Matrix homeserver with PostgreSQL and Redis:
 - **Cons**: Higher resource usage, more complex
 - **Best for**: Large deployments, production environments
 - **Resources**: ~500MB+ RAM, PostgreSQL + Redis
+- **Rate Limits**: Disabled by default for development (see synapse-template/homeserver.yaml)
 
 #### Option 3: No Matrix (default)
 Instance runs without Matrix integration:

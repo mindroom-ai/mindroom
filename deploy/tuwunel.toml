@@ -1,0 +1,70 @@
+# Tuwunel configuration for Mindroom development
+# WITH ALL RATE LIMITS EFFECTIVELY DISABLED
+
+[global]
+# Server configuration
+server_name = "localhost"
+port = 6167
+address = "0.0.0.0"
+database_path = "/var/lib/tuwunel"
+max_request_size = 20971520  # 20MB
+
+# Registration - open for development
+allow_registration = true
+registration_disabled = false
+registration_require_token = false
+
+# Federation
+allow_federation = false
+trusted_servers = ["matrix.org"]
+
+# Performance mode
+enable_lightning_bolt = true  # Tuwunel's high-performance mode
+
+# ========================================
+# DISABLE ALL RATE LIMITS FOR DEVELOPMENT
+# ========================================
+
+[requests]
+# Request rate limiting (effectively disabled)
+max_concurrent_requests = 10000
+limit_per_second = 10000
+burst_size = 10000
+burst_window = 0  # Disable burst limiting
+
+[messages]
+# Message rate limiting (effectively disabled)
+limit_per_second = 10000
+burst_size = 10000
+
+[registration]
+# Registration rate limiting (effectively disabled)
+limit_per_second = 10000
+burst_size = 10000
+
+[media]
+# Media upload rate limiting (effectively disabled)
+max_file_size = 104857600  # 100MB
+limit_per_second = 10000
+burst_size = 10000
+
+[federation]
+# Federation rate limiting (effectively disabled)
+max_fetch_prev_events = 10000
+window_size = 1000000
+concurrent = 10000
+
+[presence]
+# Presence updates (effectively disabled)
+enabled = true
+update_limit_per_second = 10000
+
+[typing]
+# Typing notifications (effectively disabled)
+enabled = true
+timeout = 30000  # 30 seconds
+
+[experimental_features]
+# Enable all experimental features for development
+msc2815_enabled = true  # Redaction relations
+msc3440_enabled = true  # Threading
