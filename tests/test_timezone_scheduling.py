@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+import pytz
+
 from mindroom.config import Config
 from mindroom.scheduling import _format_scheduled_time
 
@@ -60,12 +63,12 @@ def test_format_scheduled_time_past() -> None:
 
 
 def test_format_scheduled_time_invalid_timezone() -> None:
-    """Test fallback for invalid timezone."""
+    """Test that invalid timezone raises an exception."""
     dt = datetime.now(UTC) + timedelta(hours=2)
-    result = _format_scheduled_time(dt, "Invalid/Timezone")
 
-    # Should fallback to UTC format
-    assert "UTC" in result
+    # Should raise an exception for invalid timezone
+    with pytest.raises(pytz.exceptions.UnknownTimeZoneError):
+        _format_scheduled_time(dt, "Invalid/Timezone")
 
 
 def test_config_timezone_field() -> None:

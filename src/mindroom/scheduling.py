@@ -47,22 +47,17 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
         Formatted string like "2024-01-15 3:30 PM EST (in 2 hours)"
 
     """
-    try:
-        # Convert UTC to target timezone
-        tz = pytz.timezone(timezone_str)
-        local_dt = dt.astimezone(tz)
+    # Convert UTC to target timezone
+    tz = pytz.timezone(timezone_str)
+    local_dt = dt.astimezone(tz)
 
-        # Get human-readable relative time using humanize
-        now = datetime.now(UTC)
-        relative_str = humanize.naturaltime(dt, when=now)
+    # Get human-readable relative time using humanize
+    now = datetime.now(UTC)
+    relative_str = humanize.naturaltime(dt, when=now)
 
-        # Format the datetime string
-        time_str = local_dt.strftime("%Y-%m-%d %I:%M %p %Z")
-        return f"{time_str} ({relative_str})"  # noqa: TRY300
-
-    except Exception:
-        # Fallback to UTC if timezone conversion fails
-        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    # Format the datetime string
+    time_str = local_dt.strftime("%Y-%m-%d %I:%M %p %Z")
+    return f"{time_str} ({relative_str})"
 
 
 async def schedule_task(
