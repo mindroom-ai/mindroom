@@ -10,7 +10,7 @@ services:
     ports:
       - "${MATRIX_PORT:-8448}:6167"
     volumes:
-      - ${DATA_DIR:-./instance_data}/${INSTANCE_NAME:-mindroom}/tuwunel:/var/lib/tuwunel
+      - ${DATA_DIR:-./instance_data}/tuwunel:/var/lib/tuwunel
       - ./tuwunel.toml:/etc/tuwunel.toml:ro
     command: ["-c", "/etc/tuwunel.toml"]
     environment:

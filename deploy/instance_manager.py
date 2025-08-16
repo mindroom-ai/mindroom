@@ -22,19 +22,22 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-app = typer.Typer(help="Mindroom Instance Manager - Simple multi-instance deployment")
+app = typer.Typer(
+    help="Mindroom Instance Manager - Simple multi-instance deployment",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 console = Console()
 
-REGISTRY_FILE = "instances.json"
-ENV_TEMPLATE = ".env.template"
+# Get the script's directory to ensure paths are relative to it
+SCRIPT_DIR = Path(__file__).parent.absolute()
+REGISTRY_FILE = SCRIPT_DIR / "instances.json"
+ENV_TEMPLATE = SCRIPT_DIR / ".env.template"
 
 
 def load_registry() -> dict[str, Any]:
     """Load the instance registry."""
-    registry_path = Path(REGISTRY_FILE)
-
-    # Default structure
-    data_base = os.environ.get("MINDROOM_DATA_BASE", "./instance_data")
+    # Default structure - use absolute path for data directory
+    data_base = os.environ.get("MINDROOM_DATA_BASE", str(SCRIPT_DIR / "instance_data"))
     default_registry = {
         "instances": {},
         "allocated_ports": {"backend": [], "frontend": [], "matrix": []},
@@ -46,11 +49,11 @@ def load_registry() -> dict[str, Any]:
         },
     }
 
-    if not registry_path.exists():
+    if not REGISTRY_FILE.exists():
         return default_registry
 
     try:
-        with registry_path.open() as f:
+        with REGISTRY_FILE.open() as f:
             data = json.load(f)
             # Ensure the loaded data has the required structure
             if not isinstance(data, dict):
@@ -66,7 +69,7 @@ def load_registry() -> dict[str, Any]:
 
 def save_registry(registry: dict[str, Any]) -> None:
     """Save the instance registry."""
-    with Path(REGISTRY_FILE).open("w") as f:
+    with REGISTRY_FILE.open("w") as f:
         json.dump(registry, f, indent=2)
 
 
@@ -127,22 +130,25 @@ def create(
         "matrix_type": matrix,  # 'tuwunel', 'synapse', or None
     }
 
-    # Create instance env file
-    env_file = f".env.{name}"
-    if Path(ENV_TEMPLATE).exists():
+    # Create instance env file in script directory
+    env_file = SCRIPT_DIR / f".env.{name}"
+    if ENV_TEMPLATE.exists():
         shutil.copy(ENV_TEMPLATE, env_file)
     else:
         # Create basic env file if template doesn't exist
-        Path(env_file).touch()
+        env_file.touch()
 
     # Append instance-specific vars
-    with Path(env_file).open("a") as f:
+    # data_dir is already absolute from the registry defaults
+    abs_data_dir = data_dir if Path(data_dir).is_absolute() else str(Path(data_dir).absolute())
+
+    with env_file.open("a") as f:
         f.write("\n# Instance configuration\n")
         f.write(f"INSTANCE_NAME={name}\n")
         f.write(f"BACKEND_PORT={backend_port}\n")
         f.write(f"FRONTEND_PORT={frontend_port}\n")
-        # Use ./deploy/ prefix since we run docker compose from parent directory
-        f.write(f"DATA_DIR=./deploy/{data_dir}\n")
+        # Use absolute path to work correctly from any directory
+        f.write(f"DATA_DIR={abs_data_dir}\n")
         f.write(f"INSTANCE_DOMAIN={instance['domain']}\n")
 
         if matrix:
@@ -188,9 +194,9 @@ def start(name: str = typer.Argument(..., help="Instance name to start")) -> Non
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
         raise typer.Exit(1)
 
-    env_file = f".env.{name}"
-    if not Path(env_file).exists():
-        console.print(f"[red]✗[/red] Environment file {env_file} not found!")
+    env_file = SCRIPT_DIR / f".env.{name}"
+    if not env_file.exists():
+        console.print(f"[red]✗[/red] Environment file .env.{name} not found!")
         raise typer.Exit(1)
 
     # Create data directories
@@ -211,21 +217,23 @@ def start(name: str = typer.Argument(..., help="Instance name to start")) -> Non
         # Copy Synapse config template if needed
         synapse_dir = Path(f"{instance['data_dir']}/synapse")
         if not (synapse_dir / "homeserver.yaml").exists():
-            template_dir = Path("synapse-template")
+            template_dir = SCRIPT_DIR / "synapse-template"
             if template_dir.exists():
                 for file in template_dir.glob("*"):
                     if file.is_file():
                         shutil.copy(file, synapse_dir / file.name)
 
     # Start with docker compose (modern syntax) - run from parent directory for build context
+    # Get the parent directory (project root)
+    project_root = SCRIPT_DIR.parent
+    env_file_relative = f"deploy/.env.{name}"
+
     if matrix_type == "tuwunel":
-        cmd = f"cd .. && docker compose --env-file deploy/{env_file} -f deploy/docker-compose.yml -f deploy/docker-compose.tuwunel.yml -p {name} up -d --build"
+        cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml -f deploy/docker-compose.tuwunel.yml -p {name} up -d --build"
     elif matrix_type == "synapse":
-        cmd = f"cd .. && docker compose --env-file deploy/{env_file} -f deploy/docker-compose.yml -f deploy/docker-compose.synapse.yml -p {name} up -d --build"
+        cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml -f deploy/docker-compose.synapse.yml -p {name} up -d --build"
     else:
-        cmd = (
-            f"cd .. && docker compose --env-file deploy/{env_file} -f deploy/docker-compose.yml -p {name} up -d --build"
-        )
+        cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml -p {name} up -d --build"
 
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
@@ -250,7 +258,8 @@ def stop(name: str = typer.Argument(..., help="Instance name to stop")) -> None:
         raise typer.Exit(1)
 
     # Run from parent directory to match start command
-    cmd = f"cd .. && docker compose -p {name} down"
+    project_root = SCRIPT_DIR.parent
+    cmd = f"cd {project_root} && docker compose -p {name} down"
 
     with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
