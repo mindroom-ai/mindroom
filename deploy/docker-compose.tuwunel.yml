@@ -27,9 +27,15 @@ services:
         client=https://${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}},
         server=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}:443
         }
-    # Federation requires hosts to resolve each other
-    # This uses host-gateway which resolves to the Docker host
-    # The actual domains will be dynamically set based on instance configuration
+    # Federation requires hosts to resolve each other via Traefik
+    # Extra hosts point to Docker network gateway where Traefik listens
+    extra_hosts:
+      - "m-default.mindroom.chat:172.20.0.1"
+      - "m-alt.mindroom.chat:172.20.0.1"
+      - "m-alt2.mindroom.chat:172.20.0.1"
+      - "m-default.localhost:172.20.0.1"
+      - "m-alt.localhost:172.20.0.1"
+      - "m-alt2.localhost:172.20.0.1"
     ulimits:
       nofile:
         soft: 1048567
