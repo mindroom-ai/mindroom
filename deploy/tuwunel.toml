@@ -1,0 +1,83 @@
+# Tuwunel configuration for Mindroom development
+# Optimized for development with minimal restrictions
+# Instance-specific values (server_name, database_path, port, allow_federation)
+# can be overridden via environment variables
+
+[global]
+# Server name - Override with TUWUNEL_SERVER_NAME env var
+server_name = "localhost"
+
+# Data directory - Override with TUWUNEL_DATABASE_PATH env var
+database_path = "/var/lib/tuwunel"
+
+# Network configuration
+address = "0.0.0.0"  # Required for Docker
+port = 6167  # Override with TUWUNEL_PORT env var
+
+# Performance and capacity settings - MAXIMIZED FOR DEVELOPMENT
+cache_capacity_modifier = 2.0  # Double all cache sizes
+db_cache_capacity_mb = 512.0  # High database read cache
+db_write_buffer_capacity_mb = 256.0  # High database write cache
+max_request_size = 104857600  # 100MB for large media
+max_fetch_prev_events = 10000  # Allow fetching many events
+
+# Connection timeouts - VERY PERMISSIVE FOR DEVELOPMENT
+request_conn_timeout = 60
+request_timeout = 300
+request_total_timeout = 600
+federation_timeout = 600
+sender_timeout = 600
+client_receive_timeout = 300
+client_request_timeout = 600
+client_response_timeout = 300
+
+# Registration - OPEN FOR DEVELOPMENT
+allow_registration = true
+yes_i_am_very_very_sure_i_want_an_open_registration_server_prone_to_abuse = true
+
+# Features
+allow_encryption = true
+allow_federation = false  # Override with TUWUNEL_ALLOW_FEDERATION env var
+allow_room_creation = true
+allow_unstable_room_versions = true
+allow_guest_registration = true
+
+# Media
+allow_legacy_media = true
+
+# Presence and typing
+allow_local_presence = true
+allow_incoming_presence = true
+allow_outgoing_presence = true
+allow_incoming_typing = true
+allow_outgoing_typing = true
+typing_federation_timeout_s = 60
+typing_client_timeout_max_s = 120
+
+# Performance optimizations
+startup_netburst = true
+startup_netburst_keep = 1000  # Keep more messages
+query_all_nameservers = false  # Faster DNS
+dns_cache_entries = 65536  # Large DNS cache
+dns_min_ttl = 60  # Shorter TTL for development
+
+# Database performance
+rocksdb_compression_algo = "lz4"  # Fast compression
+rocksdb_log_level = "warn"
+rocksdb_max_log_files = 3
+rocksdb_optimize_for_spinning_disks = false
+rocksdb_direct_io = true
+
+# Pool and stream settings for high throughput
+db_pool_workers = 64  # High worker count
+db_pool_queue_mult = 8  # Large queue multiplier
+stream_width_scale = 2.0  # Double stream width
+stream_amplification = 2048  # High batch sizes
+
+# Logging
+log = "info"
+log_colors = true
+
+# Admin settings
+admin_room_notices = true
+admin_escape_commands = true

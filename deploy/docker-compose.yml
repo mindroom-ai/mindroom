@@ -1,5 +1,5 @@
 services:
-  mindroom-backend:
+  backend:
     image: ${BACKEND_IMAGE:-deploy-mindroom-backend:latest}
     build:
       context: ..
@@ -8,20 +8,26 @@ services:
     restart: always
     env_file:
       - ../.env
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      - "${BACKEND_PORT:-8765}:8765"
     volumes:
-      - ${DATA_DIR:-/mnt/data/mindroom}/config:/app/config
-      - ${DATA_DIR:-/mnt/data/mindroom}/tmp:/app/tmp
-      - ${DATA_DIR:-/mnt/data/mindroom}/logs:/app/logs
+      - ${DATA_DIR}/config:/app/config
+      - ${DATA_DIR}/tmp:/app/tmp
+      - ${DATA_DIR}/logs:/app/logs
+      - ${DATA_DIR}/mindroom:/app/.mindroom
+      - ${DATA_DIR}/mem0:/app/.mem0
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - STORAGE_PATH=/app/tmp
       - BACKEND_PORT=${BACKEND_PORT:-8765}
+      - HOME=/app
     networks:
-      - mynetwork
+      - mindroom-network
     labels:
       - traefik.enable=false
 
-  mindroom-frontend:
+  frontend:
     image: ${FRONTEND_IMAGE:-deploy-mindroom-frontend:latest}
     build:
       context: ..
@@ -30,14 +36,16 @@ services:
     restart: always
     env_file:
       - ../.env
+    ports:
+      - "${FRONTEND_PORT:-3003}:3003"
     volumes:
-      - ${DATA_DIR:-/mnt/data/mindroom}/config:/app/config
-      - ${DATA_DIR:-/mnt/data/mindroom}/logs:/app/logs
+      - ${DATA_DIR}/config:/app/config
+      - ${DATA_DIR}/logs:/app/logs
     environment:
       - BACKEND_PORT=${BACKEND_PORT:-8765}
       - FRONTEND_PORT=${FRONTEND_PORT:-3003}
     networks:
-      - mynetwork
+      - mindroom-network
     labels:
       - traefik.enable=true
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN:-mindroom.${DOMAIN}}`)
@@ -47,5 +55,5 @@ services:
       - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=${FRONTEND_PORT:-3003}
 
 networks:
-  mynetwork:
-    external: true
+  mindroom-network:
+    driver: bridge

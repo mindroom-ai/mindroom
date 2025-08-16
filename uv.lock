@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13' and python_full_version < '4'",
@@ -3192,6 +3192,7 @@ dev = [
     { name = "pytest-sugar" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
+    { name = "requests" },
     { name = "ruff" },
     { name = "types-markdown" },
     { name = "types-pytz" },
@@ -3309,6 +3310,7 @@ dev = [
     { name = "pytest-sugar", specifier = ">=1" },
     { name = "pytest-timeout", specifier = ">=2.4" },
     { name = "pytest-xdist", specifier = ">=3.8" },
+    { name = "requests", specifier = ">=2.32.4" },
     { name = "ruff", specifier = ">=0.12.5" },
     { name = "types-markdown", specifier = ">=3.7" },
     { name = "types-pytz", specifier = ">=2025.2.0.20250809" },

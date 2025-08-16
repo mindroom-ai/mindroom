@@ -1,0 +1,85 @@
+# Synapse Matrix Server Overlay for Mindroom Federation
+# Full-featured Matrix server with PostgreSQL and Redis
+# Usage: docker compose --env-file .env.{instance} -f docker-compose.yml -f docker-compose.synapse.yml up -d
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ${INSTANCE_NAME:-mindroom}-postgres
+    environment:
+      POSTGRES_DB: synapse
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-synapse_password}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mindroom-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${INSTANCE_NAME:-mindroom}-redis
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mindroom-network
+
+  synapse:
+    image: matrixdotorg/synapse:latest
+    container_name: ${INSTANCE_NAME:-mindroom}-synapse
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+      SYNAPSE_SERVER_NAME: ${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
+      SYNAPSE_REPORT_STATS: "no"
+      UID: 1000
+      GID: 1000
+    volumes:
+      # Bind mount the entire synapse config directory
+      # DATA_DIR should be set in the .env file
+      - ${DATA_DIR}/synapse:/data
+    ports:
+      - "${MATRIX_PORT:-8008}:8008"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - mindroom-network
+
+  # Update backend to know about Matrix server
+  backend:
+    environment:
+      - MATRIX_HOMESERVER=http://synapse:8008
+      - MATRIX_SERVER_NAME=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
+    depends_on:
+      synapse:
+        condition: service_healthy
+
+networks:
+  mindroom-network:
+    driver: bridge
+
+volumes:
+  # Named volumes for each instance (prefixed with instance name)
+  # Docker manages permissions automatically
+  postgres-data:
+    name: ${INSTANCE_NAME:-mindroom}-postgres-data
+  redis-data:
+    name: ${INSTANCE_NAME:-mindroom}-redis-data

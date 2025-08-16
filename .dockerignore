@@ -34,6 +34,8 @@ Thumbs.db
 tmp/
 logs/
 *.log
+deploy/instance_data/
+instance_data/
 coverage.xml
 .cache
 
