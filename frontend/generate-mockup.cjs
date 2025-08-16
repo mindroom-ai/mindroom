@@ -283,10 +283,10 @@ async function generateMockup() {
   try {
     const page = await browser.newPage();
 
-    // Set viewport for a nice screenshot
+    // Set viewport for a nice screenshot - smaller to reduce background
     await page.setViewport({
-      width: 1200,
-      height: 800,
+      width: 800,
+      height: 600,
       deviceScaleFactor: 2 // High quality
     });
 
