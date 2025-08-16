@@ -49,7 +49,7 @@ def save_registry(registry: dict[str, Any]) -> None:
         json.dump(registry, f, indent=2)
 
 
-def find_next_ports(registry: dict[str, Any]) -> tuple[int, int]:
+def find_next_ports(registry: dict[str, Any]) -> tuple[int, int, int]:
     """Find the next available ports."""
     defaults = registry["defaults"]
     allocated = registry["allocated_ports"]
@@ -62,13 +62,20 @@ def find_next_ports(registry: dict[str, Any]) -> tuple[int, int]:
     while frontend_port in allocated["frontend"]:
         frontend_port += 1
 
-    return backend_port, frontend_port
+    # Matrix port allocation (starting at 8448)
+    matrix_port = defaults.get("matrix_port_start", 8448)
+    matrix_allocated = allocated.get("matrix", [])
+    while matrix_port in matrix_allocated:
+        matrix_port += 1
+
+    return backend_port, frontend_port, matrix_port
 
 
 @app.command()
 def create(
     name: str = typer.Argument(..., help="Instance name"),
     domain: str | None = typer.Option(None, help="Domain for the instance (default: NAME.localhost)"),
+    with_matrix: bool = typer.Option(False, "--matrix", help="Include Tuwunel Matrix server"),
 ) -> None:
     """Create a new instance with automatic port allocation."""
     registry = load_registry()
@@ -77,16 +84,18 @@ def create(
         console.print(f"[red]✗[/red] Instance '{name}' already exists!")
         raise typer.Exit(1)
 
-    backend_port, frontend_port = find_next_ports(registry)
+    backend_port, frontend_port, matrix_port = find_next_ports(registry)
     data_dir = f"{registry['defaults']['data_dir_base']}/{name}"
 
     instance = {
         "name": name,
         "backend_port": backend_port,
         "frontend_port": frontend_port,
+        "matrix_port": matrix_port if with_matrix else None,
         "data_dir": data_dir,
         "domain": domain or f"{name}.localhost",
         "status": "created",
+        "with_matrix": with_matrix,
     }
 
     # Create instance env file
@@ -106,18 +115,33 @@ def create(
         f.write(f"DATA_DIR={data_dir}\n")
         f.write(f"INSTANCE_DOMAIN={instance['domain']}\n")
 
+        if with_matrix:
+            f.write("\n# Matrix/Tuwunel configuration\n")
+            f.write(f"MATRIX_PORT={matrix_port}\n")
+            f.write(f"MATRIX_SERVER_NAME={instance['domain']}\n")
+            f.write("MATRIX_ALLOW_REGISTRATION=true\n")
+            f.write("MATRIX_ALLOW_FEDERATION=false\n")
+
     # Update registry
     registry["instances"][name] = instance
     registry["allocated_ports"]["backend"].append(backend_port)
     registry["allocated_ports"]["frontend"].append(frontend_port)
+    if with_matrix:
+        if "matrix" not in registry["allocated_ports"]:
+            registry["allocated_ports"]["matrix"] = []
+        registry["allocated_ports"]["matrix"].append(matrix_port)
     save_registry(registry)
 
     console.print(f"[green]✓[/green] Created instance '[cyan]{name}[/cyan]'")
     console.print(f"  [dim]Backend port:[/dim] {backend_port}")
     console.print(f"  [dim]Frontend port:[/dim] {frontend_port}")
+    if with_matrix:
+        console.print(f"  [dim]Matrix port:[/dim] {matrix_port}")
     console.print(f"  [dim]Data dir:[/dim] {data_dir}")
     console.print(f"  [dim]Domain:[/dim] {instance['domain']}")
     console.print(f"  [dim]Env file:[/dim] .env.{name}")
+    if with_matrix:
+        console.print("  [dim]Matrix:[/dim] [green]Enabled[/green] (Tuwunel)")
 
 
 @app.command()
@@ -138,8 +162,17 @@ def start(name: str = typer.Argument(..., help="Instance name to start")) -> Non
     for subdir in ["config", "tmp", "logs"]:
         Path(f"{instance['data_dir']}/{subdir}").mkdir(parents=True, exist_ok=True)
 
+    # Create Tuwunel data directory if Matrix is enabled
+    if instance.get("with_matrix"):
+        Path(f"{instance['data_dir']}/tuwunel").mkdir(parents=True, exist_ok=True)
+
     # Start with docker compose (modern syntax)
-    cmd = f"docker compose --env-file {env_file} -p {name} up -d"
+    if instance.get("with_matrix"):
+        cmd = (
+            f"docker compose --env-file {env_file} -f docker-compose.yml -f docker-compose.tuwunel.yml -p {name} up -d"
+        )
+    else:
+        cmd = f"docker compose --env-file {env_file} -p {name} up -d"
 
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
@@ -196,6 +229,7 @@ def list_instances() -> None:
     table.add_column("Status", justify="center")
     table.add_column("Backend", justify="right")
     table.add_column("Frontend", justify="right")
+    table.add_column("Matrix", justify="right")
     table.add_column("Domain")
     table.add_column("Data Directory")
 
@@ -208,11 +242,19 @@ def list_instances() -> None:
         else:
             status_display = "[yellow]● created[/yellow]"
 
+        matrix_display = ""
+        if config.get("with_matrix"):
+            matrix_port = config.get("matrix_port", "N/A")
+            matrix_display = f"[cyan]{matrix_port}[/cyan]"
+        else:
+            matrix_display = "[dim]disabled[/dim]"
+
         table.add_row(
             name,
             status_display,
             str(config["backend_port"]),
             str(config["frontend_port"]),
+            matrix_display,
             config["domain"],
             config["data_dir"],
         )
