@@ -27,34 +27,32 @@ MindRoom agents:
 - **Collaborate naturally** - Multiple agents working together in threads
 - **Respect boundaries** - You control which agent sees what data
 
-## Standing on Giants' Shoulders
+## Built on Proven Infrastructure
 
-### The Matrix Advantage
-We didn't build a chat platform. We built AI orchestration on top of **10+ years of Matrix development**:
+MindRoom leverages the Matrix protocol, a decade-old open standard with significant real-world adoption:
 
-- **€10M+ invested** in Matrix protocol development
-- **100+ developers** contributing to the ecosystem
-- **50+ million users** on Matrix already
-- **Battle-tested** by governments (France, Germany) for secure communications
-- **Existing bridges** to Slack, Discord, Telegram, WhatsApp, Signal, IRC, and more
-- **Professional clients** like Element, FluffyChat, Cinny already working
+**Foundation**
+- **10+ years** of development by the Matrix.org Foundation
+- **€10M+** invested in protocol development
+- **100+ developers** contributing to the core ecosystem
+- **35+ million users** globally
 
-**LobeChat spent years building chat infrastructure. We spent that time building AI orchestration.**
+**Enterprise Validation**
+- **German Healthcare**: 150,000+ organizations using Ti-Messenger
+- **French Government**: 5.5 million civil servants on Tchap
+- **Military Adoption**: NATO, U.S. Space Force, and other defense organizations
+- **GDPR Compliant**: Built for European privacy standards
 
-### What This Means For You
+**What This Means For You**
 
-While others debug websockets and design chat bubbles, we focus on:
-- Agent collaboration protocols
-- Memory architectures  
-- Cross-organization federation
-- Tool integrations
+By building on Matrix, MindRoom inherits:
+- Production-tested federation across organizations
+- Military-grade E2E encryption (Olm/Megolm)
+- Professional clients (Element, FluffyChat, Cinny)
+- 50+ maintained bridges to other platforms
+- Proven scale and reliability
 
-You get:
-- **Day 1**: Military-grade E2E encryption (Matrix built it)
-- **Day 1**: Professional mobile/desktop apps (Element, etc.)
-- **Day 1**: Bridges to every platform (community maintained)
-- **Day 1**: Proven scale (Matrix handles millions of users)
-- **Day 1**: Compliance ready (Matrix is GDPR compliant)
+This foundation allows MindRoom to focus entirely on agent orchestration and intelligence, rather than reimplementing communication infrastructure.
 
 ## See It In Action
 
@@ -258,12 +256,6 @@ Mix and match:
 
 ## Architecture
 
-### Why Matrix?
-- **Federation**: Like email—works across servers
-- **Bridges**: Connect to Slack, Telegram, Discord, everything
-- **E2E Encryption**: Military-grade security by default
-- **No Lock-in**: Export and migrate anytime
-
 ### Technical Stack
 - **Matrix**: Conduit server (only 20-30MB RAM!)
 - **Agents**: Python with matrix-nio
@@ -292,15 +284,6 @@ We believe AI should be:
 - 🚧 Mobile apps in development
 - 🚧 Agent marketplace planned
 
-## Why Not Just Use...?
-
-**ChatGPT/Claude?** They can't join your Slack or remember yesterday's conversation.
-
-**Slack AI?** Locked to Slack only, no memory across platforms, no federation.
-
-**Other AI Platforms?** No federation means no cross-organization collaboration.
-
-**MindRoom?** Your AI everywhere, remembering everything, owned by you.
 
 ## Contributing
 
