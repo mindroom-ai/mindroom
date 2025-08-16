@@ -8,13 +8,14 @@
 
 No over-engineering, just the basics.
 """
-# ruff: noqa: ANN001, ANN201, PTH123, S602
+# ruff: noqa: S602  # subprocess with shell=True needed for docker compose
 
 import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -27,9 +28,10 @@ REGISTRY_FILE = "instances.json"
 ENV_TEMPLATE = ".env.template"
 
 
-def load_registry():
+def load_registry() -> dict[str, Any]:
     """Load the instance registry."""
-    if not Path(REGISTRY_FILE).exists():
+    registry_path = Path(REGISTRY_FILE)
+    if not registry_path.exists():
         # Use local data directory for testing, can be changed to /mnt/data in production
         data_base = os.environ.get("MINDROOM_DATA_BASE", "./instance_data")
         return {
@@ -37,17 +39,17 @@ def load_registry():
             "allocated_ports": {"backend": [], "frontend": []},
             "defaults": {"backend_port_start": 8765, "frontend_port_start": 3003, "data_dir_base": data_base},
         }
-    with open(REGISTRY_FILE) as f:
+    with registry_path.open() as f:
         return json.load(f)
 
 
-def save_registry(registry):
+def save_registry(registry: dict[str, Any]) -> None:
     """Save the instance registry."""
-    with open(REGISTRY_FILE, "w") as f:
+    with Path(REGISTRY_FILE).open("w") as f:
         json.dump(registry, f, indent=2)
 
 
-def find_next_ports(registry):
+def find_next_ports(registry: dict[str, Any]) -> tuple[int, int]:
     """Find the next available ports."""
     defaults = registry["defaults"]
     allocated = registry["allocated_ports"]
@@ -67,7 +69,7 @@ def find_next_ports(registry):
 def create(
     name: str = typer.Argument(..., help="Instance name"),
     domain: str | None = typer.Option(None, help="Domain for the instance (default: NAME.localhost)"),
-):
+) -> None:
     """Create a new instance with automatic port allocation."""
     registry = load_registry()
 
@@ -96,7 +98,7 @@ def create(
         Path(env_file).touch()
 
     # Append instance-specific vars
-    with open(env_file, "a") as f:
+    with Path(env_file).open("a") as f:
         f.write("\n# Instance configuration\n")
         f.write(f"INSTANCE_NAME={name}\n")
         f.write(f"BACKEND_PORT={backend_port}\n")
@@ -119,7 +121,7 @@ def create(
 
 
 @app.command()
-def start(name: str = typer.Argument(..., help="Instance name to start")):
+def start(name: str = typer.Argument(..., help="Instance name to start")) -> None:
     """Start a Mindroom instance."""
     registry = load_registry()
     if name not in registry["instances"]:
@@ -154,7 +156,7 @@ def start(name: str = typer.Argument(..., help="Instance name to start")):
 
 
 @app.command()
-def stop(name: str = typer.Argument(..., help="Instance name to stop")):
+def stop(name: str = typer.Argument(..., help="Instance name to stop")) -> None:
     """Stop a running Mindroom instance."""
     registry = load_registry()
     if name not in registry["instances"]:
@@ -178,7 +180,7 @@ def stop(name: str = typer.Argument(..., help="Instance name to stop")):
 
 
 @app.command("list")
-def list_instances():
+def list_instances() -> None:
     """List all configured instances."""
     registry = load_registry()
     instances = registry["instances"]
