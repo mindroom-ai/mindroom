@@ -105,6 +105,10 @@ class Config(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
+    timezone: str = Field(
+        default="UTC",
+        description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
+    )
 
     @classmethod
     def from_yaml(cls, config_path: Path | None = None) -> Config:

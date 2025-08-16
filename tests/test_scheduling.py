@@ -99,7 +99,7 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
     client.room_get_state = AsyncMock(return_value=mock_response)
 
     # Test listing tasks for thread123
-    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123")
+    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123", config=None)
 
     # Should show 2 tasks from thread123, not task2 (different thread) or task4 (completed)
     assert "**Scheduled Tasks:**" in result
@@ -113,7 +113,7 @@ async def test_list_scheduled_tasks_real_implementation() -> None:
     assert "task4" not in result  # Completed
 
     # Test listing tasks for thread456
-    result2 = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread456")
+    result2 = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread456", config=None)
 
     # Should only show task2
     assert "**Scheduled Tasks:**" in result2
@@ -133,7 +133,7 @@ async def test_list_scheduled_tasks_no_tasks() -> None:
     mock_response = nio.RoomGetStateResponse.from_dict([], room_id="!test:server")
     client.room_get_state = AsyncMock(return_value=mock_response)
 
-    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123")
+    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123", config=None)
 
     assert result == "No scheduled tasks found."
 
@@ -176,6 +176,7 @@ async def test_list_scheduled_tasks_tasks_in_other_threads() -> None:
         client=client,
         room_id="!test:server",
         thread_id="$thread123",  # Looking for thread123, but task is in thread456
+        config=None,
     )
 
     assert "No scheduled tasks in this thread" in result
@@ -191,7 +192,7 @@ async def test_list_scheduled_tasks_error_response() -> None:
     error_response = nio.RoomGetStateError.from_dict({"error": "Not authorized"}, room_id="!test:server")
     client.room_get_state = AsyncMock(return_value=error_response)
 
-    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123")
+    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123", config=None)
 
     assert result == "Unable to retrieve scheduled tasks."
 
@@ -252,7 +253,7 @@ async def test_list_scheduled_tasks_invalid_task_data() -> None:
 
     client.room_get_state = AsyncMock(return_value=mock_response)
 
-    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123")
+    result = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread123", config=None)
 
     # Should only show the valid task
     assert "**Scheduled Tasks:**" in result
