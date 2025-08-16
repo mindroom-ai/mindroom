@@ -21,12 +21,6 @@ services:
       - TUWUNEL_ALLOW_FEDERATION=${MATRIX_ALLOW_FEDERATION:-false}
     networks:
       - mindroom-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6167/_matrix/client/versions"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
 
   # Update backend to know about Matrix server
   backend:
@@ -34,8 +28,7 @@ services:
       - MATRIX_HOMESERVER=http://tuwunel:6167
       - MATRIX_SERVER_NAME=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
     depends_on:
-      tuwunel:
-        condition: service_healthy
+      - tuwunel
 
 networks:
   mindroom-network:
