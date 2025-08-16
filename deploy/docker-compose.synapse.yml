@@ -12,7 +12,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-synapse_password}
       POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
     volumes:
-      - ${DATA_DIR:-./instance_data}/${INSTANCE_NAME:-mindroom}/postgres:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U synapse"]
       interval: 10s
@@ -25,7 +25,7 @@ services:
     image: redis:7-alpine
     container_name: ${INSTANCE_NAME:-mindroom}-redis
     volumes:
-      - ${DATA_DIR:-./instance_data}/${INSTANCE_NAME:-mindroom}/redis:/data
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -37,6 +37,8 @@ services:
   synapse:
     image: matrixdotorg/synapse:latest
     container_name: ${INSTANCE_NAME:-mindroom}-synapse
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["sleep 2 && /data/entrypoint.sh"]
     environment:
       SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
       SYNAPSE_SERVER_NAME: ${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
@@ -44,8 +46,10 @@ services:
       UID: 1000
       GID: 1000
     volumes:
+      # Bind mount the entire synapse config directory (like the original)
       - ${DATA_DIR:-./instance_data}/${INSTANCE_NAME:-mindroom}/synapse:/data
-      - ${DATA_DIR:-./instance_data}/${INSTANCE_NAME:-mindroom}/synapse/media:/data/media_store
+      # Named volume for media (persists across recreates)
+      - synapse-media:/data/media_store
     ports:
       - "${MATRIX_PORT:-8008}:8008"
     depends_on:
@@ -72,3 +76,13 @@ services:
 networks:
   mindroom-network:
     driver: bridge
+
+volumes:
+  # Named volumes for each instance (prefixed with instance name)
+  # Docker manages permissions automatically
+  postgres-data:
+    name: ${INSTANCE_NAME:-mindroom}-postgres-data
+  redis-data:
+    name: ${INSTANCE_NAME:-mindroom}-redis-data
+  synapse-media:
+    name: ${INSTANCE_NAME:-mindroom}-synapse-media

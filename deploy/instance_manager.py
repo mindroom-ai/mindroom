@@ -141,7 +141,8 @@ def create(
         f.write(f"INSTANCE_NAME={name}\n")
         f.write(f"BACKEND_PORT={backend_port}\n")
         f.write(f"FRONTEND_PORT={frontend_port}\n")
-        f.write(f"DATA_DIR={data_dir}\n")
+        # Use ./deploy/ prefix since we run docker compose from parent directory
+        f.write(f"DATA_DIR=./deploy/{data_dir}\n")
         f.write(f"INSTANCE_DOMAIN={instance['domain']}\n")
 
         if matrix:
@@ -216,17 +217,15 @@ def start(name: str = typer.Argument(..., help="Instance name to start")) -> Non
                     if file.is_file():
                         shutil.copy(file, synapse_dir / file.name)
 
-    # Start with docker compose (modern syntax)
+    # Start with docker compose (modern syntax) - run from parent directory for build context
     if matrix_type == "tuwunel":
-        cmd = (
-            f"docker compose --env-file {env_file} -f docker-compose.yml -f docker-compose.tuwunel.yml -p {name} up -d"
-        )
+        cmd = f"cd .. && docker compose --env-file deploy/{env_file} -f deploy/docker-compose.yml -f deploy/docker-compose.tuwunel.yml -p {name} up -d --build"
     elif matrix_type == "synapse":
-        cmd = (
-            f"docker compose --env-file {env_file} -f docker-compose.yml -f docker-compose.synapse.yml -p {name} up -d"
-        )
+        cmd = f"cd .. && docker compose --env-file deploy/{env_file} -f deploy/docker-compose.yml -f deploy/docker-compose.synapse.yml -p {name} up -d --build"
     else:
-        cmd = f"docker compose --env-file {env_file} -p {name} up -d"
+        cmd = (
+            f"cd .. && docker compose --env-file deploy/{env_file} -f deploy/docker-compose.yml -p {name} up -d --build"
+        )
 
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
@@ -250,7 +249,8 @@ def stop(name: str = typer.Argument(..., help="Instance name to stop")) -> None:
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
         raise typer.Exit(1)
 
-    cmd = f"docker compose -p {name} down"
+    # Run from parent directory to match start command
+    cmd = f"cd .. && docker compose -p {name} down"
 
     with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)

@@ -1,5 +1,5 @@
 services:
-  mindroom-backend:
+  backend:
     image: ${BACKEND_IMAGE:-deploy-mindroom-backend:latest}
     build:
       context: ..
@@ -17,11 +17,11 @@ services:
       - STORAGE_PATH=/app/tmp
       - BACKEND_PORT=${BACKEND_PORT:-8765}
     networks:
-      - mynetwork
+      - mindroom-network
     labels:
       - traefik.enable=false
 
-  mindroom-frontend:
+  frontend:
     image: ${FRONTEND_IMAGE:-deploy-mindroom-frontend:latest}
     build:
       context: ..
@@ -37,7 +37,7 @@ services:
       - BACKEND_PORT=${BACKEND_PORT:-8765}
       - FRONTEND_PORT=${FRONTEND_PORT:-3003}
     networks:
-      - mynetwork
+      - mindroom-network
     labels:
       - traefik.enable=true
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN:-mindroom.${DOMAIN}}`)
@@ -47,5 +47,5 @@ services:
       - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=${FRONTEND_PORT:-3003}
 
 networks:
-  mynetwork:
-    external: true
+  mindroom-network:
+    driver: bridge
