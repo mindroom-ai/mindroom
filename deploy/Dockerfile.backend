@@ -1,22 +1,23 @@
-# Multi-stage build for fast rebuilds
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim as base
-RUN apt-get update && apt-get install -y git curl build-essential && rm -rf /var/lib/apt/lists/*
+# Install uv
+FROM python:3.12-slim
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 
-# Dependencies stage - only rebuild if deps change
-FROM base as deps
+# Change the working directory to the `app` directory
 WORKDIR /app
-# Set UV to use copy mode to avoid issues with cache mounts
-ENV UV_LINK_MODE=copy
-COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
-# Use cache mount for UV packages to speed up builds
+
+# Install dependencies (without the project itself)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --all-extras --no-dev
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --locked --no-install-project --no-dev
 
-# Final stage
-FROM base as final
-WORKDIR /app
-COPY --from=deps /app/.venv /app/.venv
-COPY . .
+# Copy the project into the image
+ADD . /app
+
+# Sync the project (fast, only installs the project itself)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev
+
 RUN mkdir -p /app/tmp /app/logs /app/config
 CMD ["/app/.venv/bin/python", "-m", "mindroom.cli", "run", "--log-level", "INFO", "--storage-path", "/app/tmp"]

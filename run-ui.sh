@@ -35,11 +35,15 @@ trap cleanup EXIT INT TERM
 # Start backend (now from main mindroom package)
 echo -e "${GREEN}Starting backend server on port $BACKEND_PORT...${NC}"
 
-echo "Using uv for Python dependencies..."
+# Ensure venv exists (in Docker it's pre-installed, locally we create it)
 if [ ! -d ".venv" ]; then
+    echo "Creating virtual environment..."
     uv sync --all-extras
 fi
-uv run uvicorn mindroom.api.main:app --reload --host $HOST --port $BACKEND_PORT &
+
+# Use the venv directly (works everywhere)
+echo "Starting backend with existing virtual environment..."
+.venv/bin/uvicorn mindroom.api.main:app --reload --host $HOST --port $BACKEND_PORT &
 BACKEND_PID=$!
 
 # Wait a moment for backend to start
