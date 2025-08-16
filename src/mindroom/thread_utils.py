@@ -142,10 +142,23 @@ def should_agent_respond(
     thread_history: list[dict],
     config: Config,
     is_invited_to_thread: bool = False,
+    mentioned_agents: list[str] | None = None,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
 
     Team formation is handled elsewhere - this just determines individual responses.
+
+    Args:
+        agent_name: Name of the agent checking if it should respond
+        am_i_mentioned: Whether this specific agent is mentioned
+        is_thread: Whether the message is in a thread
+        room_id: The room ID where the message was sent
+        configured_rooms: Rooms this agent is configured for
+        thread_history: History of messages in the thread
+        config: Application configuration
+        is_invited_to_thread: Whether agent is invited to this thread
+        mentioned_agents: List of all agents mentioned in the message
+
     """
     # Check if agent has access (either native or invited to thread)
     has_room_access = room_id in configured_rooms
@@ -156,6 +169,11 @@ def should_agent_respond(
     if not is_thread:
         # Only respond if mentioned and have room access (invites only work in threads)
         return am_i_mentioned and has_room_access
+
+    # If other agents are mentioned but not this one, don't respond
+    # This handles the case where a user explicitly redirects to another agent
+    if mentioned_agents and not am_i_mentioned:
+        return False
 
     # Thread logic - invited agents behave like native agents
     if am_i_mentioned and has_access:
