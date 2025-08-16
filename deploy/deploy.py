@@ -279,11 +279,12 @@ def create(  # noqa: PLR0912, PLR0915
                         with file.open() as f:
                             content = f.read()
                         # Replace hardcoded values with instance-specific ones
-                        server_name = instance.domain
-                        content = content.replace('server_name: "localhost"', f'server_name: "{server_name}"')
+                        # For Matrix federation, use the m- prefixed domain
+                        matrix_server_name = f"m-{instance.domain}"
+                        content = content.replace('server_name: "localhost"', f'server_name: "{matrix_server_name}"')
                         content = content.replace(
                             "public_baseurl: http://localhost:8008/",
-                            f"public_baseurl: http://{server_name}:{matrix_port_value}/",
+                            f"public_baseurl: http://{matrix_server_name}:{matrix_port_value}/",
                         )
                         # Replace postgres and redis hostnames with container names
                         content = content.replace("host: postgres", f"host: {name}-postgres")
@@ -403,13 +404,17 @@ def start(  # noqa: PLR0912, PLR0915
                             with file.open() as f:
                                 content = f.read()
                             # Replace hardcoded values with instance-specific ones
-                            server_name = instance.domain
+                            # For Matrix federation, use the m- prefixed domain
+                            matrix_server_name = f"m-{instance.domain}"
                             # For public_baseurl, use the external port that will be mapped
                             matrix_port_display = instance.matrix_port or 8008
-                            content = content.replace('server_name: "localhost"', f'server_name: "{server_name}"')
+                            content = content.replace(
+                                'server_name: "localhost"',
+                                f'server_name: "{matrix_server_name}"',
+                            )
                             content = content.replace(
                                 "public_baseurl: http://localhost:8008/",
-                                f"public_baseurl: http://{server_name}:{matrix_port_display}/",
+                                f"public_baseurl: http://{matrix_server_name}:{matrix_port_display}/",
                             )
                             # Replace postgres and redis hostnames with container names
                             content = content.replace("host: postgres", f"host: {name}-postgres")
