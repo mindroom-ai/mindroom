@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from . import interactive
+from . import interactive, voice_handler
 from .agents import create_agent, get_rooms_for_entity
 from .ai import ai_response, ai_response_streaming
 from .background_tasks import create_background_task, wait_for_background_tasks
@@ -75,7 +75,6 @@ from .thread_utils import (
     has_user_responded_after_message,
     should_agent_respond,
 )
-from .voice_handler import VoiceHandler
 
 if TYPE_CHECKING:
     import structlog
@@ -178,7 +177,6 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
     thread_invite_manager: ThreadInviteManager = field(init=False)
-    voice_handler: VoiceHandler = field(init=False)
     invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
@@ -307,7 +305,6 @@ class AgentBot:
         # Initialize response tracker and thread invite manager
         self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
         self.thread_invite_manager = ThreadInviteManager(self.client)
-        self.voice_handler = VoiceHandler(self.config)
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
@@ -573,7 +570,7 @@ class AgentBot:
     ) -> None:
         """Handle voice message events for transcription and processing."""
         # Only process if voice handler is enabled
-        if not self.voice_handler.enabled:
+        if not self.config.voice.enabled:
             return
 
         # Don't process our own voice messages
@@ -583,7 +580,7 @@ class AgentBot:
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
 
         # Process the voice message
-        await self.voice_handler.handle_voice_message(self.client, room, event)
+        await voice_handler.handle_voice_message(self.client, room, event, self.config)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
