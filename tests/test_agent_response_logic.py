@@ -360,3 +360,42 @@ class TestAgentResponseLogic:
         )
         # Agent1 SHOULD respond and should NOT use router
         assert should_respond
+
+    def test_agent_stops_when_user_mentions_other_agent(self) -> None:
+        """Test that an agent stops responding when user mentions a different agent.
+
+        This tests the specific bug where GeneralAgent continued responding
+        after the user explicitly mentioned ResearchAgent.
+        """
+        # Thread history: GeneralAgent was initially mentioned by router and responded
+        thread_history = [
+            {"sender": "@user:localhost", "body": "hi"},
+            {"sender": "@mindroom_router:localhost", "body": "@general could you help with this?"},
+            {"sender": "@mindroom_general:localhost", "body": "Hello! How can I help?"},
+        ]
+
+        # GeneralAgent should NOT respond because ResearchAgent is mentioned
+        should_respond = should_agent_respond(
+            agent_name="general",
+            am_i_mentioned=False,  # GeneralAgent is NOT mentioned
+            is_thread=True,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=thread_history,
+            config=self.config,
+            mentioned_agents=["research"],  # ResearchAgent is mentioned
+        )
+        assert should_respond is False  # Should NOT respond when another agent is mentioned
+
+        # But if no agents are mentioned, general should continue the conversation
+        should_respond = should_agent_respond(
+            agent_name="general",
+            am_i_mentioned=False,
+            is_thread=True,
+            room_id="!room:localhost",
+            configured_rooms=["!room:localhost"],
+            thread_history=thread_history,
+            config=self.config,
+            mentioned_agents=[],  # No agents mentioned
+        )
+        assert should_respond is True  # Should continue when no one is mentioned
