@@ -215,3 +215,8 @@ yarn-error.log*
 screenshots/
 captures/
 frontend/node_modules/
+
+# Federation instance files
+deploy/instances.json
+deploy/.env.*
+deploy/instance_data/

@@ -1,47 +1,50 @@
 services:
   mindroom-backend:
+    image: ${BACKEND_IMAGE:-deploy-mindroom-backend:latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.backend
-    container_name: mindroom-backend
+    container_name: ${INSTANCE_NAME:-mindroom}-backend
     restart: always
     env_file:
       - ../.env
     volumes:
-      - /mnt/data/mindroom/config:/app/config
-      - /mnt/data/mindroom/tmp:/app/tmp
-      - /mnt/data/mindroom/logs:/app/logs
+      - ${DATA_DIR:-/mnt/data/mindroom}/config:/app/config
+      - ${DATA_DIR:-/mnt/data/mindroom}/tmp:/app/tmp
+      - ${DATA_DIR:-/mnt/data/mindroom}/logs:/app/logs
     environment:
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - STORAGE_PATH=/app/tmp
+      - BACKEND_PORT=${BACKEND_PORT:-8765}
     networks:
       - mynetwork
     labels:
       - traefik.enable=false
 
   mindroom-frontend:
+    image: ${FRONTEND_IMAGE:-deploy-mindroom-frontend:latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.frontend
-    container_name: mindroom-frontend
+    container_name: ${INSTANCE_NAME:-mindroom}-frontend
     restart: always
     env_file:
       - ../.env
     volumes:
-      - /mnt/data/mindroom/config:/app/config
-      - /mnt/data/mindroom/logs:/app/logs
+      - ${DATA_DIR:-/mnt/data/mindroom}/config:/app/config
+      - ${DATA_DIR:-/mnt/data/mindroom}/logs:/app/logs
     environment:
-      - BACKEND_PORT=8001
-      - FRONTEND_PORT=3003
+      - BACKEND_PORT=${BACKEND_PORT:-8765}
+      - FRONTEND_PORT=${FRONTEND_PORT:-3003}
     networks:
       - mynetwork
     labels:
       - traefik.enable=true
-      - traefik.http.routers.mindroom.rule=Host(`mindroom.${DOMAIN}`)
-      - traefik.http.routers.mindroom.entrypoints=websecure
-      - traefik.http.routers.mindroom-local.rule=Host(`mindroom.local`)
-      - traefik.http.routers.mindroom-local.entrypoints=web
-      - traefik.http.services.mindroom.loadbalancer.server.port=3003
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN:-mindroom.${DOMAIN}}`)
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-local.rule=Host(`${INSTANCE_NAME:-mindroom}.local`)
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-local.entrypoints=web
+      - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=${FRONTEND_PORT:-3003}
 
 networks:
   mynetwork:
