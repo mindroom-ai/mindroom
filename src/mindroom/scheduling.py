@@ -8,7 +8,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+import humanize
 import nio
+import pytz
 
 from .logging_config import get_logger
 from .workflow_scheduling import (
@@ -32,6 +34,30 @@ MESSAGE_PREVIEW_LENGTH = 50
 
 # Global task storage for running asyncio tasks
 _running_tasks: dict[str, asyncio.Task] = {}
+
+
+def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
+    """Format a datetime with timezone and relative time delta.
+
+    Args:
+        dt: Datetime in UTC
+        timezone_str: Timezone string (e.g., 'America/New_York')
+
+    Returns:
+        Formatted string like "2024-01-15 3:30 PM EST (in 2 hours)"
+
+    """
+    # Convert UTC to target timezone
+    tz = pytz.timezone(timezone_str)
+    local_dt = dt.astimezone(tz)
+
+    # Get human-readable relative time using humanize
+    now = datetime.now(UTC)
+    relative_str = humanize.naturaltime(dt, when=now)
+
+    # Format the datetime string
+    time_str = local_dt.strftime("%Y-%m-%d %I:%M %p %Z")
+    return f"{time_str} ({relative_str})"
 
 
 async def schedule_task(
@@ -110,8 +136,9 @@ async def schedule_task(
 
     # Build success message
     if workflow_result.schedule_type == "once" and workflow_result.execute_at:
-        exec_time = workflow_result.execute_at.strftime("%Y-%m-%d %H:%M UTC")
-        success_msg = f"✅ Scheduled for {exec_time}\n"
+        # Format time with timezone and relative delta
+        formatted_time = _format_scheduled_time(workflow_result.execute_at, config.timezone)
+        success_msg = f"✅ Scheduled for {formatted_time}\n"
     elif workflow_result.cron_schedule:
         # Show both natural language and cron syntax
         natural_desc = workflow_result.cron_schedule.to_natural_language()
@@ -132,6 +159,7 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str | None = None,
+    config: Config | None = None,
 ) -> str:
     """List scheduled tasks in human-readable format."""
     response = await client.room_get_state(room_id)
@@ -194,7 +222,9 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
     lines = ["**Scheduled Tasks:**"]
     for task in tasks:
         if task["schedule_type"] == "once" and task["time"]:
-            time_str = task["time"].strftime("%Y-%m-%d %H:%M UTC")
+            # Get timezone from config or use UTC as fallback
+            timezone = config.timezone if config else "UTC"
+            time_str = _format_scheduled_time(task["time"], timezone)
         else:
             # For recurring tasks, schedule_type now contains the natural language description
             time_str = task["schedule_type"]
