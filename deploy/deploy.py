@@ -2,7 +2,7 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["typer", "rich", "pydantic"]
+# dependencies = ["typer", "rich", "pydantic", "pyyaml"]
 # ///
 """Docker Mindroom instance manager."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
@@ -20,6 +20,7 @@ from enum import Enum
 from pathlib import Path
 
 import typer
+import yaml
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.table import Table
@@ -207,13 +208,34 @@ def _verify_extra_hosts_for_federation(matrix_type: MatrixType | None, instances
     if not compose_file.exists():
         return
 
+    # Parse the YAML file
     with compose_file.open() as f:
-        content = f.read()
+        compose_data = yaml.safe_load(f)
 
-    # Check if extra_hosts section exists
-    if "extra_hosts:" not in content:
+    # Get the service name (tuwunel or synapse)
+    service_name = matrix_type.value
+
+    # Check if the service exists and has extra_hosts
+    if not compose_data.get("services", {}).get(service_name):
+        console.print(f"[yellow]⚠️  Warning:[/yellow] Service '{service_name}' not found in {compose_file.name}")
+        return
+
+    service_config = compose_data["services"][service_name]
+    extra_hosts = service_config.get("extra_hosts", [])
+
+    # Parse existing extra_hosts entries
+    existing_domains = set()
+    for entry in extra_hosts:
+        if ":" in entry:
+            domain, _ = entry.split(":", 1)
+            existing_domains.add(domain.strip('"').strip("'"))
+
+    # Find missing domains
+    missing_domains = required_domains - existing_domains
+
+    if not extra_hosts:
         console.print("[yellow]⚠️  Federation Warning:[/yellow] Missing extra_hosts configuration")
-        console.print(f"[dim]Add the following to {compose_file.name} under the {matrix_type.value} service:[/dim]")
+        console.print(f"[dim]Add the following to {compose_file.name} under the {service_name} service:[/dim]")
         console.print("\n    extra_hosts:")
         for domain in sorted(required_domains):
             console.print(f'      - "{domain}:172.20.0.1"')
@@ -221,12 +243,6 @@ def _verify_extra_hosts_for_federation(matrix_type: MatrixType | None, instances
             "\n[dim]To find your gateway IP: docker network inspect mynetwork | jq '.[0].IPAM.Config[0].Gateway'[/dim]",
         )
         raise typer.Exit(1)
-
-    # Check which domains are missing
-    missing_domains = []
-    for domain in required_domains:
-        if f'"{domain}:' not in content and f"'{domain}:" not in content:
-            missing_domains.append(domain)
 
     if missing_domains:
         console.print(f"[yellow]⚠️  Federation Warning:[/yellow] Missing domains in extra_hosts for {compose_file.name}")
