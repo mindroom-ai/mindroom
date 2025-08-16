@@ -250,7 +250,7 @@ def stop(name: str = typer.Argument(..., help="Instance name to stop")) -> None:
 def list_instances() -> None:
     """List all configured instances."""
     registry = load_registry()
-    instances = registry["instances"]
+    instances = registry.get("instances", {})
 
     if not instances:
         console.print("[yellow]No instances configured.[/yellow]")

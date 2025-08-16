@@ -1,41 +1,80 @@
-# Minimal Makefile for mindroom
+# Makefile for mindroom - Federation deployment
 
-.PHONY: help up down setup run test clean reset
+.PHONY: help create start stop list clean reset test logs shell
+
+# Default instance name
+INSTANCE ?= default
+MATRIX ?= tuwunel
 
 help:
-	@echo "mindroom - Minimal commands:"
-	@echo "------------------------"
-	@echo "up      - Start Matrix server (Synapse + PostgreSQL + Redis)"
-	@echo "down    - Stop Matrix server"
-	@echo "setup   - Create bot and test users"
-	@echo "run     - Run the mindroom bot"
-	@echo "test    - Test bot connection"
-	@echo "clean   - Clean up everything"
-	@echo "reset   - Full reset: down compose, remove volumes, clean state"
+	@echo "mindroom - Federation commands:"
+	@echo "-------------------------------"
+	@echo "create  - Create new instance (INSTANCE=name MATRIX=tuwunel|synapse|none)"
+	@echo "start   - Start instance (INSTANCE=name)"
+	@echo "stop    - Stop instance (INSTANCE=name)"
+	@echo "list    - List all instances"
+	@echo "clean   - Clean instance data (INSTANCE=name)"
+	@echo "reset   - Full reset: remove all instances and data"
+	@echo "test    - Test bot connection (INSTANCE=name)"
+	@echo "logs    - View logs (INSTANCE=name)"
+	@echo "shell   - Shell into backend container (INSTANCE=name)"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make create                        # Create default instance with Tuwunel"
+	@echo "  make create INSTANCE=prod MATRIX=synapse"
+	@echo "  make start INSTANCE=prod"
+	@echo "  make stop INSTANCE=prod"
+	@echo "  make logs INSTANCE=prod"
 
-up:
-	docker compose up -d
+# Federation commands
+create:
+	@if [ "$(MATRIX)" = "none" ]; then \
+		cd deploy && ./instance_manager.py create $(INSTANCE); \
+	else \
+		cd deploy && ./instance_manager.py create $(INSTANCE) --matrix $(MATRIX); \
+	fi
 
-down:
-	docker compose down
+start:
+	cd deploy && ./instance_manager.py start $(INSTANCE)
 
-setup:
-	python scripts/mindroom.py setup
+stop:
+	cd deploy && ./instance_manager.py stop $(INSTANCE)
 
-run:
-	python scripts/mindroom.py run
+list:
+	cd deploy && ./instance_manager.py list
 
-test:
-	python scripts/mindroom.py test
-
+# Cleanup commands
 clean:
-	docker compose down -v
+	@echo "🧹 Cleaning instance: $(INSTANCE)"
+	cd deploy && ./instance_manager.py stop $(INSTANCE) 2>/dev/null || true
+	rm -rf deploy/instance_data/$(INSTANCE)
+	rm -f deploy/.env.$(INSTANCE)
+	@echo "✅ Instance $(INSTANCE) cleaned"
+
+reset:
+	@echo "🔄 Full reset: removing all instances and data..."
+	@cd deploy && docker ps -q --filter "name=mindroom-*" | xargs -r docker stop 2>/dev/null || true
+	@cd deploy && docker ps -aq --filter "name=mindroom-*" | xargs -r docker rm 2>/dev/null || true
+	rm -rf deploy/instance_data/
+	rm -f deploy/.env.*
+	rm -f deploy/instances.json
 	rm -f matrix_state.yaml
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
+	@echo "✅ Reset complete! Use 'make create' to start fresh."
 
-reset: clean
-	@echo "🔄 Full reset: removing volumes and temporary files..."
-	docker volume prune -f
-	rm -rf tmp/
-	@echo "✅ Reset complete! Run 'make up' then 'mindroom run' to start fresh."
+# Testing
+test:
+	@if [ -f "deploy/.env.$(INSTANCE)" ]; then \
+		echo "Testing instance: $(INSTANCE)"; \
+		cd deploy && source .env.$(INSTANCE) && python ../scripts/mindroom.py test; \
+	else \
+		echo "❌ Instance $(INSTANCE) not found. Create it first with: make create INSTANCE=$(INSTANCE)"; \
+	fi
+
+# Development helpers
+logs:
+	cd deploy && docker compose -p $(INSTANCE) logs -f
+
+shell:
+	cd deploy && docker compose -p $(INSTANCE) exec backend bash
