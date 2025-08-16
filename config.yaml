@@ -265,12 +265,12 @@ defaults:
 memory:
   embedder:
     config:
-      host: http://pc.local:11434
+      host: http://192.168.1.143:11434
       model: nomic-embed-text
     provider: ollama
   llm:
     config:
-      host: http://pc.local:11434
+      host: http://192.168.1.143:11434
       model: devstral:24b
       temperature: 0.1
       top_p: 1
@@ -303,7 +303,7 @@ models:
   ollama:
     id: devstral:24b
     provider: ollama
-    host: http://pc.local:11434
+    host: http://192.168.1.143:11434
   opus:
     id: claude-opus-4-latest
     provider: anthropic
