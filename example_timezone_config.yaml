@@ -1,0 +1,19 @@
+# Example timezone configuration for config.yaml
+# Add this line to your config.yaml to set your local timezone
+
+# Timezone for displaying scheduled tasks (defaults to UTC if not specified)
+# Common timezone examples:
+#   - America/New_York (Eastern Time)
+#   - America/Chicago (Central Time)
+#   - America/Denver (Mountain Time)
+#   - America/Los_Angeles (Pacific Time)
+#   - Europe/London
+#   - Europe/Paris
+#   - Asia/Tokyo
+#   - Australia/Sydney
+timezone: America/New_York
+
+# This will display scheduled task times as:
+# "2024-01-15 3:30 PM EST (in 2 hours 30 minutes)"
+# Instead of just:
+# "2024-01-15 20:30 UTC"
