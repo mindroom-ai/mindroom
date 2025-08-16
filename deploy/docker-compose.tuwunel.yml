@@ -34,12 +34,8 @@ services:
     extra_hosts:
       - "m-default.mindroom.chat:172.20.0.1"
       - "m-alt.mindroom.chat:172.20.0.1"
-      - "m-alt2.mindroom.chat:172.20.0.1"
-      - "m-syntest.mindroom.chat:172.20.0.1"
-      - "m-test.mindroom.chat:172.20.0.1"
       - "m-default.localhost:172.20.0.1"
       - "m-alt.localhost:172.20.0.1"
-      - "m-alt2.localhost:172.20.0.1"
     ulimits:
       nofile:
         soft: 1048567

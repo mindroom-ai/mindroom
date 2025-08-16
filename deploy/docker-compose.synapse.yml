@@ -66,13 +66,8 @@ services:
     extra_hosts:
       - "m-default.mindroom.chat:172.20.0.1"
       - "m-alt.mindroom.chat:172.20.0.1"
-      - "m-alt2.mindroom.chat:172.20.0.1"
-      - "m-syntest.mindroom.chat:172.20.0.1"
-      - "m-test.mindroom.chat:172.20.0.1"
       - "m-default.localhost:172.20.0.1"
       - "m-alt.localhost:172.20.0.1"
-      - "m-alt2.localhost:172.20.0.1"
-      - "m-syntest.localhost:172.20.0.1"
     networks:
       - mindroom-network
       - mynetwork  # Add Traefik network
@@ -91,7 +86,7 @@ services:
       - traefik.http.routers.${INSTANCE_NAME}-matrix-local.rule=Host(`m-${INSTANCE_NAME}.local`)
       - traefik.http.routers.${INSTANCE_NAME}-matrix-local.entrypoints=web
       - traefik.http.routers.${INSTANCE_NAME}-matrix-local.service=${INSTANCE_NAME}-matrix
-      - traefik.http.services.${INSTANCE_NAME}-matrix.loadbalancer.server.port=8008
+      - traefik.http.services.${INSTANCE_NAME}-matrix-local.loadbalancer.server.port=8008
 
       # Federation on port 8448
       - traefik.http.routers.${INSTANCE_NAME}-fed.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
