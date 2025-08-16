@@ -164,6 +164,32 @@ def create(
                 f.write("POSTGRES_PASSWORD=synapse_password\n")
                 f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
 
+    # If Synapse, prepare the config directory
+    if matrix == "synapse":
+        synapse_dir = Path(data_dir) / "synapse"
+        synapse_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy and customize Synapse config template
+        template_dir = SCRIPT_DIR / "synapse-template"
+        if template_dir.exists():
+            for file in template_dir.glob("*"):
+                if file.is_file():
+                    if file.name == "homeserver.yaml":
+                        # Generate homeserver.yaml with correct values
+                        with file.open() as f:
+                            content = f.read()
+                        # Replace hardcoded values with instance-specific ones
+                        server_name = instance.get("domain", f"{name}.localhost")
+                        content = content.replace('server_name: "localhost"', f'server_name: "{server_name}"')
+                        content = content.replace(
+                            'public_baseurl: http://localhost:8008/',
+                            f'public_baseurl: http://{server_name}:{matrix_port}/'
+                        )
+                        with (synapse_dir / file.name).open("w") as f:
+                            f.write(content)
+                    else:
+                        shutil.copy(file, synapse_dir / file.name)
+
     # Update registry
     registry["instances"][name] = instance
     registry["allocated_ports"]["backend"].append(backend_port)
@@ -222,7 +248,23 @@ def start(name: str = typer.Argument("default", help="Instance name to start")) 
             if template_dir.exists():
                 for file in template_dir.glob("*"):
                     if file.is_file():
-                        shutil.copy(file, synapse_dir / file.name)
+                        if file.name == "homeserver.yaml":
+                            # Generate homeserver.yaml with correct values
+                            with file.open() as f:
+                                content = f.read()
+                            # Replace hardcoded values with instance-specific ones
+                            server_name = instance.get("domain", f"{name}.localhost")
+                            # For public_baseurl, use the external port that will be mapped
+                            matrix_port = instance.get("matrix_port", 8008)
+                            content = content.replace('server_name: "localhost"', f'server_name: "{server_name}"')
+                            content = content.replace(
+                                'public_baseurl: http://localhost:8008/',
+                                f'public_baseurl: http://{server_name}:{matrix_port}/'
+                            )
+                            with (synapse_dir / file.name).open("w") as f:
+                                f.write(content)
+                        else:
+                            shutil.copy(file, synapse_dir / file.name)
 
     # Start with docker compose (modern syntax) - run from parent directory for build context
     # Get the parent directory (project root)
