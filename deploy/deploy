@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -330,4 +331,8 @@ def list_instances() -> None:
 
 
 if __name__ == "__main__":
+    # If no arguments provided, show help
+    if len(sys.argv) == 1:
+        # Show help by appending --help to argv
+        sys.argv.append("--help")
     app()
