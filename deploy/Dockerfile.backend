@@ -6,8 +6,13 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 # Dependencies stage - only rebuild if deps change
 FROM base as deps
 WORKDIR /app
+# Set UV to use copy mode to avoid issues with cache mounts
+ENV UV_LINK_MODE=copy
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --all-extras --no-dev
+COPY src ./src
+# Use cache mount for UV packages to speed up builds
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --all-extras --no-dev
 
 # Final stage
 FROM base as final

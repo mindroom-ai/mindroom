@@ -7,15 +7,21 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 # Backend deps stage (backend is now part of main package)
 FROM base as backend-deps
 WORKDIR /app
+# Set UV to use copy mode to avoid issues with cache mounts
+ENV UV_LINK_MODE=copy
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv sync --all-extras
+# Use cache mount for UV packages to speed up builds
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --all-extras
 
 # Frontend deps stage
 FROM base as frontend-deps
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+# Use cache mount for pnpm store to speed up builds
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
 
 # Build frontend
 FROM frontend-deps as frontend-build
