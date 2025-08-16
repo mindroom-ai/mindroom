@@ -34,7 +34,8 @@ services:
       - MATRIX_HOMESERVER=http://tuwunel:6167
       - MATRIX_SERVER_NAME=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
     depends_on:
-      - tuwunel
+      tuwunel:
+        condition: service_healthy
 
 networks:
   mindroom-network:
