@@ -276,6 +276,101 @@ def stop(name: str = typer.Argument(..., help="Instance name to stop")) -> None:
         raise typer.Exit(1)
 
 
+@app.command()
+def remove(
+    name: str = typer.Argument(None, help="Instance name to remove (or use --all)"),
+    all: bool = typer.Option(False, "--all", help="Remove ALL instances"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
+) -> None:
+    """Remove instance(s) completely (containers, data, and configuration)."""
+    registry = load_registry()
+    instances = registry.get("instances", {})
+
+    # Handle --all flag
+    if all:
+        if not instances:
+            console.print("[yellow]No instances to remove.[/yellow]")
+            return
+
+        # Confirmation prompt unless --force is used
+        if not force:
+            console.print(f"[red]⚠️  WARNING:[/red] This will permanently delete ALL {len(instances)} instance(s):")
+            for instance_name in instances.keys():
+                console.print(f"  - {instance_name}")
+            console.print("\n[yellow]All data, containers, and configurations will be lost![/yellow]")
+            confirm = typer.confirm("Are you absolutely sure?")
+            if not confirm:
+                console.print("[yellow]Cancelled.[/yellow]")
+                raise typer.Exit(0)
+
+        # Remove each instance
+        for instance_name in list(instances.keys()):
+            _remove_instance(instance_name, registry, console)
+
+        # Clear the registry completely
+        REGISTRY_FILE.unlink(missing_ok=True)
+        console.print(f"\n[green]✓[/green] All instances removed!")
+        return
+
+    # Handle single instance removal
+    if not name:
+        console.print("[red]✗[/red] Please specify an instance name or use --all")
+        raise typer.Exit(1)
+
+    if name not in instances:
+        console.print(f"[red]✗[/red] Instance '{name}' not found!")
+        raise typer.Exit(1)
+
+    instance = instances[name]
+
+    # Confirmation prompt unless --force is used
+    if not force:
+        console.print(f"[yellow]⚠️  Warning:[/yellow] This will permanently delete instance '[cyan]{name}[/cyan]'")
+        console.print(f"  - All data in {instance['data_dir']}")
+        console.print(f"  - Environment file .env.{name}")
+        console.print(f"  - All containers and volumes")
+        confirm = typer.confirm("Are you sure you want to continue?")
+        if not confirm:
+            console.print("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+
+    _remove_instance(name, registry, console)
+    save_registry(registry)
+    console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' completely removed!")
+
+
+def _remove_instance(name: str, registry: dict, console: Console) -> None:
+    """Helper function to remove a single instance."""
+    instance = registry["instances"][name]
+
+    with console.status(f"[yellow]Removing instance '{name}'...[/yellow]"):
+        # Stop containers if running
+        project_root = SCRIPT_DIR.parent
+        stop_cmd = f"cd {project_root} && docker compose -p {name} down -v 2>/dev/null"
+        subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
+
+        # Remove data directory
+        data_dir = Path(instance["data_dir"])
+        if data_dir.exists():
+            shutil.rmtree(data_dir)
+
+        # Remove env file
+        env_file = SCRIPT_DIR / f".env.{name}"
+        if env_file.exists():
+            env_file.unlink()
+
+        # Update registry - remove instance and free up ports
+        del registry["instances"][name]
+
+        # Remove allocated ports
+        if instance.get("backend_port") in registry["allocated_ports"]["backend"]:
+            registry["allocated_ports"]["backend"].remove(instance["backend_port"])
+        if instance.get("frontend_port") in registry["allocated_ports"]["frontend"]:
+            registry["allocated_ports"]["frontend"].remove(instance["frontend_port"])
+        if instance.get("matrix_port") and instance["matrix_port"] in registry["allocated_ports"]["matrix"]:
+            registry["allocated_ports"]["matrix"].remove(instance["matrix_port"])
+
+
 @app.command("list")
 def list_instances() -> None:
     """List all configured instances."""

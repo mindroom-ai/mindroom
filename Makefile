@@ -44,21 +44,14 @@ list:
 
 # Cleanup commands
 clean:
-	@echo "🧹 Cleaning instance: $(INSTANCE)"
-	cd deploy && ./deploy stop $(INSTANCE) 2>/dev/null || true
-	rm -rf deploy/instance_data/$(INSTANCE)
-	rm -f deploy/.env.$(INSTANCE)
-	@echo "✅ Instance $(INSTANCE) cleaned"
+	@echo "🧹 Removing instance: $(INSTANCE)"
+	cd deploy && ./deploy remove $(INSTANCE) --force
+	@echo "✅ Instance $(INSTANCE) removed"
 
 reset:
-	@echo "🔄 Full reset: stopping all instances and removing all data..."
-	@echo "Stopping all running instances..."
-	@docker ps -q --filter "label=com.docker.compose.project" | xargs -r docker stop 2>/dev/null || true
-	@docker ps -aq --filter "label=com.docker.compose.project" | xargs -r docker rm 2>/dev/null || true
-	@echo "Removing all instance data..."
-	rm -rf deploy/instance_data/
-	rm -f deploy/.env.*
-	rm -f deploy/instances.json
+	@echo "🔄 Full reset: removing all instances..."
+	cd deploy && ./deploy remove --all --force
+	@echo "Cleaning up any remaining files..."
 	rm -f matrix_state.yaml
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
