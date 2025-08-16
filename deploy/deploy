@@ -98,7 +98,7 @@ def find_next_ports(registry: dict[str, Any]) -> tuple[int, int, int]:
 
 @app.command()
 def create(
-    name: str = typer.Argument(..., help="Instance name"),
+    name: str = typer.Argument("default", help="Instance name"),
     domain: str | None = typer.Option(None, help="Domain for the instance (default: NAME.localhost)"),
     matrix: str | None = typer.Option(
         None,
@@ -188,7 +188,7 @@ def create(
 
 
 @app.command()
-def start(name: str = typer.Argument(..., help="Instance name to start")) -> None:
+def start(name: str = typer.Argument("default", help="Instance name to start")) -> None:
     """Start a Mindroom instance."""
     registry = load_registry()
     if name not in registry["instances"]:
@@ -251,7 +251,7 @@ def start(name: str = typer.Argument(..., help="Instance name to start")) -> Non
 
 
 @app.command()
-def stop(name: str = typer.Argument(..., help="Instance name to stop")) -> None:
+def stop(name: str = typer.Argument("default", help="Instance name to stop")) -> None:
     """Stop a running Mindroom instance."""
     registry = load_registry()
     if name not in registry["instances"]:

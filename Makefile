@@ -2,7 +2,7 @@
 
 .PHONY: help create start stop list clean reset logs shell
 
-# Default instance name
+# Default values
 INSTANCE ?= default
 MATRIX ?= tuwunel
 
