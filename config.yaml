@@ -303,6 +303,7 @@ models:
   ollama:
     id: devstral:24b
     provider: ollama
+    host: http://pc.local:11434
   opus:
     id: claude-opus-4-latest
     provider: anthropic
