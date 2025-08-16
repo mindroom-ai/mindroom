@@ -56,6 +56,7 @@ dependencies = [
   "googlesearch-python",                         # for GoogleSearch tool
   "groq>=0.31",                                  # for Groq model
   "httpx>=0.27",                                 # for Jina, Telegram, Searxng tools, widget API
+  "humanize>=4.12.3",
   "jira>=3.10.5",                                # for Jira tool
   "linkup-sdk>=0.2.8",                           # for Linkup tool
   "loguru>=0.7.3",
@@ -133,6 +134,7 @@ dev = [
   "requests>=2.32.4",
   "ruff>=0.12.5",
   "types-markdown>=3.7",
+  "types-pytz>=2025.2.0.20250809",
   "types-pyyaml>=6.0.12.20250516",
   "types-requests>=2.32.4.20250611",
 ]

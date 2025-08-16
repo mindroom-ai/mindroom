@@ -980,6 +980,7 @@ class AgentBot:
                 client=self.client,
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
+                config=self.config,
             )
 
         elif command.type == CommandType.CANCEL_SCHEDULE:
