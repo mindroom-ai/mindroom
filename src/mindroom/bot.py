@@ -381,12 +381,13 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
         assert self.client is not None
         if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
             return
 
-        if event.sender == self.agent_user.user_id:
+        # Allow processing of voice transcriptions we sent on behalf of users
+        if event.sender == self.agent_user.user_id and not event.body.strip().startswith("🎤"):
             return
 
         # Check if we should process messages in this room
