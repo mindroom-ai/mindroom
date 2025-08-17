@@ -451,7 +451,6 @@ def create(
 @app.command()
 def start(  # noqa: PLR0912, PLR0915
     name: str = typer.Argument("default", help="Instance name to start"),
-    no_frontend: bool = typer.Option(False, "--no-frontend", help="Start without frontend (for development)"),
     only_matrix: bool = typer.Option(False, "--only-matrix", help="Start only Matrix server without backend/frontend"),
 ) -> None:
     """Start a Mindroom instance."""
@@ -548,16 +547,10 @@ def start(  # noqa: PLR0912, PLR0915
         status_msg = f"Starting Matrix server for '{name}'..."
         console.print("[yellow]ℹ[/yellow] Starting only Matrix server (no backend/frontend)")  # noqa: RUF001
     else:
-        # Add services to start (backend always, frontend only if not --no-frontend)
-        services = "backend"
+        # Start full stack: frontend + backend + matrix
+        services = "frontend backend"
         services += _get_matrix_services(matrix_type)
-
-        if not no_frontend:
-            services = "frontend " + services  # Add frontend to the list
-            status_msg = f"Starting instance '{name}'..."
-        else:
-            status_msg = f"Starting instance '{name}' (backend only)..."
-            console.print("[yellow]ℹ[/yellow] Starting without frontend (development mode)")  # noqa: RUF001
+        status_msg = f"Starting instance '{name}'..."
 
     cmd = f"{compose_files} -p {name} up -d --build {services}"
 
@@ -574,24 +567,14 @@ def start(  # noqa: PLR0912, PLR0915
 
     if result.returncode == 0:
         # Update status to reflect what's actually running
-        if only_matrix:
-            # Don't change status for matrix-only start
-            pass
-        elif no_frontend:
-            registry.instances[name].status = InstanceStatus.BACKEND_ONLY
-        else:
+        if not only_matrix:
             registry.instances[name].status = InstanceStatus.RUNNING
-        save_registry(registry)
+            save_registry(registry)
 
         if only_matrix:
             console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' started successfully!")
             matrix_url = f"https://m-{instance.domain}"
             console.print(f"  [dim]Matrix:[/dim] {matrix_url}")
-        elif no_frontend:
-            console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully (backend only)!")
-            console.print(f"  [dim]Backend:[/dim] http://localhost:{instance.backend_port}")
-            if matrix_type:
-                console.print(f"  [dim]Matrix:[/dim] http://localhost:{instance.matrix_port or 8008}")
         else:
             console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully!")
     else:
@@ -630,7 +613,6 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
 @app.command()
 def restart(  # noqa: PLR0912, PLR0915
     name: str = typer.Argument("default", help="Instance name to restart"),
-    no_frontend: bool = typer.Option(False, "--no-frontend", help="Skip starting the frontend"),
     only_matrix: bool = typer.Option(
         False,
         "--only-matrix",
@@ -684,12 +666,9 @@ def restart(  # noqa: PLR0912, PLR0915
             raise typer.Exit(1)
         services = _get_matrix_services(matrix_type).strip()
     else:
-        # Add services to start
-        services = "backend"
+        # Start full stack: frontend + backend + matrix
+        services = "frontend backend"
         services += _get_matrix_services(matrix_type)
-
-        if not no_frontend:
-            services = "frontend " + services
 
     start_cmd = f"{compose_files} -p {name} up -d --build {services}"
 
@@ -703,14 +682,9 @@ def restart(  # noqa: PLR0912, PLR0915
 
     if result.returncode == 0:
         # Update status
-        if only_matrix:
-            # Don't change status for matrix-only restart
-            pass
-        elif no_frontend:
-            registry.instances[name].status = InstanceStatus.BACKEND_ONLY
-        else:
+        if not only_matrix:
             registry.instances[name].status = InstanceStatus.RUNNING
-        save_registry(registry)
+            save_registry(registry)
 
         if only_matrix:
             console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' restarted successfully!")
