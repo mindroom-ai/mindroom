@@ -586,7 +586,7 @@ class AgentBot:
 
         # Process the voice message
         await voice_handler.handle_voice_message(self.client, room, event, self.config)
-        
+
         # Mark the voice message as responded so we don't process it again
         self.response_tracker.mark_responded(event.event_id)
 

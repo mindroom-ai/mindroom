@@ -175,7 +175,7 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
-            
+
             connector = aiohttp.TCPConnector(ssl=ssl_context)
             async with (
                 aiohttp.ClientSession(connector=connector) as session,
@@ -249,18 +249,18 @@ Output the formatted message only, no explanation:"""
 
         # Get the AI model to process the transcription
         model = get_model_instance(config, config.voice.intelligence.model)
-        
+
         # Create an agent for voice command processing
         agent = Agent(
             name="VoiceCommandProcessor",
             role="Convert voice transcriptions to properly formatted chat commands",
             model=model,
         )
-        
+
         # Process the transcription with the agent
         session_id = f"voice_process_{uuid.uuid4()}"
         response = await agent.arun(prompt, session_id=session_id)
-        
+
         # Extract the content from the response
         if response and response.content:
             return response.content.strip()
