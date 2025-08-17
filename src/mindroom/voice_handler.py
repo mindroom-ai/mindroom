@@ -16,6 +16,7 @@ from agno.agent import Agent
 from nio import crypto
 
 from .ai import get_model_instance
+from .commands import get_command_list
 from .logging_config import get_logger
 from .matrix.client import send_message
 from .matrix.mentions import create_mention_content_from_text
@@ -226,15 +227,7 @@ Your task is to convert spoken transcriptions into properly formatted chat comma
 Available agents: {", ".join([f"@{name} ({agent_display_names[name]})" for name in agent_names])}
 Available teams: {", ".join([f"@{name} ({team_display_names[name]})" for name in team_names])}
 
-Available commands:
-- !invite <agent> - Invite an agent to the current thread
-- !uninvite <agent> - Remove an agent from the thread
-- !list_invites - Show all invited agents
-- !schedule <task> - Schedule a task
-- !list_schedules - List scheduled tasks
-- !cancel_schedule <id> - Cancel a scheduled task
-- !help [topic] - Get help
-- !widget [url] - Add configuration widget
+{get_command_list()}
 
 Rules:
 1. If the user mentions an agent by name or role, format it as @agent_name

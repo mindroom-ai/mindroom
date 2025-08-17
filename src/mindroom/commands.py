@@ -33,6 +33,34 @@ class CommandType(Enum):
     WIDGET = "widget"
 
 
+# Command documentation for each command type
+COMMAND_DOCS = {
+    CommandType.INVITE: ("!invite <agent>", "Invite an agent to the current thread"),
+    CommandType.UNINVITE: ("!uninvite <agent>", "Remove an agent from the thread"),
+    CommandType.LIST_INVITES: ("!list_invites", "Show all invited agents"),
+    CommandType.SCHEDULE: ("!schedule <task>", "Schedule a task"),
+    CommandType.LIST_SCHEDULES: ("!list_schedules", "List scheduled tasks"),
+    CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
+    CommandType.HELP: ("!help [topic]", "Get help"),
+    CommandType.WIDGET: ("!widget [url]", "Add configuration widget"),
+}
+
+
+def get_command_list() -> str:
+    """Get a formatted list of all available commands.
+
+    Returns:
+        Formatted string with all commands and their descriptions
+
+    """
+    lines = ["Available commands:"]
+    for cmd_type in CommandType:
+        if cmd_type in COMMAND_DOCS:
+            syntax, description = COMMAND_DOCS[cmd_type]
+            lines.append(f"- {syntax} - {description}")
+    return "\n".join(lines)
+
+
 @dataclass
 class Command:
     """Parsed command with arguments."""
