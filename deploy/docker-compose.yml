@@ -49,7 +49,7 @@ services:
       - traefik.enable=true
       # API routes (for the API server on port 8765 in the same container)
       # API has higher priority (100) so it matches first
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.rule=Host(`${INSTANCE_DOMAIN:-mindroom.${DOMAIN}}`) && PathPrefix(`/api`)
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.rule=Host(`${INSTANCE_DOMAIN}`) && PathPrefix(`/api`)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.entrypoints=websecure
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls=true
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls.certresolver=porkbun
@@ -58,7 +58,7 @@ services:
       - traefik.http.services.${INSTANCE_NAME:-mindroom}-api.loadbalancer.server.port=8765
       # Frontend routes (for the Vite dev server on port $FRONTEND_PORT)
       # Frontend has lower priority (50) and catches everything else
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN:-mindroom.${DOMAIN}}`)
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN}`)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls=true
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls.certresolver=porkbun

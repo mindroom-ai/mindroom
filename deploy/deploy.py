@@ -247,11 +247,6 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
         f.write(f"DATA_DIR={abs_data_dir}\n")
         f.write(f"INSTANCE_DOMAIN={instance.domain}\n")
 
-        # Extract base domain from instance domain
-        if "." in instance.domain:
-            base_domain = ".".join(instance.domain.split(".")[1:])
-            f.write(f"DOMAIN={base_domain}\n")
-
         if matrix_type:
             f.write(f"\n# Matrix configuration ({matrix_type.value})\n")
             f.write(f"MATRIX_PORT={instance.matrix_port}\n")
