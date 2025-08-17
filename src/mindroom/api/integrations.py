@@ -10,6 +10,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from spotipy import Spotify, SpotifyOAuth  # type: ignore[import-untyped]
 
+import mindroom
 from mindroom.credentials import CredentialsManager
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
@@ -21,8 +22,13 @@ creds_manager = CredentialsManager()
 # Load tool metadata from the single source of truth
 def get_tools_metadata() -> dict[str, Any]:
     """Load tool metadata from JSON file."""
-    json_path = Path(__file__).parent.parent.parent.parent.parent / "mindroom/tools_metadata.json"
+    # Always use the package location to find tools_metadata.json
+    # This works regardless of how the package is installed or where it's run from
+    package_dir = Path(mindroom.__file__).parent
+    json_path = package_dir / "tools_metadata.json"
+
     if not json_path.exists():
+        print(f"Warning: tools_metadata.json not found at {json_path}")
         return {}
 
     with json_path.open() as f:
