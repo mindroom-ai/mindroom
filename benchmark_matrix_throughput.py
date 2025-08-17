@@ -7,6 +7,7 @@ by sending messages at various rates and measuring throughput.
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,12 +15,25 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from mindroom.matrix import MATRIX_HOMESERVER
-from mindroom.matrix.client import send_message
-from mindroom.matrix.users import AgentMatrixUser, login_agent_user
-
-# Suppress mindroom debug logs for cleaner benchmark output
+# Suppress all debug logs for cleaner benchmark output
+os.environ["MINDROOM_LOG_LEVEL"] = "WARNING"  # Set before importing mindroom
 logging.getLogger("mindroom").setLevel(logging.WARNING)
+logging.getLogger("mindroom.matrix").setLevel(logging.WARNING)
+logging.getLogger("mindroom.matrix.client").setLevel(logging.WARNING)
+
+from mindroom.matrix import MATRIX_HOMESERVER  # noqa: E402
+from mindroom.matrix.client import send_message  # noqa: E402
+from mindroom.matrix.users import AgentMatrixUser, login_agent_user  # noqa: E402
+
+# Suppress structlog output after import (mindroom uses structlog)
+try:
+    import structlog
+
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+    )
+except ImportError:
+    pass
 
 if TYPE_CHECKING:
     import nio
