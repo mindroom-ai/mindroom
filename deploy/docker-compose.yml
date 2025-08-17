@@ -46,10 +46,13 @@ services:
       - FRONTEND_PORT=${FRONTEND_PORT:-3003}
     networks:
       - mindroom-network
+      - mynetwork
     labels:
       - traefik.enable=true
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN:-mindroom.${DOMAIN}}`)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls=true
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls.certresolver=porkbun
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-local.rule=Host(`${INSTANCE_NAME:-mindroom}.local`)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-local.entrypoints=web
       - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=${FRONTEND_PORT:-3003}
@@ -57,3 +60,5 @@ services:
 networks:
   mindroom-network:
     driver: bridge
+  mynetwork:
+    external: true
