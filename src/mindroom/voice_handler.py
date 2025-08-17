@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import ssl
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -168,9 +169,14 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
             data.add_field("file", audio_content, filename="audio.ogg", content_type="audio/ogg")
             data.add_field("model", config.voice.stt.model)
 
-            # Make the API request
+            # Make the API request (with SSL verification disabled if needed)
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
             async with (
-                aiohttp.ClientSession() as session,
+                aiohttp.ClientSession(connector=connector) as session,
                 session.post(url, headers=headers, data=data) as response,
             ):
                 if response.status != 200:

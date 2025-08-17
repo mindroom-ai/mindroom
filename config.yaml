@@ -341,15 +341,15 @@ teams:
 # Timezone for displaying scheduled tasks (Seattle/Pacific Time)
 timezone: America/Los_Angeles
 
-# Voice message handling configuration (disabled by default)
-# Uncomment and configure to enable voice message transcription
-# voice:
-#   enabled: true
-#   stt:
-#     provider: openai
-#     model: whisper-1
-#     # api_key: your-api-key-here  # Optional, uses OPENAI_API_KEY env var by default
-#     # host: http://localhost:8080  # For self-hosted STT services
-#   intelligence:
-#     model: default  # Model for command recognition
-#     confidence_threshold: 0.7
+# Voice message handling configuration
+# Configure to enable voice message transcription
+voice:
+  enabled: true
+  stt:
+    provider: openai
+    model: whisper-1
+    # api_key: your-api-key-here  # Optional, uses OPENAI_API_KEY env var by default
+    # host: http://localhost:8080  # For self-hosted STT services
+  intelligence:
+    model: default  # Model for command recognition
+    confidence_threshold: 0.7
