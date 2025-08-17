@@ -5,3 +5,5 @@ deploy/instances.json
 deploy/instance_data/
 *.yaml.backup
 deploy/matrix-data/
+# Generated well-known files for Matrix federation
+well-known-*.json

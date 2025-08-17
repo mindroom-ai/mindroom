@@ -55,12 +55,7 @@ clean:
 reset:
 	@echo "🔄 Full reset: removing all instances..."
 	cd deploy && ./deploy.py remove --all --force
-	@echo "Cleaning up any remaining files..."
-	rm -f matrix_state.yaml
-	find . -type d -name "__pycache__" -exec rm -rf {} +
-	find . -type f -name "*.pyc" -delete
 	@echo "✅ Reset complete! Use 'make create' to start fresh."
-
 
 # Development helpers
 logs:

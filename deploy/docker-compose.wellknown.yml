@@ -1,0 +1,27 @@
+# Well-known server for Matrix federation
+version: '3.8'
+
+services:
+  wellknown:
+    image: nginx:alpine
+    container_name: ${INSTANCE_NAME:-mindroom}-wellknown
+    restart: unless-stopped
+    volumes:
+      - ./well-known-${INSTANCE_NAME}.json:/usr/share/nginx/html/.well-known/matrix/server:ro
+      - ./well-known-client-${INSTANCE_NAME}.json:/usr/share/nginx/html/.well-known/matrix/client:ro
+    networks:
+      - mynetwork
+    labels:
+      - traefik.enable=true
+
+      # Serve well-known endpoints on Matrix domain
+      - traefik.http.routers.${INSTANCE_NAME}-wellknown.rule=Host(`m-${INSTANCE_DOMAIN}`) && PathPrefix(`/.well-known/matrix`)
+      - traefik.http.routers.${INSTANCE_NAME}-wellknown.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME}-wellknown.tls=true
+      - traefik.http.routers.${INSTANCE_NAME}-wellknown.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME}-wellknown.service=${INSTANCE_NAME}-wellknown
+      - traefik.http.services.${INSTANCE_NAME}-wellknown.loadbalancer.server.port=80
+
+networks:
+  mynetwork:
+    external: true

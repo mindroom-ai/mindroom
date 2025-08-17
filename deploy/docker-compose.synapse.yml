@@ -39,7 +39,7 @@ services:
     container_name: ${INSTANCE_NAME:-mindroom}-synapse
     environment:
       SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
-      SYNAPSE_SERVER_NAME: ${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
+      SYNAPSE_SERVER_NAME: m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}
       SYNAPSE_REPORT_STATS: "no"
       UID: 1000
       GID: 1000
@@ -47,8 +47,7 @@ services:
       # Bind mount the entire synapse config directory
       # DATA_DIR should be set in the .env file
       - ${DATA_DIR}/synapse:/data
-    ports:
-      - "${MATRIX_PORT:-8008}:8008"
+    # Ports are handled by Traefik - no direct host exposure needed
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
       interval: 10s
@@ -60,14 +59,48 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Federation requires Matrix domains to resolve to Traefik
+    # For LOCAL deployments: Add your Matrix domains here pointing to your Docker network gateway
+    # To find your gateway IP, run: docker network inspect mynetwork | jq '.[0].IPAM.Config[0].Gateway'
+    # For PUBLIC deployments: Remove the entire extra_hosts section
+    extra_hosts:
+      - "m-default.mindroom.chat:172.20.0.1"
+      - "m-alt.mindroom.chat:172.20.0.1"
+      - "m-test.mindroom.chat:172.20.0.1"
+      - "m-default.localhost:172.20.0.1"
+      - "m-alt.localhost:172.20.0.1"
     networks:
       - mindroom-network
+      - mynetwork  # Add Traefik network
+    labels:
+      - traefik.enable=true
+
+      # Production HTTPS route (m-mything.lab.mydomain.com)
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.tls=true
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.service=${INSTANCE_NAME}-matrix
+      - traefik.http.services.${INSTANCE_NAME}-matrix.loadbalancer.server.port=8008
+
+      # Local HTTP route (m-mything.local)
+      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.rule=Host(`m-${INSTANCE_NAME}.local`)
+      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.entrypoints=web
+      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.service=${INSTANCE_NAME}-matrix
+      - traefik.http.services.${INSTANCE_NAME}-matrix-local.loadbalancer.server.port=8008
+
+      # Federation on port 8448
+      - traefik.http.routers.${INSTANCE_NAME}-fed.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
+      - traefik.http.routers.${INSTANCE_NAME}-fed.entrypoints=matrix-fed
+      - traefik.http.routers.${INSTANCE_NAME}-fed.tls=true
+      - traefik.http.routers.${INSTANCE_NAME}-fed.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME}-fed.service=${INSTANCE_NAME}-matrix
 
   # Update backend to know about Matrix server
   backend:
     environment:
       - MATRIX_HOMESERVER=http://synapse:8008
-      - MATRIX_SERVER_NAME=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
+      - MATRIX_SERVER_NAME=m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}
     depends_on:
       synapse:
         condition: service_healthy
@@ -75,6 +108,8 @@ services:
 networks:
   mindroom-network:
     driver: bridge
+  mynetwork:
+    external: true
 
 volumes:
   # Named volumes for each instance (prefixed with instance name)
