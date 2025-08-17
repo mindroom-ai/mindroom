@@ -19,6 +19,7 @@ from .ai import get_model_instance
 from .commands import get_command_list
 from .logging_config import get_logger
 from .matrix.client import send_message
+from .matrix.identity import MatrixID
 from .matrix.mentions import create_mention_content_from_text
 
 if TYPE_CHECKING:
@@ -71,10 +72,15 @@ async def handle_voice_message(
             # Add a note that this was transcribed from voice
             final_message = f"🎤 {formatted_message}"
 
+            # Get the sender's domain for proper mention formatting
+            sender_id = MatrixID.parse(event.sender)
+            sender_domain = sender_id.domain
+
             # Create mention content if there are mentions
             content = create_mention_content_from_text(
                 config,
                 final_message,
+                sender_domain=sender_domain,
                 reply_to_event_id=event.event_id,
             )
 
