@@ -226,6 +226,16 @@ async def _process_transcription(transcription: str, config: Config) -> str:
         prompt = f"""You are a voice command processor for a Matrix chat bot system.
 Your task is to convert spoken transcriptions into properly formatted chat commands.
 
+Examples of correct formatting:
+- "schedule turn off the lights in 10 minutes" → "!schedule in 10 minutes turn off the lights"
+- "HomeAssistant turn on the fan" → "@homeassistant turn on the fan"
+- "hey home assistant agent schedule to turn off the guest room lights in 10 seconds" → "!schedule in 10 seconds @homeassistant turn off the guest room lights"
+- "home assistant schedule the lights off in 5 minutes" → "!schedule in 5 minutes @homeassistant turn off the lights"
+- "schedule a meeting tomorrow at 3pm" → "!schedule tomorrow at 3pm meeting"
+- "cancel schedule ABC123" → "!cancel_schedule ABC123"
+- "list my schedules" → "!list_schedules"
+- "research agent find papers on AI" → "@research find papers on AI"
+
 Available agents: {", ".join([f"@{name} ({agent_display_names[name]})" for name in agent_names])}
 Available teams: {", ".join([f"@{name} ({team_display_names[name]})" for name in team_names])}
 
@@ -234,11 +244,18 @@ Available teams: {", ".join([f"@{name} ({team_display_names[name]})" for name in
 Rules:
 1. If the user mentions an agent by name or role, format it as @agent_name
 2. If the user speaks a command, format it as !command
-3. Fix common speech recognition errors (e.g., "at research" -> "@research")
-4. Be smart about intent - "ask the research agent" means "@research"
-5. "Schedule a meeting" should become "!schedule meeting"
-6. Keep the natural language but add proper formatting
-7. If unclear, prefer natural language over forcing commands
+3. IMPORTANT: !schedule commands MUST include a time (in X minutes, at 3pm, tomorrow, etc.)
+   - The time should come right after !schedule
+   - "schedule turn off lights in 10 minutes" → "!schedule in 10 minutes turn off lights"
+4. When both command AND agent are mentioned, command comes FIRST:
+   - "hey home assistant schedule lights off in 5 min" → "!schedule in 5 minutes @homeassistant turn off lights"
+5. Agent mentions come FIRST when just addressing them (no command):
+   - "research agent, find papers" → "@research find papers"
+   - "ask the email agent to check mail" → "@email check mail"
+6. Fix common speech recognition errors (e.g., "at research" → "@research")
+7. Be smart about intent - "ask the research agent" means "@research"
+8. Keep the natural language but add proper formatting
+9. If unclear, prefer natural language over forcing commands
 
 Transcription: "{transcription}"
 
