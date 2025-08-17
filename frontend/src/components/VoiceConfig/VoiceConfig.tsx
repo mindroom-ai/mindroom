@@ -42,7 +42,12 @@ export function VoiceConfig() {
   // Update local state when config changes
   useEffect(() => {
     if (config?.voice) {
-      setVoiceConfig(config.voice);
+      // Handle legacy 'localai' provider by converting to 'custom'
+      const voiceConfig = { ...config.voice };
+      if (voiceConfig.stt.provider === 'localai') {
+        voiceConfig.stt = { ...voiceConfig.stt, provider: 'custom' };
+      }
+      setVoiceConfig(voiceConfig);
     }
   }, [config?.voice]);
 
@@ -160,9 +165,8 @@ export function VoiceConfig() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="openai">OpenAI Whisper</SelectItem>
-                        <SelectItem value="localai">LocalAI (Self-hosted)</SelectItem>
-                        <SelectItem value="custom">Custom OpenAI-compatible</SelectItem>
+                        <SelectItem value="openai">OpenAI Whisper (Cloud)</SelectItem>
+                        <SelectItem value="custom">Self-hosted (OpenAI-compatible)</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -194,8 +198,7 @@ export function VoiceConfig() {
                   </div>
                 )}
 
-                {(voiceConfig.stt.provider === 'localai' ||
-                  voiceConfig.stt.provider === 'custom') && (
+                {voiceConfig.stt.provider === 'custom' && (
                   <div className="space-y-2">
                     <Label htmlFor="stt-host">Host URL</Label>
                     <Input
@@ -247,11 +250,13 @@ export function VoiceConfig() {
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="default">Default Model</SelectItem>
-                        {availableModels.map(model => (
-                          <SelectItem key={model} value={model}>
-                            {model}
-                          </SelectItem>
-                        ))}
+                        {availableModels
+                          .filter(model => model !== 'default')
+                          .map(model => (
+                            <SelectItem key={model} value={model}>
+                              {model}
+                            </SelectItem>
+                          ))}
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
