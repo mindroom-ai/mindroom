@@ -65,9 +65,6 @@ services:
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.service=${INSTANCE_NAME:-mindroom}
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.priority=50
       - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=${FRONTEND_PORT:-3003}
-      # Local access
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-local.rule=Host(`${INSTANCE_NAME:-mindroom}.local`)
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-local.entrypoints=web
 
 networks:
   mindroom-network:

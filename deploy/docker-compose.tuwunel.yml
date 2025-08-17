@@ -56,11 +56,6 @@ services:
       - traefik.http.routers.${INSTANCE_NAME}-matrix.service=${INSTANCE_NAME}-matrix
       - traefik.http.services.${INSTANCE_NAME}-matrix.loadbalancer.server.port=6167
 
-      # Matrix Client API - Local HTTP
-      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.rule=Host(`m-${INSTANCE_NAME}.local`)
-      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.entrypoints=web
-      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.service=${INSTANCE_NAME}-matrix
-
       # Federation on port 8448
       - traefik.http.routers.${INSTANCE_NAME}-fed.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
       - traefik.http.routers.${INSTANCE_NAME}-fed.entrypoints=matrix-fed
