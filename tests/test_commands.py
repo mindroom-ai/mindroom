@@ -25,7 +25,8 @@ def test_invite_command_invalid_format() -> None:
     """Test invite command with invalid formats."""
     # Test with extra text (no longer supports duration)
     command = command_parser.parse("!invite calculator for 2 hours")
-    assert command is None  # Should not parse with extra text
+    assert command is not None
+    assert command.type == CommandType.UNKNOWN  # Should be UNKNOWN with extra text
 
 
 def test_invite_command_case_insensitive() -> None:
@@ -34,9 +35,10 @@ def test_invite_command_case_insensitive() -> None:
     assert command is not None
     assert command.type == CommandType.INVITE
 
-    # With extra text it should not parse
+    # With extra text it should be UNKNOWN
     command = command_parser.parse("!Invite calculator FOR 2 HOURS")
-    assert command is None
+    assert command is not None
+    assert command.type == CommandType.UNKNOWN
 
 
 def test_uninvite_command() -> None:
@@ -156,8 +158,9 @@ def test_list_schedules_command() -> None:
 
 def test_all_commands_have_documentation() -> None:
     """Test that all CommandType values have documentation."""
-    # Check that all commands have documentation
-    missing_docs = set(CommandType) - set(COMMAND_DOCS.keys())
+    # Check that all commands have documentation (except UNKNOWN which is special)
+    commands_needing_docs = set(CommandType) - {CommandType.UNKNOWN}
+    missing_docs = commands_needing_docs - set(COMMAND_DOCS.keys())
     assert not missing_docs, f"Missing documentation for commands: {missing_docs}"
 
     # Check that there are no extra documentation entries

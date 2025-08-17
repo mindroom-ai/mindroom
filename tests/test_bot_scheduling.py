@@ -130,6 +130,7 @@ class TestBotScheduleCommands:
                 client=mock_agent_bot.client,
                 room_id="!test:server",
                 thread_id="$thread123",
+                config=mock_agent_bot.config,
             )
 
             mock_agent_bot._send_response.assert_called_once()  # type: ignore[attr-defined]
