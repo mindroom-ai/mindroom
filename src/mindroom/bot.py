@@ -82,6 +82,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+
 # Constants
 SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
@@ -406,7 +407,10 @@ class AgentBot:
             assert self.thread_invite_manager is not None
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
-        is_command = event.body.strip().startswith("!")
+        # Check if it's a command - the parser will handle emoji prefixes
+        is_command = event.body.strip().startswith("!") or any(
+            event.body.strip().startswith(prefix) for prefix in ["🎤", "🎙️", "🗣️", "🎵"]
+        )
         if is_command:  # ONLY router handles the command
             if self.agent_name != ROUTER_AGENT_NAME:
                 return
