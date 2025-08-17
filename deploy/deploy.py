@@ -614,8 +614,9 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
 
 
 @app.command()
-def restart(  # noqa: PLR0912, PLR0915
-    name: str = typer.Argument("default", help="Instance name to restart"),
+def restart(
+    name: str = typer.Argument(None, help="Instance name to restart (or use --all)"),
+    all_instances: bool = typer.Option(False, "--all", help="Restart all running instances"),
     only_matrix: bool = typer.Option(
         False,
         "--only-matrix",
@@ -624,17 +625,53 @@ def restart(  # noqa: PLR0912, PLR0915
 ) -> None:
     """Restart a Mindroom instance (stop and start)."""
     registry = load_registry()
+
+    # Handle --all flag
+    if all_instances:
+        if name is not None:
+            console.print("[red]✗[/red] Cannot specify instance name with --all flag")
+            raise typer.Exit(1)
+
+        # Get all running instances (including partial)
+        running_instances = [
+            n
+            for n, inst in registry.instances.items()
+            if inst.status in [InstanceStatus.RUNNING, InstanceStatus.PARTIAL]
+        ]
+
+        if not running_instances:
+            console.print("[yellow]No running instances to restart[/yellow]")
+            return
+
+        console.print(f"[cyan]Restarting {len(running_instances)} instances...[/cyan]")
+
+        # Restart each instance
+        for instance_name in running_instances:
+            instance = registry.instances[instance_name]
+            console.print(f"\n[yellow]Restarting '[cyan]{instance_name}[/cyan]'...[/yellow]")
+            _restart_instance(instance_name, instance, registry, only_matrix)
+
+        console.print("\n[green]✓[/green] All instances restarted successfully!")
+        return
+
+    # Single instance restart
+    if name is None:
+        name = "default"  # Default to "default" if no name specified and not --all
+
     if name not in registry.instances:
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
         raise typer.Exit(1)
 
     instance = registry.instances[name]
+    console.print(f"[yellow]Restarting instance '[cyan]{name}[/cyan]'...[/yellow]")
+    _restart_instance(name, instance, registry, only_matrix)
 
+
+def _restart_instance(name: str, instance: Instance, registry: Registry, only_matrix: bool) -> None:  # noqa: PLR0912
+    """Helper function to restart a single instance."""
     # Verify federation configuration if Matrix is enabled
     if instance.matrix_type:
         _verify_extra_hosts_for_federation(instance.matrix_type, registry.instances)
-
-    console.print(f"[yellow]Restarting instance '[cyan]{name}[/cyan]'...[/yellow]")
 
     # Stop the instance
     project_root = SCRIPT_DIR.parent
