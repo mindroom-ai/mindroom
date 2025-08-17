@@ -36,7 +36,6 @@ export function VoiceConfig() {
     ...(config?.voice || {}),
   });
 
-  const [isTestingSTT, setIsTestingSTT] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   // Update local state when config changes
@@ -67,26 +66,6 @@ export function VoiceConfig() {
     handleVoiceConfigChange({
       intelligence: { ...voiceConfig.intelligence, ...updates },
     });
-  };
-
-  const testSTTConnection = async () => {
-    setIsTestingSTT(true);
-    try {
-      // In a real implementation, this would test the STT connection
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      toast({
-        title: 'STT Connection Successful',
-        description: 'Voice transcription service is configured correctly.',
-      });
-    } catch (error) {
-      toast({
-        title: 'STT Connection Failed',
-        description: 'Please check your configuration and try again.',
-        variant: 'destructive',
-      });
-    } finally {
-      setIsTestingSTT(false);
-    }
   };
 
   const handleSave = async () => {
@@ -207,16 +186,6 @@ export function VoiceConfig() {
                     </p>
                   </div>
                 )}
-
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={testSTTConnection}
-                  disabled={isTestingSTT}
-                  className="w-fit"
-                >
-                  {isTestingSTT ? <>Testing...</> : <>Test Connection</>}
-                </Button>
               </div>
             </div>
 
