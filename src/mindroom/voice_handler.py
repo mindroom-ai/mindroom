@@ -127,8 +127,6 @@ async def _download_audio(
     except Exception:
         logger.exception("Error downloading audio")
         return None
-    else:
-        return None
 
 
 async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
@@ -171,12 +169,16 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
             data.add_field("file", audio_content, filename="audio.ogg", content_type="audio/ogg")
             data.add_field("model", config.voice.stt.model)
 
-            # Make the API request (with SSL verification disabled if needed)
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            # Make the API request
+            # Only disable SSL for localhost/self-hosted
+            connector = None
+            if stt_host and ("localhost" in stt_host or "127.0.0.1" in stt_host):
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                connector = aiohttp.TCPConnector(ssl=ssl_context)
+            else:
+                connector = aiohttp.TCPConnector()
             async with (
                 aiohttp.ClientSession(connector=connector) as session,
                 session.post(url, headers=headers, data=data) as response,
