@@ -83,6 +83,36 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _is_command(body: str) -> bool:
+    """Check if a message body is a command.
+
+    Handles both direct commands (!command) and commands with voice emoji prefixes.
+
+    Args:
+        body: The message body to check
+
+    Returns:
+        True if the message is a command
+
+    """
+    body = body.strip()
+
+    # Direct command
+    if body.startswith("!"):
+        return True
+
+    # Check for voice emoji prefixes that might contain commands
+    voice_prefixes = ["🎤", "🎙️", "🗣️", "🎵"]
+    for prefix in voice_prefixes:
+        if body.startswith(prefix):
+            # Check if there's a command after the emoji
+            remaining = body[len(prefix) :].lstrip()
+            if remaining.startswith("!"):
+                return True
+
+    return False
+
+
 # Constants
 SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
@@ -407,10 +437,7 @@ class AgentBot:
             assert self.thread_invite_manager is not None
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
-        # Check if it's a command - the parser will handle emoji prefixes
-        is_command = event.body.strip().startswith("!") or any(
-            event.body.strip().startswith(prefix) for prefix in ["🎤", "🎙️", "🗣️", "🎵"]
-        )
+        is_command = _is_command(event.body)
         if is_command:  # ONLY router handles the command
             if self.agent_name != ROUTER_AGENT_NAME:
                 return
