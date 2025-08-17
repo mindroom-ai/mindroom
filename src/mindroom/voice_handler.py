@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 import ssl
 import tempfile
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiofiles
 import aiohttp
 import nio
+from agno.agent import Agent
 from nio import crypto
 
 from .ai import get_model_instance
@@ -247,17 +249,21 @@ Output the formatted message only, no explanation:"""
 
         # Get the AI model to process the transcription
         model = get_model_instance(config, config.voice.intelligence.model)
-
-        # Use the model's run method directly for simple text generation
-        # The agno models have a .run() method that takes messages
-        messages = [{"role": "user", "content": prompt}]
-        response = await model.run(messages)
         
-        # The response should have content
-        if response and hasattr(response, "content"):
+        # Create an agent for voice command processing
+        agent = Agent(
+            name="VoiceCommandProcessor",
+            role="Convert voice transcriptions to properly formatted chat commands",
+            model=model,
+        )
+        
+        # Process the transcription with the agent
+        session_id = f"voice_process_{uuid.uuid4()}"
+        response = await agent.arun(prompt, session_id=session_id)
+        
+        # Extract the content from the response
+        if response and response.content:
             return response.content.strip()
-        elif isinstance(response, str):
-            return response.strip()
 
     except Exception:
         logger.exception("Error processing transcription")
