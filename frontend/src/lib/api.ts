@@ -1,6 +1,6 @@
 // API configuration
 export const API_BASE_URL =
-  (import.meta as any).env?.VITE_API_URL ||
+  (import.meta as any).env?.VITE_API_URL ??
   `http://localhost:${(import.meta as any).env?.VITE_BACKEND_PORT || '8765'}`;
 
 // Export as API_BASE for compatibility
@@ -40,7 +40,7 @@ export const API_ENDPOINTS = {
   },
 
   // Other endpoints
-  tools: `${API_BASE_URL}/api/tools/`,
+  tools: `${API_BASE_URL}/api/tools`,
   rooms: `${API_BASE_URL}/api/rooms`,
   testModel: `${API_BASE_URL}/api/test/model`,
   encryptKey: `${API_BASE_URL}/api/keys/encrypt`,

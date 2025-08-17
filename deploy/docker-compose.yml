@@ -9,8 +9,6 @@ services:
     env_file:
       - ../.env
     user: "${UID:-1000}:${GID:-1000}"
-    ports:
-      - "${BACKEND_PORT:-8765}:8765"
     volumes:
       - ${DATA_DIR}/config:/app/config
       - ${DATA_DIR}/tmp:/app/tmp
@@ -20,7 +18,6 @@ services:
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - STORAGE_PATH=/app/tmp
-      - BACKEND_PORT=${BACKEND_PORT:-8765}
       - HOME=/app
     networks:
       - mindroom-network
@@ -44,17 +41,29 @@ services:
     environment:
       - BACKEND_PORT=${BACKEND_PORT:-8765}
       - FRONTEND_PORT=${FRONTEND_PORT:-3003}
+      - VITE_API_URL=
     networks:
       - mindroom-network
       - mynetwork
     labels:
       - traefik.enable=true
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN:-mindroom.${DOMAIN}}`)
+      # API routes (for the API server on port 8765 in the same container)
+      # API has higher priority (100) so it matches first
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.rule=Host(`${INSTANCE_DOMAIN}`) && PathPrefix(`/api`)
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls=true
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.service=${INSTANCE_NAME:-mindroom}-api
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.priority=100
+      - traefik.http.services.${INSTANCE_NAME:-mindroom}-api.loadbalancer.server.port=8765
+      # Frontend routes (for the Vite dev server on port $FRONTEND_PORT)
+      # Frontend has lower priority (50) and catches everything else
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN}`)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls=true
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls.certresolver=porkbun
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-local.rule=Host(`${INSTANCE_NAME:-mindroom}.local`)
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-local.entrypoints=web
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.service=${INSTANCE_NAME:-mindroom}
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.priority=50
       - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=${FRONTEND_PORT:-3003}
 
 networks:

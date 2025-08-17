@@ -7,7 +7,7 @@
 
 ./deploy.py start alt
 ./deploy.py start default
-./deploy.py start --matrix-only test
-./deploy.py start --matrix-only test-2
-./deploy.py start --matrix-only test-3
-./deploy.py start --matrix-only test-4
+./deploy.py start --only-matrix test
+./deploy.py start --only-matrix test-2
+./deploy.py start --only-matrix test-3
+./deploy.py start --only-matrix test-4

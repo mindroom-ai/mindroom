@@ -39,7 +39,7 @@ services:
     container_name: ${INSTANCE_NAME:-mindroom}-synapse
     environment:
       SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
-      SYNAPSE_SERVER_NAME: m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}
+      SYNAPSE_SERVER_NAME: m-${INSTANCE_DOMAIN}
       SYNAPSE_REPORT_STATS: "no"
       UID: 1000
       GID: 1000
@@ -77,21 +77,15 @@ services:
       - traefik.enable=true
 
       # Production HTTPS route (m-mything.lab.mydomain.com)
-      - traefik.http.routers.${INSTANCE_NAME}-matrix.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
+      - traefik.http.routers.${INSTANCE_NAME}-matrix.rule=Host(`m-${INSTANCE_DOMAIN}`)
       - traefik.http.routers.${INSTANCE_NAME}-matrix.entrypoints=websecure
       - traefik.http.routers.${INSTANCE_NAME}-matrix.tls=true
       - traefik.http.routers.${INSTANCE_NAME}-matrix.tls.certresolver=porkbun
       - traefik.http.routers.${INSTANCE_NAME}-matrix.service=${INSTANCE_NAME}-matrix
       - traefik.http.services.${INSTANCE_NAME}-matrix.loadbalancer.server.port=8008
 
-      # Local HTTP route (m-mything.local)
-      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.rule=Host(`m-${INSTANCE_NAME}.local`)
-      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.entrypoints=web
-      - traefik.http.routers.${INSTANCE_NAME}-matrix-local.service=${INSTANCE_NAME}-matrix
-      - traefik.http.services.${INSTANCE_NAME}-matrix-local.loadbalancer.server.port=8008
-
       # Federation on port 8448
-      - traefik.http.routers.${INSTANCE_NAME}-fed.rule=Host(`m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}`)
+      - traefik.http.routers.${INSTANCE_NAME}-fed.rule=Host(`m-${INSTANCE_DOMAIN}`)
       - traefik.http.routers.${INSTANCE_NAME}-fed.entrypoints=matrix-fed
       - traefik.http.routers.${INSTANCE_NAME}-fed.tls=true
       - traefik.http.routers.${INSTANCE_NAME}-fed.tls.certresolver=porkbun
@@ -101,7 +95,7 @@ services:
   backend:
     environment:
       - MATRIX_HOMESERVER=http://synapse:8008
-      - MATRIX_SERVER_NAME=m-${INSTANCE_DOMAIN:-m-${INSTANCE_NAME}.${DOMAIN}}
+      - MATRIX_SERVER_NAME=m-${INSTANCE_DOMAIN}
     depends_on:
       synapse:
         condition: service_healthy
