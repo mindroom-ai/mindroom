@@ -149,6 +149,82 @@ def find_next_ports(registry: Registry) -> tuple[int, int, int]:
     return backend_port, frontend_port, matrix_port
 
 
+def _prepare_matrix_config(
+    instance: Instance,
+    matrix_type: MatrixType,
+    config_file_name: str,
+    template_dir: Path,
+    target_dir: Path,
+) -> None:
+    """Prepare Matrix configuration files (shared logic for Synapse and Tuwunel)."""
+    if not template_dir.exists():
+        return
+
+    matrix_server_name = f"m-{instance.domain}"
+
+    for file in template_dir.glob("*"):
+        if not file.is_file():
+            continue
+
+        if file.name == config_file_name:
+            # Generate config file with correct values
+            with file.open() as f:
+                content = f.read()
+
+            # Common replacements
+            content = content.replace('server_name: "localhost"', f'server_name: "{matrix_server_name}"')
+            content = content.replace(
+                "public_baseurl: http://localhost:8008/",
+                f"public_baseurl: https://{matrix_server_name}/",
+            )
+
+            # Matrix-specific replacements
+            if matrix_type == MatrixType.SYNAPSE:
+                # Replace postgres and redis hostnames with container names
+                content = content.replace("host: postgres", f"host: {instance.name}-postgres")
+                content = content.replace("host: redis", f"host: {instance.name}-redis")
+            elif matrix_type == MatrixType.TUWUNEL:
+                # Tuwunel-specific replacements if needed
+                pass
+
+            with (target_dir / file.name).open("w") as f:
+                f.write(content)
+
+        elif file.name == "signing.key" and matrix_type == MatrixType.SYNAPSE:
+            # Generate a unique signing key for Synapse
+            key_bytes = secrets.token_bytes(32)
+            key_b64 = base64.b64encode(key_bytes).decode("ascii")
+            key_id = f"{instance.name}_{secrets.token_hex(3)}"
+            signing_key_content = f"ed25519 {key_id} {key_b64}\n"
+
+            with (target_dir / file.name).open("w") as f:
+                f.write(signing_key_content)
+            console.print("  [dim]Generated unique signing key for instance[/dim]")
+
+        else:
+            shutil.copy(file, target_dir / file.name)
+
+
+def _get_docker_compose_files(instance: Instance, env_file_relative: str, project_root: Path) -> str:
+    """Get the docker-compose command with appropriate files based on matrix type."""
+    base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
+
+    if instance.matrix_type == MatrixType.TUWUNEL:
+        return f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
+    if instance.matrix_type == MatrixType.SYNAPSE:
+        return f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+    return base_cmd
+
+
+def _get_matrix_services(matrix_type: MatrixType | None) -> str:
+    """Get the list of services to start based on matrix type."""
+    if matrix_type == MatrixType.SYNAPSE:
+        return " postgres redis synapse"
+    if matrix_type == MatrixType.TUWUNEL:
+        return " tuwunel"
+    return ""
+
+
 def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixType | None) -> None:
     """Create and configure the environment file for an instance."""
     env_file = SCRIPT_DIR / f".env.{name}"
@@ -272,54 +348,20 @@ def _create_wellknown_files(name: str, instance: Instance) -> None:
         json.dump(client_wellknown, wf, indent=2)
 
 
-def _setup_synapse_config(instance: Instance, name: str) -> None:
+def _setup_synapse_config(instance: Instance) -> None:
     """Set up Synapse configuration directory and files."""
     synapse_dir = Path(instance.data_dir) / "synapse"
     synapse_dir.mkdir(parents=True, exist_ok=True)
     (synapse_dir / "media_store").mkdir(parents=True, exist_ok=True)
 
     template_dir = SCRIPT_DIR / "synapse-template"
-    if not template_dir.exists():
-        return
-
-    matrix_server_name = f"m-{instance.domain}"
-    matrix_port_value = instance.matrix_port or 8008
-
-    for file in template_dir.glob("*"):
-        if not file.is_file():
-            continue
-
-        if file.name == "homeserver.yaml":
-            # Generate homeserver.yaml with correct values
-            with file.open() as f:
-                content = f.read()
-
-            # Replace hardcoded values with instance-specific ones
-            content = content.replace('server_name: "localhost"', f'server_name: "{matrix_server_name}"')
-            content = content.replace(
-                "public_baseurl: http://localhost:8008/",
-                f"public_baseurl: https://{matrix_server_name}/",
-            )
-            # Replace postgres and redis hostnames with container names
-            content = content.replace("host: postgres", f"host: {name}-postgres")
-            content = content.replace("host: redis", f"host: {name}-redis")
-
-            with (synapse_dir / file.name).open("w") as f:
-                f.write(content)
-
-        elif file.name == "signing.key":
-            # Generate a unique signing key for this instance
-            key_bytes = secrets.token_bytes(32)
-            key_b64 = base64.b64encode(key_bytes).decode("ascii")
-            key_id = f"{name}_{secrets.token_hex(3)}"
-            signing_key_content = f"ed25519 {key_id} {key_b64}\n"
-
-            with (synapse_dir / file.name).open("w") as f:
-                f.write(signing_key_content)
-            console.print("  [dim]Generated unique signing key for instance[/dim]")
-
-        else:
-            shutil.copy(file, synapse_dir / file.name)
+    _prepare_matrix_config(
+        instance,
+        MatrixType.SYNAPSE,
+        "homeserver.yaml",
+        template_dir,
+        synapse_dir,
+    )
 
 
 def _update_registry(registry: Registry, instance: Instance, matrix_type: MatrixType | None) -> None:
@@ -397,7 +439,7 @@ def create(
 
     # Set up Synapse configuration if needed
     if matrix_type == MatrixType.SYNAPSE:
-        _setup_synapse_config(instance, name)
+        _setup_synapse_config(instance)
 
     # Update registry
     _update_registry(registry, instance, matrix_type)
@@ -480,57 +522,25 @@ def start(  # noqa: PLR0912, PLR0915
         synapse_dir = Path(f"{instance.data_dir}/synapse")
         if not (synapse_dir / "homeserver.yaml").exists():
             template_dir = SCRIPT_DIR / "synapse-template"
-            if template_dir.exists():
-                for file in template_dir.glob("*"):
-                    if file.is_file():
-                        if file.name == "homeserver.yaml":
-                            # Generate homeserver.yaml with correct values
-                            with file.open() as f:
-                                content = f.read()
-                            # Replace hardcoded values with instance-specific ones
-                            # For Matrix federation, use the m- prefixed domain
-                            matrix_server_name = f"m-{instance.domain}"
-                            # For public_baseurl, use the external port that will be mapped
-                            matrix_port_display = instance.matrix_port or 8008
-                            content = content.replace(
-                                'server_name: "localhost"',
-                                f'server_name: "{matrix_server_name}"',
-                            )
-                            content = content.replace(
-                                "public_baseurl: http://localhost:8008/",
-                                f"public_baseurl: https://{matrix_server_name}/",
-                            )
-                            # Replace postgres and redis hostnames with container names
-                            content = content.replace("host: postgres", f"host: {name}-postgres")
-                            content = content.replace("host: redis", f"host: {name}-redis")
-                            with (synapse_dir / file.name).open("w") as f:
-                                f.write(content)
-                        else:
-                            shutil.copy(file, synapse_dir / file.name)
+            _prepare_matrix_config(
+                instance,
+                MatrixType.SYNAPSE,
+                "homeserver.yaml",
+                template_dir,
+                synapse_dir,
+            )
 
     # Start with docker compose (modern syntax) - run from parent directory for build context
     # Get the parent directory (project root)
     project_root = SCRIPT_DIR.parent
     env_file_relative = f"deploy/.env.{name}"
 
-    # Build the docker compose command
-    base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
-
-    if matrix_type == MatrixType.TUWUNEL:
-        compose_files = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
-    elif matrix_type == MatrixType.SYNAPSE:
-        compose_files = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
-    else:
-        compose_files = base_cmd
+    # Build the docker compose command using helper
+    compose_files = _get_docker_compose_files(instance, env_file_relative, project_root)
 
     # Add services to start (backend always, frontend only if not --no-frontend)
     services = "backend"
-    if matrix_type:
-        # Add Matrix-related services
-        if matrix_type == MatrixType.SYNAPSE:
-            services += " postgres redis synapse"
-        elif matrix_type == MatrixType.TUWUNEL:
-            services += " tuwunel"
+    services += _get_matrix_services(matrix_type)
 
     if not no_frontend:
         services = "frontend " + services  # Add frontend to the list
@@ -601,7 +611,7 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
 
 
 @app.command()
-def restart(  # noqa: PLR0912, PLR0915
+def restart(
     name: str = typer.Argument("default", help="Instance name to restart"),
     no_frontend: bool = typer.Option(False, "--no-frontend", help="Skip starting the frontend"),
 ) -> None:
@@ -643,22 +653,11 @@ def restart(  # noqa: PLR0912, PLR0915
 
     # Build compose command
     env_file_relative = f"deploy/.env.{name}"
-    base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
-
-    if matrix_type == MatrixType.TUWUNEL:
-        compose_files = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
-    elif matrix_type == MatrixType.SYNAPSE:
-        compose_files = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
-    else:
-        compose_files = base_cmd
+    compose_files = _get_docker_compose_files(instance, env_file_relative, project_root)
 
     # Add services to start
     services = "backend"
-    if matrix_type:
-        if matrix_type == MatrixType.SYNAPSE:
-            services += " postgres redis synapse"
-        elif matrix_type == MatrixType.TUWUNEL:
-            services += " tuwunel"
+    services += _get_matrix_services(matrix_type)
 
     if not no_frontend:
         services = "frontend " + services

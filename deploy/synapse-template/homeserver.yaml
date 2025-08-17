@@ -40,6 +40,10 @@ log_config: "/data/log.config"
 enable_registration: true
 enable_registration_without_verification: true
 
+# Shared secret for programmatic registration (used by backend)
+# WARNING: Change this in production!
+registration_shared_secret: "mindroom_dev_secret_change_in_production"
+
 # Allow federation to private IPs for local development
 # WARNING: Do not use this in production!
 federation_ip_range_blacklist: []
