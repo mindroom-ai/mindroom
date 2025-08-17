@@ -1029,6 +1029,10 @@ class AgentBot:
                     task_id=task_id,
                 )
 
+        elif command.type == CommandType.UNKNOWN:
+            # Handle unknown commands
+            response_text = "❌ Unknown command. Try !help for available commands."
+
         if response_text:
             await self._send_response(
                 room,

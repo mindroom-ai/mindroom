@@ -31,6 +31,7 @@ class CommandType(Enum):
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
     WIDGET = "widget"
+    UNKNOWN = "unknown"  # Special type for unrecognized commands
 
 
 # Command documentation for each command type
@@ -194,9 +195,13 @@ class CommandParser:
                 raw_text=message,
             )
 
-        # Unknown command
+        # Unknown command - return a special Command indicating it's unknown
         logger.debug(f"Unknown command: {message}")
-        return None
+        return Command(
+            type=CommandType.UNKNOWN,
+            args={"raw_command": message},
+            raw_text=message,
+        )
 
 
 def get_command_help(topic: str | None = None) -> str:  # noqa: PLR0911

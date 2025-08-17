@@ -89,19 +89,29 @@ def test_help_command() -> None:
 
 
 def test_invalid_commands() -> None:
-    """Test that invalid commands return None."""
-    invalid_commands = [
+    """Test that invalid commands are handled correctly."""
+    # Commands that should return UNKNOWN
+    unknown_commands = [
         "!invalid",
         "!invite",  # Missing agent name
         "!uninvite",  # Missing agent name
         "!invite calculator for",  # Incomplete duration
         "!invite calculator for hours",  # Invalid duration format
+    ]
+
+    for cmd_text in unknown_commands:
+        command = command_parser.parse(cmd_text)
+        assert command is not None
+        assert command.type == CommandType.UNKNOWN
+
+    # Non-commands that should return None
+    non_commands = [
         "invite calculator",  # Missing exclamation
         "just a regular message",
         "",
     ]
 
-    for cmd_text in invalid_commands:
+    for cmd_text in non_commands:
         command = command_parser.parse(cmd_text)
         assert command is None
 
