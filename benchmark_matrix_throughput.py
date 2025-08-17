@@ -6,6 +6,7 @@ by sending messages at various rates and measuring throughput.
 """
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,9 @@ import yaml
 from mindroom.matrix import MATRIX_HOMESERVER
 from mindroom.matrix.client import send_message
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
+
+# Suppress mindroom debug logs for cleaner benchmark output
+logging.getLogger("mindroom").setLevel(logging.WARNING)
 
 if TYPE_CHECKING:
     import nio
@@ -190,7 +194,7 @@ class MatrixBenchmark:
         """Gradually increase message rate to find maximum throughput."""
         print(f"\n📈 Ramp Test: 0 to {max_rate} msg/s")
 
-        rates = [1, 2, 5, 10, 20, 30, 40, 50, 75, 100]
+        rates = [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 200]
         rates = [r for r in rates if r <= max_rate]
 
         results: list[tuple[int, BenchmarkMetrics]] = []
@@ -250,7 +254,7 @@ async def main() -> None:
 
         # Test 3: Ramp test to find maximum sustainable rate
         print("\n### RAMP TEST ###")
-        await benchmark.run_ramp_test(max_rate=100, step_duration=5)
+        await benchmark.run_ramp_test(max_rate=500, step_duration=5)
 
         print("\n" + "=" * 60)
         print("✅ Benchmark Complete!")
