@@ -40,11 +40,9 @@ log_config: "/data/log.config"
 enable_registration: true
 enable_registration_without_verification: true
 
-# Shared secret for programmatic registration (used by backend)
-# WARNING: Change this in production!
-registration_shared_secret: "mindroom_dev_secret_change_in_production"
-
 # Allow federation to private IPs for local development
+# By default Synapse blocks private IP ranges (10.x, 172.16.x, 192.168.x)
+# Setting this empty allows federation between Docker containers
 # WARNING: Do not use this in production!
 federation_ip_range_blacklist: []
 
