@@ -15,7 +15,7 @@ cd widget
 nix-shell shell.nix --run "./run.sh"
 ```
 
-Note the port number shown in the output (e.g., "Frontend: http://localhost:3005")
+Note the port number shown in the output (e.g., "Frontend: http://localhost:3003")
 
 ### 2. Take screenshots (in a new terminal)
 

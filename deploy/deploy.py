@@ -14,6 +14,7 @@ import json
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 from enum import Enum
@@ -129,23 +130,72 @@ def save_registry(registry: Registry) -> None:
         json.dump(data, f, indent=2)
 
 
-def find_next_ports(registry: Registry) -> tuple[int, int, int]:
-    """Find the next available ports."""
+def _is_port_in_use(port: int) -> bool:
+    """Check if a port is already in use on the system."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("", port))
+        except OSError:
+            return True
+        else:
+            return False
+
+
+def _find_next_ports(registry: Registry) -> tuple[int, int, int]:
+    """Find the next available ports that are not in use on the system."""
     defaults = registry.defaults
     allocated = registry.allocated_ports
 
+    # Find available backend port
     backend_port = defaults.backend_port_start
-    while backend_port in allocated.backend:
+    skipped_backend = []
+    while backend_port in allocated.backend or _is_port_in_use(backend_port):
+        if _is_port_in_use(backend_port) and backend_port not in allocated.backend:
+            skipped_backend.append(backend_port)
         backend_port += 1
+        # Safety check to avoid infinite loop
+        if backend_port > defaults.backend_port_start + 1000:
+            msg = f"Could not find available backend port starting from {defaults.backend_port_start}"
+            raise RuntimeError(msg)
 
+    if skipped_backend:
+        console.print(
+            f"[yellow]Note:[/yellow] Backend port(s) {skipped_backend} already in use by other processes, using port {backend_port}",
+        )
+
+    # Find available frontend port
     frontend_port = defaults.frontend_port_start
-    while frontend_port in allocated.frontend:
+    skipped_frontend = []
+    while frontend_port in allocated.frontend or _is_port_in_use(frontend_port):
+        if _is_port_in_use(frontend_port) and frontend_port not in allocated.frontend:
+            skipped_frontend.append(frontend_port)
         frontend_port += 1
+        # Safety check to avoid infinite loop
+        if frontend_port > defaults.frontend_port_start + 1000:
+            msg = f"Could not find available frontend port starting from {defaults.frontend_port_start}"
+            raise RuntimeError(msg)
 
-    # Matrix port allocation (starting at 8448)
+    if skipped_frontend:
+        console.print(
+            f"[yellow]Note:[/yellow] Frontend port(s) {skipped_frontend} already in use by other processes, using port {frontend_port}",
+        )
+
+    # Find available Matrix port (starting at 8448)
     matrix_port = defaults.matrix_port_start
-    while matrix_port in allocated.matrix:
+    skipped_matrix = []
+    while matrix_port in allocated.matrix or _is_port_in_use(matrix_port):
+        if _is_port_in_use(matrix_port) and matrix_port not in allocated.matrix:
+            skipped_matrix.append(matrix_port)
         matrix_port += 1
+        # Safety check to avoid infinite loop
+        if matrix_port > defaults.matrix_port_start + 1000:
+            msg = f"Could not find available matrix port starting from {defaults.matrix_port_start}"
+            raise RuntimeError(msg)
+
+    if skipped_matrix:
+        console.print(
+            f"[yellow]Note:[/yellow] Matrix port(s) {skipped_matrix} already in use by other processes, using port {matrix_port}",
+        )
 
     return backend_port, frontend_port, matrix_port
 
@@ -246,11 +296,6 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
         f.write(f"FRONTEND_PORT={instance.frontend_port}\n")
         f.write(f"DATA_DIR={abs_data_dir}\n")
         f.write(f"INSTANCE_DOMAIN={instance.domain}\n")
-
-        # Extract base domain from instance domain
-        if "." in instance.domain:
-            base_domain = ".".join(instance.domain.split(".")[1:])
-            f.write(f"DOMAIN={base_domain}\n")
 
         if matrix_type:
             f.write(f"\n# Matrix configuration ({matrix_type.value})\n")
@@ -417,7 +462,15 @@ def create(
             raise typer.Exit(1)  # noqa: B904
 
     # Allocate ports and create instance
-    backend_port, frontend_port, matrix_port_value = find_next_ports(registry)
+    try:
+        backend_port, frontend_port, matrix_port_value = _find_next_ports(registry)
+    except RuntimeError as e:
+        console.print(f"[red]✗[/red] Port allocation failed: {e}")
+        console.print(
+            "[yellow]Tip:[/yellow] Check for other processes using these ports with 'sudo lsof -i' or 'netstat -tulpn'",
+        )
+        raise typer.Exit(1) from e
+
     data_dir = f"{registry.defaults.data_dir_base}/{name}"
 
     instance = Instance(
