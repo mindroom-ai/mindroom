@@ -83,36 +83,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _is_command(body: str) -> bool:
-    """Check if a message body is a command.
-
-    Handles both direct commands (!command) and commands with voice emoji prefixes.
-
-    Args:
-        body: The message body to check
-
-    Returns:
-        True if the message is a command
-
-    """
-    body = body.strip()
-
-    # Direct command
-    if body.startswith("!"):
-        return True
-
-    # Check for voice emoji prefixes that might contain commands
-    voice_prefixes = ["🎤", "🎙️", "🗣️", "🎵"]
-    for prefix in voice_prefixes:
-        if body.startswith(prefix):
-            # Check if there's a command after the emoji
-            remaining = body[len(prefix) :].lstrip()
-            if remaining.startswith("!"):
-                return True
-
-    return False
-
-
 # Constants
 SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
@@ -437,19 +407,12 @@ class AgentBot:
             assert self.thread_invite_manager is not None
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
-        is_command = _is_command(event.body)
-        if is_command:  # ONLY router handles the command
+        # Try to parse as command - parser handles emoji prefixes
+        command = command_parser.parse(event.body)
+        if command:  # ONLY router handles the command
             if self.agent_name != ROUTER_AGENT_NAME:
                 return
-            command = command_parser.parse(event.body)
-            if command:
-                await self._handle_command(room, event, command)
-            else:
-                # Extract thread info for unknown commands too
-                is_thread, thread_id = extract_thread_info(event.source)
-                help_text = "❌ Unknown command. Try !help for available commands."
-                await self._send_response(room, event.event_id, help_text, thread_id=thread_id, reply_to_event=event)
-                self.response_tracker.mark_responded(event.event_id)
+            await self._handle_command(room, event, command)
             return
 
         context = await self._extract_message_context(room, event)
