@@ -248,17 +248,10 @@ Output the formatted message only, no explanation:"""
         # Get the AI model to process the transcription
         model = get_model_instance(config, config.voice.intelligence.model)
 
-        # For simple models, we might need to be more explicit
-        if hasattr(model, "run"):
-            # This is an agno Model
-            response = await model.run(prompt)
-            if response and hasattr(response, "content"):
-                return response.content.strip()
-        else:
-            # Direct model call
-            response = await model.complete(prompt)
-            if response:
-                return response.strip()
+        # Use the model to process the prompt
+        response = await model.run(prompt)
+        if response and hasattr(response, "content"):
+            return response.content.strip()
 
     except Exception:
         logger.exception("Error processing transcription")
