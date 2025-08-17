@@ -27,6 +27,33 @@ MindRoom agents:
 - **Collaborate naturally** - Multiple agents working together in threads
 - **Respect boundaries** - You control which agent sees what data
 
+## Built on Proven Infrastructure
+
+MindRoom leverages the Matrix protocol, a decade-old open standard with significant real-world adoption:
+
+**Foundation**
+- **10+ years** of development by the Matrix.org Foundation
+- **€10M+** invested in protocol development
+- **100+ developers** contributing to the core ecosystem
+- **35+ million users** globally
+
+**Enterprise Validation**
+- **German Healthcare**: 150,000+ organizations using Ti-Messenger
+- **French Government**: 5.5 million civil servants on Tchap
+- **Military Adoption**: NATO, U.S. Space Force, and other defense organizations
+- **GDPR Compliant**: Built for European privacy standards
+
+**What This Means For You**
+
+By building on Matrix, MindRoom inherits:
+- Production-tested federation across organizations
+- Military-grade E2E encryption (Olm/Megolm)
+- Professional clients (Element, FluffyChat, Cinny)
+- 50+ maintained bridges to other platforms
+- Proven scale and reliability
+
+This foundation allows MindRoom to focus entirely on agent orchestration and intelligence, rather than reimplementing communication infrastructure.
+
 ## See It In Action
 
 ```
@@ -229,12 +256,6 @@ Mix and match:
 
 ## Architecture
 
-### Why Matrix?
-- **Federation**: Like email—works across servers
-- **Bridges**: Connect to Slack, Telegram, Discord, everything
-- **E2E Encryption**: Military-grade security by default
-- **No Lock-in**: Export and migrate anytime
-
 ### Technical Stack
 - **Matrix**: Conduit server (only 20-30MB RAM!)
 - **Agents**: Python with matrix-nio
@@ -263,15 +284,6 @@ We believe AI should be:
 - 🚧 Mobile apps in development
 - 🚧 Agent marketplace planned
 
-## Why Not Just Use...?
-
-**ChatGPT/Claude?** They can't join your Slack or remember yesterday's conversation.
-
-**Slack AI?** Locked to Slack only, no memory across platforms, no federation.
-
-**Other AI Platforms?** No federation means no cross-organization collaboration.
-
-**MindRoom?** Your AI everywhere, remembering everything, owned by you.
 
 ## Contributing
 

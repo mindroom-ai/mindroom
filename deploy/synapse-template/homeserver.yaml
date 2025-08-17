@@ -1,0 +1,159 @@
+# Minimal Synapse configuration for mindroom development
+# WITH ALL RATE LIMITS EFFECTIVELY DISABLED
+
+server_name: "localhost"
+public_baseurl: http://localhost:8008/
+
+# HTTP listener
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    bind_addresses: ['0.0.0.0']
+    resources:
+      - names: [client, federation]
+
+# Database
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: synapse_password
+    database: synapse
+    host: postgres
+    port: 5432
+
+# Redis for caching (optional but recommended)
+redis:
+  enabled: true
+  host: redis
+  port: 6379
+
+# Storage
+media_store_path: "/data/media_store"
+signing_key_path: "/data/signing.key"
+
+# Logging
+log_config: "/data/log.config"
+
+# Registration - open for development
+enable_registration: true
+enable_registration_without_verification: true
+
+# ========================================
+# COMPLETE RATE LIMITING CONFIGURATION
+# All values set to 10000 to effectively disable rate limiting
+# ========================================
+
+# Message sending rate limit
+rc_message:
+  per_second: 10000
+  burst_count: 10000
+
+# Registration rate limit
+rc_registration:
+  per_second: 10000
+  burst_count: 10000
+
+# Registration token validity checks
+rc_registration_token_validity:
+  per_second: 10000
+  burst_count: 10000
+
+# Login rate limits
+rc_login:
+  address:
+    per_second: 10000
+    burst_count: 10000
+  account:
+    per_second: 10000
+    burst_count: 10000
+  failed_attempts:
+    per_second: 10000
+    burst_count: 10000
+
+# Admin redaction rate limit
+rc_admin_redaction:
+  per_second: 10000
+  burst_count: 10000
+
+# Room join rate limits
+rc_joins:
+  local:
+    per_second: 10000
+    burst_count: 10000
+  remote:
+    per_second: 10000
+    burst_count: 10000
+
+# Per-room join rate limit
+rc_joins_per_room:
+  per_second: 10000
+  burst_count: 10000
+
+# 3PID validation rate limit
+rc_3pid_validation:
+  per_second: 10000
+  burst_count: 10000
+
+# Invite rate limits
+rc_invites:
+  per_room:
+    per_second: 10000
+    burst_count: 10000
+  per_user:
+    per_second: 10000
+    burst_count: 10000
+  per_issuer:
+    per_second: 10000
+    burst_count: 10000
+
+# Third party invite rate limit
+rc_third_party_invite:
+  per_second: 10000
+  burst_count: 10000
+
+# Media creation rate limit
+rc_media_create:
+  per_second: 10000
+  burst_count: 10000
+
+# Federation rate limits
+rc_federation:
+  window_size: 1000000
+  sleep_limit: 10000
+  sleep_delay: 1
+  reject_limit: 10000
+  concurrent: 10000
+
+# Presence rate limits
+rc_presence:
+  per_user:
+    per_second: 10000
+    burst_count: 10000
+
+# Delayed event management rate limits
+rc_delayed_event_mgmt:
+  per_second: 10000
+  burst_count: 10000
+
+# Report content rate limits
+rc_reports:
+  per_second: 10000
+  burst_count: 10000
+
+# Room creation rate limits
+rc_room_creation:
+  per_second: 10000
+  burst_count: 10000
+
+# Federation read-receipt transactions
+federation_rr_transactions_per_room_per_second: 10000
+
+# Security
+macaroon_secret_key: "mindroom_dev_secret_change_in_production"
+form_secret: "mindroom_form_secret_change_in_production"
+
+# Minimal configuration - no email, no TURN, no metrics
+report_stats: false
+enable_metrics: false

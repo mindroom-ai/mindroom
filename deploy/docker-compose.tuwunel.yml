@@ -1,0 +1,35 @@
+# Tuwunel Matrix Server Overlay for Mindroom Federation
+# This adds a lightweight Matrix server to each Mindroom instance
+# Usage: docker compose --env-file .env.{instance} -f docker-compose.yml -f docker-compose.tuwunel.yml up -d
+
+services:
+  tuwunel:
+    image: ghcr.io/matrix-construct/tuwunel:latest
+    container_name: ${INSTANCE_NAME:-mindroom}-tuwunel
+    restart: unless-stopped
+    ports:
+      - "${MATRIX_PORT:-8448}:6167"
+    volumes:
+      - ${DATA_DIR:-./instance_data}/tuwunel:/var/lib/tuwunel
+      - ./tuwunel.toml:/etc/tuwunel.toml:ro
+    command: ["-c", "/etc/tuwunel.toml"]
+    environment:
+      # Instance-specific overrides via environment variables
+      - TUWUNEL_SERVER_NAME=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
+      - TUWUNEL_DATABASE_PATH=/var/lib/tuwunel
+      - TUWUNEL_PORT=${TUWUNEL_INTERNAL_PORT:-6167}
+      - TUWUNEL_ALLOW_FEDERATION=${MATRIX_ALLOW_FEDERATION:-false}
+    networks:
+      - mindroom-network
+
+  # Update backend to know about Matrix server
+  backend:
+    environment:
+      - MATRIX_HOMESERVER=http://tuwunel:6167
+      - MATRIX_SERVER_NAME=${MATRIX_SERVER_NAME:-${INSTANCE_DOMAIN:-localhost}}
+    depends_on:
+      - tuwunel
+
+networks:
+  mindroom-network:
+    driver: bridge
