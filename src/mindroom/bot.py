@@ -577,10 +577,18 @@ class AgentBot:
         if event.sender == self.agent_user.user_id:
             return
 
+        # Check if we've already responded to this voice message (e.g., after restart)
+        if self.response_tracker.has_responded(event.event_id):
+            self.logger.debug("Already processed voice message", event_id=event.event_id)
+            return
+
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
 
         # Process the voice message
         await voice_handler.handle_voice_message(self.client, room, event, self.config)
+        
+        # Mark the voice message as responded so we don't process it again
+        self.response_tracker.mark_responded(event.event_id)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
