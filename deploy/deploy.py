@@ -43,7 +43,8 @@ class InstanceStatus(str, Enum):
 
     CREATED = "created"
     RUNNING = "running"
-    BACKEND_ONLY = "backend-only"
+    PARTIAL = "partial"  # Only Matrix server running
+    BACKEND_ONLY = "backend-only"  # Deprecated, kept for compatibility
     STOPPED = "stopped"
 
 
@@ -567,9 +568,11 @@ def start(  # noqa: PLR0912, PLR0915
 
     if result.returncode == 0:
         # Update status to reflect what's actually running
-        if not only_matrix:
+        if only_matrix:
+            registry.instances[name].status = InstanceStatus.PARTIAL
+        else:
             registry.instances[name].status = InstanceStatus.RUNNING
-            save_registry(registry)
+        save_registry(registry)
 
         if only_matrix:
             console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' started successfully!")
@@ -682,9 +685,11 @@ def restart(  # noqa: PLR0912, PLR0915
 
     if result.returncode == 0:
         # Update status
-        if not only_matrix:
+        if only_matrix:
+            registry.instances[name].status = InstanceStatus.PARTIAL
+        else:
             registry.instances[name].status = InstanceStatus.RUNNING
-            save_registry(registry)
+        save_registry(registry)
 
         if only_matrix:
             console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' restarted successfully!")
@@ -858,12 +863,15 @@ def list_instances() -> None:
             status_display = "[red]● stopped[/red]"
         elif frontend_up and backend_up:
             status_display = "[green]● running[/green]"
+        elif matrix_up and not backend_up and not frontend_up:
+            # Only Matrix server running (partial mode)
+            status_display = "[yellow]● partial[/yellow]"
         elif backend_up and not frontend_up:
             status_display = "[blue]● backend[/blue]"
         elif frontend_up and not backend_up:
             status_display = "[yellow]● frontend[/yellow]"
         else:
-            # Some containers running but not the main ones
+            # Some other combination
             status_display = "[yellow]● partial[/yellow]"
 
         matrix_display = ""
