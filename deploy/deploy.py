@@ -43,7 +43,8 @@ class InstanceStatus(str, Enum):
 
     CREATED = "created"
     RUNNING = "running"
-    BACKEND_ONLY = "backend-only"
+    PARTIAL = "partial"  # Only Matrix server running
+    BACKEND_ONLY = "backend-only"  # Deprecated, kept for compatibility
     STOPPED = "stopped"
 
 
@@ -451,7 +452,7 @@ def create(
 @app.command()
 def start(  # noqa: PLR0912, PLR0915
     name: str = typer.Argument("default", help="Instance name to start"),
-    no_frontend: bool = typer.Option(False, "--no-frontend", help="Start without frontend (for development)"),
+    only_matrix: bool = typer.Option(False, "--only-matrix", help="Start only Matrix server without backend/frontend"),
 ) -> None:
     """Start a Mindroom instance."""
     registry = load_registry()
@@ -538,16 +539,19 @@ def start(  # noqa: PLR0912, PLR0915
     # Build the docker compose command using helper
     compose_files = _get_docker_compose_files(instance, env_file_relative, project_root)
 
-    # Add services to start (backend always, frontend only if not --no-frontend)
-    services = "backend"
-    services += _get_matrix_services(matrix_type)
-
-    if not no_frontend:
-        services = "frontend " + services  # Add frontend to the list
-        status_msg = f"Starting instance '{name}'..."
+    # Determine which services to start based on flags
+    if only_matrix:
+        if not matrix_type:
+            console.print(f"[red]✗[/red] Instance '{name}' has no Matrix server configured!")
+            raise typer.Exit(1)
+        services = _get_matrix_services(matrix_type).strip()
+        status_msg = f"Starting Matrix server for '{name}'..."
+        console.print("[yellow]ℹ[/yellow] Starting only Matrix server (no backend/frontend)")  # noqa: RUF001
     else:
-        status_msg = f"Starting instance '{name}' (backend only)..."
-        console.print("[yellow]ℹ[/yellow] Starting without frontend (development mode)")  # noqa: RUF001
+        # Start full stack: frontend + backend + matrix
+        services = "frontend backend"
+        services += _get_matrix_services(matrix_type)
+        status_msg = f"Starting instance '{name}'..."
 
     cmd = f"{compose_files} -p {name} up -d --build {services}"
 
@@ -564,17 +568,16 @@ def start(  # noqa: PLR0912, PLR0915
 
     if result.returncode == 0:
         # Update status to reflect what's actually running
-        if no_frontend:
-            registry.instances[name].status = InstanceStatus.BACKEND_ONLY
+        if only_matrix:
+            registry.instances[name].status = InstanceStatus.PARTIAL
         else:
             registry.instances[name].status = InstanceStatus.RUNNING
         save_registry(registry)
 
-        if no_frontend:
-            console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully (backend only)!")
-            console.print(f"  [dim]Backend:[/dim] http://localhost:{instance.backend_port}")
-            if matrix_type:
-                console.print(f"  [dim]Matrix:[/dim] http://localhost:{instance.matrix_port or 8008}")
+        if only_matrix:
+            console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' started successfully!")
+            matrix_url = f"https://m-{instance.domain}"
+            console.print(f"  [dim]Matrix:[/dim] {matrix_url}")
         else:
             console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully!")
     else:
@@ -611,9 +614,13 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
 
 
 @app.command()
-def restart(
+def restart(  # noqa: PLR0912, PLR0915
     name: str = typer.Argument("default", help="Instance name to restart"),
-    no_frontend: bool = typer.Option(False, "--no-frontend", help="Skip starting the frontend"),
+    only_matrix: bool = typer.Option(
+        False,
+        "--only-matrix",
+        help="Restart only Matrix server without backend/frontend",
+    ),
 ) -> None:
     """Restart a Mindroom instance (stop and start)."""
     registry = load_registry()
@@ -655,12 +662,16 @@ def restart(
     env_file_relative = f"deploy/.env.{name}"
     compose_files = _get_docker_compose_files(instance, env_file_relative, project_root)
 
-    # Add services to start
-    services = "backend"
-    services += _get_matrix_services(matrix_type)
-
-    if not no_frontend:
-        services = "frontend " + services
+    # Determine which services to restart based on flags
+    if only_matrix:
+        if not matrix_type:
+            console.print(f"[red]✗[/red] Instance '{name}' has no Matrix server configured!")
+            raise typer.Exit(1)
+        services = _get_matrix_services(matrix_type).strip()
+    else:
+        # Start full stack: frontend + backend + matrix
+        services = "frontend backend"
+        services += _get_matrix_services(matrix_type)
 
     start_cmd = f"{compose_files} -p {name} up -d --build {services}"
 
@@ -674,13 +685,16 @@ def restart(
 
     if result.returncode == 0:
         # Update status
-        if no_frontend:
-            registry.instances[name].status = InstanceStatus.BACKEND_ONLY
+        if only_matrix:
+            registry.instances[name].status = InstanceStatus.PARTIAL
         else:
             registry.instances[name].status = InstanceStatus.RUNNING
         save_registry(registry)
 
-        console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' restarted successfully!")
+        if only_matrix:
+            console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' restarted successfully!")
+        else:
+            console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' restarted successfully!")
     else:
         console.print(f"[red]✗[/red] Failed to start instance '{name}'")
         if result.stderr:
@@ -849,12 +863,15 @@ def list_instances() -> None:
             status_display = "[red]● stopped[/red]"
         elif frontend_up and backend_up:
             status_display = "[green]● running[/green]"
+        elif matrix_up and not backend_up and not frontend_up:
+            # Only Matrix server running (partial mode)
+            status_display = "[yellow]● partial[/yellow]"
         elif backend_up and not frontend_up:
             status_display = "[blue]● backend[/blue]"
         elif frontend_up and not backend_up:
             status_display = "[yellow]● frontend[/yellow]"
         else:
-            # Some containers running but not the main ones
+            # Some other combination
             status_display = "[yellow]● partial[/yellow]"
 
         matrix_display = ""

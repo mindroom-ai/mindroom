@@ -66,6 +66,7 @@ services:
     extra_hosts:
       - "m-default.mindroom.chat:172.20.0.1"
       - "m-alt.mindroom.chat:172.20.0.1"
+      - "m-test.mindroom.chat:172.20.0.1"
       - "m-default.localhost:172.20.0.1"
       - "m-alt.localhost:172.20.0.1"
     networks:
