@@ -42,12 +42,7 @@ export function VoiceConfig() {
   // Update local state when config changes
   useEffect(() => {
     if (config?.voice) {
-      // Handle legacy 'localai' provider by converting to 'custom'
-      const voiceConfig = { ...config.voice };
-      if (voiceConfig.stt.provider === 'localai') {
-        voiceConfig.stt = { ...voiceConfig.stt, provider: 'custom' };
-      }
-      setVoiceConfig(voiceConfig);
+      setVoiceConfig(config.voice);
     }
   }, [config?.voice]);
 
