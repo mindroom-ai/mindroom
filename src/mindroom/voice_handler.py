@@ -248,10 +248,16 @@ Output the formatted message only, no explanation:"""
         # Get the AI model to process the transcription
         model = get_model_instance(config, config.voice.intelligence.model)
 
-        # Use the model to process the prompt
-        response = await model.run(prompt)
+        # Use the model's run method directly for simple text generation
+        # The agno models have a .run() method that takes messages
+        messages = [{"role": "user", "content": prompt}]
+        response = await model.run(messages)
+        
+        # The response should have content
         if response and hasattr(response, "content"):
             return response.content.strip()
+        elif isinstance(response, str):
+            return response.strip()
 
     except Exception:
         logger.exception("Error processing transcription")
