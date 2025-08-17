@@ -213,14 +213,15 @@ export function VoiceConfig() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="default">Default Model</SelectItem>
-                        {availableModels
-                          .filter(model => model !== 'default')
-                          .map(model => (
+                        {availableModels.length > 0 ? (
+                          availableModels.map(model => (
                             <SelectItem key={model} value={model}>
                               {model}
                             </SelectItem>
-                          ))}
+                          ))
+                        ) : (
+                          <SelectItem value="default">Default Model</SelectItem>
+                        )}
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
