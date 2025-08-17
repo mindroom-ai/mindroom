@@ -298,7 +298,7 @@ def _setup_synapse_config(instance: Instance, name: str) -> None:
             content = content.replace('server_name: "localhost"', f'server_name: "{matrix_server_name}"')
             content = content.replace(
                 "public_baseurl: http://localhost:8008/",
-                f"public_baseurl: http://{matrix_server_name}:{matrix_port_value}/",
+                f"public_baseurl: https://{matrix_server_name}/",
             )
             # Replace postgres and redis hostnames with container names
             content = content.replace("host: postgres", f"host: {name}-postgres")
@@ -498,7 +498,7 @@ def start(  # noqa: PLR0912, PLR0915
                             )
                             content = content.replace(
                                 "public_baseurl: http://localhost:8008/",
-                                f"public_baseurl: http://{matrix_server_name}:{matrix_port_display}/",
+                                f"public_baseurl: https://{matrix_server_name}/",
                             )
                             # Replace postgres and redis hostnames with container names
                             content = content.replace("host: postgres", f"host: {name}-postgres")
