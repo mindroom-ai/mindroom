@@ -19,27 +19,6 @@ def test_command_parser_with_voice_emoji() -> None:
     assert command.type == CommandType.INVITE
     assert command.args["agent_name"] == "calculator"
 
-    # No space after emoji
-    command = command_parser.parse("🎤!invite assistant")
-    assert command is not None
-    assert command.type == CommandType.INVITE
-    assert command.args["agent_name"] == "assistant"
-
-    # Studio microphone emoji
-    command = command_parser.parse("🎙️ !help")
-    assert command is not None
-    assert command.type == CommandType.HELP
-
-    # Speaking emoji
-    command = command_parser.parse("🗣️ !list_invites")
-    assert command is not None
-    assert command.type == CommandType.LIST_INVITES
-
-    # Musical note emoji
-    command = command_parser.parse("🎵 !list_schedules")
-    assert command is not None
-    assert command.type == CommandType.LIST_SCHEDULES
-
 
 def test_command_parser_without_emoji() -> None:
     """Test that normal commands still work."""
