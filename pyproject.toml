@@ -233,6 +233,10 @@ ignore_missing_imports = true
 module = "diskcache.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "agno.*"
+ignore_missing_imports = true
+
 # Enable strict typing for tests too - no shortcuts!
 
 [tool.versioningit]
