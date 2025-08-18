@@ -389,7 +389,7 @@ class AgentBot:
         if (
             event.sender == self.agent_user.user_id
             # Allow processing of voice transcriptions the router sent on behalf of users
-            and not event.body.strip().startswith(VOICE_PREFIX)
+            and not event.body.startswith(VOICE_PREFIX)
         ):
             return
 
@@ -421,9 +421,17 @@ class AgentBot:
 
         context = await self._extract_message_context(room, event)
 
-        # If message is from another agent and we're not mentioned, ignore it
+        is_router_self_voice = (
+            self.agent_name == ROUTER_AGENT_NAME
+            and event.sender == self.agent_user.user_id
+            and event.body.startswith(VOICE_PREFIX)
+        )
+
+        # Ignore messages from other agents unless we are mentioned,
+        # except when the router is handling its own voice transcription (VOICE_PREFIX),
+        # which should be treated as a user-originated message to allow routing.
         sender_is_agent = extract_agent_name(event.sender, self.config) is not None
-        if sender_is_agent and not context.am_i_mentioned:
+        if sender_is_agent and not context.am_i_mentioned and not is_router_self_voice:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
