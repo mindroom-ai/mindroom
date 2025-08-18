@@ -50,7 +50,7 @@ export interface VoiceSTTConfig {
   host?: string;
 }
 
-export interface VoiceIntelligenceConfig {
+export interface VoiceLLMConfig {
   model: string;
   confidence_threshold: number;
 }
@@ -58,7 +58,7 @@ export interface VoiceIntelligenceConfig {
 export interface VoiceConfig {
   enabled: boolean;
   stt: VoiceSTTConfig;
-  intelligence: VoiceIntelligenceConfig;
+  intelligence: VoiceLLMConfig;
 }
 
 export interface Config {

@@ -104,7 +104,7 @@ class VoiceSTTConfig(BaseModel):
     host: str | None = Field(default=None, description="Host URL for self-hosted STT")
 
 
-class VoiceIntelligenceConfig(BaseModel):
+class VoiceLLMConfig(BaseModel):
     """Configuration for voice command intelligence."""
 
     model: str = Field(default="default", description="Model for command recognition")
@@ -116,8 +116,8 @@ class VoiceConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Enable voice message processing")
     stt: VoiceSTTConfig = Field(default_factory=VoiceSTTConfig, description="STT configuration")
-    intelligence: VoiceIntelligenceConfig = Field(
-        default_factory=VoiceIntelligenceConfig,
+    intelligence: VoiceLLMConfig = Field(
+        default_factory=VoiceLLMConfig,
         description="Command intelligence configuration",
     )
 

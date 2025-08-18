@@ -8,7 +8,7 @@ import nio
 import pytest
 
 from mindroom import voice_handler
-from mindroom.config import Config, VoiceConfig, VoiceIntelligenceConfig, VoiceSTTConfig
+from mindroom.config import Config, VoiceConfig, VoiceLLMConfig, VoiceSTTConfig
 
 
 class TestVoiceHandler:
@@ -25,7 +25,7 @@ class TestVoiceHandler:
             voice=VoiceConfig(
                 enabled=True,
                 stt=VoiceSTTConfig(provider="openai", model="whisper-1"),
-                intelligence=VoiceIntelligenceConfig(model="default"),
+                intelligence=VoiceLLMConfig(model="default"),
             ),
         )
         assert config.voice.enabled

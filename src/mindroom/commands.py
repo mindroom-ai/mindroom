@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from .constants import VOICE_PREFIX
 from .logging_config import get_logger
 from .matrix.client import get_room_members, invite_to_room
 from .matrix.identity import MatrixID
@@ -88,7 +89,7 @@ class CommandParser:
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
 
-    def parse(self, message: str) -> Command | None:  # noqa: PLR0911, C901
+    def parse(self, message: str) -> Command | None:  # noqa: PLR0911
         """Parse a message for commands.
 
         Args:
@@ -100,14 +101,8 @@ class CommandParser:
         """
         message = message.strip()
 
-        # Handle voice emoji prefixes (e.g., "🎤 !schedule ...")
-        voice_prefixes = ["🎤", "🎙️", "🗣️", "🎵"]
-        for prefix in voice_prefixes:
-            if message.startswith(prefix):
-                # Remove the emoji and any whitespace, then continue parsing
-                message = message[len(prefix) :].lstrip()
-                break
-
+        # Handle voice emoji prefixe (e.g., "🎤 !schedule ...")
+        message = message.removeprefix(VOICE_PREFIX)
         if not message.startswith("!"):
             return None
 

@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+VOICE_PREFIX = "🎤 "
+
 
 async def handle_voice_message(
     client: nio.AsyncClient,
@@ -70,7 +72,7 @@ async def handle_voice_message(
         # This will trigger the normal message processing flow
         if formatted_message:
             # Add a note that this was transcribed from voice
-            final_message = f"🎤 {formatted_message}"
+            final_message = f"{VOICE_PREFIX}{formatted_message}"
 
             # Get the sender's domain for proper mention formatting
             sender_id = MatrixID.parse(event.sender)

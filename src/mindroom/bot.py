@@ -26,7 +26,7 @@ from .commands import (
     handle_widget_command,
 )
 from .config import Config
-from .constants import ROUTER_AGENT_NAME
+from .constants import ROUTER_AGENT_NAME, VOICE_PREFIX
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import MATRIX_HOMESERVER
@@ -386,8 +386,11 @@ class AgentBot:
         if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
             return
 
-        # Allow processing of voice transcriptions we sent on behalf of users
-        if event.sender == self.agent_user.user_id and not event.body.strip().startswith("🎤"):
+        if (
+            event.sender == self.agent_user.user_id
+            # Allow processing of voice transcriptions the router sent on behalf of users
+            and not event.body.strip().startswith(VOICE_PREFIX)
+        ):
             return
 
         # Check if we should process messages in this room

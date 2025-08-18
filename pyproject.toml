@@ -135,6 +135,7 @@ dev = [
   "pytest-xdist>=3.8",
   "requests>=2.32.4",
   "ruff>=0.12.5",
+  "types-aiofiles>=24.1.0.20250809",
   "types-markdown>=3.7",
   "types-pytz>=2025.2.0.20250809",
   "types-pyyaml>=6.0.12.20250516",
