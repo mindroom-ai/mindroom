@@ -9,7 +9,18 @@ import { NetworkGraph } from './NetworkGraph';
 import { ItemCard, ItemCardBadge } from '@/components/shared/ItemCard';
 import { sharedStyles } from '@/components/shared/styles';
 import { FilterSelector } from '@/components/shared/FilterSelector';
-import { Bot, Home, Users, Settings, RefreshCw, FileText, BarChart3, User } from 'lucide-react';
+import {
+  Bot,
+  Home,
+  Users,
+  Settings,
+  RefreshCw,
+  FileText,
+  BarChart3,
+  User,
+  Mic,
+  MicOff,
+} from 'lucide-react';
 
 export function Dashboard() {
   const { agents, rooms, teams, config, selectedRoomId, selectedAgentId, selectRoom, selectAgent } =
@@ -81,6 +92,7 @@ export function Dashboard() {
       agentsIdle: agentStatuses.filter(status => status === 'idle').length,
       agentsOffline: agentStatuses.filter(status => status === 'offline').length,
       activeConnections: rooms.length,
+      voiceEnabled: config?.voice?.enabled || false,
     };
   }, [agents, rooms, teams, config, lastUpdated]);
 
@@ -230,7 +242,7 @@ export function Dashboard() {
       </div>
 
       {/* System Stats Cards - Top Bar */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 sm:gap-4">
         <Card>
           <CardHeader className="pb-2">
             <div className="flex items-center gap-3">
@@ -329,6 +341,51 @@ export function Dashboard() {
           </CardHeader>
           <CardContent>
             <p className="text-xs text-stone-700 dark:text-stone-300">in configuration</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center gap-3">
+              <div
+                className={`p-2 rounded-lg ${
+                  stats.voiceEnabled
+                    ? 'bg-purple-100 dark:bg-purple-900/30'
+                    : 'bg-gray-100 dark:bg-gray-900/30'
+                }`}
+              >
+                {stats.voiceEnabled ? (
+                  <Mic className="w-5 h-5 text-purple-700 dark:text-purple-300" />
+                ) : (
+                  <MicOff className="w-5 h-5 text-gray-500 dark:text-gray-400" />
+                )}
+              </div>
+              <div>
+                <CardTitle className="text-2xl font-bold text-purple-900 dark:text-purple-100">
+                  Voice
+                </CardTitle>
+                <CardDescription
+                  className={
+                    stats.voiceEnabled
+                      ? 'text-purple-700 dark:text-purple-300'
+                      : 'text-gray-500 dark:text-gray-400'
+                  }
+                >
+                  {stats.voiceEnabled ? 'Enabled' : 'Disabled'}
+                </CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <p
+              className={`text-xs ${
+                stats.voiceEnabled
+                  ? 'text-purple-700 dark:text-purple-300'
+                  : 'text-gray-500 dark:text-gray-400'
+              }`}
+            >
+              {stats.voiceEnabled ? 'Transcription active' : 'Configure in Voice tab'}
+            </p>
           </CardContent>
         </Card>
       </div>

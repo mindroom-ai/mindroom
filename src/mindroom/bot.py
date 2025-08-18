@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from . import interactive
+from . import interactive, voice_handler
 from .agents import create_agent, get_rooms_for_entity
 from .ai import ai_response, ai_response_streaming
 from .background_tasks import create_background_task, wait_for_background_tasks
@@ -26,7 +26,7 @@ from .commands import (
     handle_widget_command,
 )
 from .config import Config
-from .constants import ROUTER_AGENT_NAME
+from .constants import ROUTER_AGENT_NAME, VOICE_PREFIX
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import MATRIX_HOMESERVER
@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     from agno.agent import Agent
 
 logger = get_logger(__name__)
+
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
@@ -311,6 +312,11 @@ class AgentBot:
         self.client.add_event_callback(self._on_message, nio.RoomMessageText)
         self.client.add_event_callback(self._on_reaction, nio.ReactionEvent)
 
+        # Register voice message callbacks (only for router agent to avoid duplicates)
+        if self.agent_name == ROUTER_AGENT_NAME:
+            self.client.add_event_callback(self._on_voice_message, nio.RoomMessageAudio)
+            self.client.add_event_callback(self._on_voice_message, nio.RoomEncryptedAudio)
+
         self.running = True
 
         # Router bot has additional responsibilities
@@ -375,12 +381,16 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
         assert self.client is not None
         if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
             return
 
-        if event.sender == self.agent_user.user_id:
+        if (
+            event.sender == self.agent_user.user_id
+            # Allow processing of voice transcriptions the router sent on behalf of users
+            and not event.body.strip().startswith(VOICE_PREFIX)
+        ):
             return
 
         # Check if we should process messages in this room
@@ -401,19 +411,12 @@ class AgentBot:
             assert self.thread_invite_manager is not None
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
-        is_command = event.body.strip().startswith("!")
-        if is_command:  # ONLY router handles the command
+        # Try to parse as command - parser handles emoji prefixes
+        command = command_parser.parse(event.body)
+        if command:  # ONLY router handles the command
             if self.agent_name != ROUTER_AGENT_NAME:
                 return
-            command = command_parser.parse(event.body)
-            if command:
-                await self._handle_command(room, event, command)
-            else:
-                # Extract thread info for unknown commands too
-                is_thread, thread_id = extract_thread_info(event.source)
-                help_text = "❌ Unknown command. Try !help for available commands."
-                await self._send_response(room, event.event_id, help_text, thread_id=thread_id, reply_to_event=event)
-                self.response_tracker.mark_responded(event.event_id)
+            await self._handle_command(room, event, command)
             return
 
         context = await self._extract_message_context(room, event)
@@ -557,6 +560,33 @@ class AgentBot:
             )
             # Mark the original interactive question as responded
             self.response_tracker.mark_responded(event.reacts_to)
+
+    async def _on_voice_message(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    ) -> None:
+        """Handle voice message events for transcription and processing."""
+        # Only process if voice handler is enabled
+        if not self.config.voice.enabled:
+            return
+
+        # Don't process our own voice messages
+        if event.sender == self.agent_user.user_id:
+            return
+
+        # Check if we've already responded to this voice message (e.g., after restart)
+        if self.response_tracker.has_responded(event.event_id):
+            self.logger.debug("Already processed voice message", event_id=event.event_id)
+            return
+
+        self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
+
+        # Process the voice message
+        await voice_handler.handle_voice_message(self.client, room, event, self.config)
+
+        # Mark the voice message as responded so we don't process it again
+        self.response_tracker.mark_responded(event.event_id)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
@@ -1001,6 +1031,10 @@ class AgentBot:
                     room_id=room.room_id,
                     task_id=task_id,
                 )
+
+        elif command.type == CommandType.UNKNOWN:
+            # Handle unknown commands
+            response_text = "❌ Unknown command. Try !help for available commands."
 
         if response_text:
             await self._send_response(

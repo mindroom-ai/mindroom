@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.commands import CommandType, command_parser, get_command_help
+from mindroom.commands import COMMAND_DOCS, CommandType, command_parser, get_command_help
 
 
 def test_invite_command_basic() -> None:
@@ -25,7 +25,8 @@ def test_invite_command_invalid_format() -> None:
     """Test invite command with invalid formats."""
     # Test with extra text (no longer supports duration)
     command = command_parser.parse("!invite calculator for 2 hours")
-    assert command is None  # Should not parse with extra text
+    assert command is not None
+    assert command.type == CommandType.UNKNOWN  # Should be UNKNOWN with extra text
 
 
 def test_invite_command_case_insensitive() -> None:
@@ -34,9 +35,10 @@ def test_invite_command_case_insensitive() -> None:
     assert command is not None
     assert command.type == CommandType.INVITE
 
-    # With extra text it should not parse
+    # With extra text it should be UNKNOWN
     command = command_parser.parse("!Invite calculator FOR 2 HOURS")
-    assert command is None
+    assert command is not None
+    assert command.type == CommandType.UNKNOWN
 
 
 def test_uninvite_command() -> None:
@@ -89,19 +91,29 @@ def test_help_command() -> None:
 
 
 def test_invalid_commands() -> None:
-    """Test that invalid commands return None."""
-    invalid_commands = [
+    """Test that invalid commands are handled correctly."""
+    # Commands that should return UNKNOWN
+    unknown_commands = [
         "!invalid",
         "!invite",  # Missing agent name
         "!uninvite",  # Missing agent name
         "!invite calculator for",  # Incomplete duration
         "!invite calculator for hours",  # Invalid duration format
+    ]
+
+    for cmd_text in unknown_commands:
+        command = command_parser.parse(cmd_text)
+        assert command is not None
+        assert command.type == CommandType.UNKNOWN
+
+    # Non-commands that should return None
+    non_commands = [
         "invite calculator",  # Missing exclamation
         "just a regular message",
         "",
     ]
 
-    for cmd_text in invalid_commands:
+    for cmd_text in non_commands:
         command = command_parser.parse(cmd_text)
         assert command is None
 
@@ -142,6 +154,23 @@ def test_list_schedules_command() -> None:
         assert command is not None
         assert command.type == CommandType.LIST_SCHEDULES
         assert command.args == {}
+
+
+def test_all_commands_have_documentation() -> None:
+    """Test that all CommandType values have documentation."""
+    # Check that all commands have documentation (except UNKNOWN which is special)
+    commands_needing_docs = set(CommandType) - {CommandType.UNKNOWN}
+    missing_docs = commands_needing_docs - set(COMMAND_DOCS.keys())
+    assert not missing_docs, f"Missing documentation for commands: {missing_docs}"
+
+    # Check that there are no extra documentation entries
+    extra_docs = set(COMMAND_DOCS.keys()) - set(CommandType)
+    assert not extra_docs, f"Documentation for non-existent commands: {extra_docs}"
+
+    # Check that all documentation entries are properly formatted
+    for cmd_type, (syntax, description) in COMMAND_DOCS.items():
+        assert syntax.startswith("!"), f"{cmd_type} syntax should start with '!'"
+        assert len(description) > 0, f"{cmd_type} should have a description"
 
 
 def test_cancel_schedule_command() -> None:

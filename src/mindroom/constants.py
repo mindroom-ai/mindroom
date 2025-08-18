@@ -17,3 +17,6 @@ DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 # Use storage path if available, otherwise current directory
 STORAGE_PATH = os.getenv("STORAGE_PATH", ".")
 MATRIX_STATE_FILE = Path(STORAGE_PATH) / "matrix_state.yaml"
+
+# Other constants
+VOICE_PREFIX = "🎤 "

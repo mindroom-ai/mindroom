@@ -26,13 +26,13 @@ def mock_credentials_manager(temp_credentials_dir: Path) -> CredentialsManager:
 def test_client(mock_credentials_manager: CredentialsManager) -> TestClient:
     """Create a test client with mocked credentials manager."""
     # Import here to avoid circular dependencies
-    from widget.backend.src.api.credentials import router  # noqa: PLC0415
+    from mindroom.api.credentials import router  # noqa: PLC0415
 
     app = FastAPI()
     app.include_router(router)
 
     # Mock the get_credentials_manager function
-    with patch("widget.backend.src.api.credentials.get_credentials_manager") as mock_get:
+    with patch("mindroom.api.credentials.get_credentials_manager") as mock_get:
         mock_get.return_value = mock_credentials_manager
         client = TestClient(app)
         # Store the mock for use in tests

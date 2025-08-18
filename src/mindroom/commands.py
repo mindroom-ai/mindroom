@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
+from .constants import VOICE_PREFIX
 from .logging_config import get_logger
 from .matrix.client import get_room_members, invite_to_room
 from .matrix.identity import MatrixID
@@ -31,6 +32,35 @@ class CommandType(Enum):
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
     WIDGET = "widget"
+    UNKNOWN = "unknown"  # Special type for unrecognized commands
+
+
+# Command documentation for each command type
+COMMAND_DOCS = {
+    CommandType.INVITE: ("!invite <agent>", "Invite an agent to the current thread"),
+    CommandType.UNINVITE: ("!uninvite <agent>", "Remove an agent from the thread"),
+    CommandType.LIST_INVITES: ("!list_invites", "Show all invited agents"),
+    CommandType.SCHEDULE: ("!schedule <task>", "Schedule a task"),
+    CommandType.LIST_SCHEDULES: ("!list_schedules", "List scheduled tasks"),
+    CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
+    CommandType.HELP: ("!help [topic]", "Get help"),
+    CommandType.WIDGET: ("!widget [url]", "Add configuration widget"),
+}
+
+
+def get_command_list() -> str:
+    """Get a formatted list of all available commands.
+
+    Returns:
+        Formatted string with all commands and their descriptions
+
+    """
+    lines = ["Available commands:"]
+    for cmd_type in CommandType:
+        if cmd_type in COMMAND_DOCS:
+            syntax, description = COMMAND_DOCS[cmd_type]
+            lines.append(f"- {syntax} - {description}")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -70,6 +100,9 @@ class CommandParser:
 
         """
         message = message.strip()
+
+        # Handle voice emoji prefixe (e.g., "🎤 !schedule ...")
+        message = message.removeprefix(VOICE_PREFIX)
         if not message.startswith("!"):
             return None
 
@@ -157,9 +190,13 @@ class CommandParser:
                 raw_text=message,
             )
 
-        # Unknown command
+        # Unknown command - return a special Command indicating it's unknown
         logger.debug(f"Unknown command: {message}")
-        return None
+        return Command(
+            type=CommandType.UNKNOWN,
+            args={"raw_command": message},
+            raw_text=message,
+        )
 
 
 def get_command_help(topic: str | None = None) -> str:  # noqa: PLR0911

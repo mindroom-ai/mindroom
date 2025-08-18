@@ -43,6 +43,24 @@ export interface Room {
   model?: string; // Room-specific model override
 }
 
+export interface VoiceSTTConfig {
+  provider: string;
+  model: string;
+  api_key?: string;
+  host?: string;
+}
+
+export interface VoiceLLMConfig {
+  model: string;
+  confidence_threshold: number;
+}
+
+export interface VoiceConfig {
+  enabled: boolean;
+  stt: VoiceSTTConfig;
+  intelligence: VoiceLLMConfig;
+}
+
 export interface Config {
   memory: MemoryConfig;
   models: Record<string, ModelConfig>;
@@ -58,6 +76,7 @@ export interface Config {
   room_models?: Record<string, string>; // Room-specific model overrides for teams
   teams?: Record<string, Omit<Team, 'id'>>; // Teams configuration
   tools?: Record<string, any>; // Tool configurations
+  voice?: VoiceConfig; // Voice configuration
 }
 
 export interface APIKey {

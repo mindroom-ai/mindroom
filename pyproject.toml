@@ -19,6 +19,8 @@ classifiers = [
 dependencies = [
   "agentql",                                     # for AgentQL tool
   "agno[anthropic,google,ollama,openai]>=1.7.6",
+  "aiofiles",                                    # for voice message handling
+  "aiohttp",                                     # for voice message STT API calls
   "apify-client>=1.12.2",                        # for Apify tool
   "arxiv",                                       # for Arxiv tool
   "atlassian-python-api",                        # for Confluence tool
@@ -133,6 +135,7 @@ dev = [
   "pytest-xdist>=3.8",
   "requests>=2.32.4",
   "ruff>=0.12.5",
+  "types-aiofiles>=24.1.0.20250809",
   "types-markdown>=3.7",
   "types-pytz>=2025.2.0.20250809",
   "types-pyyaml>=6.0.12.20250516",
@@ -228,6 +231,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "diskcache.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "agno.*"
 ignore_missing_imports = true
 
 # Enable strict typing for tests too - no shortcuts!

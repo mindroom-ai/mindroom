@@ -49,7 +49,7 @@ class TestThreadHistory:
         }
 
         # Mock response
-        mock_response = MagicMock()
+        mock_response = MagicMock(spec=nio.RoomMessagesResponse)
         mock_response.chunk = [router_event, root_event]  # Order doesn't matter, will be sorted
         mock_response.end = None  # No more messages
 
@@ -134,7 +134,7 @@ class TestThreadHistory:
         }
 
         # Mock response with all messages
-        mock_response = MagicMock()
+        mock_response = MagicMock(spec=nio.RoomMessagesResponse)
         mock_response.chunk = [other_thread_msg, thread1_msg, room_msg, root_event]
         mock_response.end = None
 
@@ -170,7 +170,7 @@ class TestThreadHistory:
         }
 
         # Mock response
-        mock_response = MagicMock()
+        mock_response = MagicMock(spec=nio.RoomMessagesResponse)
         mock_response.chunk = [root_event]
         mock_response.end = None
 

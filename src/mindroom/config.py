@@ -95,6 +95,33 @@ class TeamConfig(BaseModel):
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
 
 
+class VoiceSTTConfig(BaseModel):
+    """Configuration for voice speech-to-text."""
+
+    provider: str = Field(default="openai", description="STT provider (openai or compatible)")
+    model: str = Field(default="whisper-1", description="STT model name")
+    api_key: str | None = Field(default=None, description="API key for STT service")
+    host: str | None = Field(default=None, description="Host URL for self-hosted STT")
+
+
+class VoiceLLMConfig(BaseModel):
+    """Configuration for voice command intelligence."""
+
+    model: str = Field(default="default", description="Model for command recognition")
+    confidence_threshold: float = Field(default=0.7, description="Confidence threshold for commands")
+
+
+class VoiceConfig(BaseModel):
+    """Configuration for voice message handling."""
+
+    enabled: bool = Field(default=False, description="Enable voice message processing")
+    stt: VoiceSTTConfig = Field(default_factory=VoiceSTTConfig, description="STT configuration")
+    intelligence: VoiceLLMConfig = Field(
+        default_factory=VoiceLLMConfig,
+        description="Command intelligence configuration",
+    )
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -105,6 +132,7 @@ class Config(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory configuration")
     models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
+    voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     timezone: str = Field(
         default="UTC",
         description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
