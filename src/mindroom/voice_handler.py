@@ -17,6 +17,7 @@ from nio import crypto
 
 from .ai import get_model_instance
 from .commands import get_command_list
+from .constants import VOICE_PREFIX
 from .logging_config import get_logger
 from .matrix.client import send_message
 from .matrix.identity import MatrixID
@@ -26,8 +27,6 @@ if TYPE_CHECKING:
     from .config import Config
 
 logger = get_logger(__name__)
-
-VOICE_PREFIX = "🎤 "
 
 
 async def handle_voice_message(
@@ -108,34 +107,27 @@ async def _download_audio(
 
     """
     try:
+        # Unencrypted audio
+        mxc = event.url
+        response = await client.download(mxc)
+        if isinstance(response, nio.DownloadError):
+            logger.error(f"Download failed: {response}")
+            return None
         if isinstance(event, nio.RoomMessageAudio):
-            # Unencrypted audio
-            mxc = event.url
-            response = await client.download(mxc)
-            if isinstance(response, nio.DownloadError):
-                logger.error(f"Download failed: {response}")
-                return None
-            return response.body
+            return response.body  # type: ignore[no-any-return]
 
-        if isinstance(event, nio.RoomEncryptedAudio):
-            # Encrypted audio
-            mxc = event.url
-            response = await client.download(mxc)
-            if isinstance(response, nio.DownloadError):
-                logger.error(f"Download failed: {response}")
-                return None
-
-            # Decrypt the audio
-            return crypto.attachments.decrypt_attachment(
-                response.body,
-                event.source["content"]["file"]["key"]["k"],
-                event.source["content"]["file"]["hashes"]["sha256"],
-                event.source["content"]["file"]["iv"],
-            )
+        assert isinstance(event, nio.RoomEncryptedAudio)
+        # Decrypt the audio
+        return crypto.attachments.decrypt_attachment(  # type: ignore[no-any-return]
+            response.body,
+            event.source["content"]["file"]["key"]["k"],
+            event.source["content"]["file"]["hashes"]["sha256"],
+            event.source["content"]["file"]["iv"],
+        )
 
     except Exception:
         logger.exception("Error downloading audio")
-        return None
+    return None
 
 
 async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
@@ -194,7 +186,7 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
                     return None
 
                 result = await response.json()
-                return result.get("text", "").strip()
+                return result.get("text", "").strip()  # type: ignore[no-any-return]
 
         finally:
             # Clean up temporary file
@@ -279,7 +271,7 @@ Output the formatted message only, no explanation:"""
 
         # Extract the content from the response
         if response and response.content:
-            return response.content.strip()
+            return response.content.strip()  # type: ignore[no-any-return]
 
     except Exception:
         logger.exception("Error processing transcription")
