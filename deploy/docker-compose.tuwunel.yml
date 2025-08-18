@@ -38,6 +38,7 @@ services:
       - "m-test-2.mindroom.chat:172.20.0.1"
       - "m-test-3.mindroom.chat:172.20.0.1"
       - "m-test-4.mindroom.chat:172.20.0.1"
+      - "m-test-5.mindroom.chat:172.20.0.1"
     ulimits:
       nofile:
         soft: 1048567
