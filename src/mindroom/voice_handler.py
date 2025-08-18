@@ -158,9 +158,7 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
                 url = "https://api.openai.com/v1/audio/transcriptions"
 
             api_key = config.voice.stt.api_key or os.getenv("OPENAI_API_KEY")
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-            }
+            headers = {"Authorization": f"Bearer {api_key}"}
 
             # Prepare multipart form data
             async with aiofiles.open(tmp_path, "rb") as audio_file:
