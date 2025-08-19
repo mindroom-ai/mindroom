@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
-from nio import PresenceSetResponse
 
 from . import interactive, voice_handler
 from .agents import create_agent, get_rooms_for_entity
@@ -49,6 +48,7 @@ from .matrix.identity import (
     extract_server_name_from_homeserver,
 )
 from .matrix.mentions import create_mention_content_from_text
+from .matrix.presence import build_agent_status_message, set_presence_status
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
@@ -267,97 +267,24 @@ class AgentBot:
 
     async def _set_avatar_if_available(self) -> None:
         """Set avatar for the agent if an avatar file exists."""
-        if not self.client:
-            return
+        assert self.client is not None
 
         entity_type = "teams" if self.agent_name in self.config.teams else "agents"
         avatar_path = Path(__file__).parent.parent.parent / "avatars" / entity_type / f"{self.agent_name}.png"
 
         if avatar_path.exists():
-            try:
-                success = await check_and_set_avatar(self.client, avatar_path)
-                if success:
-                    self.logger.info(f"Successfully set avatar for {self.agent_name}")
-                else:
-                    self.logger.warning(f"Failed to set avatar for {self.agent_name}")
-            except Exception as e:
-                self.logger.warning(f"Failed to set avatar: {e}")
+            success = await check_and_set_avatar(self.client, avatar_path)
+            if success:
+                self.logger.info(f"Successfully set avatar for {self.agent_name}")
+            else:
+                self.logger.warning(f"Failed to set avatar for {self.agent_name}")
 
     async def _set_presence_with_model_info(self) -> None:
         """Set presence status with model information."""
-        if not self.client:
-            return
+        assert self.client is not None
 
-        try:
-            status_msg = self._build_status_message()
-
-            # Set presence to "online" with the status message
-            response = await self.client.set_presence("online", status_msg)
-
-            if isinstance(response, PresenceSetResponse):
-                self.logger.info(f"Set presence status: {status_msg}")
-            else:
-                self.logger.warning(f"Failed to set presence: {response}")
-        except Exception as e:
-            self.logger.warning(f"Failed to set presence: {e}")
-
-    def _build_status_message(self) -> str:
-        """Build status message with model and role information."""
-        status_parts = []
-
-        # Add model information
-        model_info = self._get_model_info()
-        status_parts.append(f"🤖 Model: {model_info}")
-
-        # Add role/purpose for teams and agents
-        if self.agent_name == ROUTER_AGENT_NAME:
-            status_parts.append("📍 Routes messages to appropriate agents")
-        elif self.agent_name in self.config.teams:
-            team_config = self.config.teams[self.agent_name]
-            if team_config.role:
-                status_parts.append(f"👥 {team_config.role[:100]}")  # Limit length
-            status_parts.append(f"🤝 Team: {', '.join(team_config.agents[:5])}")  # Show first 5 agents
-        elif self.agent_name in self.config.agents:
-            agent_config = self.config.agents[self.agent_name]
-            if agent_config.role:
-                status_parts.append(f"💼 {agent_config.role[:100]}")  # Limit length
-            # Add tool count
-            if agent_config.tools:
-                status_parts.append(f"🔧 {len(agent_config.tools)} tools available")
-
-        # Join all parts with line breaks
-        status_msg = " | ".join(status_parts)
-
-        # Limit total length to avoid API limits (usually 256 chars)
-        if len(status_msg) > 250:
-            status_msg = status_msg[:247] + "..."
-
-        return status_msg
-
-    def _get_model_info(self) -> str:
-        """Get model information for this agent."""
-        try:
-            # Router uses router model
-            if self.agent_name == ROUTER_AGENT_NAME:
-                model_name = self.config.router.model
-            # Teams use their configured model or default
-            elif self.agent_name in self.config.teams:
-                team_config = self.config.teams[self.agent_name]
-                model_name = team_config.model or "default"
-            # Regular agents use their configured model
-            else:
-                agent_config = self.config.agents.get(self.agent_name)
-                model_name = agent_config.model if agent_config else "default"
-
-            # Get the actual model configuration
-            if model_name in self.config.models:
-                model_config = self.config.models[model_name]
-                # Return a formatted string with provider and model ID
-                return f"{model_config.provider}/{model_config.id}"
-            return model_name  # noqa: TRY300
-        except Exception as e:
-            self.logger.debug(f"Could not get model info: {e}")
-            return "unknown"
+        status_msg = build_agent_status_message(self.agent_name, self.config)
+        await set_presence_status(self.client, status_msg)
 
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
@@ -1406,7 +1333,7 @@ class MultiAgentOrchestrator:
             if entity_name not in entities_to_restart:
                 bot.config = new_config
                 # Update presence with new config info
-                asyncio.create_task(bot._set_presence_with_model_info())  # noqa: RUF006
+                create_background_task(bot._set_presence_with_model_info())
 
         # Recreate entities that need restarting using self-management
         for entity_name in entities_to_restart:
