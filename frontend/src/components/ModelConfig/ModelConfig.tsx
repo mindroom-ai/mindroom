@@ -3,6 +3,7 @@ import { useConfigStore } from '@/store/configStore';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import {
   Select,
   SelectContent,
@@ -12,7 +13,7 @@ import {
 } from '@/components/ui/select';
 import { EditorPanel } from '@/components/shared/EditorPanel';
 import { FieldGroup } from '@/components/shared/FieldGroup';
-import { Eye, EyeOff, TestTube, Save, Trash2, Settings, Sparkles } from 'lucide-react';
+import { Eye, EyeOff, TestTube, Save, Trash2, Settings, Sparkles, Code } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
@@ -26,6 +27,7 @@ interface ModelFormData {
   id: string;
   host?: string;
   configId?: string; // The key in the config.models object
+  extra_kwargs?: string; // JSON string for editing
 }
 
 export function ModelConfig() {
@@ -84,6 +86,21 @@ export function ModelConfig() {
   };
 
   const handleSaveModel = () => {
+    // Parse extra_kwargs if provided
+    let parsedExtraKwargs = undefined;
+    if (modelForm.extra_kwargs) {
+      try {
+        parsedExtraKwargs = JSON.parse(modelForm.extra_kwargs);
+      } catch (e) {
+        toast({
+          title: 'Invalid JSON',
+          description: 'The Advanced Settings must be valid JSON',
+          variant: 'destructive',
+        });
+        return;
+      }
+    }
+
     if (isAddingModel) {
       // Creating a new model
       if (!modelForm.configId || !modelForm.id) {
@@ -109,6 +126,7 @@ export function ModelConfig() {
         provider: modelForm.provider as any,
         id: modelForm.id,
         ...(modelForm.host && { host: modelForm.host }),
+        ...(parsedExtraKwargs && { extra_kwargs: parsedExtraKwargs }),
       });
 
       setIsAddingModel(false);
@@ -123,6 +141,7 @@ export function ModelConfig() {
         provider: modelForm.provider as any,
         id: modelForm.id,
         ...(modelForm.host && { host: modelForm.host }),
+        ...(parsedExtraKwargs && { extra_kwargs: parsedExtraKwargs }),
       });
       setEditingModel(null);
       setModelForm({ provider: 'ollama', id: '', configId: '' });
@@ -296,6 +315,30 @@ export function ModelConfig() {
                   />
                 </FieldGroup>
               )}
+
+              {/* Advanced Settings (extra_kwargs) */}
+              <FieldGroup
+                label="Advanced Settings (JSON)"
+                helperText={
+                  modelForm.provider === 'openrouter'
+                    ? 'Provider routing, custom parameters, etc. Example: {"request_params": {"provider": {"order": ["Cerebras"]}}}'
+                    : 'Provider-specific parameters like temperature, max_tokens, etc.'
+                }
+                htmlFor="extra-kwargs"
+              >
+                <Textarea
+                  id="extra-kwargs"
+                  value={modelForm.extra_kwargs || ''}
+                  onChange={e => setModelForm({ ...modelForm, extra_kwargs: e.target.value })}
+                  placeholder={
+                    modelForm.provider === 'openrouter'
+                      ? '{\n  "request_params": {\n    "provider": {\n      "order": ["Cerebras"]\n    }\n  }\n}'
+                      : '{\n  "temperature": 0.7,\n  "max_tokens": 4096\n}'
+                  }
+                  className="font-mono text-sm min-h-[120px]"
+                />
+              </FieldGroup>
+
               <div className="flex gap-3 pt-4">
                 <Button
                   onClick={handleSaveModel}
@@ -397,6 +440,9 @@ export function ModelConfig() {
                                   provider: modelConfig.provider,
                                   id: modelConfig.id,
                                   host: modelConfig.host,
+                                  extra_kwargs: modelConfig.extra_kwargs
+                                    ? JSON.stringify(modelConfig.extra_kwargs, null, 2)
+                                    : '',
                                 });
                               }}
                               className="h-8 w-8 hover:bg-primary/10"
@@ -478,6 +524,22 @@ export function ModelConfig() {
                             />
                           </FieldGroup>
                         )}
+
+                        <FieldGroup
+                          label="Advanced Settings (JSON)"
+                          helperText=""
+                          htmlFor={`extra-kwargs-${modelId}`}
+                        >
+                          <Textarea
+                            id={`extra-kwargs-${modelId}`}
+                            value={modelForm.extra_kwargs || ''}
+                            onChange={e =>
+                              setModelForm({ ...modelForm, extra_kwargs: e.target.value })
+                            }
+                            placeholder="{ }"
+                            className="font-mono text-xs min-h-[80px]"
+                          />
+                        </FieldGroup>
                       </>
                     ) : (
                       <>
@@ -493,6 +555,17 @@ export function ModelConfig() {
                               <span className="text-muted-foreground">Host:</span>
                               <code className="text-xs bg-muted px-1.5 py-0.5 rounded truncate max-w-[150px]">
                                 {modelConfig.host}
+                              </code>
+                            </div>
+                          )}
+                          {modelConfig.extra_kwargs && (
+                            <div className="flex items-start gap-2">
+                              <span className="text-muted-foreground">
+                                <Code className="h-3 w-3 inline mr-1" />
+                                Advanced:
+                              </span>
+                              <code className="text-xs bg-muted px-1.5 py-0.5 rounded block max-w-[150px] truncate">
+                                {JSON.stringify(modelConfig.extra_kwargs)}
                               </code>
                             </div>
                           )}
