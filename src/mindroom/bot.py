@@ -333,8 +333,7 @@ class AgentBot:
             except Exception as e:
                 self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
 
-        # All bots run periodic tasks (cleanup for router, presence refresh for all)
-        asyncio.create_task(self._periodic_cleanup())  # noqa: RUF006
+            asyncio.create_task(self._periodic_cleanup())  # noqa: RUF006
 
         # Note: Room joining is deferred until after invitations are handled
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
@@ -1054,37 +1053,32 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
 
     async def _periodic_cleanup(self) -> None:
-        """Periodically refresh presence and clean up expired thread invitations (router only)."""
+        """Periodically clean up expired thread invitations."""
         while self.running:
             try:
                 # Wait for 1 hour between cleanups
                 await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
-                # Refresh presence status periodically for all bots
-                await self._set_presence_with_model_info()
+                # Get all rooms the bot is in
+                assert self.client is not None
+                joined_rooms = await get_joined_rooms(self.client)
+                if joined_rooms is None:
+                    continue
 
-                # Only router does thread cleanup
-                if self.agent_name == ROUTER_AGENT_NAME:
-                    # Get all rooms the bot is in
-                    assert self.client is not None
-                    joined_rooms = await get_joined_rooms(self.client)
-                    if joined_rooms is None:
-                        continue
+                total_removed = 0
+                for room_id in joined_rooms:
+                    try:
+                        assert self.thread_invite_manager is not None
+                        removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
+                            room_id,
+                            timeout_hours=self.invitation_timeout_hours,
+                        )
+                        total_removed += removed_count
+                    except Exception as e:
+                        self.logger.exception("Failed to cleanup room", room_id=room_id, error=str(e))
 
-                    total_removed = 0
-                    for room_id in joined_rooms:
-                        try:
-                            assert self.thread_invite_manager is not None
-                            removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
-                                room_id,
-                                timeout_hours=self.invitation_timeout_hours,
-                            )
-                            total_removed += removed_count
-                        except Exception as e:
-                            self.logger.exception("Failed to cleanup room", room_id=room_id, error=str(e))
-
-                    if total_removed > 0:
-                        self.logger.info(f"Periodic cleanup removed {total_removed} expired agents")
+                if total_removed > 0:
+                    self.logger.info(f"Periodic cleanup removed {total_removed} expired agents")
 
             except asyncio.CancelledError:
                 break
