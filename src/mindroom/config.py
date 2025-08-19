@@ -203,6 +203,9 @@ class Config(BaseModel):
         Returns:
             Model name (e.g., "default", "gpt-4", etc.)
 
+        Raises:
+            ValueError: If entity_name is not found in configuration
+
         """
         # Router uses router model
         if entity_name == ROUTER_AGENT_NAME:
@@ -211,8 +214,13 @@ class Config(BaseModel):
         if entity_name in self.teams:
             return self.teams[entity_name].model or "default"
         # Regular agents use their configured model
-        agent_config = self.agents.get(entity_name)
-        return agent_config.model if agent_config else "default"
+        if entity_name in self.agents:
+            return self.agents[entity_name].model
+
+        # Entity not found in any category
+        available = sorted(set(self.agents.keys()) | set(self.teams.keys()) | {ROUTER_AGENT_NAME})
+        msg = f"Unknown entity: {entity_name}. Available entities: {', '.join(available)}"
+        raise ValueError(msg)
 
     def get_configured_bots_for_room(self, room_id: str) -> set[str]:
         """Get the set of bot usernames that should be in a specific room.
