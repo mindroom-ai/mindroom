@@ -590,17 +590,11 @@ class AgentBot:
 
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
 
-        # Process the voice message and get transcription
         transcribed_message = await voice_handler.handle_voice_message(self.client, room, event, self.config)
 
         if transcribed_message:
-            # Extract thread info from the voice message event
             is_thread, thread_id = extract_thread_info(event.source)
 
-            # Send the transcription using the bot's _send_response method
-            # This handles all threading cases properly:
-            # 1. If voice message is in a thread, continue in that thread
-            # 2. If voice message is in main room, create thread from voice message
             await self._send_response(
                 room=room,
                 reply_to_event_id=event.event_id,
