@@ -805,8 +805,10 @@ class AgentBot:
                 thread_id,
             )
             if initial_message_id:
-                # Add stop button reaction
-                await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
+                # Add stop button reaction and track the event ID
+                reaction_event_id = await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
+                if reaction_event_id:
+                    self.stop_manager.current_reaction_event_id = reaction_event_id
 
         # Store memory for this agent (do this once, before generating response)
         session_id = create_session_id(room_id, thread_id)
@@ -847,12 +849,16 @@ class AgentBot:
 
         task = asyncio.create_task(generate())
         if initial_message_id:
-            self.stop_manager.set_current(initial_message_id, task)
+            self.stop_manager.set_current(initial_message_id, room_id, task)
 
         try:
             await task
+            # Successfully completed - remove the stop button
+            if self.stop_manager.current_reaction_event_id:
+                await self.stop_manager.remove_stop_button(self.client)
         except asyncio.CancelledError:
             self.logger.info("Response generation cancelled by user")
+            # Keep the stop button visible when cancelled (shows it was stopped)
         finally:
             self.stop_manager.clear_current()
 
@@ -1206,8 +1212,10 @@ class TeamBot(AgentBot):
                 thread_id,
             )
             if initial_message_id:
-                # Add stop button reaction
-                await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
+                # Add stop button reaction and track the event ID
+                reaction_event_id = await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
+                if reaction_event_id:
+                    self.stop_manager.current_reaction_event_id = reaction_event_id
 
         # Get the appropriate model for this team and room
         model_name = get_team_model(self.agent_name, room_id, self.config)
@@ -1255,12 +1263,16 @@ class TeamBot(AgentBot):
 
         task = asyncio.create_task(generate_team_response())
         if initial_message_id:
-            self.stop_manager.set_current(initial_message_id, task)
+            self.stop_manager.set_current(initial_message_id, room_id, task)
 
         try:
             await task
+            # Successfully completed - remove the stop button
+            if self.stop_manager.current_reaction_event_id:
+                await self.stop_manager.remove_stop_button(self.client)
         except asyncio.CancelledError:
             self.logger.info("Team response generation cancelled by user")
+            # Keep the stop button visible when cancelled (shows it was stopped)
         finally:
             self.stop_manager.clear_current()
 
