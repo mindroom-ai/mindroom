@@ -41,15 +41,17 @@ async def set_presence_status(
     return False
 
 
-def build_agent_status_message(
+def build_agent_status_message(  # noqa: C901, PLR0912
     agent_name: str,
     config: Config,
+    model_name: str | None = None,
 ) -> str:
     """Build status message with model and role information for an agent.
 
     Args:
         agent_name: Name of the agent
         config: Application configuration
+        model_name: Optional model name to use (will determine automatically if not provided)
 
     Returns:
         Status message string, limited to 250 characters
@@ -57,8 +59,23 @@ def build_agent_status_message(
     """
     status_parts = []
 
-    # Add model information
-    model_info = get_agent_model_info(agent_name, config)
+    # Determine model name if not provided
+    if model_name is None:
+        if agent_name == ROUTER_AGENT_NAME:
+            model_name = config.router.model
+        elif agent_name in config.teams:
+            model_name = config.teams[agent_name].model or "default"
+        else:
+            agent_config = config.agents.get(agent_name)
+            model_name = agent_config.model if agent_config else "default"
+
+    # Format model info
+    if model_name in config.models:
+        model_config = config.models[model_name]
+        model_info = f"{model_config.provider}/{model_config.id}"
+    else:
+        model_info = model_name
+
     status_parts.append(f"🤖 Model: {model_info}")
 
     # Add role/purpose for teams and agents
@@ -85,35 +102,3 @@ def build_agent_status_message(
         status_msg = status_msg[:247] + "..."
 
     return status_msg
-
-
-def get_agent_model_info(agent_name: str, config: Config) -> str:
-    """Get model information for an agent.
-
-    Args:
-        agent_name: Name of the agent
-        config: Application configuration
-
-    Returns:
-        Model information string (e.g., "openai/gpt-4" or "default")
-
-    """
-    # Router uses router model
-    if agent_name == ROUTER_AGENT_NAME:
-        model_name = config.router.model
-    # Teams use their configured model or default
-    elif agent_name in config.teams:
-        team_config = config.teams[agent_name]
-        model_name = team_config.model or "default"
-    # Regular agents use their configured model
-    else:
-        agent_config = config.agents.get(agent_name)
-        model_name = agent_config.model if agent_config else "default"
-
-    # Get the actual model configuration
-    if model_name in config.models:
-        model_config = config.models[model_name]
-        # Return a formatted string with provider and model ID
-        return f"{model_config.provider}/{model_config.id}"
-
-    return model_name

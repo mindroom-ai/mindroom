@@ -267,17 +267,21 @@ class AgentBot:
 
     async def _set_avatar_if_available(self) -> None:
         """Set avatar for the agent if an avatar file exists."""
-        assert self.client is not None
+        if not self.client:
+            return
 
         entity_type = "teams" if self.agent_name in self.config.teams else "agents"
         avatar_path = Path(__file__).parent.parent.parent / "avatars" / entity_type / f"{self.agent_name}.png"
 
         if avatar_path.exists():
-            success = await check_and_set_avatar(self.client, avatar_path)
-            if success:
-                self.logger.info(f"Successfully set avatar for {self.agent_name}")
-            else:
-                self.logger.warning(f"Failed to set avatar for {self.agent_name}")
+            try:
+                success = await check_and_set_avatar(self.client, avatar_path)
+                if success:
+                    self.logger.info(f"Successfully set avatar for {self.agent_name}")
+                else:
+                    self.logger.warning(f"Failed to set avatar for {self.agent_name}")
+            except Exception as e:
+                self.logger.warning(f"Failed to set avatar: {e}")
 
     async def _set_presence_with_model_info(self) -> None:
         """Set presence status with model information."""
@@ -307,7 +311,6 @@ class AgentBot:
         # Set avatar if available
         await self._set_avatar_if_available()
 
-        # Set presence with model information
         await self._set_presence_with_model_info()
 
         # Initialize response tracker and thread invite manager
@@ -1326,8 +1329,7 @@ class MultiAgentOrchestrator:
         for entity_name, bot in self.agent_bots.items():
             if entity_name not in entities_to_restart:
                 bot.config = new_config
-                # Update presence with new config info
-                create_background_task(bot._set_presence_with_model_info())
+                await bot._set_presence_with_model_info()
 
         # Recreate entities that need restarting using self-management
         for entity_name in entities_to_restart:
