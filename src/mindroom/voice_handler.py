@@ -78,14 +78,16 @@ async def handle_voice_message(
             sender_domain = sender_id.domain
 
             # Create mention content if there are mentions
+            # IMPORTANT: Create a thread from the voice message itself
             content = create_mention_content_from_text(
                 config,
                 final_message,
                 sender_domain=sender_domain,
                 reply_to_event_id=event.event_id,
+                thread_event_id=event.event_id,  # Create thread from the voice message
             )
 
-            # Send as a reply to the original voice message (reply already set in content)
+            # Send as a reply to the original voice message in a thread
             await send_message(client, room.room_id, content)
 
     except Exception:
