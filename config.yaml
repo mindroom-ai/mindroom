@@ -285,6 +285,11 @@ models:
   gpt_oss_120b:
     id: openai/gpt-oss-120b
     provider: openrouter
+    extra_kwargs:
+      request_params:
+        provider:
+          order: ["Cerebras"]
+          allow_fallbacks: false
   devstral:
     id: devstral:24b
     provider: ollama
