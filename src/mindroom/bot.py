@@ -431,19 +431,16 @@ class AgentBot:
             return
 
         # Router agent has one simple job: route messages when no specific agent is mentioned
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)  # Excludes router
         if self.agent_name == ROUTER_AGENT_NAME:
-            if not context.mentioned_agents:
-                # Only route if no agents have participated in the thread yet
-                agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
-                if not agents_in_thread:
-                    await self._handle_ai_routing(room, event, context.thread_history)
+            # Only route if no agents have participated in the thread yet
+            if not context.mentioned_agents and not agents_in_thread:
+                await self._handle_ai_routing(room, event, context.thread_history)
             return
 
         if self._should_skip_duplicate_response(event):
             return
 
-        # Check if we should form a team first
-        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)  # Excludes router
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = await should_form_team(
             context.mentioned_agents,
@@ -466,17 +463,13 @@ class AgentBot:
                 config=self.config,
             )
 
-            if team_response is None:
-                # Another agent in the team will handle the response
+            if team_response is None:  # Another agent in the team will handle the response
                 return
 
-            # Send the team response
             await self._send_response(room, event.event_id, team_response, context.thread_id)
-            # Mark as responded after team response
             self.response_tracker.mark_responded(event.event_id)
             return
 
-        # Determine if this agent should respond individually
         should_respond = should_agent_respond(
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,
@@ -495,7 +488,6 @@ class AgentBot:
         if not should_respond:
             return
 
-        # Process and send response
         self.logger.info("Processing", event_id=event.event_id)
         await self._generate_response(
             room_id=room.room_id,
@@ -505,7 +497,6 @@ class AgentBot:
             thread_history=context.thread_history,
             user_id=event.sender,
         )
-        # Mark as responded after response generation
         self.response_tracker.mark_responded(event.event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
