@@ -19,9 +19,6 @@ from .ai import get_model_instance
 from .commands import get_command_list
 from .constants import VOICE_PREFIX
 from .logging_config import get_logger
-from .matrix.client import send_message
-from .matrix.identity import MatrixID
-from .matrix.mentions import create_mention_content_from_text
 
 if TYPE_CHECKING:
     from .config import Config
@@ -31,10 +28,10 @@ logger = get_logger(__name__)
 
 async def handle_voice_message(
     client: nio.AsyncClient,
-    room: nio.MatrixRoom,
+    room: nio.MatrixRoom,  # noqa: ARG001
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
-) -> None:
+) -> str | None:
     """Handle a voice message event.
 
     Args:
@@ -43,22 +40,25 @@ async def handle_voice_message(
         event: Voice message event
         config: Application configuration
 
+    Returns:
+        The transcribed and formatted message, or None if transcription failed
+
     """
     if not config.voice.enabled:
-        return
+        return None
 
     try:
         # Download the audio file
         audio_data = await _download_audio(client, event)
         if not audio_data:
             logger.error("Failed to download audio file")
-            return
+            return None
 
         # Transcribe the audio
         transcription = await _transcribe_audio(audio_data, config)
         if not transcription:
             logger.warning("Failed to transcribe audio or empty transcription")
-            return
+            return None
 
         logger.info(f"Raw transcription: {transcription}")
 
@@ -67,29 +67,14 @@ async def handle_voice_message(
 
         logger.info(f"Formatted message: {formatted_message}")
 
-        # Send the formatted message as a text message from the bot
-        # This will trigger the normal message processing flow
         if formatted_message:
             # Add a note that this was transcribed from voice
-            final_message = f"{VOICE_PREFIX}{formatted_message}"
-
-            # Get the sender's domain for proper mention formatting
-            sender_id = MatrixID.parse(event.sender)
-            sender_domain = sender_id.domain
-
-            # Create mention content if there are mentions
-            content = create_mention_content_from_text(
-                config,
-                final_message,
-                sender_domain=sender_domain,
-                reply_to_event_id=event.event_id,
-            )
-
-            # Send as a reply to the original voice message (reply already set in content)
-            await send_message(client, room.room_id, content)
+            return f"{VOICE_PREFIX}{formatted_message}"
 
     except Exception:
         logger.exception("Error handling voice message")
+        return None
+    return None
 
 
 async def _download_audio(
@@ -218,29 +203,28 @@ async def _process_transcription(transcription: str, config: Config) -> str:
         prompt = f"""You are a voice command processor for a Matrix chat bot system.
 Your task is to convert spoken transcriptions into properly formatted chat commands.
 
-Examples of correct formatting:
-- "schedule turn off the lights in 10 minutes" → "!schedule in 10 minutes turn off the lights"
-- "HomeAssistant turn on the fan" → "@homeassistant turn on the fan"
-- "hey home assistant agent schedule to turn off the guest room lights in 10 seconds" → "!schedule in 10 seconds @homeassistant turn off the guest room lights"
-- "home assistant schedule the lights off in 5 minutes" → "!schedule in 5 minutes @homeassistant turn off the lights"
-- "schedule a meeting tomorrow at 3pm" → "!schedule tomorrow at 3pm meeting"
-- "cancel schedule ABC123" → "!cancel_schedule ABC123"
-- "list my schedules" → "!list_schedules"
-- "research agent find papers on AI" → "@research find papers on AI"
+Available agents (use EXACT agent name after @):
+{chr(10).join([f"  - @{name} or @mindroom_{name} (spoken as: {agent_display_names[name]})" for name in agent_names])}
 
-Available agents: {", ".join([f"@{name} ({agent_display_names[name]})" for name in agent_names])}
-Available teams: {", ".join([f"@{name} ({team_display_names[name]})" for name in team_names])}
+Available teams (use EXACT team name after @):
+{chr(10).join([f"  - @{name} (spoken as: {team_display_names[name]})" for name in team_names]) if team_names else "  (none)"}
+
+Examples of correct formatting:
+- User says "HomeAssistant turn on the fan" → "@home turn on the fan"  (NOT @homeassistant)
+- User says "schedule turn off the lights in 10 minutes" → "!schedule in 10 minutes turn off the lights"
+- User says "hey home assistant agent schedule to turn off the guest room lights in 10 seconds" → "!schedule in 10 seconds @home turn off the guest room lights"
+- User says "cancel schedule ABC123" → "!cancel_schedule ABC123"
+- User says "list my schedules" → "!list_schedules"
 
 {get_command_list()}
 
-Rules:
-1. If the user mentions an agent by name or role, format it as @agent_name
+CRITICAL RULES:
+1. ALWAYS use the EXACT agent name (the part before the parentheses) after @, NOT the display name
+   - If agent is listed as "@home (spoken as: HomeAssistant)", use "@home" NOT "@homeassistant"
 2. If the user speaks a command, format it as !command
-3. IMPORTANT: !schedule commands MUST include a time (in X minutes, at 3pm, tomorrow, etc.)
+3. !schedule commands MUST include a time (in X minutes, at 3pm, tomorrow, etc.)
    - The time should come right after !schedule
-   - "schedule turn off lights in 10 minutes" → "!schedule in 10 minutes turn off lights"
-4. When both command AND agent are mentioned, command comes FIRST:
-   - "hey home assistant schedule lights off in 5 min" → "!schedule in 5 minutes @homeassistant turn off lights"
+4. When both command AND agent are mentioned, command comes FIRST
 5. Agent mentions come FIRST when just addressing them (no command):
    - "research agent, find papers" → "@research find papers"
    - "ask the email agent to check mail" → "@email check mail"
