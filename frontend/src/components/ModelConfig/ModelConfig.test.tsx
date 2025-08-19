@@ -100,7 +100,7 @@ describe('ModelConfig', () => {
     // Provider should already be openrouter by default in the form
     // But let's click it to be sure
     fireEvent.click(providerSelect);
-    const openrouterOption = screen.getByRole('option', { name: 'OpenRouter OpenRouter' });
+    const openrouterOption = screen.getByRole('option', { name: 'OpenRouter' });
     fireEvent.click(openrouterOption);
 
     // Submit
@@ -209,7 +209,7 @@ describe('ModelConfig', () => {
     // Select ollama provider
     const providerSelect = screen.getByRole('combobox');
     fireEvent.click(providerSelect);
-    const ollamaOption = screen.getByRole('option', { name: 'Ollama Ollama' });
+    const ollamaOption = screen.getByRole('option', { name: 'Ollama' });
     fireEvent.click(ollamaOption);
 
     // Host field should appear
@@ -225,7 +225,7 @@ describe('ModelConfig', () => {
     // Select openrouter provider (should be default)
     const providerSelect = screen.getByRole('combobox');
     fireEvent.click(providerSelect);
-    const openrouterOption = screen.getByRole('option', { name: 'OpenRouter OpenRouter' });
+    const openrouterOption = screen.getByRole('option', { name: 'OpenRouter' });
     fireEvent.click(openrouterOption);
 
     // Host field should not appear

@@ -257,7 +257,9 @@ export function ModelConfig() {
                     {getProviderList().map(provider => (
                       <SelectItem key={provider.id} value={provider.id}>
                         <div className="flex items-center gap-2">
-                          <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                          <span aria-hidden="true">
+                            <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                          </span>
                           <span>{provider.name}</span>
                         </div>
                       </SelectItem>
@@ -439,7 +441,9 @@ export function ModelConfig() {
                               {getProviderList().map(provider => (
                                 <SelectItem key={provider.id} value={provider.id}>
                                   <div className="flex items-center gap-2">
-                                    <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                                    <span aria-hidden="true">
+                                      <ProviderLogo provider={provider.id} className="h-4 w-4" />
+                                    </span>
                                     <span>{provider.name}</span>
                                   </div>
                                 </SelectItem>
