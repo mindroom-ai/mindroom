@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field
 
 from .agents import describe_agent
 from .ai import get_model_instance
-from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .matrix.identity import MatrixID
 
@@ -77,7 +76,7 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             prompt = context + "\n" + prompt
 
         # Get router model from config
-        router_model_name = config.get_entity_model_name(ROUTER_AGENT_NAME)
+        router_model_name = config.router.model
 
         model = get_model_instance(config, router_model_name)
         logger.info(f"Using router model: {router_model_name} -> {model.__class__.__name__}(id={model.id})")
