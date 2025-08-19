@@ -19,9 +19,6 @@ from .ai import get_model_instance
 from .commands import get_command_list
 from .constants import VOICE_PREFIX
 from .logging_config import get_logger
-from .matrix.client import send_message
-from .matrix.identity import MatrixID
-from .matrix.mentions import create_mention_content_from_text
 
 if TYPE_CHECKING:
     from .config import Config
@@ -31,10 +28,10 @@ logger = get_logger(__name__)
 
 async def handle_voice_message(
     client: nio.AsyncClient,
-    room: nio.MatrixRoom,
+    room: nio.MatrixRoom,  # noqa: ARG001
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
-) -> None:
+) -> str | None:
     """Handle a voice message event.
 
     Args:
@@ -43,22 +40,25 @@ async def handle_voice_message(
         event: Voice message event
         config: Application configuration
 
+    Returns:
+        The transcribed and formatted message, or None if transcription failed
+
     """
     if not config.voice.enabled:
-        return
+        return None
 
     try:
         # Download the audio file
         audio_data = await _download_audio(client, event)
         if not audio_data:
             logger.error("Failed to download audio file")
-            return
+            return None
 
         # Transcribe the audio
         transcription = await _transcribe_audio(audio_data, config)
         if not transcription:
             logger.warning("Failed to transcribe audio or empty transcription")
-            return
+            return None
 
         logger.info(f"Raw transcription: {transcription}")
 
@@ -67,31 +67,14 @@ async def handle_voice_message(
 
         logger.info(f"Formatted message: {formatted_message}")
 
-        # Send the formatted message as a text message from the bot
-        # This will trigger the normal message processing flow
         if formatted_message:
             # Add a note that this was transcribed from voice
-            final_message = f"{VOICE_PREFIX}{formatted_message}"
-
-            # Get the sender's domain for proper mention formatting
-            sender_id = MatrixID.parse(event.sender)
-            sender_domain = sender_id.domain
-
-            # Create mention content if there are mentions
-            # IMPORTANT: Create a thread from the voice message itself
-            content = create_mention_content_from_text(
-                config,
-                final_message,
-                sender_domain=sender_domain,
-                reply_to_event_id=event.event_id,
-                thread_event_id=event.event_id,  # Create thread from the voice message
-            )
-
-            # Send as a reply to the original voice message in a thread
-            await send_message(client, room.room_id, content)
+            return f"{VOICE_PREFIX}{formatted_message}"
 
     except Exception:
         logger.exception("Error handling voice message")
+        return None
+    return None
 
 
 async def _download_audio(
