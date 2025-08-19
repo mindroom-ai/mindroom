@@ -1,8 +1,17 @@
 import { ReactElement } from 'react';
 import { SiOpenai, SiAnthropic, SiGoogle, SiPerplexity } from 'react-icons/si';
 import { FaBrain } from 'react-icons/fa';
-import { GiProcessor } from 'react-icons/gi';
-import { Ollama, OpenRouter, Groq, DeepSeek, Together, Mistral, Cohere, XAI } from '@lobehub/icons';
+import {
+  Ollama,
+  OpenRouter,
+  Groq,
+  DeepSeek,
+  Together,
+  Mistral,
+  Cohere,
+  XAI,
+  Cerebras,
+} from '@lobehub/icons';
 
 export interface ProviderInfo {
   id: string;
@@ -131,7 +140,7 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     name: 'Cerebras',
     description: 'Configure your Cerebras API key for fast inference',
     color: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-    icon: (className = 'h-5 w-5') => <GiProcessor className={className} />,
+    icon: (className = 'h-5 w-5') => <Cerebras className={className} />,
     requiresApiKey: true,
   },
 };
