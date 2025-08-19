@@ -1,7 +1,12 @@
+import type { PROVIDERS } from '@/lib/providers';
+
+export type ProviderType = keyof typeof PROVIDERS;
+
 export interface ModelConfig {
-  provider: 'openai' | 'anthropic' | 'ollama' | 'openrouter';
+  provider: ProviderType;
   id: string;
   host?: string; // For ollama
+  extra_kwargs?: Record<string, any>; // Additional provider-specific parameters
 }
 
 export interface MemoryConfig {
