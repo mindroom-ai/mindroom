@@ -156,6 +156,9 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     # Set environment variable from CredentialsManager for Agno to use
     _set_api_key_env_var(provider)
 
+    # Get extra kwargs if specified
+    extra_kwargs = model_config.extra_kwargs or {}
+
     if provider == "ollama":
         # For Ollama, also check CredentialsManager for host configuration
         creds_manager = get_credentials_manager()
@@ -164,17 +167,17 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
             host = ollama_creds["host"]
         else:
             host = model_config.host or "http://localhost:11434"
-        return Ollama(id=model_id, host=host)
+        return Ollama(id=model_id, host=host, **extra_kwargs)
     if provider == "openai":
-        return OpenAIChat(id=model_id)
+        return OpenAIChat(id=model_id, **extra_kwargs)
     if provider == "anthropic":
-        return Claude(id=model_id)
+        return Claude(id=model_id, **extra_kwargs)
     if provider == "openrouter":
-        return OpenRouter(id=model_id)
+        return OpenRouter(id=model_id, **extra_kwargs)
     if provider in ("gemini", "google"):
-        return Gemini(id=model_id)
+        return Gemini(id=model_id, **extra_kwargs)
     if provider == "cerebras":
-        return Cerebras(id=model_id)
+        return Cerebras(id=model_id, **extra_kwargs)
 
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)

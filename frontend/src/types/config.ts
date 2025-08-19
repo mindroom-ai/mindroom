@@ -6,6 +6,7 @@ export interface ModelConfig {
   provider: ProviderType;
   id: string;
   host?: string; // For ollama
+  extra_kwargs?: Record<string, any>; // Additional provider-specific parameters
 }
 
 export interface MemoryConfig {

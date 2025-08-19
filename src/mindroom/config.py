@@ -75,7 +75,10 @@ class ModelConfig(BaseModel):
     id: str = Field(description="Model ID specific to the provider")
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
     api_key: str | None = Field(default=None, description="Optional API key (usually from env vars)")
-    # Add other provider-specific fields as needed
+    extra_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description="Additional provider-specific parameters passed directly to the model",
+    )
 
 
 class RouterConfig(BaseModel):
