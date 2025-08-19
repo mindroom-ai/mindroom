@@ -63,7 +63,7 @@ from .scheduling import (
     schedule_task,
 )
 from .streaming import IN_PROGRESS_MARKER, StreamingResponse
-from .teams import TeamMode, create_team_response, get_team_model, should_form_team
+from .teams import TeamMode, create_team_response, get_team_model, handle_team_formation, should_form_team
 from .thread_invites import ThreadInviteManager
 from .thread_utils import (
     check_agent_mentioned,
@@ -86,53 +86,6 @@ logger = get_logger(__name__)
 # Constants
 SYNC_TIMEOUT_MS = 30000
 CLEANUP_INTERVAL_SECONDS = 3600
-
-
-async def _handle_team_formation(
-    agent_name: str,
-    form_team_agents: list[str],
-    form_team_mode: TeamMode,
-    event_body: str,
-    room_id: str,
-    orchestrator: MultiAgentOrchestrator,
-    thread_history: list[dict],
-    config: Config,
-) -> str | None:
-    """Handle team formation and response generation.
-
-    Returns the team response text if this agent should handle it, None otherwise.
-    Only the first agent alphabetically handles the team response to avoid duplicates.
-
-    Args:
-        agent_name: Name of the current agent
-        form_team_agents: List of agents that should form a team
-        form_team_mode: Mode for team collaboration
-        event_body: The message body to respond to
-        room_id: The room ID where the message was sent
-        orchestrator: The orchestrator instance for team coordination
-        thread_history: History of messages in the thread
-        config: Application configuration
-
-    Returns:
-        Team response text if this agent handles it, None if another agent should handle it
-
-    """
-    # Simple coordination: let the first agent alphabetically handle the team
-    first_agent = min(form_team_agents)
-    if agent_name != first_agent:
-        # Other agents in the team don't respond individually
-        return None
-
-    # Create and execute team response
-    model_name = get_team_model(agent_name, room_id, config)
-    return await create_team_response(
-        agent_names=form_team_agents,
-        mode=form_team_mode,
-        message=event_body,
-        orchestrator=orchestrator,
-        thread_history=thread_history,
-        model_name=model_name,
-    )
 
 
 def _should_skip_mentions(event_source: dict) -> bool:
@@ -507,7 +460,7 @@ class AgentBot:
 
         # Simple team formation: only the first agent (alphabetically) handles team formation
         if form_team.should_form_team and self.agent_name in form_team.agents:
-            team_response = await _handle_team_formation(
+            team_response = await handle_team_formation(
                 agent_name=self.agent_name,
                 form_team_agents=form_team.agents,
                 form_team_mode=form_team.mode,
