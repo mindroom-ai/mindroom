@@ -421,17 +421,17 @@ class AgentBot:
 
         context = await self._extract_message_context(room, event)
 
-        is_router_self_voice = (
-            self.agent_name == ROUTER_AGENT_NAME
-            and event.sender == self.agent_user.user_id
+        # Check if this is a voice transcription from the router
+        is_router_voice_transcription = (
+            extract_agent_name(event.sender, self.config) == ROUTER_AGENT_NAME
             and event.body.startswith(VOICE_PREFIX)
         )
 
         # Ignore messages from other agents unless we are mentioned,
-        # except when the router is handling its own voice transcription (VOICE_PREFIX),
-        # which should be treated as a user-originated message to allow routing.
+        # except when the router is posting a voice transcription (VOICE_PREFIX),
+        # which should be treated as a user-originated message.
         sender_is_agent = extract_agent_name(event.sender, self.config) is not None
-        if sender_is_agent and not context.am_i_mentioned and not is_router_self_voice:
+        if sender_is_agent and not context.am_i_mentioned and not is_router_voice_transcription:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
