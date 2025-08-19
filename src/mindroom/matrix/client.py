@@ -234,6 +234,40 @@ async def create_room(
     return None
 
 
+async def create_dm_room(
+    client: nio.AsyncClient,
+    invite_user_ids: list[str],
+    name: str | None = None,
+) -> str | None:
+    """Create a Direct Message room with specific users.
+
+    Args:
+        client: Authenticated Matrix client
+        invite_user_ids: List of user IDs to invite to the DM
+        name: Optional room name (defaults to "Direct Message")
+
+    Returns:
+        Room ID if successful, None otherwise
+
+    """
+    room_config: dict[str, Any] = {
+        "preset": "trusted_private_chat",  # DM preset - no need to invite, they can join
+        "is_direct": True,  # Mark as DM
+        "invite": invite_user_ids,
+    }
+
+    if name:
+        room_config["name"] = name
+
+    response = await client.room_create(**room_config)
+    if isinstance(response, nio.RoomCreateResponse):
+        logger.info(f"Created DM room: {response.room_id}")
+        return str(response.room_id)
+
+    logger.error(f"Failed to create DM room: {response}")
+    return None
+
+
 async def join_room(client: nio.AsyncClient, room_id: str) -> bool:
     """Join a Matrix room.
 

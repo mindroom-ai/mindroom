@@ -203,7 +203,7 @@ class TestIntegrationWithTeamFormation:
     """Test integration with team formation to ensure order flows through."""
 
     @pytest.mark.asyncio
-    async def test_coordinate_mode_respects_order(self, mock_config):
+    async def test_coordinate_mode_respects_order(self, mock_config) -> None:
         """Test that coordinate mode will execute agents in the preserved order."""
         # When agents are tagged in specific order
         tagged_agents = ["phone", "email", "research"]  # User tagged in this order
@@ -212,6 +212,7 @@ class TestIntegrationWithTeamFormation:
             tagged_agents=tagged_agents,
             agents_in_thread=[],
             all_mentioned_in_thread=[],
+            room=None,  # type: ignore[assignment]
             message="Call me, then email the details, then research more info",
             config=mock_config,
             use_ai_decision=False,  # Use hardcoded logic for predictable test

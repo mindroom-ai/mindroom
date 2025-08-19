@@ -101,7 +101,7 @@ agents:
     - Respect privacy - only access emails when specifically requested
     - When summarizing, focus on sender, subject, and key points
     - For email drafts, maintain appropriate tone and formality based on context
-    model: sonnet
+    model: gpt5mini
     num_history_runs: 5
     role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's
       intelligence

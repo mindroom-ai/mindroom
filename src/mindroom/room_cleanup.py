@@ -2,6 +2,8 @@
 
 With the new self-managing agent pattern, agents handle their own room
 memberships. This module only handles cleanup of stale/orphaned bots.
+
+DM rooms are preserved and not cleaned up.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import nio
 from .logging_config import get_logger
 from .matrix.client import get_joined_rooms, get_room_members
 from .matrix.identity import MatrixID
+from .matrix.rooms import is_dm_room
 from .matrix.state import MatrixState
 
 if TYPE_CHECKING:
@@ -50,6 +53,8 @@ async def _cleanup_orphaned_bots_in_room(
 ) -> list[str]:
     """Remove orphaned bots from a single room.
 
+    When DM mode is enabled, actual DM rooms are skipped to preserve them.
+
     Args:
         client: An authenticated Matrix client with kick permissions
         room_id: The room to check
@@ -60,6 +65,11 @@ async def _cleanup_orphaned_bots_in_room(
         List of bot usernames that were kicked
 
     """
+    # When DM mode is enabled, check if this is actually a DM room
+    if await is_dm_room(client, room_id):
+        logger.debug(f"Skipping DM room {room_id} cleanup")
+        return []
+
     # Get room members
     member_ids = await get_room_members(client, room_id)
     if not member_ids:

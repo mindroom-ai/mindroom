@@ -115,6 +115,11 @@ Email: I'll compile and send every Friday
 [They work together, automatically, every week]
 ```
 
+### 💬 Direct Messages (DMs)
+- Agents respond naturally in 1:1 DMs without needing mentions
+- Add more agents to existing DM rooms for collaborative private work
+- Complete privacy separate from configured public rooms
+
 ### 🔐 Intelligent Trust Boundaries
 - Route sensitive data to local Ollama models on your hardware
 - Use GPT-4 for complex reasoning
@@ -202,6 +207,9 @@ Agents ONLY respond in threads (not main room). Within threads:
 - `!uninvite <agent>` - Remove agent from thread
 - `!list_invites` - See all invited agents
 - `!widget [url]` - Add configuration widget to room
+- `!schedule <time> <message>` - Schedule tasks and reminders
+- `!list_schedules` - List all scheduled tasks
+- `!cancel_schedule <id|all>` - Cancel scheduled tasks
 - `!help [topic]` - Get help
 
 ## Configuration

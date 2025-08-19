@@ -452,3 +452,58 @@ class TestRouterTeamFormation:
 
         # Verify simple queries don't trigger team formation
         assert expected_agent == "calculator"
+
+    @pytest.mark.asyncio
+    async def test_dm_room_team_formation(self) -> None:
+        """Test that multiple agents in a DM room form a team when no one is mentioned."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.config import AgentConfig, Config, ModelConfig  # noqa: PLC0415
+        from mindroom.teams import should_form_team  # noqa: PLC0415
+
+        config = Config(
+            agents={
+                "agent1": AgentConfig(display_name="Agent 1", role="First agent"),
+                "agent2": AgentConfig(display_name="Agent 2", role="Second agent"),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+
+        # Mock room with multiple agents
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!dm:localhost"
+        room.users = {"@mindroom_agent1:localhost": None, "@mindroom_agent2:localhost": None}
+
+        # Test DM room with multiple agents and no mentions
+        result = await should_form_team(
+            tagged_agents=[],  # No agents mentioned
+            agents_in_thread=[],  # No agents have spoken yet
+            all_mentioned_in_thread=[],  # No mentions in thread
+            message="Hello",
+            config=config,
+            is_dm_room=True,  # This is a DM room
+            room=room,
+            use_ai_decision=False,  # Don't use AI for this test
+        )
+
+        # Should form a team with both agents
+        assert result.should_form_team is True
+        assert sorted(result.agents) == ["agent1", "agent2"]
+
+        # Test DM room with single agent (should not form team)
+        room.users = {"@mindroom_agent1:localhost": None}
+        result = await should_form_team(
+            tagged_agents=[],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            message="Hello",
+            config=config,
+            is_dm_room=True,
+            room=room,
+            use_ai_decision=False,  # Don't use AI for this test
+        )
+
+        # Should not form a team with single agent
+        assert result.should_form_team is False

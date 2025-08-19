@@ -48,7 +48,7 @@ from .matrix.identity import (
     extract_server_name_from_homeserver,
 )
 from .matrix.mentions import create_mention_content_from_text
-from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
+from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
 from .memory import store_conversation_memory
@@ -241,6 +241,9 @@ class AgentBot:
                 self.logger.info(f"Staying in room {room_id} due to {len(agent_threads)} thread invitation(s)")
                 continue
 
+            if await is_dm_room(self.client, room_id):
+                self.logger.debug(f"Preserving DM room {room_id} during cleanup")
+                continue
             success = await leave_room(self.client, room_id)
             if success:
                 self.logger.info(f"Left unconfigured room {room_id}")
@@ -342,6 +345,10 @@ class AgentBot:
             joined_rooms = await get_joined_rooms(self.client)
             if joined_rooms:
                 for room_id in joined_rooms:
+                    if await is_dm_room(self.client, room_id):
+                        self.logger.debug(f"Preserving DM room {room_id} during cleanup")
+                        continue
+
                     success = await leave_room(self.client, room_id)
                     if success:
                         self.logger.info(f"Left room {room_id} during cleanup")
@@ -395,7 +402,11 @@ class AgentBot:
 
         # Check if we should process messages in this room
         # Process if: configured for room OR invited to threads in room
-        if room.room_id not in self.rooms:
+        # 1. Room is in configured rooms list
+        # 2. Agent has been invited to threads in this room
+        # 3. Currently in a DM room and not configured for it
+        _is_dm_room = await is_dm_room(self.client, room.room_id)
+        if not _is_dm_room and room.room_id not in self.rooms:
             assert self.thread_invite_manager is not None
             agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
             if not agent_threads:
@@ -420,12 +431,10 @@ class AgentBot:
 
         context = await self._extract_message_context(room, event)
 
-        # Check if this is a voice transcription from the router
-        is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
-
         # Ignore messages from other agents unless we are mentioned,
         # except when the router is posting a voice transcription (VOICE_PREFIX),
         # which should be treated as a user-originated message.
+        is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
         if sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
@@ -446,8 +455,10 @@ class AgentBot:
             context.mentioned_agents,
             agents_in_thread,
             all_mentioned_in_thread,
+            room=room,
             message=event.body,
             config=self.config,
+            is_dm_room=_is_dm_room,
         )
 
         # Dynamic team formation: only the first agent (alphabetically) handles team formation
@@ -474,7 +485,8 @@ class AgentBot:
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
-            room_id=room.room_id,
+            room=room,
+            is_dm_room=_is_dm_room,
             configured_rooms=self.rooms,
             thread_history=context.thread_history,
             config=self.config,
