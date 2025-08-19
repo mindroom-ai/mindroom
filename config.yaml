@@ -176,7 +176,7 @@ agents:
     - Include publication dates and sources.
     - Distinguish between news and opinion pieces.
     - Highlight key developments and their significance.
-    model: default
+    model: gpt_oss_120b
     num_history_runs: 5
     role: Gather and summarize news and current events.
     rooms:
@@ -281,6 +281,9 @@ models:
     provider: anthropic
   deepseek:
     id: deepseek-ai/deepseek-chat:free
+    provider: openrouter
+  gpt_oss_120b:
+    id: openai/gpt-oss-120b
     provider: openrouter
   devstral:
     id: devstral:24b

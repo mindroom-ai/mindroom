@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import diskcache
 from agno.models.anthropic import Claude
+from agno.models.cerebras import Cerebras
 from agno.models.google import Gemini
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
@@ -112,6 +113,7 @@ def _set_api_key_env_var(provider: str) -> None:
         "openrouter": "OPENROUTER_API_KEY",
         "gemini": "GOOGLE_API_KEY",
         "google": "GOOGLE_API_KEY",
+        "cerebras": "CEREBRAS_API_KEY",
     }
 
     if provider not in env_vars:
@@ -171,6 +173,8 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
         return OpenRouter(id=model_id)
     if provider in ("gemini", "google"):
         return Gemini(id=model_id)
+    if provider == "cerebras":
+        return Cerebras(id=model_id)
 
     msg = f"Unsupported AI provider: {provider}"
     raise ValueError(msg)

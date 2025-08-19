@@ -1,7 +1,17 @@
 import { ReactElement } from 'react';
 import { SiOpenai, SiAnthropic, SiGoogle, SiPerplexity } from 'react-icons/si';
 import { FaBrain } from 'react-icons/fa';
-import { Ollama, OpenRouter, Groq, DeepSeek, Together, Mistral, Cohere, XAI } from '@lobehub/icons';
+import {
+  Ollama,
+  OpenRouter,
+  Groq,
+  DeepSeek,
+  Together,
+  Mistral,
+  Cohere,
+  XAI,
+  Cerebras,
+} from '@lobehub/icons';
 
 export interface ProviderInfo {
   id: string;
@@ -123,6 +133,14 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     description: 'Configure your xAI API key for Grok models',
     color: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
     icon: (className = 'h-5 w-5') => <XAI className={className} />,
+    requiresApiKey: true,
+  },
+  cerebras: {
+    id: 'cerebras',
+    name: 'Cerebras',
+    description: 'Configure your Cerebras API key for fast inference',
+    color: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+    icon: (className = 'h-5 w-5') => <Cerebras className={className} />,
     requiresApiKey: true,
   },
 };
