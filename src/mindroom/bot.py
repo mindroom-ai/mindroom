@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
+from nio import PresenceSetResponse
 
 from . import interactive, voice_handler
 from .agents import create_agent, get_rooms_for_entity
@@ -282,6 +283,82 @@ class AgentBot:
             except Exception as e:
                 self.logger.warning(f"Failed to set avatar: {e}")
 
+    async def _set_presence_with_model_info(self) -> None:
+        """Set presence status with model information."""
+        if not self.client:
+            return
+
+        try:
+            status_msg = self._build_status_message()
+
+            # Set presence to "online" with the status message
+            response = await self.client.set_presence("online", status_msg)
+
+            if isinstance(response, PresenceSetResponse):
+                self.logger.info(f"Set presence status: {status_msg}")
+            else:
+                self.logger.warning(f"Failed to set presence: {response}")
+        except Exception as e:
+            self.logger.warning(f"Failed to set presence: {e}")
+
+    def _build_status_message(self) -> str:
+        """Build status message with model and role information."""
+        status_parts = []
+
+        # Add model information
+        model_info = self._get_model_info()
+        status_parts.append(f"🤖 Model: {model_info}")
+
+        # Add role/purpose for teams and agents
+        if self.agent_name == ROUTER_AGENT_NAME:
+            status_parts.append("📍 Routes messages to appropriate agents")
+        elif self.agent_name in self.config.teams:
+            team_config = self.config.teams[self.agent_name]
+            if team_config.role:
+                status_parts.append(f"👥 {team_config.role[:100]}")  # Limit length
+            status_parts.append(f"🤝 Team: {', '.join(team_config.agents[:5])}")  # Show first 5 agents
+        elif self.agent_name in self.config.agents:
+            agent_config = self.config.agents[self.agent_name]
+            if agent_config.role:
+                status_parts.append(f"💼 {agent_config.role[:100]}")  # Limit length
+            # Add tool count
+            if agent_config.tools:
+                status_parts.append(f"🔧 {len(agent_config.tools)} tools available")
+
+        # Join all parts with line breaks
+        status_msg = " | ".join(status_parts)
+
+        # Limit total length to avoid API limits (usually 256 chars)
+        if len(status_msg) > 250:
+            status_msg = status_msg[:247] + "..."
+
+        return status_msg
+
+    def _get_model_info(self) -> str:
+        """Get model information for this agent."""
+        try:
+            # Router uses router model
+            if self.agent_name == ROUTER_AGENT_NAME:
+                model_name = self.config.router.model
+            # Teams use their configured model or default
+            elif self.agent_name in self.config.teams:
+                team_config = self.config.teams[self.agent_name]
+                model_name = team_config.model or "default"
+            # Regular agents use their configured model
+            else:
+                agent_config = self.config.agents.get(self.agent_name)
+                model_name = agent_config.model if agent_config else "default"
+
+            # Get the actual model configuration
+            if model_name in self.config.models:
+                model_config = self.config.models[model_name]
+                # Return a formatted string with provider and model ID
+                return f"{model_config.provider}/{model_config.id}"
+            return model_name  # noqa: TRY300
+        except Exception as e:
+            self.logger.debug(f"Could not get model info: {e}")
+            return "unknown"
+
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
 
@@ -302,6 +379,9 @@ class AgentBot:
 
         # Set avatar if available
         await self._set_avatar_if_available()
+
+        # Set presence with model information
+        await self._set_presence_with_model_info()
 
         # Initialize response tracker and thread invite manager
         self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
@@ -326,7 +406,8 @@ class AgentBot:
             except Exception as e:
                 self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
 
-            asyncio.create_task(self._periodic_cleanup())  # noqa: RUF006
+        # All bots run periodic tasks (cleanup for router, presence refresh for all)
+        asyncio.create_task(self._periodic_cleanup())  # noqa: RUF006
 
         # Note: Room joining is deferred until after invitations are handled
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
@@ -1046,32 +1127,37 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
 
     async def _periodic_cleanup(self) -> None:
-        """Periodically clean up expired thread invitations."""
+        """Periodically refresh presence and clean up expired thread invitations (router only)."""
         while self.running:
             try:
                 # Wait for 1 hour between cleanups
                 await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
 
-                # Get all rooms the bot is in
-                assert self.client is not None
-                joined_rooms = await get_joined_rooms(self.client)
-                if joined_rooms is None:
-                    continue
+                # Refresh presence status periodically for all bots
+                await self._set_presence_with_model_info()
 
-                total_removed = 0
-                for room_id in joined_rooms:
-                    try:
-                        assert self.thread_invite_manager is not None
-                        removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
-                            room_id,
-                            timeout_hours=self.invitation_timeout_hours,
-                        )
-                        total_removed += removed_count
-                    except Exception as e:
-                        self.logger.exception("Failed to cleanup room", room_id=room_id, error=str(e))
+                # Only router does thread cleanup
+                if self.agent_name == ROUTER_AGENT_NAME:
+                    # Get all rooms the bot is in
+                    assert self.client is not None
+                    joined_rooms = await get_joined_rooms(self.client)
+                    if joined_rooms is None:
+                        continue
 
-                if total_removed > 0:
-                    self.logger.info(f"Periodic cleanup removed {total_removed} expired agents")
+                    total_removed = 0
+                    for room_id in joined_rooms:
+                        try:
+                            assert self.thread_invite_manager is not None
+                            removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
+                                room_id,
+                                timeout_hours=self.invitation_timeout_hours,
+                            )
+                            total_removed += removed_count
+                        except Exception as e:
+                            self.logger.exception("Failed to cleanup room", room_id=room_id, error=str(e))
+
+                    if total_removed > 0:
+                        self.logger.info(f"Periodic cleanup removed {total_removed} expired agents")
 
             except asyncio.CancelledError:
                 break
@@ -1319,6 +1405,8 @@ class MultiAgentOrchestrator:
         for entity_name, bot in self.agent_bots.items():
             if entity_name not in entities_to_restart:
                 bot.config = new_config
+                # Update presence with new config info
+                asyncio.create_task(bot._set_presence_with_model_info())  # noqa: RUF006
 
         # Recreate entities that need restarting using self-management
         for entity_name in entities_to_restart:
