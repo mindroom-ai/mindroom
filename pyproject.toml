@@ -29,7 +29,7 @@ dependencies = [
   "boto3>=1.40.8",                               # for AWS Lambda and AWS SES tools
   "browserbase",                                 # for Browserbase tool
   "cartesia",                                    # for Cartesia tool
-  "cerebras-cloud-sdk>=1.46",
+  "cerebras-cloud-sdk>=1.46",                    # for Cerebras model
   "chromadb>=1.0.15",
   "composio-agno",                               # for Composio tool
   "crawl4ai>=0.7.3",                             # for Crawl4AI tool
