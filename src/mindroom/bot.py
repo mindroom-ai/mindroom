@@ -404,10 +404,9 @@ class AgentBot:
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
-        sender_id = MatrixID.parse(event.sender)
         assert self.config is not None
-        sender_agent_name = sender_id.agent_name(self.config)
-        if sender_id.is_agent and sender_agent_name:
+        sender_agent_name = extract_agent_name(event.sender, self.config)
+        if sender_agent_name:
             assert self.thread_invite_manager is not None
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
@@ -422,21 +421,17 @@ class AgentBot:
         context = await self._extract_message_context(room, event)
 
         # Check if this is a voice transcription from the router
-        is_router_voice_transcription = (
-            extract_agent_name(event.sender, self.config) == ROUTER_AGENT_NAME
-            and event.body.startswith(VOICE_PREFIX)
-        )
+        is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
 
         # Ignore messages from other agents unless we are mentioned,
         # except when the router is posting a voice transcription (VOICE_PREFIX),
         # which should be treated as a user-originated message.
-        sender_is_agent = extract_agent_name(event.sender, self.config) is not None
-        if sender_is_agent and not context.am_i_mentioned and not is_router_voice_transcription:
+        if sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
         # Check if message is still being streamed (has in-progress marker)
-        if sender_is_agent and context.am_i_mentioned and event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
+        if sender_agent_name and context.am_i_mentioned and event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
             self.logger.debug("Ignoring mention from agent - streaming not complete", sender=event.sender)
             return
 
