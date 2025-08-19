@@ -797,6 +797,7 @@ class AgentBot:
 
         # Send initial "Thinking..." message for stop button support (only if not editing)
         initial_message_id = None
+        reaction_event_id = None
         if not existing_event_id:
             initial_message_id = await self._send_response(
                 room,
@@ -807,8 +808,6 @@ class AgentBot:
             if initial_message_id:
                 # Add stop button reaction and track the event ID
                 reaction_event_id = await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
-                if reaction_event_id:
-                    self.stop_manager.current_reaction_event_id = reaction_event_id
 
         # Store memory for this agent (do this once, before generating response)
         session_id = create_session_id(room_id, thread_id)
@@ -849,7 +848,7 @@ class AgentBot:
 
         task = asyncio.create_task(generate())
         if initial_message_id:
-            self.stop_manager.set_current(initial_message_id, room_id, task)
+            self.stop_manager.set_current(initial_message_id, room_id, task, reaction_event_id)
 
         try:
             await task
@@ -1204,6 +1203,7 @@ class TeamBot(AgentBot):
 
         # Send initial "Thinking..." message for stop button support (only if not editing)
         initial_message_id = None
+        reaction_event_id = None
         if not existing_event_id:
             initial_message_id = await self._send_response(
                 room,
@@ -1214,8 +1214,6 @@ class TeamBot(AgentBot):
             if initial_message_id:
                 # Add stop button reaction and track the event ID
                 reaction_event_id = await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
-                if reaction_event_id:
-                    self.stop_manager.current_reaction_event_id = reaction_event_id
 
         # Get the appropriate model for this team and room
         model_name = get_team_model(self.agent_name, room_id, self.config)
@@ -1263,7 +1261,7 @@ class TeamBot(AgentBot):
 
         task = asyncio.create_task(generate_team_response())
         if initial_message_id:
-            self.stop_manager.set_current(initial_message_id, room_id, task)
+            self.stop_manager.set_current(initial_message_id, room_id, task, reaction_event_id)
 
         try:
             await task

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio  # noqa: TC003
-from contextlib import suppress
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,7 +30,8 @@ class SimpleStopManager:
         self.current_message_id = message_id
         self.current_room_id = room_id
         self.current_task = task
-        self.current_reaction_event_id = reaction_event_id
+        if reaction_event_id:
+            self.current_reaction_event_id = reaction_event_id
 
     def clear_current(self) -> None:
         """Clear the current generation."""
@@ -79,10 +79,13 @@ class SimpleStopManager:
     async def remove_stop_button(self, client: AsyncClient) -> None:
         """Remove the stop button reaction after completion."""
         if self.current_reaction_event_id and self.current_room_id:
-            with suppress(Exception):
+            try:
                 # Send a redaction event to remove the reaction
-                await client.room_redact(
+                response = await client.room_redact(
                     room_id=self.current_room_id,
                     event_id=self.current_reaction_event_id,
                     reason="Response completed",
                 )
+                print(f"DEBUG: Redaction response: {response}")
+            except Exception as e:
+                print(f"DEBUG: Failed to remove reaction: {e}")
