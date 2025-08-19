@@ -62,6 +62,7 @@ from .scheduling import (
     restore_scheduled_tasks,
     schedule_task,
 )
+from .simple_stop import SimpleStopManager
 from .streaming import IN_PROGRESS_MARKER, StreamingResponse
 from .teams import TeamMode, create_team_response, get_team_model, handle_team_formation, should_form_team
 from .thread_invites import ThreadInviteManager
@@ -181,6 +182,7 @@ class AgentBot:
     invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
+    stop_manager: SimpleStopManager = field(default_factory=SimpleStopManager, init=False)  # Stop button manager
 
     @property
     def agent_name(self) -> str:
@@ -306,9 +308,10 @@ class AgentBot:
         # Set avatar if available
         await self._set_avatar_if_available()
 
-        # Initialize response tracker and thread invite manager
+        # Initialize response tracker, thread invite manager, and stop manager
         self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
         self.thread_invite_manager = ThreadInviteManager(self.client)
+        self.stop_manager = SimpleStopManager()
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
@@ -512,8 +515,25 @@ class AgentBot:
         self.response_tracker.mark_responded(event.event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
-        """Handle reaction events for interactive questions."""
+        """Handle reaction events for interactive questions and stop functionality."""
         assert self.client is not None
+
+        # First check if this is a stop button reaction
+        if event.key == "❌":
+            # Check if this is from a bot/agent
+            sender_agent_name = extract_agent_name(event.sender, self.config)
+            # Only handle stop from users, not agents
+            if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
+                # Send a confirmation message
+                await self._send_response(
+                    room,
+                    event.reacts_to,
+                    "✅ Generation stopped",
+                    None,
+                )
+                return
+
+        # Then check for interactive question reactions
         result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
 
         if result:
@@ -775,6 +795,19 @@ class AgentBot:
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
+        # Send initial "Thinking..." message for stop button support (only if not editing)
+        initial_message_id = None
+        if not existing_event_id:
+            initial_message_id = await self._send_response(
+                room,
+                reply_to_event_id,
+                f"Thinking... {IN_PROGRESS_MARKER}",
+                thread_id,
+            )
+            if initial_message_id:
+                # Add stop button reaction
+                await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
+
         # Store memory for this agent (do this once, before generating response)
         session_id = create_session_id(room_id, thread_id)
         create_background_task(
@@ -791,25 +824,37 @@ class AgentBot:
             name=f"memory_save_{self.agent_name}_{session_id}",
         )
 
-        # Dispatch to appropriate method
-        if self.enable_streaming:
-            await self._process_and_respond_streaming(
-                room,
-                prompt,
-                reply_to_event_id,
-                thread_id,
-                thread_history,
-                existing_event_id,
-            )
-        else:
-            await self._process_and_respond(
-                room,
-                prompt,
-                reply_to_event_id,
-                thread_id,
-                thread_history,
-                existing_event_id,
-            )
+        # Create async task for generation so it can be cancelled
+        async def generate() -> None:
+            if self.enable_streaming:
+                await self._process_and_respond_streaming(
+                    room,
+                    prompt,
+                    reply_to_event_id,
+                    thread_id,
+                    thread_history,
+                    existing_event_id or initial_message_id,  # Edit the thinking message
+                )
+            else:
+                await self._process_and_respond(
+                    room,
+                    prompt,
+                    reply_to_event_id,
+                    thread_id,
+                    thread_history,
+                    existing_event_id or initial_message_id,  # Edit the thinking message
+                )
+
+        task = asyncio.create_task(generate())
+        if initial_message_id:
+            self.stop_manager.set_current(initial_message_id, task)
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            self.logger.info("Response generation cancelled by user")
+        finally:
+            self.stop_manager.clear_current()
 
     async def _send_response(
         self,
@@ -1148,48 +1193,76 @@ class TeamBot(AgentBot):
         if not prompt.strip():
             return
 
+        assert self.client is not None
+        room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
+
+        # Send initial "Thinking..." message for stop button support (only if not editing)
+        initial_message_id = None
+        if not existing_event_id:
+            initial_message_id = await self._send_response(
+                room,
+                reply_to_event_id,
+                f"🤝 Team Response: Thinking... {IN_PROGRESS_MARKER}",
+                thread_id,
+            )
+            if initial_message_id:
+                # Add stop button reaction
+                await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
+
         # Get the appropriate model for this team and room
         model_name = get_team_model(self.agent_name, room_id, self.config)
 
         # Convert team_mode string to TeamMode enum
         mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
 
-        # Create team response
-        response_text = await create_team_response(
-            agent_names=self.team_agents,
-            mode=mode,
-            message=prompt,
-            orchestrator=self.orchestrator,
-            thread_history=thread_history,
-            model_name=model_name,
-        )
+        # Create async task for team response generation so it can be cancelled
+        async def generate_team_response() -> None:
+            # Create team response
+            response_text = await create_team_response(
+                agent_names=self.team_agents,
+                mode=mode,
+                message=prompt,
+                orchestrator=self.orchestrator,
+                thread_history=thread_history,
+                model_name=model_name,
+            )
 
-        # Store memory once for the entire team (avoids duplicate LLM processing)
-        session_id = create_session_id(room_id, thread_id)
-        create_background_task(
-            store_conversation_memory(
-                prompt,
-                self.team_agents,  # Pass list of agents for team storage
-                self.storage_path,
-                session_id,
-                self.config,
-                room_id,
-                thread_history,
-                user_id,
-            ),
-            name=f"memory_save_team_{session_id}",
-        )
-        self.logger.info(f"Storing memory for team: {self.team_agents}")
+            # Store memory once for the entire team (avoids duplicate LLM processing)
+            session_id = create_session_id(room_id, thread_id)
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    self.team_agents,  # Pass list of agents for team storage
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    room_id,
+                    thread_history,
+                    user_id,
+                ),
+                name=f"memory_save_team_{session_id}",
+            )
+            self.logger.info(f"Storing memory for team: {self.team_agents}")
 
-        # Send the response (reuse parent's method for consistency)
-        assert self.client is not None
-        room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
+            # Send or edit the response
+            if existing_event_id or initial_message_id:
+                message_id = existing_event_id or initial_message_id
+                assert message_id is not None  # Type guard for mypy
+                await self._edit_message(room_id, message_id, response_text, thread_id)
+            else:
+                # Send as regular message (not streaming for teams)
+                await self._send_response(room, reply_to_event_id, response_text, thread_id)
 
-        if existing_event_id:
-            await self._edit_message(room_id, existing_event_id, response_text, thread_id)
-        else:
-            # Send as regular message (not streaming for teams)
-            await self._send_response(room, reply_to_event_id, response_text, thread_id)
+        task = asyncio.create_task(generate_team_response())
+        if initial_message_id:
+            self.stop_manager.set_current(initial_message_id, task)
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            self.logger.info("Team response generation cancelled by user")
+        finally:
+            self.stop_manager.clear_current()
 
 
 @dataclass
