@@ -41,17 +41,15 @@ async def set_presence_status(
     return False
 
 
-def build_agent_status_message(  # noqa: C901, PLR0912
+def build_agent_status_message(
     agent_name: str,
     config: Config,
-    model_name: str | None = None,
 ) -> str:
     """Build status message with model and role information for an agent.
 
     Args:
         agent_name: Name of the agent
         config: Application configuration
-        model_name: Optional model name to use (will determine automatically if not provided)
 
     Returns:
         Status message string, limited to 250 characters
@@ -59,15 +57,8 @@ def build_agent_status_message(  # noqa: C901, PLR0912
     """
     status_parts = []
 
-    # Determine model name if not provided
-    if model_name is None:
-        if agent_name == ROUTER_AGENT_NAME:
-            model_name = config.router.model
-        elif agent_name in config.teams:
-            model_name = config.teams[agent_name].model or "default"
-        else:
-            agent_config = config.agents.get(agent_name)
-            model_name = agent_config.model if agent_config else "default"
+    # Get model name using the config method
+    model_name = config.get_entity_model_name(agent_name)
 
     # Format model info
     if model_name in config.models:

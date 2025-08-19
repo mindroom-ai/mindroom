@@ -194,6 +194,26 @@ class Config(BaseModel):
             all_room_aliases.update(team_config.rooms)
         return all_room_aliases
 
+    def get_entity_model_name(self, entity_name: str) -> str:
+        """Get the model name for an agent, team, or router.
+
+        Args:
+            entity_name: Name of the entity (agent, team, or router)
+
+        Returns:
+            Model name (e.g., "default", "gpt-4", etc.)
+
+        """
+        # Router uses router model
+        if entity_name == ROUTER_AGENT_NAME:
+            return self.router.model
+        # Teams use their configured model or default
+        if entity_name in self.teams:
+            return self.teams[entity_name].model or "default"
+        # Regular agents use their configured model
+        agent_config = self.agents.get(entity_name)
+        return agent_config.model if agent_config else "default"
+
     def get_configured_bots_for_room(self, room_id: str) -> set[str]:
         """Get the set of bot usernames that should be in a specific room.
 
