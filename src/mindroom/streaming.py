@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     import nio
 
     from .config import Config
+    from .simple_stop import SimpleStopManager
 
 logger = get_logger(__name__)
 
@@ -45,9 +46,12 @@ class StreamingResponse:
             await self._send_or_edit_message(client)
             self.last_update = current_time
 
-    async def finalize(self, client: nio.AsyncClient) -> None:
+    async def finalize(self, client: nio.AsyncClient, stop_manager: SimpleStopManager | None = None) -> None:
         """Send final message update."""
         await self._send_or_edit_message(client, is_final=True)
+        # Remove stop button when streaming is complete
+        if stop_manager:
+            await stop_manager.remove_stop_button(client)
 
     async def _send_or_edit_message(self, client: nio.AsyncClient, is_final: bool = False) -> None:
         """Send new message or edit existing one."""

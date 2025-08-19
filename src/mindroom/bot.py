@@ -684,6 +684,8 @@ class AgentBot:
         if existing_event_id:
             # Edit the existing message
             await self._edit_message(room.room_id, existing_event_id, response_text, thread_id)
+            # Remove stop button when response is complete
+            await self.stop_manager.remove_stop_button(self.client)
             return
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -740,7 +742,7 @@ class AgentBot:
             ):
                 await streaming.update_content(chunk, self.client)
 
-            await streaming.finalize(self.client)
+            await streaming.finalize(self.client, self.stop_manager)
 
             if streaming.event_id:
                 self.logger.info("Sent streaming response", event_id=streaming.event_id)
@@ -852,9 +854,6 @@ class AgentBot:
 
         try:
             await task
-            # Successfully completed - remove the stop button
-            if self.stop_manager.current_reaction_event_id:
-                await self.stop_manager.remove_stop_button(self.client)
         except asyncio.CancelledError:
             self.logger.info("Response generation cancelled by user")
             # Keep the stop button visible when cancelled (shows it was stopped)
@@ -1265,9 +1264,8 @@ class TeamBot(AgentBot):
 
         try:
             await task
-            # Successfully completed - remove the stop button
-            if self.stop_manager.current_reaction_event_id:
-                await self.stop_manager.remove_stop_button(self.client)
+            # Remove stop button when team response is complete
+            await self.stop_manager.remove_stop_button(self.client)
         except asyncio.CancelledError:
             self.logger.info("Team response generation cancelled by user")
             # Keep the stop button visible when cancelled (shows it was stopped)
