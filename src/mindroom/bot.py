@@ -430,11 +430,6 @@ class AgentBot:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
-        # Check if message is still being streamed (has in-progress marker)
-        if sender_agent_name and context.am_i_mentioned and event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
-            self.logger.debug("Ignoring mention from agent - streaming not complete", sender=event.sender)
-            return
-
         # Router agent has one simple job: route messages when no specific agent is mentioned
         if self.agent_name == ROUTER_AGENT_NAME:
             if not context.mentioned_agents:
@@ -458,7 +453,7 @@ class AgentBot:
             config=self.config,
         )
 
-        # Simple team formation: only the first agent (alphabetically) handles team formation
+        # Dynamic team formation: only the first agent (alphabetically) handles team formation
         if form_team.should_form_team and self.agent_name in form_team.agents:
             team_response = await handle_team_formation(
                 agent_name=self.agent_name,

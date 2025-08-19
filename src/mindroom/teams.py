@@ -448,7 +448,7 @@ async def handle_team_formation(
         Team response text if this agent handles it, None if another agent should handle it
 
     """
-    # Simple coordination: let the first agent alphabetically handle the team
+    # Let the first agent alphabetically handle the team
     first_agent = min(form_team_agents)
     if agent_name != first_agent:
         # Other agents in the team don't respond individually
