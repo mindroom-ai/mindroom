@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13' and python_full_version < '4'",
@@ -634,6 +634,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/80/03/1d33b10d032e4d7a824c5eb521a94ddee87d203a4815af78d52e73465966/cartesia-2.0.6.tar.gz", hash = "sha256:07c1a23f588951a16a60aaad2019b09bd2cef36453d391fd2c5d613416333c75", size = 73756, upload-time = "2025-07-31T18:15:30.978Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a0/85/fb958075e965d42a0b4b25133e229f528f32aaab25e24af067eb9289d754/cartesia-2.0.6-py3-none-any.whl", hash = "sha256:63abf753d446386372ba30105465c70af1e491c9d16e4d2a7be5948302ffdfcd", size = 145849, upload-time = "2025-07-31T18:15:29.575Z" },
+]
+
+[[package]]
+name = "cerebras-cloud-sdk"
+version = "1.46.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4a/fb/713b81beaebe90ee8f401c559e908bd52391b1faa7fe031ab945f537e384/cerebras_cloud_sdk-1.46.0.tar.gz", hash = "sha256:5b74ac2a3e59fd3d0713f6364753234a69f8d31b7d5a17d8bbe0b38a55c5c966", size = 120269, upload-time = "2025-08-05T22:49:50.726Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/34/50/2b52948bfa2fa7029d60fcee346569cf72649994cf75af2e46e3ac4435f0/cerebras_cloud_sdk-1.46.0-py3-none-any.whl", hash = "sha256:8d24e8b420eccf0233fd5e1ea383acc17cb9b83d25ae8319eab91f0dec7e0b15", size = 91250, upload-time = "2025-08-05T22:49:49.792Z" },
 ]
 
 [[package]]
@@ -3096,6 +3113,7 @@ dependencies = [
     { name = "boto3" },
     { name = "browserbase" },
     { name = "cartesia" },
+    { name = "cerebras-cloud-sdk" },
     { name = "chromadb" },
     { name = "composio-agno" },
     { name = "crawl4ai" },
@@ -3217,6 +3235,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.40.8" },
     { name = "browserbase" },
     { name = "cartesia" },
+    { name = "cerebras-cloud-sdk", specifier = ">=1.46.0" },
     { name = "chromadb", specifier = ">=1.0.15" },
     { name = "composio-agno" },
     { name = "crawl4ai", specifier = ">=0.7.3" },
