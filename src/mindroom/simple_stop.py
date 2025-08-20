@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio  # noqa: TC003
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -31,6 +31,8 @@ class SimpleStopManager:
         """Initialize the stop manager."""
         # Track multiple concurrent messages by message_id
         self.tracked_messages: dict[str, TrackedMessage] = {}
+        # Keep references to cleanup tasks
+        self.cleanup_tasks: list[asyncio.Task] = []
         logger.info("SimpleStopManager initialized")
 
     def set_current(
@@ -55,11 +57,30 @@ class SimpleStopManager:
             total_tracked=len(self.tracked_messages),
         )
 
-    def clear_message(self, message_id: str) -> None:
-        """Clear tracking for a specific message."""
+    def clear_message(self, message_id: str, delay: float = 5.0) -> None:
+        """Clear tracking for a specific message after a delay.
+
+        The delay allows handling late-arriving stop reactions.
+
+        Args:
+            message_id: The message ID to clear
+            delay: Seconds to wait before clearing (default 5.0)
+
+        """
+
+        async def delayed_clear() -> None:
+            """Clear the message after a delay."""
+            await asyncio.sleep(delay)
+            if message_id in self.tracked_messages:
+                logger.info("Clearing tracked message after delay", message_id=message_id, delay=delay)
+                del self.tracked_messages[message_id]
+
         if message_id in self.tracked_messages:
-            logger.info("Clearing tracked message", message_id=message_id)
-            del self.tracked_messages[message_id]
+            logger.info("Scheduling message clear", message_id=message_id, delay=delay)
+            task = asyncio.create_task(delayed_clear())
+            self.cleanup_tasks.append(task)
+            # Clean up old completed tasks
+            self.cleanup_tasks = [t for t in self.cleanup_tasks if not t.done()]
         else:
             logger.warning("Attempted to clear untracked message", message_id=message_id)
 

@@ -680,15 +680,24 @@ class AgentBot:
 
         session_id = create_session_id(room.room_id, thread_id)
 
-        response_text = await ai_response(
-            agent_name=self.agent_name,
-            prompt=prompt,
-            session_id=session_id,
-            storage_path=self.storage_path,
-            config=self.config,
-            thread_history=thread_history,
-            room_id=room.room_id,
-        )
+        try:
+            response_text = await ai_response(
+                agent_name=self.agent_name,
+                prompt=prompt,
+                session_id=session_id,
+                storage_path=self.storage_path,
+                config=self.config,
+                thread_history=thread_history,
+                room_id=room.room_id,
+            )
+        except asyncio.CancelledError:
+            # Handle cancellation - send a message showing it was stopped
+            self.logger.info("Non-streaming response cancelled by user", message_id=existing_event_id)
+            if existing_event_id:
+                cancelled_text = "**[Response cancelled by user]**"
+                await self._edit_message(room.room_id, existing_event_id, cancelled_text, thread_id)
+                # Don't remove stop button when cancelled
+            raise  # Re-raise to let the outer handler know
 
         if existing_event_id:
             # Edit the existing message
@@ -757,6 +766,13 @@ class AgentBot:
             if streaming.event_id:
                 self.logger.info("Sent streaming response", event_id=streaming.event_id)
 
+        except asyncio.CancelledError:
+            # Handle cancellation - send a message showing it was stopped
+            self.logger.info("Streaming cancelled by user", message_id=existing_event_id)
+            if streaming.accumulated_text:
+                streaming.accumulated_text += "\n\n**[Response cancelled by user]**"
+                await streaming.finalize(self.client, None, None)  # Don't remove stop button when cancelled
+            raise  # Re-raise to let the outer handler know
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
             # Don't mark as responded if streaming failed
