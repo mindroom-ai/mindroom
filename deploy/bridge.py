@@ -203,13 +203,12 @@ def _get_matrix_info(instance_name: str) -> tuple[str, str, str]:
     matrix_type = instance["matrix_type"]
     matrix_domain = f"m-{instance['domain']}"
 
-    # Determine Matrix server URL based on type
+    # Determine Matrix server URL based on type - use container names for internal communication
     if matrix_type == "tuwunel":
-        # Tuwunel runs on port 6167 by default
-        matrix_url = "http://localhost:6167"
+        # Use container name for internal Docker communication
+        matrix_url = f"http://{instance_name}-tuwunel:6167"
     else:  # synapse
-        matrix_port = instance.get("matrix_port", 8008)
-        matrix_url = f"http://localhost:{matrix_port}"
+        matrix_url = f"http://{instance_name}-synapse:8008"
 
     return matrix_type, matrix_domain, matrix_url
 
@@ -218,12 +217,15 @@ def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[st
     """Create a docker-compose file for a bridge."""
     compose_file = Path(bridge.data_dir) / "docker-compose.yml"
 
+    # Use the same network as the Matrix server
+    network_name = f"{bridge.instance_name}_mindroom-network"
+
     compose_content = {
         "version": "3.8",
         "services": {
-            bridge.bridge_type: {
+            bridge.bridge_type.value: {  # Use .value to get the string representation
                 "image": bridge_template["image"],
-                "container_name": f"{bridge.instance_name}-{bridge.bridge_type}-bridge",
+                "container_name": f"{bridge.instance_name}-{bridge.bridge_type.value}-bridge",
                 "restart": "unless-stopped",
                 "volumes": [
                     f"{bridge.data_dir}/data:/data",
@@ -232,12 +234,12 @@ def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[st
                     f"{bridge.port}:29317",  # mautrix bridges use 29317 internally
                 ],
                 "networks": [
-                    "matrix-bridges",
+                    network_name,
                 ],
             },
         },
         "networks": {
-            "matrix-bridges": {
+            network_name: {
                 "external": True,
             },
         },
@@ -269,7 +271,7 @@ def _generate_bridge_config(bridge: BridgeConfig, template_path: Path) -> Path: 
                     "domain": bridge.matrix_domain,
                 },
                 "appservice": {
-                    "database": "sqlite:///data/mautrix-telegram.db",
+                    "database": "sqlite:////data/mautrix-telegram.db",  # Absolute path in container
                     "address": "http://0.0.0.0:29317",
                 },
                 "telegram": {
@@ -320,6 +322,11 @@ def _register_with_tuwunel(bridge: BridgeConfig, registration_yaml: str) -> bool
     console.print("3. Paste the registration.yaml content")
     console.print("\n[dim]Registration content saved to:[/dim]")
     console.print(f"  {bridge.registration_file}")
+
+    # Note about bot user creation
+    console.print("\n[yellow]Note:[/yellow] After registration, you may need to manually create the bot user.")
+    console.print("The bridge will attempt this automatically when started.")
+
     console.print("\n[yellow]After registration, run:[/yellow]")
     console.print(f"  ./bridge.py start {bridge.bridge_type} --instance {bridge.instance_name}")
     return True
@@ -428,7 +435,11 @@ def add(
 
     # Create directories
     bridge_data_dir.mkdir(parents=True, exist_ok=True)
-    (bridge_data_dir / "data").mkdir(exist_ok=True)
+    data_dir = bridge_data_dir / "data"
+    data_dir.mkdir(exist_ok=True)
+
+    # Set permissions for data directory (needed for SQLite database)
+    data_dir.chmod(0o755)  # Use more restrictive permissions
 
     # Generate configuration
     _generate_bridge_config(bridge, Path())  # Template path not used yet
@@ -509,11 +520,13 @@ def register(
         process.terminate()
         subprocess.run(f"cd {bridge.data_dir} && docker compose down", shell=True, check=False)
 
-    # Update registration with correct URL (external port)
+    # Update registration with correct URL (use container name for internal communication)
     with registration_file.open() as f:
         reg_data = yaml.safe_load(f)
 
-    reg_data["url"] = f"http://localhost:{bridge.port}"
+    # Use the bridge container name for internal Docker network communication
+    bridge_container = f"{bridge.instance_name}-{bridge.bridge_type.value}-bridge"
+    reg_data["url"] = f"http://{bridge_container}:29317"
 
     with registration_file.open("w") as f:
         yaml.dump(reg_data, f, default_flow_style=False)
@@ -561,9 +574,6 @@ def start(
         else:
             console.print(f"[red]✗[/red] {bridge_type} bridge not found for instance '{instance}'")
             raise typer.Exit(1)
-
-    # Ensure network exists
-    subprocess.run("docker network create matrix-bridges 2>/dev/null", shell=True, check=False)
 
     for bridge in bridges_to_start:
         with console.status(f"[yellow]Starting {bridge.bridge_type} bridge...[/yellow]"):
