@@ -23,7 +23,7 @@ This directory contains Matrix bridge configurations for connecting various plat
 ## Quick Start
 
 ### Prerequisites
-1. Matrix server (Synapse/Dendrite/Conduit)
+1. Matrix server (Synapse/Dendrite/Conduit/Tuwunel)
 2. Docker and Docker Compose
 3. Admin access to your Matrix server
 
@@ -44,7 +44,18 @@ Each bridge follows the same pattern:
    docker compose up  # Ctrl+C after registration.yaml is created
    ```
 
-4. **Register with Matrix**: Add registration.yaml to your Matrix server
+4. **Register with Matrix server**:
+
+   **For Tuwunel/Conduit servers:**
+   - Join `#admins:your-server.com` room
+   - Send: `!admin appservices register`
+   - Paste the entire `registration.yaml` content
+   - Verify with: `!admin appservices list`
+
+   **For Synapse servers:**
+   - Copy `registration.yaml` to server
+   - Add to `homeserver.yaml` under `app_service_config_files`
+   - Restart Synapse
 
 5. **Run**:
    ```bash

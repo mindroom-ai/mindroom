@@ -28,7 +28,7 @@ This directory contains the mautrix-telegram bridge configuration for connecting
 
 ### 3. Matrix Server
 - Your Matrix homeserver URL (e.g., `https://m-test.mindroom.chat`)
-- Admin access to add application service registration files
+- Admin access to your Matrix server's admin room
 
 ## Quick Setup
 
@@ -69,7 +69,7 @@ bridge:
         "@admin:your-domain.com": "admin"
 ```
 
-### 3. Start the Bridge
+### 3. Generate Registration
 
 ```bash
 # First run generates registration.yaml
@@ -78,8 +78,15 @@ docker compose up
 # After registration is generated, stop with Ctrl+C
 ```
 
-### 4. Register with Matrix
+### 4. Register with Matrix Server
 
+#### For Tuwunel/Conduit:
+1. Join the admin room `#admins:your-server.com`
+2. Send: `!admin appservices register`
+3. Paste the entire contents of `data/registration.yaml`
+4. Verify with: `!admin appservices list`
+
+#### For Synapse:
 1. Copy `data/registration.yaml` to your Matrix server
 2. Add to Synapse's `homeserver.yaml`:
    ```yaml
