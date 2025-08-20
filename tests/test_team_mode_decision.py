@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom.config import AgentConfig, Config, DefaultsConfig
@@ -182,6 +183,7 @@ class TestShouldFormTeam:
                 tagged_agents=["email", "phone"],
                 agents_in_thread=[],
                 all_mentioned_in_thread=[],
+                room=MagicMock(spec=nio.MatrixRoom),
                 message="Send email then call",
                 config=mock_config,
                 use_ai_decision=True,
@@ -203,6 +205,7 @@ class TestShouldFormTeam:
             tagged_agents=["email", "phone"],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
+            room=MagicMock(spec=nio.MatrixRoom),
             message="Send email then call",
             config=mock_config,
             use_ai_decision=False,
@@ -220,6 +223,7 @@ class TestShouldFormTeam:
             tagged_agents=["email", "phone"],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
+            room=MagicMock(spec=nio.MatrixRoom),
             message=None,  # No message provided
             config=mock_config,
             use_ai_decision=True,
@@ -237,6 +241,7 @@ class TestShouldFormTeam:
             tagged_agents=["email", "phone"],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
+            room=MagicMock(spec=nio.MatrixRoom),
             message="Send email then call",
             config=None,  # No config provided
             use_ai_decision=True,
@@ -254,6 +259,7 @@ class TestShouldFormTeam:
             tagged_agents=["email"],  # Only one agent
             agents_in_thread=[],
             all_mentioned_in_thread=[],
+            room=MagicMock(spec=nio.MatrixRoom),
             message="Send an email",
             config=None,
             use_ai_decision=True,
@@ -273,6 +279,7 @@ class TestShouldFormTeam:
                 tagged_agents=[],
                 agents_in_thread=["research", "analyst"],
                 all_mentioned_in_thread=[],
+                room=MagicMock(spec=nio.MatrixRoom),
                 message="Continue the analysis",
                 config=mock_config,
                 use_ai_decision=True,
@@ -323,6 +330,7 @@ class TestIntegrationScenarios:
                     tagged_agents=["email", "phone"],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
+                    room=MagicMock(spec=nio.MatrixRoom),
                     message="Email me the details, then call me to discuss",
                     config=mock_config,
                     use_ai_decision=True,
@@ -350,6 +358,7 @@ class TestIntegrationScenarios:
                     tagged_agents=["research", "analyst"],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
+                    room=MagicMock(spec=nio.MatrixRoom),
                     message="What are your thoughts on this approach?",
                     config=mock_config,
                     use_ai_decision=True,
@@ -367,6 +376,7 @@ class TestIntegrationScenarios:
             tagged_agents=["email", "phone"],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
+            room=MagicMock(spec=nio.MatrixRoom),
         )
 
         # Should still work with hardcoded logic

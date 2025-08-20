@@ -26,6 +26,7 @@ def check_agent_mentioned(event_source: dict, agent_name: str, config: Config) -
 
 def create_session_id(room_id: str, thread_id: str | None) -> str:
     """Create a session ID with thread awareness."""
+    # Thread sessions include thread ID
     return f"{room_id}:{thread_id}" if thread_id else room_id
 
 
@@ -133,11 +134,12 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
     return mentioned_agents
 
 
-def should_agent_respond(
+def should_agent_respond(  # noqa: PLR0911
     agent_name: str,
     am_i_mentioned: bool,
     is_thread: bool,
-    room_id: str,
+    room: nio.MatrixRoom,
+    is_dm_room: bool,
     configured_rooms: list[str],
     thread_history: list[dict],
     config: Config,
@@ -152,7 +154,8 @@ def should_agent_respond(
         agent_name: Name of the agent checking if it should respond
         am_i_mentioned: Whether this specific agent is mentioned
         is_thread: Whether the message is in a thread
-        room_id: The room ID where the message was sent
+        room: The Matrix room object
+        is_dm_room: Whether this is a DM room
         configured_rooms: Rooms this agent is configured for
         thread_history: History of messages in the thread
         config: Application configuration
@@ -161,14 +164,30 @@ def should_agent_respond(
 
     """
     # Check if agent has access (either native or invited to thread)
-    has_room_access = room_id in configured_rooms
+    has_room_access = room.room_id in configured_rooms or is_dm_room
     has_thread_access = is_thread and is_invited_to_thread
     has_access = has_room_access or has_thread_access
 
     # For room messages (not in threads)
     if not is_thread:
-        # Only respond if mentioned and have room access (invites only work in threads)
-        return am_i_mentioned and has_room_access
+        # In regular rooms, only respond if mentioned
+        if not is_dm_room:
+            return am_i_mentioned and has_room_access
+
+        # Special case: DM room without thread started yet
+        # If mentioned, respond
+        if am_i_mentioned:
+            return True
+
+        # If other agents mentioned but not this one, don't respond
+        if mentioned_agents and not am_i_mentioned:
+            return False
+
+        # No mentions - check how many agents are in the room
+        available_agents = get_available_agents_in_room(room, config)
+        # Single agent in DM should respond naturally
+        # Multiple agents or unable to determine - let team formation handle it
+        return len(available_agents) == 1 and agent_name in available_agents
 
     # If other agents are mentioned but not this one, don't respond
     # This handles the case where a user explicitly redirects to another agent

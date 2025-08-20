@@ -27,6 +27,17 @@ from mindroom.thread_utils import should_agent_respond
 from .conftest import TEST_PASSWORD, TEST_TMP_DIR
 
 
+def create_mock_room(room_id: str = "!room:localhost", agents: list[str] | None = None) -> MagicMock:
+    """Create a mock room with specified agents."""
+    room = MagicMock()
+    room.room_id = room_id
+    if agents:
+        room.users = {f"@mindroom_{agent}:localhost": None for agent in agents}
+    else:
+        room.users = {}
+    return room
+
+
 @pytest.fixture
 def mock_config() -> Config:
     """Create a mock config with agents."""
@@ -132,11 +143,13 @@ async def test_invited_agent_takes_ownership_of_empty_thread(mock_config: Config
     thread_history: list[dict] = []
 
     # Test invited agent behavior
+    room = create_mock_room("!automation:localhost", ["calculator"])
     should_respond = should_agent_respond(
         agent_name="calculator",
         am_i_mentioned=False,  # Not mentioned in this message
         is_thread=True,
-        room_id="!automation:localhost",
+        room=room,
+        is_dm_room=False,
         configured_rooms=[],  # Calculator not configured for this room
         thread_history=thread_history,  # No one has spoken
         config=mock_config,
@@ -151,7 +164,8 @@ async def test_invited_agent_takes_ownership_of_empty_thread(mock_config: Config
         agent_name="general",
         am_i_mentioned=False,
         is_thread=True,
-        room_id="!automation:localhost",
+        room=room,
+        is_dm_room=False,
         configured_rooms=["!automation:localhost"],  # General IS configured for room
         thread_history=thread_history,  # No one has spoken
         config=mock_config,
@@ -172,11 +186,13 @@ async def test_invited_agent_continues_conversation(mock_config: Config) -> None
     ]
 
     # Test invited agent continuing conversation
+    room = create_mock_room("!automation:localhost", ["calculator"])
     should_respond = should_agent_respond(
         agent_name="calculator",
         am_i_mentioned=False,
         is_thread=True,
-        room_id="!automation:localhost",
+        room=room,
+        is_dm_room=False,
         configured_rooms=[],  # Not configured
         thread_history=thread_history,
         config=mock_config,
@@ -198,11 +214,13 @@ async def test_multiple_agents_with_invited_agent(mock_config: Config) -> None:
     ]
 
     # Test invited agent behavior with multiple agents
+    room = create_mock_room("!automation:localhost", ["calculator", "general"])
     should_respond = should_agent_respond(
         agent_name="calculator",
         am_i_mentioned=False,
         is_thread=True,
-        room_id="!automation:localhost",
+        room=room,
+        is_dm_room=False,
         configured_rooms=[],
         thread_history=thread_history,
         config=mock_config,
@@ -213,11 +231,13 @@ async def test_multiple_agents_with_invited_agent(mock_config: Config) -> None:
     assert should_respond is False
 
     # But should respond if mentioned
+    # room already created above
     should_respond = should_agent_respond(
         agent_name="calculator",
         am_i_mentioned=True,  # Mentioned
         is_thread=True,
-        room_id="!automation:localhost",
+        room=room,
+        is_dm_room=False,
         configured_rooms=[],
         thread_history=thread_history,
         config=mock_config,

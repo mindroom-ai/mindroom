@@ -51,6 +51,7 @@ async def test_router_processes_own_voice_transcriptions() -> None:
         patch.object(bot, "_handle_command", new_callable=AsyncMock) as mock_handle,
         patch.object(bot, "client", MagicMock()),
         patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
+        patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
     ):
         await bot._on_message(room, event)
 
@@ -98,6 +99,7 @@ async def test_router_ignores_non_voice_self_messages() -> None:
         patch.object(bot, "_handle_command", new_callable=AsyncMock) as mock_handle,
         patch.object(bot, "client", MagicMock()),
         patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
+        patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
     ):
         await bot._on_message(room, event)
 

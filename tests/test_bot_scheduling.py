@@ -18,6 +18,17 @@ from mindroom.thread_utils import should_agent_respond
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 
+def create_mock_room(room_id: str = "!test:localhost", agents: list[str] | None = None) -> MagicMock:
+    """Create a mock room with specified agents."""
+    room = MagicMock()
+    room.room_id = room_id
+    if agents:
+        room.users = {f"@mindroom_{agent}:localhost": None for agent in agents}
+    else:
+        room.users = {}
+    return room
+
+
 @pytest.fixture
 def mock_agent_bot() -> AgentBot:
     """Create a mock agent bot for testing."""
@@ -525,7 +536,8 @@ class TestCommandHandling:
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
-            room_id="!test:localhost",
+            room=create_mock_room("!test:localhost", ["finance", "router"]),
+            is_dm_room=False,
             configured_rooms=["!test:localhost"],
             thread_history=thread_history,  # Full history including router's error
             config=self.config,
@@ -539,7 +551,8 @@ class TestCommandHandling:
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
-            room_id="!test:localhost",
+            room=create_mock_room("!test:localhost", ["finance", "router"]),
+            is_dm_room=False,
             configured_rooms=["!test:localhost"],
             thread_history=thread_history,  # Include router's error in history
             config=self.config,

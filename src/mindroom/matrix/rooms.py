@@ -12,10 +12,10 @@ from .client import check_and_set_avatar, create_room, join_room, matrix_client
 from .identity import MatrixID, extract_server_name_from_homeserver
 from .state import MatrixRoom, MatrixState
 
-logger = get_logger(__name__)
-
 if TYPE_CHECKING:
     from mindroom.config import Config
+
+logger = get_logger(__name__)
 
 
 def load_rooms() -> dict[str, MatrixRoom]:
@@ -253,3 +253,40 @@ async def ensure_user_in_rooms(
                 logger.info(f"User {user_id} joined room {room_key}")
             else:
                 logger.warning(f"User {user_id} failed to join room {room_key} - may need invitation")
+
+
+DM_ROOM_CACHE: dict[str, bool] = {}
+
+
+async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
+    """Check if a room is a Direct Message (DM) room.
+
+    DM rooms have the "is_direct" flag set to true in member state events.
+    This function checks the room state to determine if it's a DM.
+
+    Args:
+        client: The Matrix client
+        room_id: The room ID to check
+
+    Returns:
+        True if the room is a DM room, False otherwise
+
+    """
+    if room_id in DM_ROOM_CACHE:
+        return DM_ROOM_CACHE[room_id]
+    # Get the room state events, specifically member events
+    response = await client.room_get_state(room_id)
+
+    if isinstance(response, nio.RoomGetStateResponse):
+        # Check member events for the is_direct flag
+        for event in response.events:
+            if event.get("type") == "m.room.member":
+                content = event.get("content", {})
+                if content.get("is_direct") is True:
+                    # Cache the result for this room ID
+                    DM_ROOM_CACHE[room_id] = True
+                    return True
+
+    # If we can't find is_direct=true in any member event, it's not a DM
+    DM_ROOM_CACHE[room_id] = False
+    return False

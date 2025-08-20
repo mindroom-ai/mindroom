@@ -16,8 +16,11 @@ from .ai import get_model_instance
 from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
+from .thread_utils import get_available_agents_in_room
 
 if TYPE_CHECKING:
+    import nio
+
     from .bot import MultiAgentOrchestrator
     from .config import Config
 
@@ -226,9 +229,11 @@ async def should_form_team(
     tagged_agents: list[str],
     agents_in_thread: list[str],
     all_mentioned_in_thread: list[str],
+    room: nio.MatrixRoom,
     message: str | None = None,
     config: Config | None = None,
     use_ai_decision: bool = True,
+    is_dm_room: bool = False,
 ) -> ShouldFormTeamResult:
     """Determine if a team should form and with which mode.
 
@@ -236,9 +241,11 @@ async def should_form_team(
         tagged_agents: Agents explicitly mentioned in the current message
         agents_in_thread: Agents that have participated in the thread
         all_mentioned_in_thread: All agents ever mentioned in the thread
+        room: The Matrix room object (for checking available agents)
         message: The user's message (for AI decision context)
         config: Application configuration (for AI model access)
         use_ai_decision: Whether to use AI for mode selection
+        is_dm_room: Whether this is a DM room
 
     Returns:
         ShouldFormTeamResult with team formation decision
@@ -261,6 +268,13 @@ async def should_form_team(
     elif not tagged_agents and len(agents_in_thread) > 1:
         logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
         team_agents = agents_in_thread
+
+    # Case 4: DM room with multiple agents and no mentions
+    elif is_dm_room and not tagged_agents and room and config:
+        available_agents = get_available_agents_in_room(room, config)
+        if len(available_agents) > 1:
+            logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")
+            team_agents = available_agents
 
     # No team needed
     if not team_agents:
