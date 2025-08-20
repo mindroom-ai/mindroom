@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from .ai import get_model_instance
 from .logging_config import get_logger
 from .matrix.client import send_message
+from .matrix.identity import extract_server_name_from_homeserver
 from .matrix.mentions import create_mention_content_from_text
 
 if TYPE_CHECKING:
@@ -295,10 +296,14 @@ async def execute_scheduled_workflow(
             f"⏰ [Automated Task]\n{workflow.message}\n\n_Note: Automated task - no follow-up expected._"
         )
 
+        # Extract the server name from the client's homeserver for proper agent mentions
+        server_name = extract_server_name_from_homeserver(client.homeserver)
+
         # Create mention content with the automated message
         content = create_mention_content_from_text(
             config,
             automated_message,
+            sender_domain=server_name,
             thread_event_id=workflow.thread_id,
         )
 
