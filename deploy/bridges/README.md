@@ -1,0 +1,137 @@
+# Matrix Bridges for MindRoom Demo
+
+This directory contains Matrix bridge configurations for connecting various platforms to your Matrix server.
+
+## Available Bridges
+
+### ✅ Telegram Bridge (`telegram/`)
+- **Status**: Configured and tested
+- **Bot**: @mindroom_demo_bot
+- **Features**: Bidirectional messaging, media support, user puppeting
+- **Setup Time**: ~10 minutes
+
+### 🚧 Slack Bridge (coming soon)
+- **Status**: Not yet configured
+- **Features**: Workspace bridging, threading support
+- **Setup Time**: ~15 minutes
+
+### 🚧 Email Bridge (coming soon)
+- **Status**: Not yet configured
+- **Features**: SMTP/IMAP bridging, email to Matrix rooms
+- **Setup Time**: ~10 minutes
+
+## Quick Start
+
+### Prerequisites
+1. Matrix server (Synapse/Dendrite/Conduit)
+2. Docker and Docker Compose
+3. Admin access to your Matrix server
+
+### General Setup Pattern
+
+Each bridge follows the same pattern:
+
+1. **Generate config**:
+   ```bash
+   cd bridge-name
+   docker run --rm -v $(pwd)/data:/data:z dock.mau.dev/mautrix/bridge-name:latest
+   ```
+
+2. **Configure**: Edit `data/config.yaml` with your credentials
+
+3. **Generate registration**:
+   ```bash
+   docker compose up  # Ctrl+C after registration.yaml is created
+   ```
+
+4. **Register with Matrix**: Add registration.yaml to your Matrix server
+
+5. **Run**:
+   ```bash
+   docker compose up -d
+   ```
+
+## Network Configuration
+
+All bridges share a common Docker network:
+
+```bash
+# Create the shared network (one time)
+docker network create matrix-bridges
+```
+
+## Security Notes
+
+⚠️ **Never commit these files:**
+- `data/config.yaml` - Contains API keys and tokens
+- `data/registration.yaml` - Contains authentication tokens
+- `.env` - Environment variables with secrets
+- `*.db` - Database files
+
+Use the provided `.gitignore` files in each bridge directory.
+
+## For Demo Purposes
+
+For the MindRoom demo, we're focusing on showing:
+1. **Cross-platform messaging** - Same conversation in Telegram, Slack, Email
+2. **Persistent memory** - Agents remember context across platforms
+3. **Federation** - Agents joining from different servers
+
+### Demo Credentials Needed
+
+#### Telegram
+- API ID: Get from https://my.telegram.org
+- API Hash: Get from https://my.telegram.org
+- Bot Token: Create bot via @BotFather
+
+#### Slack
+- Slack App OAuth Token
+- Workspace details
+
+#### Email
+- SMTP server credentials
+- Domain for receiving emails
+
+## Architecture
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Telegram   │────▶│   Bridge    │────▶│   Matrix    │
+└─────────────┘     └─────────────┘     └─────────────┘
+                            │                    │
+┌─────────────┐     ┌─────────────┐            │
+│    Slack    │────▶│   Bridge    │────────────┤
+└─────────────┘     └─────────────┘            │
+                            │                    │
+┌─────────────┐     ┌─────────────┐            │
+│    Email    │────▶│   Bridge    │────────────┤
+└─────────────┘     └─────────────┘            │
+                                                 ▼
+                                          ┌─────────────┐
+                                          │  MindRoom   │
+                                          │   Agents    │
+                                          └─────────────┘
+```
+
+## Troubleshooting
+
+### Bridge can't connect to Matrix
+- Check `homeserver` address in config.yaml
+- Verify registration.yaml is loaded by Matrix server
+- Check firewall/network settings
+
+### "Unknown access token" errors
+- Registration not loaded by Matrix server
+- Restart Matrix server after adding registration
+- Check tokens match between config and registration
+
+### Database errors
+- Ensure data directory has write permissions
+- For Docker: `chmod 777 data/` (for demo only!)
+
+## Support
+
+For bridge-specific issues:
+- Telegram: https://docs.mau.fi/bridges/python/telegram/
+- Slack: https://docs.mau.fi/bridges/python/slack/
+- Email: https://github.com/etkecc/postmoogle

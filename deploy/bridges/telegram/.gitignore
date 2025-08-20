@@ -1,0 +1,13 @@
+# Sensitive files
+data/config.yaml
+data/*.db
+data/*.db-*
+data/registration.yaml
+.env
+
+# Runtime files
+data/media/
+*.log
+
+# Archive files
+*.tar.gz
