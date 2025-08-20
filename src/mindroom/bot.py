@@ -809,7 +809,6 @@ class AgentBot:
 
         # Send initial "Thinking..." message for stop button support (only if not editing)
         initial_message_id = None
-        reaction_event_id = None
         if not existing_event_id:
             initial_message_id = await self._send_response(
                 room,
@@ -817,10 +816,7 @@ class AgentBot:
                 f"Thinking... {IN_PROGRESS_MARKER}",
                 thread_id,
             )
-            if initial_message_id:
-                # Track the message first, then add stop button (which will update the reaction ID)
-                self.logger.info("Adding stop button to initial message", message_id=initial_message_id)
-                reaction_event_id = await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
+            # Note: We don't track the message here yet because we don't have the task created
 
         # Store memory for this agent (do this once, before generating response)
         session_id = create_session_id(room_id, thread_id)
@@ -861,7 +857,11 @@ class AgentBot:
 
         task = asyncio.create_task(generate())
         if initial_message_id:
-            self.stop_manager.set_current(initial_message_id, room_id, task, reaction_event_id)
+            # First track the message with the task
+            self.stop_manager.set_current(initial_message_id, room_id, task, None)
+            # Then add the stop button (which will update the reaction_event_id)
+            self.logger.info("Adding stop button to initial message", message_id=initial_message_id)
+            await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
 
         try:
             await task
@@ -1214,7 +1214,6 @@ class TeamBot(AgentBot):
 
         # Send initial "Thinking..." message for stop button support (only if not editing)
         initial_message_id = None
-        reaction_event_id = None
         if not existing_event_id:
             initial_message_id = await self._send_response(
                 room,
@@ -1222,10 +1221,7 @@ class TeamBot(AgentBot):
                 f"🤝 Team Response: Thinking... {IN_PROGRESS_MARKER}",
                 thread_id,
             )
-            if initial_message_id:
-                # Track the message first, then add stop button (which will update the reaction ID)
-                self.logger.info("Adding stop button to initial message", message_id=initial_message_id)
-                reaction_event_id = await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
+            # Note: We don't track the message here yet because we don't have the task created
 
         # Get the appropriate model for this team and room
         model_name = get_team_model(self.agent_name, room_id, self.config)
@@ -1273,7 +1269,11 @@ class TeamBot(AgentBot):
 
         task = asyncio.create_task(generate_team_response())
         if initial_message_id:
-            self.stop_manager.set_current(initial_message_id, room_id, task, reaction_event_id)
+            # First track the message with the task
+            self.stop_manager.set_current(initial_message_id, room_id, task, None)
+            # Then add the stop button (which will update the reaction_event_id)
+            self.logger.info("Adding stop button to initial team message", message_id=initial_message_id)
+            await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
 
         try:
             await task
