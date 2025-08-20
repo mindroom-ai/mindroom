@@ -523,9 +523,23 @@ class AgentBot:
             # Check if this is from a bot/agent
             sender_agent_name = extract_agent_name(event.sender, self.config)
             # Only handle stop from users, not agents
-            if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
-                # Send a confirmation message
-                await self._send_response(room, event.reacts_to, "✅ Generation stopped", None)
+            if not sender_agent_name:
+                # Check if this agent is tracking the message being reacted to
+                if await self.stop_manager.handle_stop_reaction(event.reacts_to):
+                    self.logger.info(
+                        "Stopped generation for message",
+                        message_id=event.reacts_to,
+                        stopped_by=event.sender,
+                    )
+                    # Send a confirmation message
+                    await self._send_response(room, event.reacts_to, "✅ Generation stopped", None)
+                    return
+                # Another agent might be handling this message
+                self.logger.debug(
+                    "Stop reaction not for this agent's message",
+                    message_id=event.reacts_to,
+                    agent=self.agent_name,
+                )
                 return
 
         # Then check for interactive question reactions
