@@ -80,17 +80,26 @@ For the MindRoom demo, we're focusing on showing:
 ### Demo Credentials Needed
 
 #### Telegram
-- API ID: Get from https://my.telegram.org
-- API Hash: Get from https://my.telegram.org
-- Bot Token: Create bot via @BotFather
+1. **Bot Token** (from @BotFather in Telegram):
+   - Send `/newbot` to @BotFather
+   - Choose bot name and username (must end in `bot`)
+   - Save the token you receive
+
+2. **API Credentials** (from https://my.telegram.org):
+   - Log in with your phone number
+   - Go to "API development tools"
+   - Create an app if needed (Platform: Web)
+   - Save your API ID (number) and API Hash (string)
 
 #### Slack
 - Slack App OAuth Token
 - Workspace details
+- See: https://api.slack.com/apps
 
 #### Email
 - SMTP server credentials
 - Domain for receiving emails
+- See: https://github.com/etkecc/postmoogle
 
 ## Architecture
 

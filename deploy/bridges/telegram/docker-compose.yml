@@ -7,7 +7,7 @@ services:
     volumes:
       - ./data:/data
     ports:
-      - "29317:29317"
+      - "29318:29317"
     networks:
       - bridge-network
 
