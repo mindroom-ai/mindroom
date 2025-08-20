@@ -525,12 +525,7 @@ class AgentBot:
             # Only handle stop from users, not agents
             if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
                 # Send a confirmation message
-                await self._send_response(
-                    room,
-                    event.reacts_to,
-                    "✅ Generation stopped",
-                    None,
-                )
+                await self._send_response(room, event.reacts_to, "✅ Generation stopped", None)
                 return
 
         # Then check for interactive question reactions
@@ -685,7 +680,7 @@ class AgentBot:
             # Edit the existing message
             await self._edit_message(room.room_id, existing_event_id, response_text, thread_id)
             # Remove stop button when response is complete
-            await self.stop_manager.remove_stop_button(self.client)
+            await self.stop_manager.remove_stop_button(self.client, existing_event_id)
             return
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -742,7 +737,8 @@ class AgentBot:
             ):
                 await streaming.update_content(chunk, self.client)
 
-            await streaming.finalize(self.client, self.stop_manager)
+            # Pass the initial message ID for stop button removal
+            await streaming.finalize(self.client, self.stop_manager, existing_event_id)
 
             if streaming.event_id:
                 self.logger.info("Sent streaming response", event_id=streaming.event_id)
@@ -808,7 +804,8 @@ class AgentBot:
                 thread_id,
             )
             if initial_message_id:
-                # Add stop button reaction and track the event ID
+                # Track the message first, then add stop button (which will update the reaction ID)
+                self.logger.info("Adding stop button to initial message", message_id=initial_message_id)
                 reaction_event_id = await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
 
         # Store memory for this agent (do this once, before generating response)
@@ -855,10 +852,11 @@ class AgentBot:
         try:
             await task
         except asyncio.CancelledError:
-            self.logger.info("Response generation cancelled by user")
+            self.logger.info("Response generation cancelled by user", message_id=initial_message_id)
             # Keep the stop button visible when cancelled (shows it was stopped)
         finally:
-            self.stop_manager.clear_current()
+            if initial_message_id:
+                self.stop_manager.clear_message(initial_message_id)
 
     async def _send_response(
         self,
@@ -1211,7 +1209,8 @@ class TeamBot(AgentBot):
                 thread_id,
             )
             if initial_message_id:
-                # Add stop button reaction and track the event ID
+                # Track the message first, then add stop button (which will update the reaction ID)
+                self.logger.info("Adding stop button to initial message", message_id=initial_message_id)
                 reaction_event_id = await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
 
         # Get the appropriate model for this team and room
@@ -1265,12 +1264,14 @@ class TeamBot(AgentBot):
         try:
             await task
             # Remove stop button when team response is complete
-            await self.stop_manager.remove_stop_button(self.client)
+            if initial_message_id:
+                await self.stop_manager.remove_stop_button(self.client, initial_message_id)
         except asyncio.CancelledError:
-            self.logger.info("Team response generation cancelled by user")
+            self.logger.info("Team response generation cancelled by user", message_id=initial_message_id)
             # Keep the stop button visible when cancelled (shows it was stopped)
         finally:
-            self.stop_manager.clear_current()
+            if initial_message_id:
+                self.stop_manager.clear_message(initial_message_id)
 
 
 @dataclass
