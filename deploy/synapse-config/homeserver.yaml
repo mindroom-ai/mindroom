@@ -1,0 +1,145 @@
+# Synapse Homeserver Configuration for MindRoom
+# This is a template that will be customized per instance
+
+server_name: "INSTANCE_DOMAIN"
+pid_file: /data/homeserver.pid
+web_client_location: false
+public_baseurl: "https://INSTANCE_DOMAIN"
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    resources:
+      - names: [client, federation]
+        compress: false
+
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: synapse_password
+    database: synapse
+    host: postgres
+    cp_min: 5
+    cp_max: 10
+
+# Registration Security - IMPORTANT!
+# By default, registration is disabled for security
+enable_registration: false
+
+# Shared secret for registering users programmatically (for bots)
+# This allows MindRoom bots to register while blocking public registration
+registration_shared_secret: "REGISTRATION_SHARED_SECRET"
+
+# If you need to allow limited registration with tokens:
+# Uncomment and configure:
+# enable_registration_without_verification: true
+# registration_requires_token: true
+
+# To generate registration tokens (when registration_requires_token is true):
+# docker exec INSTANCE_NAME-synapse register_new_matrix_user http://localhost:8008 -c /data/homeserver.yaml
+# Or use the admin API to create tokens
+
+# Rate limiting for registration (when enabled)
+rc_registration:
+  per_second: 0.17  # ~10 per minute
+  burst_count: 3
+
+# Auto-join rooms for new users (optional)
+# auto_join_rooms:
+#   - "#general:INSTANCE_DOMAIN"
+
+# Trusted key servers
+trusted_key_servers:
+  - server_name: "matrix.org"
+
+# Media storage
+media_store_path: "/data/media_store"
+max_upload_size: "50M"
+max_image_pixels: "32M"
+dynamic_thumbnails: false
+
+# URL preview settings
+url_preview_enabled: true
+url_preview_ip_range_blacklist:
+  - '127.0.0.0/8'
+  - '10.0.0.0/8'
+  - '172.16.0.0/12'
+  - '192.168.0.0/16'
+  - '100.64.0.0/10'
+  - '192.0.0.0/24'
+  - '169.254.0.0/16'
+  - '::1/128'
+  - 'fe80::/10'
+  - 'fc00::/7'
+  - '2001:db8::/32'
+  - 'ff00::/8'
+  - 'fec0::/10'
+
+# Federation
+federation_domain_whitelist: []  # Empty = allow all
+# To restrict federation to specific servers:
+# federation_domain_whitelist:
+#   - "trusted-server.com"
+#   - "another-server.org"
+
+# Room creation
+# Anyone who can register can create rooms by default
+# To restrict: set to false and use room_list_publication_rules
+enable_room_list_search: true
+
+# Retention policy
+retention:
+  enabled: false
+
+# Redis configuration for workers (optional, for scaling)
+redis:
+  enabled: true
+  host: redis
+  port: 6379
+
+# Logging
+log_config: "/data/log.config"
+
+# Report stats to matrix.org
+report_stats: false
+
+# Signing keys path
+signing_key_path: "/data/signing.key"
+
+# Macaroon secret key
+macaroon_secret_key: "MACAROON_SECRET_KEY"
+
+# Form secret
+form_secret: "FORM_SECRET"
+
+# Admin users - add your admin Matrix IDs here
+# admins:
+#   - "@admin:INSTANCE_DOMAIN"
+
+# Enable presence tracking
+use_presence: true
+
+# Email configuration (optional, for password resets)
+# email:
+#   smtp_host: smtp.gmail.com
+#   smtp_port: 587
+#   smtp_user: "your-email@gmail.com"
+#   smtp_pass: "your-app-password"
+#   notif_from: "MindRoom <noreply@INSTANCE_DOMAIN>"
+
+# Security settings
+password_config:
+  enabled: true
+  minimum_length: 8
+
+# Captcha for registration (when enabled)
+# recaptcha_public_key: "YOUR_RECAPTCHA_PUBLIC_KEY"
+# recaptcha_private_key: "YOUR_RECAPTCHA_PRIVATE_KEY"
+
+# Turn off unnecessary features for security
+enable_search: true
+enable_registration_captcha: false
+allow_guest_access: false
