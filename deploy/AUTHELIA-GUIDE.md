@@ -29,7 +29,7 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.authelia.ym
 
 ### 4. Access your app
 - App: `https://myapp.com` (will redirect to auth)
-- Auth portal: `https://auth.myapp.com`
+- Auth portal: `https://auth-myapp.com`
 
 ## User Management
 

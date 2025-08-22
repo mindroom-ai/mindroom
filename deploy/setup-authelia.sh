@@ -88,7 +88,7 @@ echo "   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.au
 echo
 echo "3. Access your instance:"
 echo "   - App: https://$INSTANCE_DOMAIN"
-echo "   - Auth: https://auth.$INSTANCE_DOMAIN"
+echo "   - Auth: https://auth-$INSTANCE_DOMAIN"
 echo
 echo "4. For production, update:"
 echo "   - SMTP settings in configuration.yml for password reset emails"

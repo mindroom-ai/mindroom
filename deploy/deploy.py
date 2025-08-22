@@ -56,6 +56,12 @@ class MatrixType(str, Enum):
     SYNAPSE = "synapse"
 
 
+class AuthType(str, Enum):
+    """Authentication type enum."""
+
+    AUTHELIA = "authelia"
+
+
 class Instance(BaseModel):
     """Instance configuration model."""
 
@@ -67,6 +73,7 @@ class Instance(BaseModel):
     domain: str
     status: InstanceStatus = InstanceStatus.CREATED
     matrix_type: MatrixType | None = None
+    auth_type: AuthType | None = None
 
 
 class AllocatedPorts(BaseModel):
@@ -257,13 +264,19 @@ def _prepare_matrix_config(
 
 
 def _get_docker_compose_files(instance: Instance, env_file_relative: str, project_root: Path) -> str:
-    """Get the docker-compose command with appropriate files based on matrix type."""
+    """Get the docker-compose command with appropriate files based on matrix and auth type."""
     base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
 
+    # Add Matrix server compose file if configured
     if instance.matrix_type == MatrixType.TUWUNEL:
-        return f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
-    if instance.matrix_type == MatrixType.SYNAPSE:
-        return f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+        base_cmd = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
+    elif instance.matrix_type == MatrixType.SYNAPSE:
+        base_cmd = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+
+    # Add Authelia compose file if configured
+    if instance.auth_type == AuthType.AUTHELIA:
+        base_cmd = f"{base_cmd} -f deploy/docker-compose.authelia.yml"
+
     return base_cmd
 
 
@@ -410,6 +423,54 @@ def _setup_synapse_config(instance: Instance) -> None:
     )
 
 
+def _setup_authelia_config(instance: Instance) -> None:
+    """Set up Authelia configuration directory and files."""
+    authelia_dir = Path(instance.data_dir) / "authelia"
+    authelia_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create Redis directory for session storage
+    redis_dir = Path(instance.data_dir) / "authelia-redis"
+    redis_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy configuration files
+    config_template = SCRIPT_DIR / "authelia-config" / "configuration.yml"
+    users_template = SCRIPT_DIR / "authelia-config" / "users_database.yml"
+
+    if config_template.exists():
+        shutil.copy(config_template, authelia_dir / "configuration.yml")
+    if users_template.exists():
+        shutil.copy(users_template, authelia_dir / "users_database.yml")
+
+    # Generate secrets for configuration
+    config_file = authelia_dir / "configuration.yml"
+    if config_file.exists():
+        config_content = config_file.read_text()
+
+        # Generate three different secrets
+        jwt_secret = secrets.token_hex(32)
+        session_secret = secrets.token_hex(32)
+        encryption_key = secrets.token_hex(32)
+
+        # Replace placeholders with actual secrets (one at a time)
+        config_content = config_content.replace("CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32", jwt_secret, 1)
+        config_content = config_content.replace(
+            "CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32",
+            session_secret,
+            1,
+        )
+        config_content = config_content.replace(
+            "CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32",
+            encryption_key,
+            1,
+        )
+
+        # Update domain references
+        config_content = config_content.replace("mindroom.localhost", instance.domain)
+        config_content = config_content.replace("auth-mindroom.localhost", f"auth-{instance.domain}")
+
+        config_file.write_text(config_content)
+
+
 def _update_registry(registry: Registry, instance: Instance, matrix_type: MatrixType | None) -> None:
     """Update the registry with the new instance."""
     registry.instances[instance.name] = instance
@@ -420,7 +481,7 @@ def _update_registry(registry: Registry, instance: Instance, matrix_type: Matrix
     save_registry(registry)
 
 
-def _print_instance_info(instance: Instance, matrix_type: MatrixType | None) -> None:
+def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, auth_type: AuthType | None = None) -> None:
     """Print information about the created instance."""
     console.print(f"[green]✓[/green] Created instance '[cyan]{instance.name}[/cyan]'")
     console.print(f"  [dim]Backend port:[/dim] {instance.backend_port}")
@@ -433,6 +494,10 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None) -> 
     if matrix_type:
         matrix_name = "Tuwunel (lightweight)" if matrix_type == MatrixType.TUWUNEL else "Synapse (full)"
         console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
+    if auth_type:
+        console.print("  [dim]Auth:[/dim] [green]Authelia (production-ready)[/green]")
+        console.print("    [yellow]Default login:[/yellow] admin / mindroom")
+        console.print(f"    [dim]Auth URL:[/dim] https://auth-{instance.domain}")
 
 
 @app.command()
@@ -443,6 +508,11 @@ def create(
         None,
         "--matrix",
         help="Include Matrix server: 'tuwunel' (lightweight) or 'synapse' (full)",
+    ),
+    auth: str | None = typer.Option(
+        None,
+        "--auth",
+        help="Include authentication: 'authelia' (production-ready auth server)",
     ),
 ) -> None:
     """Create a new instance with automatic port allocation."""
@@ -459,6 +529,15 @@ def create(
             matrix_type = MatrixType(matrix)
         except ValueError:
             console.print(f"[red]✗[/red] Invalid matrix option '{matrix}'. Use 'tuwunel' or 'synapse'")
+            raise typer.Exit(1)  # noqa: B904
+
+    # Validate and convert auth type to enum
+    auth_type: AuthType | None = None
+    if auth:
+        try:
+            auth_type = AuthType(auth)
+        except ValueError:
+            console.print(f"[red]✗[/red] Invalid auth option '{auth}'. Use 'authelia'")
             raise typer.Exit(1)  # noqa: B904
 
     # Allocate ports and create instance
@@ -482,6 +561,7 @@ def create(
         domain=domain or f"{name}.localhost",
         status=InstanceStatus.CREATED,
         matrix_type=matrix_type,
+        auth_type=auth_type,
     )
 
     # Create environment file
@@ -495,11 +575,15 @@ def create(
     if matrix_type == MatrixType.SYNAPSE:
         _setup_synapse_config(instance)
 
+    # Set up Authelia configuration if needed
+    if auth_type == AuthType.AUTHELIA:
+        _setup_authelia_config(instance)
+
     # Update registry
     _update_registry(registry, instance, matrix_type)
 
     # Print instance information
-    _print_instance_info(instance, matrix_type)
+    _print_instance_info(instance, matrix_type, auth_type)
 
 
 @app.command()
@@ -924,7 +1008,7 @@ def get_actual_status(name: str) -> tuple[bool, bool, bool]:
 
 
 @app.command("list")
-def list_instances() -> None:
+def list_instances() -> None:  # noqa: PLR0912
     """List all configured instances."""
     registry = load_registry()
     instances = registry.instances
@@ -974,13 +1058,18 @@ def list_instances() -> None:
         else:
             matrix_display = "[dim]disabled[/dim]"
 
+        # Add auth indicator to domain if configured
+        domain_display = instance.domain
+        if instance.auth_type == AuthType.AUTHELIA:
+            domain_display = f"{instance.domain} 🔒"
+
         table.add_row(
             name,
             status_display,
             str(instance.backend_port),
             str(instance.frontend_port),
             matrix_display,
-            instance.domain,
+            domain_display,
             instance.data_dir,
         )
 

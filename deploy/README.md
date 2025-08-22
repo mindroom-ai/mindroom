@@ -18,8 +18,11 @@ The `deploy` script manages multiple Mindroom instances with optional Matrix ser
 ```bash
 cd deploy
 
-# Basic instance (no Matrix server)
+# Basic instance (no Matrix server, no auth)
 ./deploy.py create myapp
+
+# Instance with production-ready authentication (Authelia)
+./deploy.py create myapp --auth authelia
 
 # Instance with lightweight Tuwunel Matrix server
 ./deploy.py create myapp --matrix tuwunel
@@ -27,8 +30,11 @@ cd deploy
 # Instance with full Synapse Matrix server (PostgreSQL + Redis)
 ./deploy.py create myapp --matrix synapse
 
-# Instance with custom domain
-./deploy.py create myapp --domain myapp.example.com --matrix tuwunel
+# Instance with custom domain and authentication
+./deploy.py create myapp --domain myapp.example.com --auth authelia
+
+# Full setup: Matrix + Authentication
+./deploy.py create myapp --domain myapp.example.com --matrix tuwunel --auth authelia
 ```
 
 ### 2. Configure Your Instance
@@ -56,6 +62,7 @@ This will start:
 - Mindroom backend (port automatically assigned, e.g., 8765)
 - Mindroom frontend (port automatically assigned, e.g., 3003)
 - Matrix server if enabled (port automatically assigned, e.g., 8448)
+- Authelia authentication server if enabled (with Redis for sessions)
 - PostgreSQL and Redis (if using Synapse)
 
 ### 4. Access Your Instance
@@ -64,6 +71,7 @@ After starting, your instance will be available at:
 - **Frontend**: `http://localhost:{FRONTEND_PORT}` (e.g., `http://localhost:3003`)
 - **Backend API**: `http://localhost:{BACKEND_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
+- **Auth Portal** (if enabled): `https://auth-{DOMAIN}` (e.g., `https://auth-myapp.example.com`)
 
 To find your ports:
 ```bash

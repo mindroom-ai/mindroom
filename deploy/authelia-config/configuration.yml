@@ -44,7 +44,7 @@ access_control:
   default_policy: deny
   rules:
     # Allow access to Authelia itself
-    - domain: auth.*.localhost
+    - domain: auth-*.localhost
       policy: bypass
 
     # Require authentication for all mindroom instances
@@ -66,7 +66,7 @@ session:
 
   cookies:
     - domain: mindroom.localhost
-      authelia_url: https://auth.mindroom.localhost
+      authelia_url: https://auth-mindroom.localhost
 
   redis:
     host: authelia-redis
