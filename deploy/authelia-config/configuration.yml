@@ -64,6 +64,10 @@ session:
   inactivity: 5m
   remember_me_duration: 1M
 
+  cookies:
+    - domain: mindroom.localhost
+      authelia_url: https://auth.mindroom.localhost
+
   redis:
     host: authelia-redis
     port: 6379
@@ -76,6 +80,8 @@ regulation:
 
 # Storage for user preferences and 2FA
 storage:
+  # Generate with: openssl rand -hex 32
+  encryption_key: CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32
   local:
     path: /config/db.sqlite3
 

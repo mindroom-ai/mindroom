@@ -45,20 +45,24 @@ if grep -q "CHANGE_THIS" "$DATA_DIR/authelia/configuration.yml"; then
     if command -v openssl &> /dev/null; then
         JWT_SECRET=$(openssl rand -hex 32)
         SESSION_SECRET=$(openssl rand -hex 32)
+        ENCRYPTION_KEY=$(openssl rand -hex 32)
     else
         JWT_SECRET=$(python -c "import secrets; print(secrets.token_hex(32))")
         SESSION_SECRET=$(python -c "import secrets; print(secrets.token_hex(32))")
+        ENCRYPTION_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
     fi
 
-    # Update configuration with secrets
+    # Update configuration with secrets - use different delimiters to avoid conflicts
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        # macOS
-        sed -i '' "s/CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32/$JWT_SECRET/g" "$DATA_DIR/authelia/configuration.yml"
-        sed -i '' "s/CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32/$SESSION_SECRET/g" "$DATA_DIR/authelia/configuration.yml"
+        # macOS - replace each secret only once
+        sed -i '' "0,/CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32/s//$JWT_SECRET/" "$DATA_DIR/authelia/configuration.yml"
+        sed -i '' "0,/CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32/s//$SESSION_SECRET/" "$DATA_DIR/authelia/configuration.yml"
+        sed -i '' "0,/CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32/s//$ENCRYPTION_KEY/" "$DATA_DIR/authelia/configuration.yml"
     else
-        # Linux
-        sed -i "s/CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32/$JWT_SECRET/g" "$DATA_DIR/authelia/configuration.yml"
-        sed -i "s/CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32/$SESSION_SECRET/g" "$DATA_DIR/authelia/configuration.yml"
+        # Linux - replace each secret only once
+        sed -i "0,/CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32/s//$JWT_SECRET/" "$DATA_DIR/authelia/configuration.yml"
+        sed -i "0,/CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32/s//$SESSION_SECRET/" "$DATA_DIR/authelia/configuration.yml"
+        sed -i "0,/CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32/s//$ENCRYPTION_KEY/" "$DATA_DIR/authelia/configuration.yml"
     fi
 fi
 
