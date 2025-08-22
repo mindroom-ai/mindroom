@@ -12,6 +12,7 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 # Import routers
+from mindroom.api.auth import router as auth_router
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.google_integration import router as google_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
@@ -96,6 +97,7 @@ observer.schedule(ConfigFileHandler(), path=str(CONFIG_PATH.parent), recursive=F
 observer.start()
 
 # Include routers
+app.include_router(auth_router)
 app.include_router(credentials_router)
 app.include_router(google_router)
 app.include_router(homeassistant_router)

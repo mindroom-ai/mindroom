@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { BrowserRouter, useNavigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { useConfigStore } from '@/store/configStore';
 import { AgentList } from '@/components/AgentList/AgentList';
 import { AgentEditor } from '@/components/AgentEditor/AgentEditor';
@@ -17,13 +17,20 @@ import { Dashboard } from '@/components/Dashboard/Dashboard';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
+import { AuthProvider } from '@/contexts/AuthContext';
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
+import { Login } from '@/components/Login/Login';
+import { ProtectedRoute } from '@/components/ProtectedRoute/ProtectedRoute';
+import { useAuth } from '@/contexts/AuthContext';
+import { Button } from '@/components/ui/button';
+import { LogOut } from 'lucide-react';
 
 const queryClient = new QueryClient();
 
 function AppContent() {
   const { loadConfig, syncStatus, error, selectedAgentId, selectedTeamId, selectedRoomId } =
     useConfigStore();
+  const { isAuthEnabled, username, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -75,6 +82,15 @@ function AppContent() {
               </div>
             </h1>
             <div className="flex items-center gap-4">
+              {isAuthEnabled && username && (
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-600 dark:text-gray-400">{username}</span>
+                  <Button variant="ghost" size="sm" onClick={logout} className="gap-2">
+                    <LogOut className="h-4 w-4" />
+                    Logout
+                  </Button>
+                </div>
+              )}
               <ThemeToggle />
               <SyncStatus status={syncStatus} />
             </div>
@@ -224,10 +240,24 @@ function AppContent() {
             </TabsContent>
           </Tabs>
         </div>
-
-        <Toaster />
       </div>
     </div>
+  );
+}
+
+function AppWithAuth() {
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route
+        path="/*"
+        element={
+          <ProtectedRoute>
+            <AppContent />
+          </ProtectedRoute>
+        }
+      />
+    </Routes>
   );
 }
 
@@ -236,7 +266,10 @@ export default function App() {
     <BrowserRouter>
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
-          <AppContent />
+          <AuthProvider>
+            <AppWithAuth />
+            <Toaster />
+          </AuthProvider>
         </ThemeProvider>
       </QueryClientProvider>
     </BrowserRouter>

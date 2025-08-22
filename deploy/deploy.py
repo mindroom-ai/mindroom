@@ -67,6 +67,9 @@ class Instance(BaseModel):
     domain: str
     status: InstanceStatus = InstanceStatus.CREATED
     matrix_type: MatrixType | None = None
+    auth_enabled: bool = False
+    auth_username: str | None = None
+    auth_password_hash: str | None = None
 
 
 class AllocatedPorts(BaseModel):
@@ -297,6 +300,17 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
         f.write(f"DATA_DIR={abs_data_dir}\n")
         f.write(f"INSTANCE_DOMAIN={instance.domain}\n")
 
+        # Add authentication configuration
+        if instance.auth_enabled and instance.auth_username and instance.auth_password_hash:
+            f.write("\n# Authentication configuration\n")
+            f.write("MINDROOM_AUTH_ENABLED=true\n")
+            f.write(f"MINDROOM_AUTH_USERNAME={instance.auth_username}\n")
+            f.write(f"MINDROOM_AUTH_PASSWORD_HASH={instance.auth_password_hash}\n")
+            f.write("MINDROOM_SESSION_DURATION=86400\n")  # 24 hours
+        else:
+            f.write("\n# Authentication disabled\n")
+            f.write("MINDROOM_AUTH_ENABLED=false\n")
+
         if matrix_type:
             f.write(f"\n# Matrix configuration ({matrix_type.value})\n")
             f.write(f"MATRIX_PORT={instance.matrix_port}\n")
@@ -430,6 +444,8 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None) -> 
     console.print(f"  [dim]Data dir:[/dim] {instance.data_dir}")
     console.print(f"  [dim]Domain:[/dim] {instance.domain}")
     console.print(f"  [dim]Env file:[/dim] .env.{instance.name}")
+    if instance.auth_enabled:
+        console.print(f"  [dim]Authentication:[/dim] [green]Enabled[/green] (user: {instance.auth_username})")
     if matrix_type:
         matrix_name = "Tuwunel (lightweight)" if matrix_type == MatrixType.TUWUNEL else "Synapse (full)"
         console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
@@ -444,6 +460,7 @@ def create(
         "--matrix",
         help="Include Matrix server: 'tuwunel' (lightweight) or 'synapse' (full)",
     ),
+    auth: bool = typer.Option(False, "--auth", help="Enable authentication for frontend access"),
 ) -> None:
     """Create a new instance with automatic port allocation."""
     registry = load_registry()
@@ -473,6 +490,45 @@ def create(
 
     data_dir = f"{registry.defaults.data_dir_base}/{name}"
 
+    # Handle authentication setup if requested
+    auth_username = None
+    auth_password_hash = None
+
+    if auth:
+        console.print("\n[cyan]Setting up authentication...[/cyan]")
+
+        # Try to import bcrypt
+        try:
+            import bcrypt
+        except ImportError:
+            console.print("[yellow]⚠️  bcrypt not installed![/yellow]")
+            console.print("Install it with: pip install bcrypt")
+            console.print("\nAlternatively, run deploy_auth.py after installation to generate credentials.")
+            auth = False
+        else:
+            import getpass
+
+            auth_username = typer.prompt("Enter username", default="admin")
+
+            while True:
+                password = getpass.getpass("Enter password: ")
+                confirm = getpass.getpass("Confirm password: ")
+
+                if password != confirm:
+                    console.print("[red]Passwords don't match. Please try again.[/red]")
+                    continue
+
+                if len(password) < 8:
+                    console.print("[red]Password must be at least 8 characters long.[/red]")
+                    continue
+
+                break
+
+            # Generate password hash
+            salt = bcrypt.gensalt()
+            auth_password_hash = bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+            console.print(f"[green]✓[/green] Authentication configured for user '{auth_username}'")
+
     instance = Instance(
         name=name,
         backend_port=backend_port,
@@ -482,6 +538,9 @@ def create(
         domain=domain or f"{name}.localhost",
         status=InstanceStatus.CREATED,
         matrix_type=matrix_type,
+        auth_enabled=auth,
+        auth_username=auth_username,
+        auth_password_hash=auth_password_hash,
     )
 
     # Create environment file
@@ -921,6 +980,83 @@ def get_actual_status(name: str) -> tuple[bool, bool, bool]:
     matrix_running = any(m in running_containers for m in ["synapse", "tuwunel", "postgres", "redis"])
 
     return backend_running, frontend_running, matrix_running
+
+
+@app.command()
+def auth(
+    name: str = typer.Argument("default", help="Instance name"),
+    enable: bool = typer.Option(None, "--enable/--disable", help="Enable or disable authentication"),
+    update: bool = typer.Option(False, "--update", help="Update authentication credentials"),
+) -> None:
+    """Manage authentication for an existing instance."""
+    registry = load_registry()
+
+    if name not in registry.instances:
+        console.print(f"[red]✗[/red] Instance '{name}' not found!")
+        raise typer.Exit(1)
+
+    instance = registry.instances[name]
+
+    # Show current status if no action specified
+    if enable is None and not update:
+        if instance.auth_enabled:
+            console.print(f"[green]Authentication is enabled[/green] for instance '{name}'")
+            if instance.auth_username:
+                console.print(f"  Username: {instance.auth_username}")
+        else:
+            console.print(f"[yellow]Authentication is disabled[/yellow] for instance '{name}'")
+        return
+
+    # Disable authentication
+    if enable is False:
+        instance.auth_enabled = False
+        instance.auth_username = None
+        instance.auth_password_hash = None
+        console.print(f"[yellow]Authentication disabled[/yellow] for instance '{name}'")
+
+    # Enable or update authentication
+    elif enable is True or update:
+        try:
+            import bcrypt
+        except ImportError:
+            console.print("[red]✗[/red] bcrypt not installed!")
+            console.print("Install it with: pip install bcrypt")
+            raise typer.Exit(1) from None
+
+        import getpass
+
+        username = typer.prompt("Enter username", default=instance.auth_username or "admin")
+
+        while True:
+            password = getpass.getpass("Enter password: ")
+            confirm = getpass.getpass("Confirm password: ")
+
+            if password != confirm:
+                console.print("[red]Passwords don't match. Please try again.[/red]")
+                continue
+
+            if len(password) < 8:
+                console.print("[red]Password must be at least 8 characters long.[/red]")
+                continue
+
+            break
+
+        # Generate password hash
+        salt = bcrypt.gensalt()
+        password_hash = bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+
+        instance.auth_enabled = True
+        instance.auth_username = username
+        instance.auth_password_hash = password_hash
+
+        console.print(f"[green]✓[/green] Authentication {'updated' if update else 'enabled'} for user '{username}'")
+
+    # Save changes
+    save_registry(registry)
+    _create_environment_file(instance, name, instance.matrix_type)
+
+    console.print("\n[cyan]Restart the instance for changes to take effect:[/cyan]")
+    console.print(f"  ./deploy.py restart {name}")
 
 
 @app.command("list")
