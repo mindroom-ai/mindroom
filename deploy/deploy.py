@@ -465,8 +465,13 @@ def _setup_authelia_config(instance: Instance) -> None:
         )
 
         # Update domain references
-        config_content = config_content.replace("mindroom.localhost", instance.domain)
+        # Extract root domain (e.g., "try.mindroom.chat" -> "mindroom.chat")
+        domain_parts = instance.domain.split(".")
+        root_domain = ".".join(domain_parts[-2:]) if len(domain_parts) > 2 else instance.domain
+
+        config_content = config_content.replace("mindroom.localhost", root_domain)
         config_content = config_content.replace("auth-mindroom.localhost", f"auth-{instance.domain}")
+        config_content = config_content.replace("https://mindroom.localhost", f"https://{instance.domain}")
 
         config_file.write_text(config_content)
 
