@@ -12,24 +12,20 @@ Authelia is a production-ready, actively maintained authentication server that p
 
 ## Quick Start
 
-### 1. Create an instance
+### 1. Create an instance with authentication
 ```bash
-./deploy.py create myapp --domain myapp.com
+./deploy.py create myapp --domain myapp.com --auth authelia
 ```
 
-### 2. Setup Authelia
+### 2. Start the instance
 ```bash
-./deploy/setup-authelia.sh myapp
+./deploy.py start myapp
 ```
 
-### 3. Start with authentication
-```bash
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.authelia.yml -p myapp up -d
-```
-
-### 4. Access your app
+### 3. Access your app
 - App: `https://myapp.com` (will redirect to auth)
 - Auth portal: `https://auth-myapp.com`
+- Default credentials: `admin` / `mindroom`
 
 ## User Management
 
