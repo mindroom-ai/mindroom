@@ -10,6 +10,7 @@
 
 import base64
 import contextlib
+import getpass
 import json
 import os
 import secrets
@@ -20,6 +21,7 @@ import sys
 from enum import Enum
 from pathlib import Path
 
+import bcrypt
 import typer
 import yaml
 from pydantic import BaseModel, Field
@@ -496,38 +498,26 @@ def create(
 
     if auth:
         console.print("\n[cyan]Setting up authentication...[/cyan]")
+        auth_username = typer.prompt("Enter username", default="admin")
 
-        # Try to import bcrypt
-        try:
-            import bcrypt
-        except ImportError:
-            console.print("[yellow]⚠️  bcrypt not installed![/yellow]")
-            console.print("Install it with: pip install bcrypt")
-            console.print("\nAlternatively, run deploy_auth.py after installation to generate credentials.")
-            auth = False
-        else:
-            import getpass
+        while True:
+            password = getpass.getpass("Enter password: ")
+            confirm = getpass.getpass("Confirm password: ")
 
-            auth_username = typer.prompt("Enter username", default="admin")
+            if password != confirm:
+                console.print("[red]Passwords don't match. Please try again.[/red]")
+                continue
 
-            while True:
-                password = getpass.getpass("Enter password: ")
-                confirm = getpass.getpass("Confirm password: ")
+            if len(password) < 8:
+                console.print("[red]Password must be at least 8 characters long.[/red]")
+                continue
 
-                if password != confirm:
-                    console.print("[red]Passwords don't match. Please try again.[/red]")
-                    continue
+            break
 
-                if len(password) < 8:
-                    console.print("[red]Password must be at least 8 characters long.[/red]")
-                    continue
-
-                break
-
-            # Generate password hash
-            salt = bcrypt.gensalt()
-            auth_password_hash = bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
-            console.print(f"[green]✓[/green] Authentication configured for user '{auth_username}'")
+        # Generate password hash
+        salt = bcrypt.gensalt()
+        auth_password_hash = bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+        console.print(f"[green]✓[/green] Authentication configured for user '{auth_username}'")
 
     instance = Instance(
         name=name,
@@ -1016,15 +1006,6 @@ def auth(
 
     # Enable or update authentication
     elif enable is True or update:
-        try:
-            import bcrypt
-        except ImportError:
-            console.print("[red]✗[/red] bcrypt not installed!")
-            console.print("Install it with: pip install bcrypt")
-            raise typer.Exit(1) from None
-
-        import getpass
-
         username = typer.prompt("Enter username", default=instance.auth_username or "admin")
 
         while True:
