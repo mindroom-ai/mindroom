@@ -1,8 +1,6 @@
 # Production-ready authentication using Traefik Forward Auth
 # This is a MUCH better approach than rolling our own
 
-version: '3.8'
-
 services:
   # Option 1: Traefik Forward Auth with Google/GitHub OAuth
   traefik-forward-auth:

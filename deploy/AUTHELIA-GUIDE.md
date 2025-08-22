@@ -131,9 +131,13 @@ docker compose -p myapp up -d
 
 ### 4. 🛡️ Secure Secrets
 ```bash
-# Generate strong secrets
+# Generate strong secrets (using openssl)
 openssl rand -hex 32  # For JWT secret
 openssl rand -hex 32  # For session secret
+
+# Or using Python if openssl is not available
+python -c "import secrets; print(secrets.token_hex(32))"  # For JWT secret
+python -c "import secrets; print(secrets.token_hex(32))"  # For session secret
 ```
 
 ### 5. 📊 Monitor Logs

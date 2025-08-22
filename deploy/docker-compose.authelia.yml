@@ -1,6 +1,5 @@
 # Authelia - Modern authentication server for Traefik
 # Active development, great documentation, production-ready
-version: '3.8'
 
 services:
   authelia:

@@ -299,6 +299,7 @@ class TestShouldFormTeam:
                 tagged_agents=[],
                 agents_in_thread=[],
                 all_mentioned_in_thread=["email", "phone", "research"],
+                room=MagicMock(spec=nio.MatrixRoom),
                 message="Let's continue",
                 config=mock_config,
                 use_ai_decision=True,

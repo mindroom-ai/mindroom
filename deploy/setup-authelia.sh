@@ -41,8 +41,14 @@ cp -r deploy/authelia-config/* "$DATA_DIR/authelia/"
 if grep -q "CHANGE_THIS" "$DATA_DIR/authelia/configuration.yml"; then
     echo -e "${YELLOW}Generating secure secrets...${NC}"
 
-    JWT_SECRET=$(openssl rand -hex 32)
-    SESSION_SECRET=$(openssl rand -hex 32)
+    # Try openssl first, fallback to Python
+    if command -v openssl &> /dev/null; then
+        JWT_SECRET=$(openssl rand -hex 32)
+        SESSION_SECRET=$(openssl rand -hex 32)
+    else
+        JWT_SECRET=$(python -c "import secrets; print(secrets.token_hex(32))")
+        SESSION_SECRET=$(python -c "import secrets; print(secrets.token_hex(32))")
+    fi
 
     # Update configuration with secrets
     if [[ "$OSTYPE" == "darwin"* ]]; then
