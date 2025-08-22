@@ -114,10 +114,26 @@ Shows all configured bridges across all instances.
 3. Add bridge with credentials
 4. Register and start
 
-### Slack (Coming Soon)
+### Slack
 **Required Credentials**:
-- **App Token**: From Slack App configuration
-- **Bot Token**: From OAuth & Permissions
+- **App Token**: Socket Mode token (xapp-...) from Basic Information > App-Level Tokens
+- **Bot Token**: Bot User OAuth Token (xoxb-...) from OAuth & Permissions
+- **Team ID**: Workspace ID (T...) from your Slack URL or workspace settings
+
+**Setup Steps**:
+1. Create a new Slack App at https://api.slack.com/apps
+2. Enable Socket Mode and generate an App-Level Token with connections:write scope
+3. Add OAuth scopes: channels:history, channels:read, chat:write, users:read
+4. Install app to your workspace
+5. Get the Bot User OAuth Token
+6. Find your Team ID in the Slack URL or workspace settings
+7. Add bridge with credentials:
+   ```bash
+   ./bridge.py add slack --instance my-instance \
+     --app-token xapp-... \
+     --bot-token xoxb-... \
+     --team-id T...
+   ```
 
 ### Email (Coming Soon)
 **Required Credentials**:

@@ -102,8 +102,8 @@ BRIDGE_TEMPLATES = {
     BridgeType.SLACK: {
         "image": "dock.mau.dev/mautrix/slack:latest",
         "config_template": "slack-config-template.yaml",
-        "env_vars": ["SLACK_APP_TOKEN", "SLACK_BOT_TOKEN"],
-        "required_credentials": ["app_token", "bot_token"],
+        "env_vars": ["SLACK_APP_TOKEN", "SLACK_BOT_TOKEN", "SLACK_TEAM_ID"],
+        "required_credentials": ["app_token", "bot_token", "team_id"],
     },
     BridgeType.EMAIL: {
         "image": "etkecc/postmoogle:latest",
@@ -287,6 +287,32 @@ def _generate_bridge_config(bridge: BridgeConfig, template_path: Path) -> Path: 
                     },
                 },
             }
+    elif bridge.bridge_type == BridgeType.SLACK:
+        # Create Slack bridge config
+        config_data = {
+            "homeserver": {
+                "address": bridge.matrix_server,
+                "domain": bridge.matrix_domain,
+            },
+            "appservice": {
+                "database": "sqlite:////data/mautrix-slack.db",  # Absolute path in container
+                "address": "http://0.0.0.0:29317",
+            },
+            "slack": {
+                "app_token": bridge.credentials.get("app_token"),
+                "bot_token": bridge.credentials.get("bot_token"),
+                "team_id": bridge.credentials.get("team_id"),
+            },
+            "bridge": {
+                "permissions": {
+                    "*": "relaybot",
+                    bridge.matrix_domain: "user",
+                    f"@admin:{bridge.matrix_domain}": "admin",
+                },
+                "username_template": "slack_{{.}}",
+                "displayname_template": "{{.RealName}} (Slack)",
+            },
+        }
     else:
         # Placeholder for other bridge types
         config_data = {
@@ -306,6 +332,10 @@ def _generate_bridge_config(bridge: BridgeConfig, template_path: Path) -> Path: 
         config_data["telegram"]["api_id"] = int(bridge.credentials.get("api_id", 0))
         config_data["telegram"]["api_hash"] = bridge.credentials.get("api_hash", "")
         config_data["telegram"]["bot_token"] = bridge.credentials.get("bot_token", "")
+    elif bridge.bridge_type == BridgeType.SLACK and "slack" in config_data:
+        config_data["slack"]["app_token"] = bridge.credentials.get("app_token", "")
+        config_data["slack"]["bot_token"] = bridge.credentials.get("bot_token", "")
+        config_data["slack"]["team_id"] = bridge.credentials.get("team_id", "")
 
     with config_file.open("w") as f:
         yaml.dump(config_data, f, default_flow_style=False)
@@ -365,12 +395,14 @@ def _register_with_synapse(bridge: BridgeConfig, registration_file: Path) -> boo
 
 
 @app.command()
-def add(
+def add(  # noqa: PLR0915
     bridge_type: BridgeType = typer.Argument(..., help="Bridge type to add"),
     instance: str = typer.Option("default", "--instance", "-i", help="Mindroom instance name"),
     api_id: str | None = typer.Option(None, "--api-id", help="Telegram API ID"),
     api_hash: str | None = typer.Option(None, "--api-hash", help="Telegram API Hash"),
-    bot_token: str | None = typer.Option(None, "--bot-token", help="Telegram Bot Token"),
+    bot_token: str | None = typer.Option(None, "--bot-token", help="Telegram/Slack Bot Token"),
+    app_token: str | None = typer.Option(None, "--app-token", help="Slack App Token"),
+    team_id: str | None = typer.Option(None, "--team-id", help="Slack Team/Workspace ID"),
 ) -> None:
     """Add and configure a bridge for a Mindroom instance."""
     registry = load_registry()
@@ -412,6 +444,27 @@ def add(
             "api_id": api_id,
             "api_hash": api_hash,
             "bot_token": bot_token,
+        }
+    elif bridge_type == BridgeType.SLACK:
+        if not all([app_token, bot_token, team_id]):
+            console.print("[yellow]i[/yellow] Slack bridge requires:")
+            console.print("  1. Create a Slack App at https://api.slack.com/apps")
+            console.print("  2. Enable Socket Mode and get App-Level Token (xapp-...)")
+            console.print("  3. Install app to workspace and get Bot User OAuth Token (xoxb-...)")
+            console.print("  4. Get your Team/Workspace ID from the URL (T...)")
+            console.print("\n[cyan]Provide credentials:[/cyan]")
+
+            if not app_token:
+                app_token = typer.prompt("App Token (xapp-...)")
+            if not bot_token:
+                bot_token = typer.prompt("Bot Token (xoxb-...)")
+            if not team_id:
+                team_id = typer.prompt("Team ID (T...)")
+
+        credentials = {
+            "app_token": app_token,
+            "bot_token": bot_token,
+            "team_id": team_id,
         }
 
     # Allocate port
