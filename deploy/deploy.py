@@ -12,6 +12,7 @@ import base64
 import contextlib
 import json
 import os
+import platform as plat
 import secrets
 import shutil
 import socket
@@ -710,8 +711,6 @@ def start(  # noqa: PLR0912, PLR0915
     if use_registry:
         console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}...")
         # Detect platform
-        import platform as plat
-
         arch = "arm64" if plat.machine() == "aarch64" else "amd64"
 
         images = [
@@ -849,7 +848,7 @@ def restart(
     _restart_instance(name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
 
-def _restart_instance(
+def _restart_instance(  # noqa: PLR0912, PLR0915
     name: str,
     instance: Instance,
     registry: Registry,
@@ -905,8 +904,6 @@ def _restart_instance(
     if use_registry:
         console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}...")
         # Detect platform
-        import platform as plat
-
         arch = "arm64" if plat.machine() == "aarch64" else "amd64"
 
         images = [
@@ -1164,8 +1161,6 @@ def pull(
     """Pull latest images from registry."""
     # Auto-detect platform if tag not specified
     if tag is None:
-        import platform as plat
-
         tag = "arm64" if plat.machine() == "aarch64" else "amd64"
         console.print(f"[blue]🔍[/blue] Auto-detected platform: {tag}")
 
