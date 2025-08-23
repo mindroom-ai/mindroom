@@ -25,7 +25,7 @@ services:
       - traefik.http.services.${INSTANCE_NAME:-mindroom}-authelia.loadbalancer.server.port=9091
 
       # Middleware for forward auth
-      - traefik.http.middlewares.${INSTANCE_NAME:-mindroom}-auth.forwardauth.address=http://authelia:9091/api/verify?rd=https://auth-${INSTANCE_DOMAIN}
+      - traefik.http.middlewares.${INSTANCE_NAME:-mindroom}-auth.forwardauth.address=http://${INSTANCE_NAME:-mindroom}-authelia:9091/api/verify?rd=https://auth-${INSTANCE_DOMAIN}
       - traefik.http.middlewares.${INSTANCE_NAME:-mindroom}-auth.forwardauth.trustForwardHeader=true
       - traefik.http.middlewares.${INSTANCE_NAME:-mindroom}-auth.forwardauth.authResponseHeaders=Remote-User,Remote-Groups,Remote-Name,Remote-Email
 
@@ -43,8 +43,8 @@ services:
   # Apply auth middleware to frontend
   frontend:
     labels:
-      # Add auth middleware to the frontend router (disabled for now)
-      # - traefik.http.routers.${INSTANCE_NAME:-mindroom}.middlewares=${INSTANCE_NAME:-mindroom}-auth
+      # Add auth middleware to the frontend router
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.middlewares=${INSTANCE_NAME:-mindroom}-auth
 
 networks:
   mindroom-network:
