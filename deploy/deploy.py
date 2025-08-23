@@ -595,6 +595,9 @@ def create(
 def start(  # noqa: PLR0912, PLR0915
     name: str = typer.Argument("default", help="Instance name to start"),
     only_matrix: bool = typer.Option(False, "--only-matrix", help="Start only Matrix server without backend/frontend"),
+    use_registry: bool = typer.Option(False, "--registry", "-r", help="Pull images from registry instead of building"),
+    registry_url: str = typer.Option("git.nijho.lt/basnijholt", "--registry-url", help="Registry URL to pull from"),
+    no_build: bool = typer.Option(False, "--no-build", help="Skip building images (use existing local images)"),
 ) -> None:
     """Start a Mindroom instance."""
     registry = load_registry()
@@ -695,7 +698,32 @@ def start(  # noqa: PLR0912, PLR0915
         services += _get_matrix_services(matrix_type)
         status_msg = f"Starting instance '{name}'..."
 
-    cmd = f"{compose_files} -p {name} up -d --build {services}"
+    # Pull images from registry if requested
+    if use_registry:
+        console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}...")
+        # Detect platform
+        import platform as plat
+        arch = "arm64" if plat.machine() == "aarch64" else "amd64"
+        
+        images = [
+            (f"{registry_url}/mindroom-backend:{arch}", "deploy-mindroom-backend:latest"),
+            (f"{registry_url}/mindroom-frontend:{arch}", "deploy-mindroom-frontend:latest"),
+        ]
+        for source, target in images:
+            pull_cmd = f"docker pull {source} && docker tag {source} {target}"
+            console.print(f"  Pulling {source.split('/')[-1]}...")
+            result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+            if result.returncode != 0:
+                console.print(f"[red]✗[/red] Failed to pull {source}")
+                console.print(result.stderr)
+                raise typer.Exit(1)
+        build_flag = ""
+    elif no_build:
+        build_flag = ""
+    else:
+        build_flag = "--build"
+    
+    cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]{status_msg}[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
@@ -764,6 +792,9 @@ def restart(
         "--only-matrix",
         help="Restart only Matrix server without backend/frontend",
     ),
+    use_registry: bool = typer.Option(False, "--registry", "-r", help="Pull images from registry instead of building"),
+    registry_url: str = typer.Option("git.nijho.lt/basnijholt", "--registry-url", help="Registry URL to pull from"),
+    no_build: bool = typer.Option(False, "--no-build", help="Skip building images (use existing local images)"),
 ) -> None:
     """Restart a Mindroom instance (stop and start)."""
     registry = load_registry()
@@ -791,7 +822,7 @@ def restart(
         for instance_name in running_instances:
             instance = registry.instances[instance_name]
             console.print(f"\n[yellow]Restarting '[cyan]{instance_name}[/cyan]'...[/yellow]")
-            _restart_instance(instance_name, instance, registry, only_matrix)
+            _restart_instance(instance_name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
         console.print("\n[green]✓[/green] All instances restarted successfully!")
         return
@@ -806,10 +837,10 @@ def restart(
 
     instance = registry.instances[name]
     console.print(f"[yellow]Restarting instance '[cyan]{name}[/cyan]'...[/yellow]")
-    _restart_instance(name, instance, registry, only_matrix)
+    _restart_instance(name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
 
-def _restart_instance(name: str, instance: Instance, registry: Registry, only_matrix: bool) -> None:  # noqa: PLR0912
+def _restart_instance(name: str, instance: Instance, registry: Registry, only_matrix: bool, use_registry: bool = False, registry_url: str = "git.nijho.lt/basnijholt", no_build: bool = False) -> None:  # noqa: PLR0912
     """Helper function to restart a single instance."""
     # Verify federation configuration if Matrix is enabled
     if instance.matrix_type:
@@ -852,7 +883,32 @@ def _restart_instance(name: str, instance: Instance, registry: Registry, only_ma
         services = "frontend backend"
         services += _get_matrix_services(matrix_type)
 
-    start_cmd = f"{compose_files} -p {name} up -d --build {services}"
+    # Pull images from registry if requested
+    if use_registry:
+        console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}...")
+        # Detect platform
+        import platform as plat
+        arch = "arm64" if plat.machine() == "aarch64" else "amd64"
+        
+        images = [
+            (f"{registry_url}/mindroom-backend:{arch}", "deploy-mindroom-backend:latest"),
+            (f"{registry_url}/mindroom-frontend:{arch}", "deploy-mindroom-frontend:latest"),
+        ]
+        for source, target in images:
+            pull_cmd = f"docker pull {source} && docker tag {source} {target}"
+            console.print(f"  Pulling {source.split('/')[-1]}...")
+            result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+            if result.returncode != 0:
+                console.print(f"[red]✗[/red] Failed to pull {source}")
+                console.print(result.stderr)
+                raise typer.Exit(1)
+        build_flag = ""
+    elif no_build:
+        build_flag = ""
+    else:
+        build_flag = "--build"
+    
+    start_cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
         result = subprocess.run(start_cmd, check=False, shell=True, capture_output=True, text=True)
@@ -1079,6 +1135,43 @@ def list_instances() -> None:  # noqa: PLR0912
         )
 
     console.print(table)
+
+
+@app.command()
+def pull(
+    registry_url: str = typer.Option("git.nijho.lt/basnijholt", "--registry-url", help="Registry URL to pull from"),
+    tag: str = typer.Option(None, "--tag", "-t", help="Image tag to pull (default: auto-detect platform)"),
+) -> None:
+    """Pull latest images from registry."""
+    # Auto-detect platform if tag not specified
+    if tag is None:
+        import platform as plat
+        tag = "arm64" if plat.machine() == "aarch64" else "amd64"
+        console.print(f"[blue]🔍[/blue] Auto-detected platform: {tag}")
+    
+    console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}:{tag}...")
+    
+    images = [
+        (f"{registry_url}/mindroom-backend:{tag}", "deploy-mindroom-backend:latest"),
+        (f"{registry_url}/mindroom-frontend:{tag}", "deploy-mindroom-frontend:latest"),
+    ]
+    
+    for source, target in images:
+        with console.status(f"Pulling {source.split('/')[-1]}..."):
+            pull_cmd = f"docker pull {source}"
+            result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                # Tag the image
+                tag_cmd = f"docker tag {source} {target}"
+                subprocess.run(tag_cmd, shell=True, capture_output=True, text=True)
+                console.print(f"[green]✓[/green] Pulled {source.split('/')[-1]}")
+            else:
+                console.print(f"[red]✗[/red] Failed to pull {source}")
+                console.print(f"[dim]{result.stderr}[/dim]")
+                raise typer.Exit(1)
+    
+    console.print("[green]✓[/green] All images pulled successfully!")
 
 
 if __name__ == "__main__":

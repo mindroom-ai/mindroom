@@ -34,7 +34,7 @@ services:
     env_file:
       - ../.env
     ports:
-      - "${FRONTEND_PORT:-3003}:3003"
+      - "${FRONTEND_PORT:-3003}:3005"
     volumes:
       - ${DATA_DIR}/config:/app/config
       - ${DATA_DIR}/logs:/app/logs
@@ -64,7 +64,7 @@ services:
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls.certresolver=porkbun
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.service=${INSTANCE_NAME:-mindroom}
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.priority=50
-      - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=${FRONTEND_PORT:-3003}
+      - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=3005
 
 networks:
   mindroom-network:
