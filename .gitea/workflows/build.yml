@@ -1,10 +1,24 @@
-name: Parallel Multi-Arch Build
-# Builds images in parallel for maximum speed
+name: Build Docker Images
+# Builds images in parallel for maximum speed with change detection
 
 on:
   push:
     branches: [ main, public ]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'deploy/Dockerfile.*'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.gitea/workflows/**'
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build all images'
+        type: boolean
+        default: false
 
 env:
   REGISTRY: git.nijho.lt
