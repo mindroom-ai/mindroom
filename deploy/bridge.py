@@ -2,7 +2,7 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["typer", "rich", "pydantic", "pyyaml", "httpx"]
+# dependencies = ["typer", "rich", "pydantic", "pyyaml", "httpx", "python-dotenv"]
 # ///
 """Matrix Bridge Manager for Mindroom instances."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
@@ -11,6 +11,7 @@
 # ruff: noqa: PLR0912  # complexity is acceptable for CLI commands
 
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -22,6 +23,7 @@ from typing import Any
 
 import typer
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.table import Table
@@ -37,6 +39,10 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 BRIDGES_DIR = SCRIPT_DIR / "bridges"
 BRIDGE_REGISTRY_FILE = SCRIPT_DIR / "bridge_instances.json"
 INSTANCES_FILE = SCRIPT_DIR / "instances.json"  # From deploy.py
+
+# Load environment variables from .env files
+load_dotenv(SCRIPT_DIR / ".env.slack")
+load_dotenv(SCRIPT_DIR / ".env.telegram")
 
 
 # Bridge types and their configurations
@@ -427,6 +433,17 @@ def add(  # noqa: PLR0915
     # Collect credentials
     credentials = {}
     if bridge_type == BridgeType.TELEGRAM:
+        # Try to load from environment (dotenv already loaded above)
+        if not api_id:
+            api_id = os.environ.get("TELEGRAM_API_ID")
+        if not api_hash:
+            api_hash = os.environ.get("TELEGRAM_API_HASH")
+        if not bot_token:
+            bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+
+        if all([api_id, api_hash, bot_token]):
+            console.print("[green]✓[/green] Using Telegram credentials from .env.telegram")
+
         if not all([api_id, api_hash, bot_token]):
             console.print("[yellow]i[/yellow] Telegram bridge requires:")
             console.print("  1. API ID and Hash from https://my.telegram.org")
@@ -446,6 +463,17 @@ def add(  # noqa: PLR0915
             "bot_token": bot_token,
         }
     elif bridge_type == BridgeType.SLACK:
+        # Try to load from environment (dotenv already loaded above)
+        if not app_token:
+            app_token = os.environ.get("SLACK_APP_TOKEN")
+        if not bot_token:
+            bot_token = os.environ.get("SLACK_BOT_TOKEN")
+        if not team_id:
+            team_id = os.environ.get("SLACK_TEAM_ID")
+
+        if all([app_token, bot_token, team_id]):
+            console.print("[green]✓[/green] Using Slack credentials from .env.slack")
+
         if not all([app_token, bot_token, team_id]):
             console.print("[yellow]i[/yellow] Slack bridge requires:")
             console.print("  1. Create a Slack App at https://api.slack.com/apps")
@@ -491,8 +519,7 @@ def add(  # noqa: PLR0915
     data_dir = bridge_data_dir / "data"
     data_dir.mkdir(exist_ok=True)
 
-    # Set permissions for data directory (needed for SQLite database)
-    data_dir.chmod(0o755)  # Use more restrictive permissions
+    # Note: Permissions are handled by Docker container
 
     # Generate configuration
     _generate_bridge_config(bridge, Path())  # Template path not used yet
