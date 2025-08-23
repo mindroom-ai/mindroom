@@ -74,11 +74,39 @@ matty users "room_name"  # See available agents
 
 ### 2. Test Scenario Execution
 
+## CRITICAL: Agent Response Time Management
+
+MindRoom agents require 15-30+ seconds to complete responses:
+- Agents show "⋯" while processing (this is normal)
+- ALWAYS wait minimum 30 seconds before checking responses
+- Some tool operations may require 60+ seconds
+- Use `sleep 30` between sending messages and checking responses
+- Consider testing fewer agents concurrently to allow proper completion verification
+
+## Test Completion Verification Protocol
+
+For EVERY agent interaction:
+1. Send message, record exact timestamp
+2. Wait minimum 30 seconds (`sleep 30`)
+3. Check thread until "⋯" disappears
+4. If still showing "⋯" after 60 seconds, note as "long processing time"
+5. Verify tool outputs are complete before marking test successful
+6. Document actual response time for reporting
+
+## Thread Management Strategy
+
+To maintain test clarity:
+- Test maximum 3 agents concurrently
+- Wait for completion of current tests before starting new ones
+- Keep a log of thread IDs and their test purposes
+- Use `matty threads "Lobby"` regularly to track progress
+- Consider testing in different rooms to avoid thread congestion
+
 For each test scenario:
 1. Create a clear test plan with expected outcomes
 2. Send initial message with appropriate @mentions
-3. Wait for thread creation
-4. Check thread for agent response
+3. Wait minimum 30 seconds for thread creation and response
+4. Check thread for agent response (verify no "⋯")
 5. Continue conversation IN THE THREAD
 6. Document response time, quality, and behavior
 
@@ -97,23 +125,30 @@ matty send "room" "@mindroom_assistant !help"
 ```
 
 #### Tool Usage Testing
-Based on config.yaml, test each agent's tool capabilities:
+Based on config.yaml, test each agent's tool capabilities SEQUENTIALLY:
+
 ```bash
-# For agents with search tools
+# Test ONE agent at a time with proper completion verification:
+
+# 1. Research agent (search tools)
 matty send "room" "@mindroom_research search for recent AI papers on arxiv"
+sleep 30  # Wait for response
+matty thread "room" "t[number]" --format json  # Check for complete response
 
-# For agents with code tools
-matty send "room" "@mindroom_code write a Python function to calculate fibonacci"
-
-# For agents with email tools
-matty send "room" "@mindroom_email_assistant draft an email about our meeting"
-
-# For agents with calculation tools
+# 2. Calculator agent (only after research agent completes)
 matty send "room" "@mindroom_calculator calculate the compound interest on $10000 at 5% for 10 years"
+sleep 30
+matty thread "room" "t[number]" --format json
 
-# For agents with data analysis tools
-matty send "room" "@mindroom_data_analyst analyze this CSV data: [provide sample]"
+# 3. Code agent (only after calculator completes)
+matty send "room" "@mindroom_code write a Python function to calculate fibonacci"
+sleep 30
+matty thread "room" "t[number]" --format json
+
+# Continue with other agents one at a time...
 ```
+
+**IMPORTANT**: Test agents SEQUENTIALLY, not simultaneously, to verify actual tool outputs
 
 #### Single Agent Testing
 ```bash
