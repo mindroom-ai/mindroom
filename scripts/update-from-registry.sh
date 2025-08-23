@@ -15,16 +15,18 @@ NC='\033[0m'
 
 echo -e "${BLUE}🔄 Updating Mindroom deployments from Gitea registry...${NC}"
 
-# Check if token is provided or in environment
-if [ -z "$GITEA_TOKEN" ]; then
-    echo -e "${RED}❌ GITEA_TOKEN not set. Please export GITEA_TOKEN or pass it as argument${NC}"
-    echo "Usage: GITEA_TOKEN=your_token $0"
+# Check if token is provided or in environment (accepts both DOCKER_TOKEN or GITEA_TOKEN for compatibility)
+TOKEN="${DOCKER_TOKEN:-$GITEA_TOKEN}"
+if [ -z "$TOKEN" ]; then
+    echo -e "${RED}❌ DOCKER_TOKEN not set. Please export DOCKER_TOKEN or pass it as argument${NC}"
+    echo "Usage: DOCKER_TOKEN=your_token $0"
+    echo "   or: export DOCKER_TOKEN=your_token"
     exit 1
 fi
 
 # Login to registry
 echo -e "${BLUE}🔐 Logging into Gitea registry...${NC}"
-echo "$GITEA_TOKEN" | docker login "$REGISTRY" -u "$OWNER" --password-stdin
+echo "$TOKEN" | docker login "$REGISTRY" -u "$OWNER" --password-stdin
 
 # Pull latest images
 echo -e "${BLUE}📥 Pulling latest images...${NC}"

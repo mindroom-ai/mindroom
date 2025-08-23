@@ -17,19 +17,20 @@ NC='\033[0m'
 echo -e "${BLUE}🔍 Checking Gitea Actions build status...${NC}"
 echo ""
 
-# Check if token is provided
-if [ -z "$GITEA_TOKEN" ]; then
-    echo -e "${YELLOW}⚠️  GITEA_TOKEN not set. Some features may be limited.${NC}"
-    echo "   To set: export GITEA_TOKEN=your_token"
+# Check if token is provided (accepts both DOCKER_TOKEN or GITEA_TOKEN)
+TOKEN="${DOCKER_TOKEN:-$GITEA_TOKEN}"
+if [ -z "$TOKEN" ]; then
+    echo -e "${YELLOW}⚠️  DOCKER_TOKEN not set. Some features may be limited.${NC}"
+    echo "   To set: export DOCKER_TOKEN=your_token"
     echo ""
 fi
 
 # Check latest workflow runs (requires curl and jq)
-if command -v curl &> /dev/null && command -v jq &> /dev/null && [ -n "$GITEA_TOKEN" ]; then
+if command -v curl &> /dev/null && command -v jq &> /dev/null && [ -n "$TOKEN" ]; then
     echo -e "${BLUE}📊 Recent workflow runs:${NC}"
     
     # Get workflow runs from Gitea API
-    RUNS=$(curl -s -H "Authorization: token $GITEA_TOKEN" \
+    RUNS=$(curl -s -H "Authorization: token $TOKEN" \
         "https://$REGISTRY/api/v1/repos/$OWNER/$REPO/actions/runs?limit=5" 2>/dev/null || echo "{}")
     
     if [ "$RUNS" != "{}" ] && [ "$(echo "$RUNS" | jq -r '.workflow_runs | length' 2>/dev/null)" != "0" ]; then
@@ -78,7 +79,7 @@ echo "   docker pull $REGISTRY/$OWNER/mindroom-backend:latest"
 echo "   docker pull $REGISTRY/$OWNER/mindroom-frontend:latest"
 echo ""
 echo "3. Update deployments:"
-echo "   GITEA_TOKEN=your_token ~/mindroom/scripts/update-from-registry.sh"
+echo "   DOCKER_TOKEN=your_token ~/mindroom/scripts/update-from-registry.sh"
 echo ""
 
 # Check if runner is configured

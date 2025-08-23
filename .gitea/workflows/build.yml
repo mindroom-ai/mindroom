@@ -62,7 +62,7 @@ jobs:
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ gitea.actor }}
-        password: ${{ secrets.GITEA_TOKEN }}
+        password: ${{ secrets.DOCKER_TOKEN }}
     
     - name: Set build vars
       id: vars
@@ -123,7 +123,7 @@ jobs:
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ gitea.actor }}
-        password: ${{ secrets.GITEA_TOKEN }}
+        password: ${{ secrets.DOCKER_TOKEN }}
     
     - name: Create and push manifest
       run: |
