@@ -289,6 +289,13 @@ def _get_matrix_services(matrix_type: MatrixType | None) -> str:
     return ""
 
 
+def _get_auth_services(auth_type: AuthType | None) -> str:
+    """Get the list of services to start based on auth type."""
+    if auth_type == AuthType.AUTHELIA:
+        return " authelia authelia-redis"
+    return ""
+
+
 def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixType | None) -> None:
     """Create and configure the environment file for an instance."""
     env_file = SCRIPT_DIR / f".env.{name}"
@@ -693,9 +700,10 @@ def start(  # noqa: PLR0912, PLR0915
         status_msg = f"Starting Matrix server for '{name}'..."
         console.print("[yellow]ℹ[/yellow] Starting only Matrix server (no backend/frontend)")  # noqa: RUF001
     else:
-        # Start full stack: frontend + backend + matrix
+        # Start full stack: frontend + backend + matrix + auth
         services = "frontend backend"
         services += _get_matrix_services(matrix_type)
+        services += _get_auth_services(instance.auth_type)
         status_msg = f"Starting instance '{name}'..."
 
     # Pull images from registry if requested
@@ -879,9 +887,10 @@ def _restart_instance(name: str, instance: Instance, registry: Registry, only_ma
             raise typer.Exit(1)
         services = _get_matrix_services(matrix_type).strip()
     else:
-        # Start full stack: frontend + backend + matrix
+        # Start full stack: frontend + backend + matrix + auth
         services = "frontend backend"
         services += _get_matrix_services(matrix_type)
+        services += _get_auth_services(instance.auth_type)
 
     # Pull images from registry if requested
     if use_registry:
