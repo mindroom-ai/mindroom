@@ -65,18 +65,6 @@ jobs:
         username: ${{ gitea.actor }}
         password: ${{ secrets.DOCKER_TOKEN }}
     
-    - name: Pre-pull base images for cache
-      continue-on-error: true
-      run: |
-        # Pre-pull base images to Docker daemon for better caching
-        if [ "${{ matrix.image }}" = "backend" ]; then
-          docker pull python:3.12-slim || true
-          docker pull ghcr.io/astral-sh/uv:latest || true
-        else
-          docker pull node:20-slim || true
-          docker pull ghcr.io/astral-sh/uv:latest || true
-        fi
-    
     - name: Set build vars
       id: vars
       run: |
@@ -90,12 +78,8 @@ jobs:
           echo "platform_suffix=arm64" >> $GITHUB_OUTPUT
         fi
         
-        # Set build args for frontend
-        if [ "${{ matrix.image }}" = "frontend" ]; then
-          echo "build_args=NODE_OPTIONS=--max-old-space-size=6144" >> $GITHUB_OUTPUT
-        else
-          echo "build_args=" >> $GITHUB_OUTPUT
-        fi
+        # No special build args needed
+        echo "build_args=" >> $GITHUB_OUTPUT
         
         # Generate timestamp
         echo "timestamp=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
@@ -112,9 +96,7 @@ jobs:
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ github.ref_name }}-${{ steps.vars.outputs.platform_suffix }}
           ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.timestamp }}-${{ steps.vars.outputs.platform_suffix }}
         build-args: ${{ steps.vars.outputs.build_args }}
-        cache-from: |
-          type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:buildcache-${{ steps.vars.outputs.platform_suffix }}
-          type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.platform_suffix }}
+        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:buildcache-${{ steps.vars.outputs.platform_suffix }}
         cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:buildcache-${{ steps.vars.outputs.platform_suffix }},mode=max
         provenance: false
         sbom: false
