@@ -143,27 +143,17 @@ nano .env.test  # Add API keys
 - **Resources**: ~100MB RAM
 - **Command**: `--matrix tuwunel`
 - **Features**: Fast, minimal, perfect for development
-- **Security**: See [MATRIX-SECURITY.md](MATRIX-SECURITY.md) for secure configuration
 
 ### Synapse (Full-featured)
 - **When to use**: Production, large deployments, when you need all Matrix features
 - **Resources**: ~500MB+ RAM, PostgreSQL, Redis
 - **Command**: `--matrix synapse`
 - **Features**: Complete Matrix spec implementation, battle-tested
-- **Security**: See [MATRIX-SECURITY.md](MATRIX-SECURITY.md) for secure configuration
 
 ### No Matrix
 - **When to use**: When you only need Mindroom without chat features
 - **Command**: (default, no flag needed)
 - **Features**: Just Mindroom backend and frontend
-
-### 🔐 Security Note
-By default, Matrix servers are configured with **open registration disabled** for security. MindRoom bots must be registered using secure methods. See [MATRIX-SECURITY.md](MATRIX-SECURITY.md) for details on:
-- Secure bot registration
-- Registration tokens
-- Shared secret configuration
-- Federation controls
-- Security best practices
 
 ## Testing Your Matrix Server
 
