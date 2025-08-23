@@ -7,9 +7,9 @@ users:
   admin:
     disabled: false
     displayname: "Admin User"
-    # Password: MindRoom-Secure-2025-Auth! (CHANGE THIS FOR PRODUCTION!)
-    # Generated with: docker run --rm authelia/authelia:latest authelia crypto hash generate argon2 --password 'MindRoom-Secure-2025-Auth!' -i 1 -m 1024 -p 8
-    password: "$argon2id$v=19$m=1024,t=1,p=8$qT+WsrNuzquYmBnbpw35qw$yrRnxf5YxDJh+293jHYdsKN7m+Ft6FRYI6awRwv7LPI"
+    # Password: gSPZ9DPX2jA1ZF5OQRQo (CHANGE THIS FOR PRODUCTION!)
+    # Generated with: docker run --rm authelia/authelia:latest authelia crypto hash generate argon2 --password 'gSPZ9DPX2jA1ZF5OQRQo' -i 1 -m 1024 -p 8
+    password: "$argon2id$v=19$m=1024,t=1,p=8$rqwBHbPanMHvZzrpxxbhVQ$IZPHcoxceCmeRKIroLg14RZbcdamQ1MwKCFGfns8iqo"
     email: admin@example.com
     groups:
       - admins

@@ -711,8 +711,9 @@ def start(  # noqa: PLR0912, PLR0915
         console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}...")
         # Detect platform
         import platform as plat
+
         arch = "arm64" if plat.machine() == "aarch64" else "amd64"
-        
+
         images = [
             (f"{registry_url}/mindroom-backend:{arch}", "deploy-mindroom-backend:latest"),
             (f"{registry_url}/mindroom-frontend:{arch}", "deploy-mindroom-frontend:latest"),
@@ -720,7 +721,7 @@ def start(  # noqa: PLR0912, PLR0915
         for source, target in images:
             pull_cmd = f"docker pull {source} && docker tag {source} {target}"
             console.print(f"  Pulling {source.split('/')[-1]}...")
-            result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+            result = subprocess.run(pull_cmd, check=False, shell=True, capture_output=True, text=True)
             if result.returncode != 0:
                 console.print(f"[red]✗[/red] Failed to pull {source}")
                 console.print(result.stderr)
@@ -730,7 +731,7 @@ def start(  # noqa: PLR0912, PLR0915
         build_flag = ""
     else:
         build_flag = "--build"
-    
+
     cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]{status_msg}[/yellow]"):
@@ -848,7 +849,15 @@ def restart(
     _restart_instance(name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
 
-def _restart_instance(name: str, instance: Instance, registry: Registry, only_matrix: bool, use_registry: bool = False, registry_url: str = "git.nijho.lt/basnijholt", no_build: bool = False) -> None:  # noqa: PLR0912
+def _restart_instance(
+    name: str,
+    instance: Instance,
+    registry: Registry,
+    only_matrix: bool,
+    use_registry: bool = False,
+    registry_url: str = "git.nijho.lt/basnijholt",
+    no_build: bool = False,
+) -> None:
     """Helper function to restart a single instance."""
     # Verify federation configuration if Matrix is enabled
     if instance.matrix_type:
@@ -897,8 +906,9 @@ def _restart_instance(name: str, instance: Instance, registry: Registry, only_ma
         console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}...")
         # Detect platform
         import platform as plat
+
         arch = "arm64" if plat.machine() == "aarch64" else "amd64"
-        
+
         images = [
             (f"{registry_url}/mindroom-backend:{arch}", "deploy-mindroom-backend:latest"),
             (f"{registry_url}/mindroom-frontend:{arch}", "deploy-mindroom-frontend:latest"),
@@ -906,7 +916,7 @@ def _restart_instance(name: str, instance: Instance, registry: Registry, only_ma
         for source, target in images:
             pull_cmd = f"docker pull {source} && docker tag {source} {target}"
             console.print(f"  Pulling {source.split('/')[-1]}...")
-            result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
+            result = subprocess.run(pull_cmd, check=False, shell=True, capture_output=True, text=True)
             if result.returncode != 0:
                 console.print(f"[red]✗[/red] Failed to pull {source}")
                 console.print(result.stderr)
@@ -916,7 +926,7 @@ def _restart_instance(name: str, instance: Instance, registry: Registry, only_ma
         build_flag = ""
     else:
         build_flag = "--build"
-    
+
     start_cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
@@ -1155,31 +1165,32 @@ def pull(
     # Auto-detect platform if tag not specified
     if tag is None:
         import platform as plat
+
         tag = "arm64" if plat.machine() == "aarch64" else "amd64"
         console.print(f"[blue]🔍[/blue] Auto-detected platform: {tag}")
-    
+
     console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}:{tag}...")
-    
+
     images = [
         (f"{registry_url}/mindroom-backend:{tag}", "deploy-mindroom-backend:latest"),
         (f"{registry_url}/mindroom-frontend:{tag}", "deploy-mindroom-frontend:latest"),
     ]
-    
+
     for source, target in images:
         with console.status(f"Pulling {source.split('/')[-1]}..."):
             pull_cmd = f"docker pull {source}"
-            result = subprocess.run(pull_cmd, shell=True, capture_output=True, text=True)
-            
+            result = subprocess.run(pull_cmd, check=False, shell=True, capture_output=True, text=True)
+
             if result.returncode == 0:
                 # Tag the image
                 tag_cmd = f"docker tag {source} {target}"
-                subprocess.run(tag_cmd, shell=True, capture_output=True, text=True)
+                subprocess.run(tag_cmd, check=False, shell=True, capture_output=True, text=True)
                 console.print(f"[green]✓[/green] Pulled {source.split('/')[-1]}")
             else:
                 console.print(f"[red]✗[/red] Failed to pull {source}")
                 console.print(f"[dim]{result.stderr}[/dim]")
                 raise typer.Exit(1)
-    
+
     console.print("[green]✓[/green] All images pulled successfully!")
 
 

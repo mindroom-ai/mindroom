@@ -12,7 +12,7 @@ if [ "$INSTANCE" == "try" ]; then
     DOMAIN="try.mindroom.chat"
 elif [ "$INSTANCE" == "alt" ]; then
     BACKEND_PORT=8766
-    FRONTEND_PORT=3006  
+    FRONTEND_PORT=3006
     MATRIX_PORT=8450
     DOMAIN="alt.mindroom.chat"
 else
