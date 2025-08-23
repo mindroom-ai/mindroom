@@ -43,8 +43,8 @@ services:
   # Apply auth middleware to frontend
   frontend:
     labels:
-      # Add auth middleware to the frontend router
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.middlewares=${INSTANCE_NAME:-mindroom}-auth
+      # Add auth middleware to the frontend router (disabled for now)
+      # - traefik.http.routers.${INSTANCE_NAME:-mindroom}.middlewares=${INSTANCE_NAME:-mindroom}-auth
 
 networks:
   mindroom-network:

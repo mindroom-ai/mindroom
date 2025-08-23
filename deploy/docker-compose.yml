@@ -40,7 +40,7 @@ services:
       - ${DATA_DIR}/logs:/app/logs
     environment:
       - BACKEND_PORT=${BACKEND_PORT:-8765}
-      - FRONTEND_PORT=${FRONTEND_PORT:-3003}
+      - FRONTEND_PORT=3005
       - VITE_API_URL=
     networks:
       - mindroom-network
