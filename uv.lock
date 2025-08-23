@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13' and python_full_version < '4'",
@@ -3043,6 +3043,24 @@ wheels = [
 ]
 
 [[package]]
+name = "matty"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiofiles" },
+    { name = "matrix-nio" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "python-dotenv" },
+    { name = "rich" },
+    { name = "typer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/90/4b/a6d24253d596560a91d7c1e77965123d32ea7b8cb4d8b78982a960e7331a/matty-0.2.0.tar.gz", hash = "sha256:e742b04fe1598156f968b9f32d28a2a72cc49c0a507a4b11fd2b3e27c3cc81bb", size = 19378, upload-time = "2025-08-23T19:09:57.643Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/16/ba/89d0a3755e5bedc12a18ff081c1c973c87a81d1c4e210137b74ee61fe728/matty-0.2.0-py3-none-any.whl", hash = "sha256:efe68053d2b19f93b28124bba2dc007257628c413539442fa87b4b3449fe712f", size = 15072, upload-time = "2025-08-23T19:09:56.257Z" },
+]
+
+[[package]]
 name = "mcp"
 version = "1.12.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3202,6 +3220,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "aioresponses" },
+    { name = "matty" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pre-commit-uv" },
@@ -3235,7 +3254,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.40.8" },
     { name = "browserbase" },
     { name = "cartesia" },
-    { name = "cerebras-cloud-sdk", specifier = ">=1.46.0" },
+    { name = "cerebras-cloud-sdk", specifier = ">=1.46" },
     { name = "chromadb", specifier = ">=1.0.15" },
     { name = "composio-agno" },
     { name = "crawl4ai", specifier = ">=0.7.3" },
@@ -3324,6 +3343,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aioresponses", specifier = ">=0.7.8" },
+    { name = "matty", specifier = ">=0.2.0" },
     { name = "mypy", specifier = ">=1.17" },
     { name = "pre-commit", specifier = ">=4.2" },
     { name = "pre-commit-uv", specifier = ">=4.1.4" },
@@ -6007,7 +6027,7 @@ wheels = [
 
 [[package]]
 name = "typer"
-version = "0.16.0"
+version = "0.16.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -6015,9 +6035,9 @@ dependencies = [
     { name = "shellingham" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c5/8c/7d682431efca5fd290017663ea4588bf6f2c6aad085c7f108c5dbc316e70/typer-0.16.0.tar.gz", hash = "sha256:af377ffaee1dbe37ae9440cb4e8f11686ea5ce4e9bae01b84ae7c63b87f1dd3b", size = 102625, upload-time = "2025-05-26T14:30:31.824Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/78/d90f616bf5f88f8710ad067c1f8705bf7618059836ca084e5bb2a0855d75/typer-0.16.1.tar.gz", hash = "sha256:d358c65a464a7a90f338e3bb7ff0c74ac081449e53884b12ba658cbd72990614", size = 102836, upload-time = "2025-08-18T19:18:22.898Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/76/42/3efaf858001d2c2913de7f354563e3a3a2f0decae3efe98427125a8f441e/typer-0.16.0-py3-none-any.whl", hash = "sha256:1f79bed11d4d02d4310e3c1b7ba594183bcedb0ac73b27a9e5f28f6fb5b98855", size = 46317, upload-time = "2025-05-26T14:30:30.523Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/76/06dbe78f39b2203d2a47d5facc5df5102d0561e2807396471b5f7c5a30a1/typer-0.16.1-py3-none-any.whl", hash = "sha256:90ee01cb02d9b8395ae21ee3368421faf21fa138cb2a541ed369c08cec5237c9", size = 46397, upload-time = "2025-08-18T19:18:21.663Z" },
 ]
 
 [[package]]
