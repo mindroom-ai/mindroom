@@ -12,6 +12,7 @@ import base64
 import contextlib
 import json
 import os
+import platform as plat
 import secrets
 import shutil
 import socket
@@ -36,6 +37,7 @@ console = Console()
 SCRIPT_DIR = Path(__file__).parent.absolute()
 REGISTRY_FILE = SCRIPT_DIR / "instances.json"
 ENV_TEMPLATE = SCRIPT_DIR / ".env.template"
+DEFAULT_REGISTRY = "git.nijho.lt/basnijholt"
 
 
 # Pydantic Models
@@ -56,6 +58,12 @@ class MatrixType(str, Enum):
     SYNAPSE = "synapse"
 
 
+class AuthType(str, Enum):
+    """Authentication type enum."""
+
+    AUTHELIA = "authelia"
+
+
 class Instance(BaseModel):
     """Instance configuration model."""
 
@@ -67,6 +75,7 @@ class Instance(BaseModel):
     domain: str
     status: InstanceStatus = InstanceStatus.CREATED
     matrix_type: MatrixType | None = None
+    auth_type: AuthType | None = None
 
 
 class AllocatedPorts(BaseModel):
@@ -257,13 +266,19 @@ def _prepare_matrix_config(
 
 
 def _get_docker_compose_files(instance: Instance, env_file_relative: str, project_root: Path) -> str:
-    """Get the docker-compose command with appropriate files based on matrix type."""
+    """Get the docker-compose command with appropriate files based on matrix and auth type."""
     base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
 
+    # Add Matrix server compose file if configured
     if instance.matrix_type == MatrixType.TUWUNEL:
-        return f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
-    if instance.matrix_type == MatrixType.SYNAPSE:
-        return f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+        base_cmd = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
+    elif instance.matrix_type == MatrixType.SYNAPSE:
+        base_cmd = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+
+    # Add Authelia compose file if configured
+    if instance.auth_type == AuthType.AUTHELIA:
+        base_cmd = f"{base_cmd} -f deploy/docker-compose.authelia.yml"
+
     return base_cmd
 
 
@@ -274,6 +289,42 @@ def _get_matrix_services(matrix_type: MatrixType | None) -> str:
     if matrix_type == MatrixType.TUWUNEL:
         return " tuwunel"
     return ""
+
+
+def _get_auth_services(auth_type: AuthType | None) -> str:
+    """Get the list of services to start based on auth type."""
+    if auth_type == AuthType.AUTHELIA:
+        return " authelia"  # Redis removed - using in-memory sessions
+    return ""
+
+
+def _pull_images_from_registry(registry_url: str, console: Console) -> None:
+    """Pull images from registry and tag them locally.
+
+    Args:
+        registry_url: Registry URL to pull from
+        console: Rich console for output
+
+    Raises:
+        typer.Exit: If pulling fails
+
+    """
+    console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}...")
+    # Detect platform
+    arch = "arm64" if plat.machine() == "aarch64" else "amd64"
+
+    images = [
+        (f"{registry_url}/mindroom-backend:{arch}", "deploy-mindroom-backend:latest"),
+        (f"{registry_url}/mindroom-frontend:{arch}", "deploy-mindroom-frontend:latest"),
+    ]
+    for source, target in images:
+        pull_cmd = f"docker pull {source} && docker tag {source} {target}"
+        console.print(f"  Pulling {source.split('/')[-1]}...")
+        result = subprocess.run(pull_cmd, check=False, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            console.print(f"[red]✗[/red] Failed to pull {source}")
+            console.print(result.stderr)
+            raise typer.Exit(1)
 
 
 def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixType | None) -> None:
@@ -410,6 +461,55 @@ def _setup_synapse_config(instance: Instance) -> None:
     )
 
 
+def _setup_authelia_config(instance: Instance) -> None:
+    """Set up Authelia configuration directory and files."""
+    authelia_dir = Path(instance.data_dir) / "authelia"
+    authelia_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy configuration files
+    config_template = SCRIPT_DIR / "authelia-config" / "configuration.yml"
+    users_template = SCRIPT_DIR / "authelia-config" / "users_database.yml"
+
+    if config_template.exists():
+        shutil.copy(config_template, authelia_dir / "configuration.yml")
+    if users_template.exists():
+        shutil.copy(users_template, authelia_dir / "users_database.yml")
+
+    # Generate secrets for configuration
+    config_file = authelia_dir / "configuration.yml"
+    if config_file.exists():
+        config_content = config_file.read_text()
+
+        # Generate three different secrets
+        jwt_secret = secrets.token_hex(32)
+        session_secret = secrets.token_hex(32)
+        encryption_key = secrets.token_hex(32)
+
+        # Replace placeholders with actual secrets (one at a time)
+        config_content = config_content.replace("CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32", jwt_secret, 1)
+        config_content = config_content.replace(
+            "CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32",
+            session_secret,
+            1,
+        )
+        config_content = config_content.replace(
+            "CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32",
+            encryption_key,
+            1,
+        )
+
+        # Update domain references
+        # Extract root domain (e.g., "try.mindroom.chat" -> "mindroom.chat")
+        domain_parts = instance.domain.split(".")
+        root_domain = ".".join(domain_parts[-2:]) if len(domain_parts) > 2 else instance.domain
+
+        config_content = config_content.replace("mindroom.localhost", root_domain)
+        config_content = config_content.replace("auth-mindroom.localhost", f"auth-{instance.domain}")
+        config_content = config_content.replace("https://mindroom.localhost", f"https://{instance.domain}")
+
+        config_file.write_text(config_content)
+
+
 def _update_registry(registry: Registry, instance: Instance, matrix_type: MatrixType | None) -> None:
     """Update the registry with the new instance."""
     registry.instances[instance.name] = instance
@@ -420,7 +520,7 @@ def _update_registry(registry: Registry, instance: Instance, matrix_type: Matrix
     save_registry(registry)
 
 
-def _print_instance_info(instance: Instance, matrix_type: MatrixType | None) -> None:
+def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, auth_type: AuthType | None = None) -> None:
     """Print information about the created instance."""
     console.print(f"[green]✓[/green] Created instance '[cyan]{instance.name}[/cyan]'")
     console.print(f"  [dim]Backend port:[/dim] {instance.backend_port}")
@@ -433,6 +533,10 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None) -> 
     if matrix_type:
         matrix_name = "Tuwunel (lightweight)" if matrix_type == MatrixType.TUWUNEL else "Synapse (full)"
         console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
+    if auth_type:
+        console.print("  [dim]Auth:[/dim] [green]Authelia (production-ready)[/green]")
+        console.print("    [yellow]Default login:[/yellow] admin / mindroom")
+        console.print(f"    [dim]Auth URL:[/dim] https://auth-{instance.domain}")
 
 
 @app.command()
@@ -443,6 +547,11 @@ def create(
         None,
         "--matrix",
         help="Include Matrix server: 'tuwunel' (lightweight) or 'synapse' (full)",
+    ),
+    auth: str | None = typer.Option(
+        None,
+        "--auth",
+        help="Include authentication: 'authelia' (production-ready auth server)",
     ),
 ) -> None:
     """Create a new instance with automatic port allocation."""
@@ -459,6 +568,15 @@ def create(
             matrix_type = MatrixType(matrix)
         except ValueError:
             console.print(f"[red]✗[/red] Invalid matrix option '{matrix}'. Use 'tuwunel' or 'synapse'")
+            raise typer.Exit(1)  # noqa: B904
+
+    # Validate and convert auth type to enum
+    auth_type: AuthType | None = None
+    if auth:
+        try:
+            auth_type = AuthType(auth)
+        except ValueError:
+            console.print(f"[red]✗[/red] Invalid auth option '{auth}'. Use 'authelia'")
             raise typer.Exit(1)  # noqa: B904
 
     # Allocate ports and create instance
@@ -482,6 +600,7 @@ def create(
         domain=domain or f"{name}.localhost",
         status=InstanceStatus.CREATED,
         matrix_type=matrix_type,
+        auth_type=auth_type,
     )
 
     # Create environment file
@@ -495,17 +614,24 @@ def create(
     if matrix_type == MatrixType.SYNAPSE:
         _setup_synapse_config(instance)
 
+    # Set up Authelia configuration if needed
+    if auth_type == AuthType.AUTHELIA:
+        _setup_authelia_config(instance)
+
     # Update registry
     _update_registry(registry, instance, matrix_type)
 
     # Print instance information
-    _print_instance_info(instance, matrix_type)
+    _print_instance_info(instance, matrix_type, auth_type)
 
 
 @app.command()
 def start(  # noqa: PLR0912, PLR0915
     name: str = typer.Argument("default", help="Instance name to start"),
     only_matrix: bool = typer.Option(False, "--only-matrix", help="Start only Matrix server without backend/frontend"),
+    use_registry: bool = typer.Option(False, "--registry", "-r", help="Pull images from registry instead of building"),
+    registry_url: str = typer.Option(DEFAULT_REGISTRY, "--registry-url", help="Registry URL to pull from"),
+    no_build: bool = typer.Option(False, "--no-build", help="Skip building images (use existing local images)"),
 ) -> None:
     """Start a Mindroom instance."""
     registry = load_registry()
@@ -601,12 +727,22 @@ def start(  # noqa: PLR0912, PLR0915
         status_msg = f"Starting Matrix server for '{name}'..."
         console.print("[yellow]ℹ[/yellow] Starting only Matrix server (no backend/frontend)")  # noqa: RUF001
     else:
-        # Start full stack: frontend + backend + matrix
+        # Start full stack: frontend + backend + matrix + auth
         services = "frontend backend"
         services += _get_matrix_services(matrix_type)
+        services += _get_auth_services(instance.auth_type)
         status_msg = f"Starting instance '{name}'..."
 
-    cmd = f"{compose_files} -p {name} up -d --build {services}"
+    # Pull images from registry if requested
+    if use_registry:
+        _pull_images_from_registry(registry_url, console)
+        build_flag = ""
+    elif no_build:
+        build_flag = ""
+    else:
+        build_flag = "--build"
+
+    cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]{status_msg}[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
@@ -675,6 +811,9 @@ def restart(
         "--only-matrix",
         help="Restart only Matrix server without backend/frontend",
     ),
+    use_registry: bool = typer.Option(False, "--registry", "-r", help="Pull images from registry instead of building"),
+    registry_url: str = typer.Option(DEFAULT_REGISTRY, "--registry-url", help="Registry URL to pull from"),
+    no_build: bool = typer.Option(False, "--no-build", help="Skip building images (use existing local images)"),
 ) -> None:
     """Restart a Mindroom instance (stop and start)."""
     registry = load_registry()
@@ -702,7 +841,7 @@ def restart(
         for instance_name in running_instances:
             instance = registry.instances[instance_name]
             console.print(f"\n[yellow]Restarting '[cyan]{instance_name}[/cyan]'...[/yellow]")
-            _restart_instance(instance_name, instance, registry, only_matrix)
+            _restart_instance(instance_name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
         console.print("\n[green]✓[/green] All instances restarted successfully!")
         return
@@ -717,10 +856,18 @@ def restart(
 
     instance = registry.instances[name]
     console.print(f"[yellow]Restarting instance '[cyan]{name}[/cyan]'...[/yellow]")
-    _restart_instance(name, instance, registry, only_matrix)
+    _restart_instance(name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
 
-def _restart_instance(name: str, instance: Instance, registry: Registry, only_matrix: bool) -> None:  # noqa: PLR0912
+def _restart_instance(  # noqa: PLR0912, PLR0915
+    name: str,
+    instance: Instance,
+    registry: Registry,
+    only_matrix: bool,
+    use_registry: bool = False,
+    registry_url: str = DEFAULT_REGISTRY,
+    no_build: bool = False,
+) -> None:
     """Helper function to restart a single instance."""
     # Verify federation configuration if Matrix is enabled
     if instance.matrix_type:
@@ -759,11 +906,21 @@ def _restart_instance(name: str, instance: Instance, registry: Registry, only_ma
             raise typer.Exit(1)
         services = _get_matrix_services(matrix_type).strip()
     else:
-        # Start full stack: frontend + backend + matrix
+        # Start full stack: frontend + backend + matrix + auth
         services = "frontend backend"
         services += _get_matrix_services(matrix_type)
+        services += _get_auth_services(instance.auth_type)
 
-    start_cmd = f"{compose_files} -p {name} up -d --build {services}"
+    # Pull images from registry if requested
+    if use_registry:
+        _pull_images_from_registry(registry_url, console)
+        build_flag = ""
+    elif no_build:
+        build_flag = ""
+    else:
+        build_flag = "--build"
+
+    start_cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
         result = subprocess.run(start_cmd, check=False, shell=True, capture_output=True, text=True)
@@ -924,7 +1081,7 @@ def get_actual_status(name: str) -> tuple[bool, bool, bool]:
 
 
 @app.command("list")
-def list_instances() -> None:
+def list_instances() -> None:  # noqa: PLR0912
     """List all configured instances."""
     registry = load_registry()
     instances = registry.instances
@@ -974,17 +1131,58 @@ def list_instances() -> None:
         else:
             matrix_display = "[dim]disabled[/dim]"
 
+        # Add auth indicator to domain if configured
+        domain_display = instance.domain
+        if instance.auth_type == AuthType.AUTHELIA:
+            domain_display = f"{instance.domain} 🔒"
+
         table.add_row(
             name,
             status_display,
             str(instance.backend_port),
             str(instance.frontend_port),
             matrix_display,
-            instance.domain,
+            domain_display,
             instance.data_dir,
         )
 
     console.print(table)
+
+
+@app.command()
+def pull(
+    registry_url: str = typer.Option(DEFAULT_REGISTRY, "--registry-url", help="Registry URL to pull from"),
+    tag: str = typer.Option(None, "--tag", "-t", help="Image tag to pull (default: auto-detect platform)"),
+) -> None:
+    """Pull latest images from registry."""
+    # Auto-detect platform if tag not specified
+    if tag is None:
+        tag = "arm64" if plat.machine() == "aarch64" else "amd64"
+        console.print(f"[blue]🔍[/blue] Auto-detected platform: {tag}")
+
+    console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}:{tag}...")
+
+    images = [
+        (f"{registry_url}/mindroom-backend:{tag}", "deploy-mindroom-backend:latest"),
+        (f"{registry_url}/mindroom-frontend:{tag}", "deploy-mindroom-frontend:latest"),
+    ]
+
+    for source, target in images:
+        with console.status(f"Pulling {source.split('/')[-1]}..."):
+            pull_cmd = f"docker pull {source}"
+            result = subprocess.run(pull_cmd, check=False, shell=True, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                # Tag the image
+                tag_cmd = f"docker tag {source} {target}"
+                subprocess.run(tag_cmd, check=False, shell=True, capture_output=True, text=True)
+                console.print(f"[green]✓[/green] Pulled {source.split('/')[-1]}")
+            else:
+                console.print(f"[red]✗[/red] Failed to pull {source}")
+                console.print(f"[dim]{result.stderr}[/dim]")
+                raise typer.Exit(1)
+
+    console.print("[green]✓[/green] All images pulled successfully!")
 
 
 if __name__ == "__main__":
