@@ -393,6 +393,17 @@ class AgentBot:
         if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
             return
 
+        # Skip edit events - they have m.relates_to with rel_type == "m.replace"
+        # NOTE: This means the bot won't respond to edited messages at all.
+        # Ideally, when a user edits their message, the bot would edit its response too,
+        # but this requires complex tracking of message relationships and response regeneration.
+        # For now, we ignore all edits to prevent them being treated as new messages.
+        # Users who want a new response after editing should send a new message instead.
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        if relates_to.get("rel_type") == "m.replace":
+            self.logger.debug(f"Skipping edit event {event.event_id}")
+            return
+
         if (
             event.sender == self.agent_user.user_id
             # Allow processing of voice transcriptions the router sent on behalf of users
