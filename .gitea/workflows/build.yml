@@ -47,7 +47,8 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set up QEMU
+    - name: Set up QEMU (for ARM64 builds)
+      if: matrix.platform == 'linux/arm64'
       uses: docker/setup-qemu-action@v3
     
     - name: Set up Docker Buildx
