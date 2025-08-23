@@ -292,7 +292,7 @@ def _get_matrix_services(matrix_type: MatrixType | None) -> str:
 def _get_auth_services(auth_type: AuthType | None) -> str:
     """Get the list of services to start based on auth type."""
     if auth_type == AuthType.AUTHELIA:
-        return " authelia authelia-redis"
+        return " authelia"  # Redis removed - using in-memory sessions
     return ""
 
 
