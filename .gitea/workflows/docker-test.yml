@@ -1,7 +1,9 @@
 name: Docker Registry Test (Quick Debug)
 
 on:
-  workflow_dispatch:  # Manual trigger only - for debugging CI issues
+  push:
+    branches: [ main, public ]
+  workflow_dispatch:  # Allow manual trigger for testing
 
 env:
   REGISTRY: git.nijho.lt
