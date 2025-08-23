@@ -1,4 +1,5 @@
 name: Build Multi-Arch Docker Images
+# Builds multi-arch images for both backend and frontend
 
 on:
   push:
