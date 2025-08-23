@@ -9,7 +9,7 @@ users:
     displayname: "Admin User"
     # Password: mindroom (CHANGE THIS!)
     # Generated with: docker run --rm authelia/authelia:latest authelia crypto hash generate argon2 --password 'mindroom'
-    password: "$argon2id$v=19$m=65536,t=3,p=4$v0oPn4oNMspsoZx6LQvIdg$wF2QEHmbTlVEYbbJQh0Z1eDeGekHU00shSn4OD2SVjg"
+    password: "$argon2id$v=19$m=1024,t=1,p=8$+ogfwWzq7g/phRNlSiAF7Q$B1GAkekp1p7EJgggQe7aiz1gYNm2uA/1Q5yBNv65zxY"
     email: admin@example.com
     groups:
       - admins
