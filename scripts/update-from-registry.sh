@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Script to pull latest images from Gitea registry and update deployments
 
 set -e
