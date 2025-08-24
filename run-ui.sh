@@ -5,15 +5,15 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Load .env file if it exists, but don't override existing env vars
+# Load .env file if it exists (only set variables that aren't already set)
 if [ -f .env ]; then
-    set -a
-    source <(grep -v '^#' .env | sed 's/=\(.*\)$/="\1"/' | while IFS='=' read -r key value; do
-        if [ -z "${!key}" ]; then
-            echo "$key=$value"
+    # Use a subshell to avoid polluting the environment
+    while IFS='=' read -r key value; do
+        # Only set if not already set
+        if [[ ! -v $key ]] && [[ $key != \#* ]] && [[ -n $key ]]; then
+            export "$key=$value"
         fi
-    done)
-    set +a
+    done < <(grep -v '^#' .env | grep -v '^$')
 fi
 
 # Set ports from environment variables or use defaults
