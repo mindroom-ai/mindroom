@@ -2,7 +2,7 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["typer", "rich", "pydantic", "pyyaml", "httpx", "python-dotenv"]
+# dependencies = ["typer", "rich", "pydantic", "pyyaml", "httpx", "python-dotenv", "jinja2"]
 # ///
 """Matrix Bridge Manager for Mindroom instances."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
@@ -24,6 +24,7 @@ from typing import Any
 import typer
 import yaml
 from dotenv import load_dotenv
+from jinja2 import Template
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.table import Table
@@ -219,33 +220,81 @@ def _get_matrix_info(instance_name: str) -> tuple[str, str, str]:
     return matrix_type, matrix_domain, matrix_url
 
 
-def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[str, Any]) -> Path:
-    """Create a docker-compose file for a bridge."""
+def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[str, Any]) -> Path:  # noqa: ARG001
+    """Create a docker-compose file for a bridge using Jinja2 template."""
     compose_file = Path(bridge.data_dir) / "docker-compose.yml"
 
-    # Use the same network as the Matrix server
+    # Load the appropriate Jinja2 template
+    template_file = BRIDGES_DIR / f"docker-compose.{bridge.bridge_type.value}.j2"
+
+    if not template_file.exists():
+        # Fallback to YAML generation if template doesn't exist
+        console.print(f"[yellow]Warning: Template {template_file} not found, using default generation[/yellow]")
+        return _create_bridge_docker_compose_fallback(bridge)
+
+    # Read and render the template
+    with template_file.open() as f:
+        template = Template(f.read())
+
+    # Prepare variables for template
+    template_vars = {
+        "instance_name": bridge.instance_name,
+        "port": bridge.port,
+        "data_dir": bridge.data_dir,
+    }
+
+    # Add bridge-specific variables
+    if bridge.bridge_type == BridgeType.EMAIL:
+        template_vars.update(
+            {
+                "smtp_port": bridge.port,
+                "imap_port": bridge.port + 1,
+                "email_domain": bridge.credentials.get("domain", "example.com"),
+                "smtp_host": bridge.credentials.get("smtp_host", "smtp.example.com"),
+            },
+        )
+
+    # Render the template
+    compose_content = template.render(**template_vars)
+
+    # Write to file
+    with compose_file.open("w") as f:
+        f.write(compose_content)
+
+    return compose_file
+
+
+def _create_bridge_docker_compose_fallback(bridge: BridgeConfig) -> Path:
+    """Fallback method to create docker-compose file without template."""
+    compose_file = Path(bridge.data_dir) / "docker-compose.yml"
     network_name = f"{bridge.instance_name}_mindroom-network"
 
+    # Get image from bridge templates
+    image = BRIDGE_TEMPLATES.get(bridge.bridge_type, {}).get("image", "unknown")
+
     compose_content = {
-        "version": "3.8",
         "services": {
-            bridge.bridge_type.value: {  # Use .value to get the string representation
-                "image": bridge_template["image"],
+            bridge.bridge_type.value: {
+                "image": image,
                 "container_name": f"{bridge.instance_name}-{bridge.bridge_type.value}-bridge",
                 "restart": "unless-stopped",
                 "volumes": [
                     f"{bridge.data_dir}/data:/data",
                 ],
                 "ports": [
-                    f"{bridge.port}:29317",  # mautrix bridges use 29317 internally
+                    f"{bridge.port}:29317",
                 ],
                 "networks": [
                     network_name,
+                    "mynetwork",
                 ],
             },
         },
         "networks": {
             network_name: {
+                "external": True,
+            },
+            "mynetwork": {
                 "external": True,
             },
         },
@@ -576,8 +625,9 @@ def register(
 
     # Start bridge temporarily to generate registration
     with console.status("[yellow]Starting bridge to generate registration...[/yellow]"):
-        # Ensure network exists
-        subprocess.run("docker network create matrix-bridges 2>/dev/null", shell=True, check=False)
+        # Ensure networks exist
+        subprocess.run(f"docker network create {instance}_mindroom-network 2>/dev/null", shell=True, check=False)
+        subprocess.run("docker network create mynetwork 2>/dev/null", shell=True, check=False)
 
         # Start bridge
         cmd = f"cd {bridge.data_dir} && docker compose up"
