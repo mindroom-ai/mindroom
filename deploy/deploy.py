@@ -151,61 +151,36 @@ def _is_port_in_use(port: int) -> bool:
             return False
 
 
+def _find_available_port(start_port: int, allocated_ports: list[int], port_type: str) -> int:
+    """Find next available port starting from start_port."""
+    port = start_port
+    skipped = []
+
+    while port in allocated_ports or _is_port_in_use(port):
+        if _is_port_in_use(port) and port not in allocated_ports:
+            skipped.append(port)
+        port += 1
+        # Safety check to avoid infinite loop
+        if port > start_port + 1000:
+            msg = f"Could not find available {port_type} port starting from {start_port}"
+            raise RuntimeError(msg)
+
+    if skipped:
+        console.print(
+            f"[yellow]Note:[/yellow] {port_type.capitalize()} port(s) {skipped} already in use by other processes, using port {port}",
+        )
+
+    return port
+
+
 def _find_next_ports(registry: Registry) -> tuple[int, int, int]:
     """Find the next available ports that are not in use on the system."""
     defaults = registry.defaults
     allocated = registry.allocated_ports
 
-    # Find available backend port
-    backend_port = defaults.backend_port_start
-    skipped_backend = []
-    while backend_port in allocated.backend or _is_port_in_use(backend_port):
-        if _is_port_in_use(backend_port) and backend_port not in allocated.backend:
-            skipped_backend.append(backend_port)
-        backend_port += 1
-        # Safety check to avoid infinite loop
-        if backend_port > defaults.backend_port_start + 1000:
-            msg = f"Could not find available backend port starting from {defaults.backend_port_start}"
-            raise RuntimeError(msg)
-
-    if skipped_backend:
-        console.print(
-            f"[yellow]Note:[/yellow] Backend port(s) {skipped_backend} already in use by other processes, using port {backend_port}",
-        )
-
-    # Find available frontend port
-    frontend_port = defaults.frontend_port_start
-    skipped_frontend = []
-    while frontend_port in allocated.frontend or _is_port_in_use(frontend_port):
-        if _is_port_in_use(frontend_port) and frontend_port not in allocated.frontend:
-            skipped_frontend.append(frontend_port)
-        frontend_port += 1
-        # Safety check to avoid infinite loop
-        if frontend_port > defaults.frontend_port_start + 1000:
-            msg = f"Could not find available frontend port starting from {defaults.frontend_port_start}"
-            raise RuntimeError(msg)
-
-    if skipped_frontend:
-        console.print(
-            f"[yellow]Note:[/yellow] Frontend port(s) {skipped_frontend} already in use by other processes, using port {frontend_port}",
-        )
-
-    # Find available Matrix port (starting at 8448)
-    matrix_port = defaults.matrix_port_start
-    skipped_matrix = []
-    while matrix_port in allocated.matrix or _is_port_in_use(matrix_port):
-        if _is_port_in_use(matrix_port) and matrix_port not in allocated.matrix:
-            skipped_matrix.append(matrix_port)
-        matrix_port += 1
-        # Safety check to avoid infinite loop
-        if matrix_port > defaults.matrix_port_start + 1000:
-            msg = f"Could not find available matrix port starting from {defaults.matrix_port_start}"
-            raise RuntimeError(msg)
-
-    if skipped_matrix:
-        console.print(
-            f"[yellow]Note:[/yellow] Matrix port(s) {skipped_matrix} already in use by other processes, using port {matrix_port}",
-        )
+    backend_port = _find_available_port(defaults.backend_port_start, allocated.backend, "backend")
+    frontend_port = _find_available_port(defaults.frontend_port_start, allocated.frontend, "frontend")
+    matrix_port = _find_available_port(defaults.matrix_port_start, allocated.matrix, "matrix")
 
     return backend_port, frontend_port, matrix_port
 
@@ -284,6 +259,28 @@ def _get_docker_compose_files(instance: Instance, env_file_relative: str, projec
         base_cmd = f"{base_cmd} -f deploy/docker-compose.authelia.yml"
 
     return base_cmd
+
+
+def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str:
+    """Get the list of services to start based on instance configuration."""
+    if only_matrix:
+        if not instance.matrix_type:
+            msg = f"Instance '{instance.name}' has no Matrix server configured!"
+            raise ValueError(msg)
+        return _get_matrix_services(instance.matrix_type).strip()
+
+    # Start full stack: frontend + backend + matrix + auth
+    services = ["frontend", "backend"]
+
+    if instance.matrix_type == MatrixType.SYNAPSE:
+        services.extend(["postgres", "redis", "synapse"])
+    elif instance.matrix_type == MatrixType.TUWUNEL:
+        services.append("tuwunel")
+
+    if instance.auth_type == AuthType.AUTHELIA:
+        services.append("authelia")
+
+    return " ".join(services)
 
 
 def _get_matrix_services(matrix_type: MatrixType | None) -> str:
@@ -428,6 +425,75 @@ def _verify_extra_hosts_for_federation(matrix_type: MatrixType | None, instances
             console.print(f'      - "{domain}:172.20.0.1"')
         console.print("\n[dim]This is required for local federation to work properly.[/dim]")
         raise typer.Exit(1)
+
+
+def _create_directory_with_permissions(path: Path, uid: int = 1000, gid: int = 1000) -> None:
+    """Create a directory with proper ownership and permissions."""
+    path.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError, PermissionError):
+        os.chown(path, uid, gid)
+        path.chmod(0o755)
+
+
+def _copy_credentials_to_instance(instance: Instance) -> None:
+    """Copy credentials from ~/.mindroom/credentials to instance data directory."""
+    source_dir = Path.home() / ".mindroom" / "credentials"
+    if not source_dir.exists():
+        return
+
+    target_dir = Path(instance.data_dir) / "mindroom" / "credentials"
+
+    # Copy all credential files
+    for cred_file in source_dir.glob("*.json"):
+        target_file = target_dir / cred_file.name
+        if not target_file.exists():
+            shutil.copy2(cred_file, target_file)
+            # Set proper permissions for Docker
+            with contextlib.suppress(OSError, PermissionError):
+                os.chown(target_file, 1000, 1000)
+                target_file.chmod(0o644)
+
+
+def _create_instance_directories(instance: Instance) -> None:
+    """Create all necessary directories for an instance with proper permissions."""
+    # Base directories needed by all instances
+    base_dirs = ["config", "tmp", "logs", "mindroom", "mindroom/credentials", "mem0"]
+
+    for subdir in base_dirs:
+        dir_path = Path(f"{instance.data_dir}/{subdir}")
+        _create_directory_with_permissions(dir_path)
+
+    # Copy credentials from ~/.mindroom/credentials if they exist
+    _copy_credentials_to_instance(instance)
+
+
+def _create_synapse_directories(instance: Instance) -> None:
+    """Create directories needed for Synapse."""
+    for matrix_dir in ["synapse", "synapse/media_store", "postgres", "redis"]:
+        dir_path = Path(f"{instance.data_dir}/{matrix_dir}")
+        _create_directory_with_permissions(dir_path)
+
+
+def _setup_tuwunel_directory(instance: Instance, env_file: Path) -> None:
+    """Set up Tuwunel directory, clearing if server name changed."""
+    tuwunel_dir = Path(f"{instance.data_dir}/tuwunel")
+
+    # Check if Tuwunel database exists and might have wrong server name
+    if tuwunel_dir.exists() and any(tuwunel_dir.iterdir()):
+        # Read current server name from env file
+        current_server_name = None
+        with env_file.open() as f:
+            for line in f:
+                if line.startswith("MATRIX_SERVER_NAME="):
+                    current_server_name = line.split("=", 1)[1].strip()
+                    break
+
+        # If server name changed, clear the database (safe - Tuwunel recreates it)
+        if current_server_name and current_server_name != instance.domain:
+            console.print("[yellow]i[/yellow] Clearing Tuwunel database due to server name change")
+            shutil.rmtree(tuwunel_dir)
+
+    _create_directory_with_permissions(tuwunel_dir)
 
 
 def _create_wellknown_files(name: str, instance: Instance) -> None:
@@ -664,53 +730,13 @@ def start(  # noqa: PLR0912, PLR0915
         _verify_extra_hosts_for_federation(instance.matrix_type, registry.instances)
 
     # Create data directories with proper permissions
-    # Use UID/GID 1000 for Docker containers (standard non-root user)
-    docker_uid, docker_gid = 1000, 1000
-
-    for subdir in ["config", "tmp", "logs", "mindroom", "mindroom/credentials", "mem0"]:
-        dir_path = Path(f"{instance.data_dir}/{subdir}")
-        dir_path.mkdir(parents=True, exist_ok=True)
-        # Ensure proper ownership and permissions for Docker containers
-        with contextlib.suppress(OSError, PermissionError):
-            os.chown(dir_path, docker_uid, docker_gid)
-            dir_path.chmod(0o755)
+    _create_instance_directories(instance)
 
     # Create Matrix data directories if enabled
-    matrix_type = instance.matrix_type
-    if matrix_type == MatrixType.TUWUNEL:
-        tuwunel_dir = Path(f"{instance.data_dir}/tuwunel")
-
-        # Check if Tuwunel database exists and might have wrong server name
-        # If the .env file has a different MATRIX_SERVER_NAME than what's in the database,
-        # we need to clear the database
-        if tuwunel_dir.exists() and any(tuwunel_dir.iterdir()):
-            # Read current server name from env file
-            current_server_name = None
-            with env_file.open() as f:
-                for line in f:
-                    if line.startswith("MATRIX_SERVER_NAME="):
-                        current_server_name = line.split("=", 1)[1].strip()
-                        break
-
-            # If server name changed or we're having issues, clear the database
-            # This is safe because Tuwunel will recreate it
-            if current_server_name and current_server_name != instance.domain:
-                console.print("[yellow]i[/yellow] Clearing Tuwunel database due to server name change")
-                shutil.rmtree(tuwunel_dir)
-                tuwunel_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            tuwunel_dir.mkdir(parents=True, exist_ok=True)
-
-        with contextlib.suppress(OSError, PermissionError):
-            os.chown(tuwunel_dir, docker_uid, docker_gid)
-            tuwunel_dir.chmod(0o755)
-    elif matrix_type == MatrixType.SYNAPSE:
-        for matrix_dir in ["synapse", "synapse/media_store", "postgres", "redis"]:
-            dir_path = Path(f"{instance.data_dir}/{matrix_dir}")
-            dir_path.mkdir(parents=True, exist_ok=True)
-            with contextlib.suppress(OSError, PermissionError):
-                os.chown(dir_path, docker_uid, docker_gid)
-                dir_path.chmod(0o755)
+    if instance.matrix_type == MatrixType.TUWUNEL:
+        _setup_tuwunel_directory(instance, env_file)
+    elif instance.matrix_type == MatrixType.SYNAPSE:
+        _create_synapse_directories(instance)
 
         # Copy Synapse config template if needed
         synapse_dir = Path(f"{instance.data_dir}/synapse")
@@ -733,19 +759,15 @@ def start(  # noqa: PLR0912, PLR0915
     compose_files = _get_docker_compose_files(instance, env_file_relative, project_root)
 
     # Determine which services to start based on flags
+    try:
+        services = _get_services_to_start(instance, only_matrix)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1) from e
+
+    status_msg = f"Starting Matrix server for '{name}'..." if only_matrix else f"Starting instance '{name}'..."
     if only_matrix:
-        if not matrix_type:
-            console.print(f"[red]✗[/red] Instance '{name}' has no Matrix server configured!")
-            raise typer.Exit(1)
-        services = _get_matrix_services(matrix_type).strip()
-        status_msg = f"Starting Matrix server for '{name}'..."
         console.print("[yellow]ℹ[/yellow] Starting only Matrix server (no backend/frontend)")  # noqa: RUF001
-    else:
-        # Start full stack: frontend + backend + matrix + auth
-        services = "frontend backend"
-        services += _get_matrix_services(matrix_type)
-        services += _get_auth_services(instance.auth_type)
-        status_msg = f"Starting instance '{name}'..."
 
     # Pull images from registry if requested
     if use_registry:
@@ -762,7 +784,7 @@ def start(  # noqa: PLR0912, PLR0915
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
 
     # If Matrix is enabled, also start the well-known service for federation
-    if result.returncode == 0 and matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
+    if result.returncode == 0 and instance.matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
         wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
         with console.status(f"[yellow]Starting federation well-known service for '{name}'...[/yellow]"):
             wellknown_result = subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
@@ -914,16 +936,11 @@ def _restart_instance(  # noqa: PLR0912, PLR0915
     compose_files = _get_docker_compose_files(instance, env_file_relative, project_root)
 
     # Determine which services to restart based on flags
-    if only_matrix:
-        if not matrix_type:
-            console.print(f"[red]✗[/red] Instance '{name}' has no Matrix server configured!")
-            raise typer.Exit(1)
-        services = _get_matrix_services(matrix_type).strip()
-    else:
-        # Start full stack: frontend + backend + matrix + auth
-        services = "frontend backend"
-        services += _get_matrix_services(matrix_type)
-        services += _get_auth_services(instance.auth_type)
+    try:
+        services = _get_services_to_start(instance, only_matrix)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1) from e
 
     # Pull images from registry if requested
     if use_registry:
