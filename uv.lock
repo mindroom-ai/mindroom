@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13' and python_full_version < '4'",
@@ -1746,7 +1746,7 @@ wheels = [
 
 [[package]]
 name = "firecrawl-py"
-version = "3.2.1"
+version = "3.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1757,9 +1757,9 @@ dependencies = [
     { name = "requests" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a9/60/c38172c805ab09b95a0cf46a60f8d739918085324b465b99165f3b3ab02d/firecrawl_py-3.2.1.tar.gz", hash = "sha256:2ddbefe7adc30310177d72c0d3787c2ba1687bd4d850f40bf90a49b54282c12c", size = 123710, upload-time = "2025-08-22T18:31:39.312Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/79/18/c4078568d60dc3a36c81b78fb946b8f38b171959d6fb8bf86aa674faa807/firecrawl_py-3.3.2.tar.gz", hash = "sha256:7c5433806edcff52375a67e59a90e933f51fa5951926c92afb86e8654a99ff1f", size = 124387, upload-time = "2025-08-23T23:52:29.009Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e3/d8/788f7fb737e6568485a220e21eb76c92c07abc115a3ed9cb53ea75f0107e/firecrawl_py-3.2.1-py3-none-any.whl", hash = "sha256:06832c7795567ef803c1039aa9c17cd689601f140a1ba1fe69e5e20e362d5835", size = 158312, upload-time = "2025-08-22T18:31:37.551Z" },
+    { url = "https://files.pythonhosted.org/packages/43/7b/a73fc536d5a1b5c0b58a540668876c4d29fcfc9668dcb768375f306f1b67/firecrawl_py-3.3.2-py3-none-any.whl", hash = "sha256:af60a91fd34e869cb9bcbf91dbac9d673eda6336ddb843c8d868422ffeb1e1b6", size = 158506, upload-time = "2025-08-23T23:52:27.601Z" },
 ]
 
 [[package]]
@@ -2837,7 +2837,7 @@ wheels = [
 
 [[package]]
 name = "litellm"
-version = "1.75.9"
+version = "1.76.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -2852,9 +2852,9 @@ dependencies = [
     { name = "tiktoken" },
     { name = "tokenizers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d2/d8/08615bc4811d9a6df2b46f8efa7a0d6f7f8e1ca268a4c794540d9987a035/litellm-1.75.9.tar.gz", hash = "sha256:d8baf4b9988df599b55cb675808bbe22cedee2f099ba883684fe3f23af8d13a9", size = 10142656, upload-time = "2025-08-20T17:43:50.554Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/e8/47c791c3d2cb4397ddece90840aecfc6cdc4a003f039dde42d7c861f4709/litellm-1.76.0.tar.gz", hash = "sha256:d26d12333135edd72af60e0e310284dac3b079f4d7c47c79dfbb2430b9b4b421", size = 10170569, upload-time = "2025-08-24T05:14:01.176Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5d/b2/f21db9636d9fcd67b2c557c58aafb8a6e9b53864f7a40d645e09c2e3ab98/litellm-1.75.9-py3-none-any.whl", hash = "sha256:a72c3e05bcb0e50ac1804f0df09d0d7bf5cb41e84351e1609a960033b0ef01c1", size = 8920144, upload-time = "2025-08-20T17:43:48.327Z" },
+    { url = "https://files.pythonhosted.org/packages/86/f2/891b4b6c09021046d7f5bcff57178b18f352a67b032d35cc693d79b38620/litellm-1.76.0-py3-none-any.whl", hash = "sha256:357464242fc1eeda384810c9e334e48ad67a50ecd30cf61e86c15f89e2f2e0b4", size = 8953112, upload-time = "2025-08-24T05:13:58.642Z" },
 ]
 
 [[package]]
@@ -3084,7 +3084,7 @@ wheels = [
 
 [[package]]
 name = "matty"
-version = "0.3.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -3095,9 +3095,9 @@ dependencies = [
     { name = "rich" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d6/04/192751b083dc951937d2fba246e5bff2db58f1c607abd84d997a5562c46c/matty-0.3.0.tar.gz", hash = "sha256:264111b5841b668063c4ed3d8138d00341e7238f08d393267ee98eb3f1a87470", size = 21623, upload-time = "2025-08-23T20:59:41.218Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/39/f4/73ae8834ef8becd977fbbce2516ab3ce8208ebcc7eeb7ffd0e40c0310e22/matty-0.5.0.tar.gz", hash = "sha256:b1cdfe87c388d51b1e6da7006fda7e793d22b1b8b3974d448ea3afde7cc4f980", size = 22249, upload-time = "2025-08-23T21:56:19.48Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/31/f5/57efba84c08146bc870db1e9b9b81790e6133550e8b750f62d5126c06547/matty-0.3.0-py3-none-any.whl", hash = "sha256:5e1bed691b735e41a275d7cf7e00e8187a51a77650aa7f908889acd4075f14c2", size = 16945, upload-time = "2025-08-23T20:59:39.77Z" },
+    { url = "https://files.pythonhosted.org/packages/70/29/7da3ac30b8bb08cb8e7daaf7ac7ce74e538cb064549aaf31904eb5034ac4/matty-0.5.0-py3-none-any.whl", hash = "sha256:efca1f139bd5e9c4cd96276ca67a82bd353bd4383495b717adda544fe394f76c", size = 17594, upload-time = "2025-08-23T21:56:18.117Z" },
 ]
 
 [[package]]
