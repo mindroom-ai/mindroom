@@ -217,41 +217,44 @@ def _prepare_matrix_config(
     template_dir: Path,
     target_dir: Path,
 ) -> None:
-    """Prepare Matrix configuration files (shared logic for Synapse and Tuwunel)."""
+    """Prepare Matrix configuration files using Jinja2 templates."""
     if not template_dir.exists():
         return
 
     matrix_server_name = f"m-{instance.domain}"
 
+    # Look for Jinja2 template
+    template_file = template_dir / f"{config_file_name}.j2"
+    if template_file.exists():
+        template_content = template_file.read_text()
+        template = Template(template_content)
+
+        # Render template with variables
+        if matrix_type == MatrixType.SYNAPSE:
+            content = template.render(
+                matrix_server_name=matrix_server_name,
+                postgres_host=f"{instance.name}-postgres",
+                redis_host=f"{instance.name}-redis",
+            )
+        else:
+            # For Tuwunel or other matrix types
+            content = template.render(
+                matrix_server_name=matrix_server_name,
+            )
+
+        with (target_dir / config_file_name).open("w") as f:
+            f.write(content)
+
+    # Copy other files (like signing.key, log.config, etc.)
     for file in template_dir.glob("*"):
-        if not file.is_file():
+        if not file.is_file() or file.suffix == ".j2":
             continue
 
         if file.name == config_file_name:
-            # Generate config file with correct values
-            with file.open() as f:
-                content = f.read()
+            # Skip - already handled by template
+            continue
 
-            # Common replacements
-            content = content.replace('server_name: "localhost"', f'server_name: "{matrix_server_name}"')
-            content = content.replace(
-                "public_baseurl: http://localhost:8008/",
-                f"public_baseurl: https://{matrix_server_name}/",
-            )
-
-            # Matrix-specific replacements
-            if matrix_type == MatrixType.SYNAPSE:
-                # Replace postgres and redis hostnames with container names
-                content = content.replace("host: postgres", f"host: {instance.name}-postgres")
-                content = content.replace("host: redis", f"host: {instance.name}-redis")
-            elif matrix_type == MatrixType.TUWUNEL:
-                # Tuwunel-specific replacements if needed
-                pass
-
-            with (target_dir / file.name).open("w") as f:
-                f.write(content)
-
-        elif file.name == "signing.key" and matrix_type == MatrixType.SYNAPSE:
+        if file.name == "signing.key" and matrix_type == MatrixType.SYNAPSE:
             # Generate a unique signing key for Synapse
             key_bytes = secrets.token_bytes(32)
             key_b64 = base64.b64encode(key_bytes).decode("ascii")
