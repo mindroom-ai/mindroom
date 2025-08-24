@@ -9,7 +9,7 @@ services:
     restart: unless-stopped
     volumes:
       - ${DATA_DIR:-./instance_data}/tuwunel:/var/lib/tuwunel
-      - ./tuwunel.toml:/etc/tuwunel.toml:ro
+      - ./templates/tuwunel/tuwunel.toml:/etc/tuwunel.toml:ro
     command: ["-c", "/etc/tuwunel.toml"]
     environment:
       # Instance-specific overrides via environment variables
@@ -34,6 +34,12 @@ services:
     extra_hosts:
       - "m-try.mindroom.chat:172.20.0.1"
       - "m-alt.mindroom.chat:172.20.0.1"
+      - "m-default.mindroom.chat:172.20.0.1"
+      - "m-test-2.mindroom.chat:172.20.0.1"
+      - "m-test-3.mindroom.chat:172.20.0.1"
+      - "m-test-4.mindroom.chat:172.20.0.1"
+      - "m-test-5.mindroom.chat:172.20.0.1"
+      - "m-test.mindroom.chat:172.20.0.1"
     ulimits:
       nofile:
         soft: 1048567

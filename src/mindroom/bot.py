@@ -421,7 +421,7 @@ class AgentBot:
             assert self.thread_invite_manager is not None
             await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
-        # Try to parse as command - parser handles emoji prefixes
+        # Try to parse as command
         command = command_parser.parse(event.body)
         if command:  # ONLY router handles the command
             if self.agent_name != ROUTER_AGENT_NAME:

@@ -14,8 +14,8 @@ log:
 # Theme (light, dark, grey, auto)
 theme: auto
 
-# JWT Secret - CHANGE THIS! Generate with: openssl rand -hex 32
-jwt_secret: CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32
+# JWT Secret
+jwt_secret: {{ jwt_secret }}
 
 # Default redirection URL (now configured per cookie below)
 
@@ -43,30 +43,30 @@ access_control:
   default_policy: deny
   rules:
     # Allow access to Authelia itself
-    - domain: auth-*.localhost
+    - domain: {{ auth_domain }}
       policy: bypass
 
-    # Require authentication for all mindroom instances
+    # Require authentication for all instances
+    {% if is_production %}
+    - domain: '*.{{ root_domain }}'
+      policy: one_factor
+    {% else %}
     - domain: '*.localhost'
       policy: one_factor
-
-    # For production domains
-    - domain: '*.yourdomain.com'
-      policy: two_factor
+    {% endif %}
 
 # Session configuration
 session:
   name: authelia_session
-  # Generate with: openssl rand -hex 32
-  secret: CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32
+  secret: {{ session_secret }}
   expiration: 1h
   inactivity: 5m
   remember_me_duration: 1M
 
   cookies:
-    - domain: mindroom.localhost
-      authelia_url: https://auth-mindroom.localhost
-      default_redirection_url: https://mindroom.localhost
+    - domain: {{ cookie_domain }}
+      authelia_url: https://{{ auth_domain }}
+      default_redirection_url: https://{{ instance_domain }}
 
 # Regulation - prevent brute force
 regulation:
@@ -76,8 +76,7 @@ regulation:
 
 # Storage for user preferences and 2FA
 storage:
-  # Generate with: openssl rand -hex 32
-  encryption_key: CHANGE_THIS_TO_A_RANDOM_SECRET_USE_OPENSSL_RAND_HEX_32
+  encryption_key: {{ encryption_key }}
   local:
     path: /config/db.sqlite3
 

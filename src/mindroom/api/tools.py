@@ -25,7 +25,12 @@ def _check_homeassistant_configured(tool_name: str, manager: CredentialsManager)
     """Check if HomeAssistant is configured."""
     if tool_name == "homeassistant":
         ha_creds = manager.load_credentials("homeassistant")
-        return bool(ha_creds and "instance_url" in ha_creds and "long_lived_token" in ha_creds)
+        if not ha_creds:
+            return False
+        # Check for the fields that HomeAssistantTools actually uses
+        has_url = "instance_url" in ha_creds
+        has_token = "access_token" in ha_creds or "long_lived_token" in ha_creds
+        return has_url and has_token
     return False
 
 

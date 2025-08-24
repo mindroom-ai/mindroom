@@ -1,0 +1,22 @@
+services:
+  email:
+    container_name: {{ instance_name }}-email-bridge
+    image: etkecc/postmoogle:latest
+    networks:
+      - {{ instance_name }}_mindroom-network
+      - mynetwork
+    ports:
+      - "{{ smtp_port }}:25"
+      - "{{ imap_port }}:143"
+    restart: unless-stopped
+    volumes:
+      - {{ data_dir }}/data:/data
+    environment:
+      EMAIL_DOMAIN: "{{ email_domain }}"
+      SMTP_HOST: "{{ smtp_host }}"
+
+networks:
+  {{ instance_name }}_mindroom-network:
+    external: true
+  mynetwork:
+    external: true

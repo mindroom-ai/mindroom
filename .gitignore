@@ -220,3 +220,4 @@ frontend/node_modules/
 deploy/instances.json
 deploy/.env.*
 deploy/instance_data/
+deploy/bridge_instances.json

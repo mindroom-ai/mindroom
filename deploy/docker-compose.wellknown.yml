@@ -7,8 +7,8 @@ services:
     container_name: ${INSTANCE_NAME:-mindroom}-wellknown
     restart: unless-stopped
     volumes:
-      - ./well-known-${INSTANCE_NAME}.json:/usr/share/nginx/html/.well-known/matrix/server:ro
-      - ./well-known-client-${INSTANCE_NAME}.json:/usr/share/nginx/html/.well-known/matrix/client:ro
+      - ${DATA_DIR}/well-known/server.json:/usr/share/nginx/html/.well-known/matrix/server:ro
+      - ${DATA_DIR}/well-known/client.json:/usr/share/nginx/html/.well-known/matrix/client:ro
     networks:
       - mynetwork
     labels:
