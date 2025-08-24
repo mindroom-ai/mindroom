@@ -5,9 +5,15 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Load .env file if it exists
+# Load .env file if it exists, but don't override existing env vars
 if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
+    set -a
+    source <(grep -v '^#' .env | sed 's/=\(.*\)$/="\1"/' | while IFS='=' read -r key value; do
+        if [ -z "${!key}" ]; then
+            echo "$key=$value"
+        fi
+    done)
+    set +a
 fi
 
 # Set ports from environment variables or use defaults

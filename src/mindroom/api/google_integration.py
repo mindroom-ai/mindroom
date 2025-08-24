@@ -11,6 +11,7 @@ Replaces the previous fragmented gmail_config.py, google_auth.py, and google_set
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import jwt
 from fastapi import APIRouter, HTTPException, Request
@@ -144,11 +145,13 @@ def save_env_credentials(client_id: str, client_secret: str, project_id: str | N
             env_lines = f.readlines()
 
     # Update or add credentials
+    # Use current environment variable for redirect URI to support multiple deployments
+    current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", REDIRECT_URI)
     env_vars = {
         "GOOGLE_CLIENT_ID": client_id,
         "GOOGLE_CLIENT_SECRET": client_secret,
         "GOOGLE_PROJECT_ID": project_id or "mindroom-integration",
-        "GOOGLE_REDIRECT_URI": REDIRECT_URI,
+        "GOOGLE_REDIRECT_URI": current_redirect_uri,
         "BACKEND_PORT": BACKEND_PORT,
     }
 
@@ -235,7 +238,9 @@ async def connect() -> GoogleAuthUrl:
 
     try:
         # Create OAuth flow with all scopes
-        flow = Flow.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=REDIRECT_URI)
+        # Use current environment variable for redirect URI to support multiple deployments
+        current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", REDIRECT_URI)
+        flow = Flow.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=current_redirect_uri)
 
         # Generate authorization URL
         auth_url, _ = flow.authorization_url(
@@ -263,14 +268,19 @@ async def callback(request: Request) -> RedirectResponse:
 
     try:
         # Create OAuth flow and exchange code for tokens
-        flow = Flow.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=REDIRECT_URI)
+        # Use current environment variable for redirect URI to support multiple deployments
+        current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", REDIRECT_URI)
+        flow = Flow.from_client_config(oauth_config, scopes=SCOPES, redirect_uri=current_redirect_uri)
         flow.fetch_token(code=code)
 
         # Save credentials
         save_credentials(flow.credentials)
 
         # Redirect back to widget with success message
-        return RedirectResponse(url="http://localhost:5173/?google=connected")
+        # Extract the domain from the redirect URI for the final redirect
+        parsed_uri = urlparse(current_redirect_uri)
+        base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
+        return RedirectResponse(url=f"{base_url}/?google=connected")
     except Exception as e:
         # Check if it's a scope change error
         error_msg = str(e)
