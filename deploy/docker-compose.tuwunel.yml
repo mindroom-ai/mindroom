@@ -9,7 +9,7 @@ services:
     restart: unless-stopped
     volumes:
       - ${DATA_DIR:-./instance_data}/tuwunel:/var/lib/tuwunel
-      - ./tuwunel.toml:/etc/tuwunel.toml:ro
+      - ./templates/tuwunel/tuwunel.toml:/etc/tuwunel.toml:ro
     command: ["-c", "/etc/tuwunel.toml"]
     environment:
       # Instance-specific overrides via environment variables

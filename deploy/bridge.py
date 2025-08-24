@@ -37,7 +37,7 @@ console = Console()
 
 # Get the script's directory to ensure paths are relative to it
 SCRIPT_DIR = Path(__file__).parent.absolute()
-BRIDGES_DIR = SCRIPT_DIR / "bridges"
+BRIDGES_DIR = SCRIPT_DIR / "templates" / "bridges"
 BRIDGE_REGISTRY_FILE = SCRIPT_DIR / "bridge_instances.json"
 INSTANCES_FILE = SCRIPT_DIR / "instances.json"  # From deploy.py
 

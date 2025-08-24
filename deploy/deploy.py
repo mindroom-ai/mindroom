@@ -530,7 +530,7 @@ def _setup_synapse_config(instance: Instance) -> None:
     synapse_dir.mkdir(parents=True, exist_ok=True)
     (synapse_dir / "media_store").mkdir(parents=True, exist_ok=True)
 
-    template_dir = SCRIPT_DIR / "synapse-template"
+    template_dir = SCRIPT_DIR / "templates" / "synapse"
     _prepare_matrix_config(
         instance,
         MatrixType.SYNAPSE,
@@ -546,8 +546,8 @@ def _setup_authelia_config(instance: Instance) -> None:
     authelia_dir.mkdir(parents=True, exist_ok=True)
 
     # Use Jinja2 template
-    jinja_template = SCRIPT_DIR / "authelia-config" / "configuration.yml.j2"
-    users_template = SCRIPT_DIR / "authelia-config" / "users_database.yml"
+    jinja_template = SCRIPT_DIR / "templates" / "authelia" / "configuration.yml.j2"
+    users_template = SCRIPT_DIR / "templates" / "authelia" / "users_database.yml"
 
     if jinja_template.exists():
         # Use Jinja2 template
@@ -750,7 +750,7 @@ def start(  # noqa: PLR0912, PLR0915
         # Copy Synapse config template if needed
         synapse_dir = Path(f"{instance.data_dir}/synapse")
         if not (synapse_dir / "homeserver.yaml").exists():
-            template_dir = SCRIPT_DIR / "synapse-template"
+            template_dir = SCRIPT_DIR / "templates" / "synapse"
             _prepare_matrix_config(
                 instance,
                 MatrixType.SYNAPSE,
