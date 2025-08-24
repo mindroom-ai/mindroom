@@ -2,7 +2,7 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["typer", "rich", "pydantic", "pyyaml", "httpx", "python-dotenv", "jinja2"]
+# dependencies = ["typer", "rich", "pydantic", "pyyaml", "httpx", "python-dotenv", "jinja2", "matty"]
 # ///
 """Matrix Bridge Manager for Mindroom instances."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
@@ -10,6 +10,7 @@
 # ruff: noqa: B008  # typer.Argument in defaults is the standard pattern
 # ruff: noqa: PLR0912  # complexity is acceptable for CLI commands
 
+import asyncio
 import json
 import os
 import shutil
@@ -21,6 +22,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import matty
 import typer
 import yaml
 from dotenv import load_dotenv
@@ -630,6 +632,133 @@ def register(
         bridge.status = BridgeStatus.REGISTERED
         save_registry(registry)
         console.print(f"[green]✓[/green] Bridge registration prepared for {matrix_type}")
+
+
+@app.command("register-with-matrix")
+def register_with_matrix(  # noqa: PLR0915
+    bridge_type: BridgeType = typer.Argument(..., help="Bridge type to register"),
+    instance: str = typer.Option("default", "--instance", "-i", help="Mindroom instance name"),
+    dry: bool = typer.Option(False, "--dry", help="Just print the command without executing"),
+) -> None:
+    """Send registration to Matrix admin room using matty (for Tuwunel/Conduit)."""
+    registry = load_registry()
+
+    # Find bridge
+    if instance not in registry.bridges:
+        console.print(f"[red]✗[/red] No bridges configured for instance '{instance}'")
+        raise typer.Exit(1)
+
+    bridge = None
+    for b in registry.bridges[instance]:
+        if b.bridge_type == bridge_type:
+            bridge = b
+            break
+
+    if not bridge:
+        console.print(f"[red]✗[/red] {bridge_type} bridge not found for instance '{instance}'")
+        raise typer.Exit(1)
+
+    # Check if registration file exists
+    registration_file = Path(bridge.data_dir) / "data" / "registration.yaml"
+    if not registration_file.exists():
+        console.print("[red]✗[/red] Registration file not found. Run 'register' command first.")
+        raise typer.Exit(1)
+
+    # Check Matrix server type
+    matrix_type, _, _ = _get_matrix_info(instance)
+    if matrix_type != "tuwunel":
+        console.print(f"[yellow]![/yellow] This command is for Tuwunel/Conduit. Use 'register' for {matrix_type}.")
+        raise typer.Exit(1)
+
+    # Get admin room using the standard alias format
+    admin_room = f"#admins:{bridge.matrix_domain}"
+
+    # Read registration content
+    registration_content = registration_file.read_text()
+
+    # Build the message with proper formatting
+    message = f"!admin appservices register\n```\n{registration_content}```"
+
+    # Get Matrix credentials from matrix_state.yaml
+    instances = load_instances()
+    instance_data = instances[instance]
+    matrix_state_file = Path(instance_data["data_dir"]) / "tmp" / "matrix_state.yaml"
+
+    username = None
+    password = None
+    if matrix_state_file.exists():
+        with matrix_state_file.open() as f:
+            state_data = yaml.safe_load(f)
+            if state_data and "accounts" in state_data and "agent_user" in state_data["accounts"]:
+                user_account = state_data["accounts"]["agent_user"]
+                username = user_account["username"]
+                password = user_account["password"]
+                # Set environment for matty
+                os.environ["MATRIX_USERNAME"] = username
+                os.environ["MATRIX_PASSWORD"] = password
+                os.environ["MATRIX_HOMESERVER"] = f"https://{bridge.matrix_domain}"
+
+    if not username or not password:
+        console.print("[red]✗[/red] Could not find Matrix credentials in matrix_state.yaml")
+        raise typer.Exit(1)
+
+    if dry:
+        # In dry run mode, just show what would be sent
+        console.print("[yellow]Dry run - Would send to Matrix:[/yellow]\n")
+        console.print(f"Room: {admin_room}")
+        console.print(f"Username: {username}")
+        console.print(f"Homeserver: https://{bridge.matrix_domain}")
+        console.print("\nMessage content:")
+        console.print("!admin appservices register")
+        console.print("```")
+        console.print(registration_content)
+        console.print("```")
+        return
+
+    # Send registration using matty module
+    console.print(f"[yellow]Sending registration to {admin_room}...[/yellow]")
+
+    try:
+        # Use matty's internal send function (async)
+        asyncio.run(
+            matty._execute_send_command(
+                room=admin_room,
+                message=message,
+                username=username,
+                password=password,
+                no_mentions=True,
+            ),
+        )
+        console.print(f"[green]✓[/green] Registration sent to {admin_room}")
+
+        # Update status
+        bridge.status = BridgeStatus.REGISTERED
+        save_registry(registry)
+
+        # Verify registration
+        console.print("\n[yellow]Verifying registration...[/yellow]")
+        time.sleep(2)  # Give server time to process
+
+        # Send verification command
+        asyncio.run(
+            matty._execute_send_command(
+                room=admin_room,
+                message="!admin appservices list",
+                username=username,
+                password=password,
+                no_mentions=True,
+            ),
+        )
+
+        console.print("[green]✓[/green] Registration complete! You can now start the bridge:")
+        console.print(f"  ./bridge.py start {bridge_type} --instance {instance}")
+
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to send registration: {e}")
+        console.print("\nTry manually with:")
+        console.print(f'  matty send "{admin_room}" "!admin appservices register"')
+        console.print(f"  Then paste the contents of: {registration_file}")
+        raise typer.Exit(1)  # noqa: B904
 
 
 @app.command()

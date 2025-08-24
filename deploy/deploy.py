@@ -459,6 +459,25 @@ def _copy_credentials_to_instance(instance: Instance) -> None:
                 target_file.chmod(0o644)
 
 
+def _copy_config_to_instance(instance: Instance) -> None:
+    """Copy config.yaml from the main mindroom directory to instance config directory."""
+    source_config = SCRIPT_DIR.parent / "config.yaml"
+    if not source_config.exists():
+        console.print("[yellow]Warning:[/yellow] config.yaml not found in mindroom directory")
+        return
+
+    target_config = Path(instance.data_dir) / "config" / "config.yaml"
+
+    # Only copy if target doesn't exist (preserve customizations)
+    if not target_config.exists():
+        shutil.copy2(source_config, target_config)
+        # Set proper permissions for Docker
+        with contextlib.suppress(OSError, PermissionError):
+            os.chown(target_config, 1000, 1000)
+            target_config.chmod(0o644)
+        console.print("[green]✓[/green] Copied config.yaml to instance")
+
+
 def _create_instance_directories(instance: Instance) -> None:
     """Create all necessary directories for an instance with proper permissions."""
     # Base directories needed by all instances
@@ -470,6 +489,9 @@ def _create_instance_directories(instance: Instance) -> None:
 
     # Copy credentials from ~/.mindroom/credentials if they exist
     _copy_credentials_to_instance(instance)
+
+    # Copy config.yaml to instance
+    _copy_config_to_instance(instance)
 
 
 def _create_synapse_directories(instance: Instance) -> None:

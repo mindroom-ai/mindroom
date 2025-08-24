@@ -10,7 +10,7 @@ services:
       - ../.env
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
-      - ${DATA_DIR}/config:/app/config
+      - ${DATA_DIR}/config/config.yaml:/app/config.yaml
       - ${DATA_DIR}/tmp:/app/tmp
       - ${DATA_DIR}/logs:/app/logs
       - ${DATA_DIR}/mindroom:/app/.mindroom
@@ -37,7 +37,7 @@ services:
     ports:
       - "${FRONTEND_PORT:-3003}:3003"
     volumes:
-      - ${DATA_DIR}/config:/app/config
+      - ${DATA_DIR}/config/config.yaml:/app/config.yaml
       - ${DATA_DIR}/logs:/app/logs
       - ${DATA_DIR}/mindroom:/app/.mindroom
     environment:
