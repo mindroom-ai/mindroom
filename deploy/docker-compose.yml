@@ -44,6 +44,7 @@ services:
       - FRONTEND_PORT=${FRONTEND_PORT:-3003}
       - VITE_API_URL=
       - HOME=/app
+      - GOOGLE_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/google/callback
     networks:
       - mindroom-network
       - mynetwork
