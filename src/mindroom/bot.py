@@ -1710,6 +1710,16 @@ async def main(log_level: str, storage_path: Path) -> None:
         # Wait for either orchestrator or watcher to complete
         done, pending = await asyncio.wait({orchestrator_task, watcher_task}, return_when=asyncio.FIRST_COMPLETED)
 
+        # Check if any completed task had an exception
+        for task in done:
+            try:
+                task.result()  # This will raise if the task had an exception
+            except asyncio.CancelledError:
+                logger.info("Task was cancelled")
+            except Exception:
+                logger.exception("Task failed with exception")
+                # Don't re-raise - let cleanup happen gracefully
+
         # Cancel any pending tasks
         for task in pending:
             task.cancel()
