@@ -60,3 +60,79 @@ This document outlines the core principles and practices for developing this pro
 - **DO NOT** manually edit the CLI help messages in `README.md`. They are auto-generated.
 - **NEVER** use `git add .`.
 - **NEVER** claim a task is done without passing all `pytest` tests.
+
+## 4. Interacting with MindRoom Agents via Matty CLI
+
+### Overview
+Matty is a Matrix CLI client that allows you to interact with MindRoom AI agents. Use it to send messages and observe agent responses during development and testing.
+
+### Prerequisites
+```bash
+# Matty is installed as a project dependency
+# Activate the virtual environment
+source .venv/bin/activate
+# Now you can use matty directly
+```
+
+### Configuration
+The Matrix credentials are already configured in the project's `.env` file. Matty will automatically use these credentials.
+
+### Essential Commands for Agent Interaction
+
+#### 1. List Rooms
+```bash
+matty rooms  # or: matty r
+```
+
+#### 2. View Messages (See Agent Responses)
+```bash
+matty messages "room_name" --limit 20  # or: matty m "room_name" -l 20
+```
+
+#### 3. Send Messages to Agents
+```bash
+# Direct message
+matty send "room_name" "Hello @mindroom_assistant!"
+
+# Multiple agent mentions
+matty send "room_name" "@mindroom_research @mindroom_analyst analyze this topic"
+```
+
+#### 4. Work with Threads (Agents respond in threads)
+```bash
+# List threads in a room
+matty threads "room_name"
+
+# View thread messages (where agents typically respond)
+matty thread "room_name" t1  # View thread with ID t1
+
+# Start a thread (agents will respond here)
+matty thread-start "room_name" m2 "Starting discussion with agents"
+
+# Reply in thread
+matty thread-reply "room_name" t1 "@mindroom_assistant continue"
+```
+
+### Typical Agent Testing Workflow
+```bash
+# 1. Find the test room
+matty rooms
+
+# 2. Send a message mentioning agents
+matty send "test_room" "@mindroom_assistant What can you do?"
+
+# 3. Check for agent response (agents respond in threads)
+matty threads "test_room"
+matty thread "test_room" t1  # View the thread where agent responded
+
+# 4. Continue conversation in thread
+matty thread-reply "test_room" t1 "@mindroom_research find information about X"
+```
+
+### Important Notes
+- **Agents respond in threads**: Always check threads after sending messages
+- **Use @mentions**: Tag agents with @ to get their attention
+- **Message handles**: Use m1, m2, m3 to reference messages
+- **Thread IDs**: Use t1, t2, t3 to reference threads (persistent across sessions)
+- **Output formats**: Add `--format json` for machine-readable output
+- **Streaming responses**: If you see "⋯" in agent messages, they're still typing. Agents stream responses by editing messages, which may take 10+ seconds to complete. Re-check the thread after waiting.
