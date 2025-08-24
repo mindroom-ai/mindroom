@@ -37,8 +37,12 @@ console = Console()
 # Get the script's directory to ensure paths are relative to it
 SCRIPT_DIR = Path(__file__).parent.absolute()
 REGISTRY_FILE = SCRIPT_DIR / "instances.json"
+ENV_DIR = SCRIPT_DIR / "envs"
 ENV_TEMPLATE = SCRIPT_DIR / ".env.template"
 DEFAULT_REGISTRY = "git.nijho.lt/basnijholt"
+
+# Ensure env directory exists
+ENV_DIR.mkdir(exist_ok=True)
 
 
 # Pydantic Models
@@ -244,8 +248,9 @@ def _prepare_matrix_config(
             shutil.copy(file, target_dir / file.name)
 
 
-def _get_docker_compose_files(instance: Instance, env_file_relative: str, project_root: Path) -> str:
+def _get_docker_compose_files(instance: Instance, name: str, project_root: Path) -> str:
     """Get the docker-compose command with appropriate files based on matrix and auth type."""
+    env_file_relative = f"deploy/envs/{name}.env"
     base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
 
     # Add Matrix server compose file if configured
@@ -330,7 +335,7 @@ def _pull_images_from_registry(registry_url: str, console: Console) -> None:
 
 def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixType | None) -> None:
     """Create and configure the environment file for an instance."""
-    env_file = SCRIPT_DIR / f".env.{name}"
+    env_file = ENV_DIR / f"{name}.env"
     if ENV_TEMPLATE.exists():
         shutil.copy(ENV_TEMPLATE, env_file)
     else:
@@ -496,13 +501,17 @@ def _setup_tuwunel_directory(instance: Instance, env_file: Path) -> None:
     _create_directory_with_permissions(tuwunel_dir)
 
 
-def _create_wellknown_files(name: str, instance: Instance) -> None:
+def _create_wellknown_files(instance: Instance) -> None:
     """Create well-known files for Matrix federation."""
     matrix_server_name = f"m-{instance.domain}"
 
+    # Create well-known directory in instance data
+    wellknown_dir = Path(instance.data_dir) / "well-known"
+    wellknown_dir.mkdir(parents=True, exist_ok=True)
+
     # Server well-known (for federation discovery)
     server_wellknown = {"m.server": f"{matrix_server_name}:443"}
-    with (SCRIPT_DIR / f"well-known-{name}.json").open("w") as wf:
+    with (wellknown_dir / "server.json").open("w") as wf:
         json.dump(server_wellknown, wf, indent=2)
 
     # Client well-known (for client discovery)
@@ -511,7 +520,7 @@ def _create_wellknown_files(name: str, instance: Instance) -> None:
             "base_url": f"https://{matrix_server_name}",
         },
     }
-    with (SCRIPT_DIR / f"well-known-client-{name}.json").open("w") as wf:
+    with (wellknown_dir / "client.json").open("w") as wf:
         json.dump(client_wellknown, wf, indent=2)
 
 
@@ -601,7 +610,7 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, aut
         console.print(f"  [dim]Matrix port:[/dim] {instance.matrix_port}")
     console.print(f"  [dim]Data dir:[/dim] {instance.data_dir}")
     console.print(f"  [dim]Domain:[/dim] {instance.domain}")
-    console.print(f"  [dim]Env file:[/dim] .env.{instance.name}")
+    console.print(f"  [dim]Env file:[/dim] envs/{instance.name}.env")
     if matrix_type:
         matrix_name = "Tuwunel (lightweight)" if matrix_type == MatrixType.TUWUNEL else "Synapse (full)"
         console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
@@ -688,7 +697,7 @@ def create(
 
     # Create well-known files for Matrix federation
     if matrix_type:
-        _create_wellknown_files(name, instance)
+        _create_wellknown_files(instance)
 
     # Set up Synapse configuration if needed
     if matrix_type == MatrixType.SYNAPSE:
@@ -719,9 +728,9 @@ def start(  # noqa: PLR0912, PLR0915
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
         raise typer.Exit(1)
 
-    env_file = SCRIPT_DIR / f".env.{name}"
+    env_file = ENV_DIR / f"{name}.env"
     if not env_file.exists():
-        console.print(f"[red]✗[/red] Environment file .env.{name} not found!")
+        console.print(f"[red]✗[/red] Environment file {env_file} not found!")
         raise typer.Exit(1)
 
     # Verify federation configuration if Matrix is enabled
@@ -753,10 +762,9 @@ def start(  # noqa: PLR0912, PLR0915
     # Start with docker compose (modern syntax) - run from parent directory for build context
     # Get the parent directory (project root)
     project_root = SCRIPT_DIR.parent
-    env_file_relative = f"deploy/.env.{name}"
 
     # Build the docker compose command using helper
-    compose_files = _get_docker_compose_files(instance, env_file_relative, project_root)
+    compose_files = _get_docker_compose_files(instance, name, project_root)
 
     # Determine which services to start based on flags
     try:
@@ -785,6 +793,7 @@ def start(  # noqa: PLR0912, PLR0915
 
     # If Matrix is enabled, also start the well-known service for federation
     if result.returncode == 0 and instance.matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
+        env_file_relative = f"deploy/envs/{name}.env"
         wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
         with console.status(f"[yellow]Starting federation well-known service for '{name}'...[/yellow]"):
             wellknown_result = subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
@@ -923,17 +932,13 @@ def _restart_instance(  # noqa: PLR0912, PLR0915
         raise typer.Exit(1)
 
     # Start the instance
-    env_file = SCRIPT_DIR / f".env.{name}"
+    env_file = ENV_DIR / f"{name}.env"
     if not env_file.exists():
         console.print(f"[red]✗[/red] Environment file not found: {env_file}")
         raise typer.Exit(1)
 
-    # Get matrix type from registry
-    matrix_type = instance.matrix_type
-
     # Build compose command
-    env_file_relative = f"deploy/.env.{name}"
-    compose_files = _get_docker_compose_files(instance, env_file_relative, project_root)
+    compose_files = _get_docker_compose_files(instance, name, project_root)
 
     # Determine which services to restart based on flags
     try:
@@ -957,7 +962,8 @@ def _restart_instance(  # noqa: PLR0912, PLR0915
         result = subprocess.run(start_cmd, check=False, shell=True, capture_output=True, text=True)
 
     # If Matrix is enabled, also restart the well-known service for federation
-    if result.returncode == 0 and matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
+    if result.returncode == 0 and instance.matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
+        env_file_relative = f"deploy/envs/{name}.env"
         wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
         subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
 
@@ -1059,17 +1065,9 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
             shutil.rmtree(data_dir)
 
         # Remove env file
-        env_file = SCRIPT_DIR / f".env.{name}"
+        env_file = ENV_DIR / f"{name}.env"
         if env_file.exists():
             env_file.unlink()
-
-        # Remove well-known files if they exist (for Matrix federation)
-        wellknown_server = SCRIPT_DIR / f"well-known-{name}.json"
-        if wellknown_server.exists():
-            wellknown_server.unlink()
-        wellknown_client = SCRIPT_DIR / f"well-known-client-{name}.json"
-        if wellknown_client.exists():
-            wellknown_client.unlink()
 
         # Update registry - remove instance and free up ports
         del registry.instances[name]
