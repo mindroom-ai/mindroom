@@ -501,11 +501,43 @@ def _setup_authelia_config(instance: Instance) -> None:
         # Update domain references
         # Extract root domain (e.g., "try.mindroom.chat" -> "mindroom.chat")
         domain_parts = instance.domain.split(".")
-        root_domain = ".".join(domain_parts[-2:]) if len(domain_parts) > 2 else instance.domain
+        if len(domain_parts) >= 2 and domain_parts[-1] != "localhost":
+            # For production domains, use wildcard cookie domain
+            root_domain = ".".join(domain_parts[-2:])  # e.g., "mindroom.chat"
+            cookie_domain = f".{root_domain}"  # e.g., ".mindroom.chat"
+            # Use auth-subdomain pattern that works with *.domain wildcard DNS
+            subdomain = domain_parts[0]  # e.g., "try" from "try.mindroom.chat"
+            auth_url = f"https://auth-{subdomain}.{root_domain}"  # e.g., "https://auth-try.mindroom.chat"
+        else:
+            # For localhost development, use subdomain approach
+            root_domain = instance.domain
+            cookie_domain = instance.domain
+            auth_url = f"https://auth-{instance.domain}"
 
-        config_content = config_content.replace("mindroom.localhost", root_domain)
-        config_content = config_content.replace("auth-mindroom.localhost", f"auth-{instance.domain}")
+        # Replace domain placeholders in the correct order
         config_content = config_content.replace("https://mindroom.localhost", f"https://{instance.domain}")
+        config_content = config_content.replace("auth-mindroom.localhost", auth_url.replace("https://", ""))
+        config_content = config_content.replace("mindroom.localhost", cookie_domain)
+
+        # Update access control rules
+        if len(domain_parts) >= 2 and domain_parts[-1] != "localhost":
+            # For production domains, update the access control rules
+            # Replace the generic auth bypass rule
+            subdomain = domain_parts[0]
+            config_content = config_content.replace(
+                "- domain: auth-*.localhost\n      policy: bypass",
+                f"- domain: auth-{subdomain}.{root_domain}\n      policy: bypass",
+            )
+            # Replace the generic one_factor rule
+            config_content = config_content.replace(
+                "- domain: '*.localhost'\n      policy: one_factor",
+                f"- domain: '*.{root_domain}'\n      policy: one_factor",
+            )
+            # Remove the yourdomain.com example rule
+            config_content = config_content.replace(
+                "\n    # For production domains\n    - domain: '*.yourdomain.com'\n      policy: two_factor",
+                "",
+            )
 
         config_file.write_text(config_content)
 
@@ -536,7 +568,15 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, aut
     if auth_type:
         console.print("  [dim]Auth:[/dim] [green]Authelia (production-ready)[/green]")
         console.print("    [yellow]Default login:[/yellow] admin / mindroom")
-        console.print(f"    [dim]Auth URL:[/dim] https://auth-{instance.domain}")
+        # Determine auth URL based on domain type
+        domain_parts = instance.domain.split(".")
+        if len(domain_parts) >= 2 and domain_parts[-1] != "localhost":
+            root_domain = ".".join(domain_parts[-2:])
+            subdomain = domain_parts[0]
+            auth_url = f"https://auth-{subdomain}.{root_domain}"
+        else:
+            auth_url = f"https://auth-{instance.domain}"
+        console.print(f"    [dim]Auth URL:[/dim] {auth_url}")
 
 
 @app.command()
