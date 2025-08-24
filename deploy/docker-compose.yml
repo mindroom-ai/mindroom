@@ -39,7 +39,7 @@ services:
     volumes:
       - ${DATA_DIR}/config:/app/config
       - ${DATA_DIR}/logs:/app/logs
-      - ${DATA_DIR}/mindroom:/app/.mindroom:ro
+      - ${DATA_DIR}/mindroom:/app/.mindroom
     environment:
       - BACKEND_PORT=${BACKEND_PORT:-8765}
       - FRONTEND_PORT=${FRONTEND_PORT:-3003}
