@@ -228,9 +228,8 @@ def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[st
     template_file = BRIDGES_DIR / f"docker-compose.{bridge.bridge_type.value}.j2"
 
     if not template_file.exists():
-        # Fallback to YAML generation if template doesn't exist
-        console.print(f"[yellow]Warning: Template {template_file} not found, using default generation[/yellow]")
-        return _create_bridge_docker_compose_fallback(bridge)
+        console.print(f"[red]✗[/red] Template {template_file} not found for bridge type {bridge.bridge_type.value}")
+        raise typer.Exit(1)
 
     # Read and render the template
     with template_file.open() as f:
@@ -260,48 +259,6 @@ def _create_bridge_docker_compose(bridge: BridgeConfig, bridge_template: dict[st
     # Write to file
     with compose_file.open("w") as f:
         f.write(compose_content)
-
-    return compose_file
-
-
-def _create_bridge_docker_compose_fallback(bridge: BridgeConfig) -> Path:
-    """Fallback method to create docker-compose file without template."""
-    compose_file = Path(bridge.data_dir) / "docker-compose.yml"
-    network_name = f"{bridge.instance_name}_mindroom-network"
-
-    # Get image from bridge templates
-    image = BRIDGE_TEMPLATES.get(bridge.bridge_type, {}).get("image", "unknown")
-
-    compose_content = {
-        "services": {
-            bridge.bridge_type.value: {
-                "image": image,
-                "container_name": f"{bridge.instance_name}-{bridge.bridge_type.value}-bridge",
-                "restart": "unless-stopped",
-                "volumes": [
-                    f"{bridge.data_dir}/data:/data",
-                ],
-                "ports": [
-                    f"{bridge.port}:29317",
-                ],
-                "networks": [
-                    network_name,
-                    "mynetwork",
-                ],
-            },
-        },
-        "networks": {
-            network_name: {
-                "external": True,
-            },
-            "mynetwork": {
-                "external": True,
-            },
-        },
-    }
-
-    with compose_file.open("w") as f:
-        yaml.dump(compose_content, f, default_flow_style=False)
 
     return compose_file
 
