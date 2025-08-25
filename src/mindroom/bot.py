@@ -1046,6 +1046,9 @@ class AgentBot:
         elif command.type == CommandType.SCHEDULE:
             full_text = command.args["full_text"]
 
+            # Get mentioned agents from the command text
+            mentioned_agents, _ = check_agent_mentioned(event.source, "", self.config)
+
             assert self.client is not None
             task_id, response_text = await schedule_task(
                 client=self.client,
@@ -1055,6 +1058,7 @@ class AgentBot:
                 scheduled_by=event.sender,
                 full_text=full_text,
                 config=self.config,
+                mentioned_agents=mentioned_agents,
             )
 
         elif command.type == CommandType.LIST_SCHEDULES:

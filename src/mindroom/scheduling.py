@@ -13,6 +13,8 @@ import nio
 import pytz
 
 from .logging_config import get_logger
+from .matrix.client import fetch_thread_history
+from .thread_utils import get_agents_in_thread
 from .workflow_scheduling import (
     ScheduledWorkflow,
     WorkflowParseError,
@@ -60,7 +62,7 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
     return f"{time_str} ({relative_str})"
 
 
-async def schedule_task(
+async def schedule_task(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str | None,
@@ -68,6 +70,7 @@ async def schedule_task(
     scheduled_by: str,
     full_text: str,
     config: Config,
+    mentioned_agents: list[str] | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -75,8 +78,21 @@ async def schedule_task(
         Tuple of (task_id, response_message)
 
     """
-    # Parse the workflow request
-    workflow_result = await parse_workflow_schedule(full_text, config)
+    # Get agents that are available in the thread
+    available_agents = []
+    if thread_id:
+        # Get agents already participating in the thread
+        thread_history = await fetch_thread_history(client, room_id, thread_id)
+        available_agents = get_agents_in_thread(thread_history, config)
+
+    # Add any agents mentioned in the command itself
+    if mentioned_agents:
+        for agent_name in mentioned_agents:
+            if agent_name not in available_agents:
+                available_agents.append(agent_name)
+
+    # Parse the workflow request with available agents
+    workflow_result = await parse_workflow_schedule(full_text, config, available_agents)
 
     if isinstance(workflow_result, WorkflowParseError):
         error_msg = f"❌ {workflow_result.error}"
