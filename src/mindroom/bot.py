@@ -1056,6 +1056,7 @@ class AgentBot:
                 scheduled_by=event.sender,
                 full_text=full_text,
                 config=self.config,
+                room=room,
             )
 
         elif command.type == CommandType.LIST_SCHEDULES:
