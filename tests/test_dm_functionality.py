@@ -319,7 +319,7 @@ class TestDMIntegration:
         with (
             patch("mindroom.bot.fetch_thread_history", return_value=[]),
             patch("mindroom.bot.check_agent_mentioned", return_value=([], False)),
-            patch("mindroom.bot.analyze_event_relations") as mock_thread_info,
+            patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.bot._should_skip_mentions", return_value=False),
             patch("mindroom.bot.extract_agent_name", return_value=None),  # User is not an agent
             patch("mindroom.bot.is_dm_room", return_value=True),  # This is a DM room
@@ -405,7 +405,7 @@ class TestDMIntegration:
         with (
             patch("mindroom.bot.fetch_thread_history", return_value=[]),
             patch("mindroom.bot.check_agent_mentioned", return_value=([], False)),
-            patch("mindroom.bot.analyze_event_relations") as mock_thread_info,
+            patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
             patch("mindroom.bot._should_skip_mentions", return_value=False),
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.bot.is_dm_room", return_value=True),  # This is a DM room
