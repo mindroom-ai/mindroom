@@ -88,7 +88,7 @@ agents:
     tools:
     - csv
     - calculator
-  email_assistant:
+  email:
     display_name: EmailAssistant
     instructions:
     - Search and retrieve emails based on user queries
@@ -107,6 +107,7 @@ agents:
       intelligence
     rooms:
     - lobby
+    - communication
     - productivity
     tools:
     - gmail

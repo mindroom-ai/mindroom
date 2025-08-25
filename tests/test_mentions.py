@@ -145,8 +145,8 @@ class TestMentionParsing:
             ("@Calculator help me", ["calculator"]),
             ("@CALCULATOR help me", ["calculator"]),
             ("@CaLcUlAtOr help me", ["calculator"]),
-            ("@Code @EMAIL_ASSISTANT help", ["code", "email_assistant"]),
-            ("@EMAIL_assistant @Code help", ["email_assistant", "code"]),
+            ("@Code @EMAIL help", ["code", "email"]),
+            ("@EMAIL @Code help", ["email", "code"]),
         ]
 
         for text, expected_agents in test_cases:
