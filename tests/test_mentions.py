@@ -102,6 +102,7 @@ class TestMentionParsing:
             "@calculator and @code please help",
             sender_domain="matrix.org",
             thread_event_id="$thread123",
+            latest_thread_event_id="$thread123",  # For thread fallback
         )
 
         assert content["msgtype"] == "m.text"

@@ -7,53 +7,7 @@ from mindroom.config import Config
 
 from .client import markdown_to_html
 from .identity import MatrixID
-
-
-def create_mention_content(
-    body: str,
-    mentioned_user_ids: list[str],
-    thread_event_id: str | None = None,
-    reply_to_event_id: str | None = None,
-    formatted_body: str | None = None,
-) -> dict[str, Any]:
-    """Create a properly formatted Matrix message with mentions.
-
-    Args:
-        body: The message body text (plain text version)
-        mentioned_user_ids: List of Matrix user IDs to mention (e.g., ["@mindroom_calculator:localhost"])
-        thread_event_id: Optional thread root event ID
-        reply_to_event_id: Optional event ID to reply to
-        formatted_body: Optional HTML formatted body (if not provided, will convert from markdown)
-
-    Returns:
-        Properly formatted content dict for room_send
-
-    """
-    content: dict[str, Any] = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": formatted_body if formatted_body else markdown_to_html(body),
-    }
-
-    # Add mentions if any
-    if mentioned_user_ids:
-        content["m.mentions"] = {"user_ids": mentioned_user_ids}
-
-    # Add thread/reply relationship if specified
-    if thread_event_id or reply_to_event_id:
-        relates_to: dict[str, Any] = {}
-
-        if thread_event_id:
-            relates_to["rel_type"] = "m.thread"
-            relates_to["event_id"] = thread_event_id
-
-        if reply_to_event_id:
-            relates_to["m.in_reply_to"] = {"event_id": reply_to_event_id}
-
-        content["m.relates_to"] = relates_to
-
-    return content
+from .message_builder import build_message_content
 
 
 def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tuple[str, list[str], str]:
@@ -153,6 +107,7 @@ def create_mention_content_from_text(
     sender_domain: str = "localhost",
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
+    latest_thread_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Parse text for mentions and create properly formatted Matrix message.
 
@@ -163,7 +118,8 @@ def create_mention_content_from_text(
         text: Message text that may contain @agent_name mentions
         sender_domain: Domain part of the sender's user ID
         thread_event_id: Optional thread root event ID
-        reply_to_event_id: Optional event ID to reply to
+        reply_to_event_id: Optional event ID to reply to (for genuine replies)
+        latest_thread_event_id: Optional latest event ID in thread (for fallback compatibility)
 
     Returns:
         Properly formatted content dict for room_send
@@ -175,10 +131,11 @@ def create_mention_content_from_text(
     # The markdown converter will properly handle the [@DisplayName](url) format
     formatted_html = markdown_to_html(markdown_text)
 
-    return create_mention_content(
+    return build_message_content(
         body=plain_text,
+        formatted_body=formatted_html,
         mentioned_user_ids=mentioned_user_ids,
         thread_event_id=thread_event_id,
         reply_to_event_id=reply_to_event_id,
-        formatted_body=formatted_html,
+        latest_thread_event_id=latest_thread_event_id,
     )

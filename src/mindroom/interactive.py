@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, NamedTuple
 import nio
 
 from .logging_config import get_logger
-from .matrix.client import extract_thread_info
 from .matrix.identity import is_agent_id
+from .matrix.thread_info import analyze_thread_info
 
 if TYPE_CHECKING:
     from .config import Config
@@ -156,7 +156,8 @@ async def handle_text_response(
     if not message_text.isdigit() or len(message_text) > 1:
         return None
 
-    _, thread_id = extract_thread_info(event.source)
+    thread_info = analyze_thread_info(event.source)
+    thread_id = thread_info.thread_id
 
     # Find matching active questions in this room/thread
     for question_event_id, question in _active_questions.items():

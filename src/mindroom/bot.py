@@ -33,7 +33,6 @@ from .matrix import MATRIX_HOMESERVER
 from .matrix.client import (
     check_and_set_avatar,
     edit_message,
-    extract_thread_info,
     fetch_thread_history,
     get_joined_rooms,
     get_room_members,
@@ -50,6 +49,7 @@ from .matrix.identity import (
 from .matrix.mentions import create_mention_content_from_text
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
+from .matrix.thread_info import analyze_thread_info
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
 from .memory import store_conversation_memory
 from .response_tracker import ResponseTracker
@@ -71,7 +71,6 @@ from .thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     get_available_agents_in_room,
-    get_safe_thread_root,
     has_user_responded_after_message,
     should_agent_respond,
 )
@@ -597,13 +596,13 @@ class AgentBot:
         transcribed_message = await voice_handler.handle_voice_message(self.client, room, event, self.config)
 
         if transcribed_message:
-            is_thread, thread_id = extract_thread_info(event.source)
+            thread_info = analyze_thread_info(event.source)
 
             await self._send_response(
                 room=room,
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
-                thread_id=thread_id,
+                thread_id=thread_info.thread_id,
             )
 
         # Mark the voice message as responded so we don't process it again
@@ -626,22 +625,22 @@ class AgentBot:
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
-        is_thread, thread_id = extract_thread_info(event.source)
+        thread_info = analyze_thread_info(event.source)
 
         thread_history = []
         is_invited_to_thread = False
-        if thread_id:
-            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
+        if thread_info.thread_id:
+            thread_history = await fetch_thread_history(self.client, room.room_id, thread_info.thread_id)
             is_invited_to_thread = await self.thread_invite_manager.is_agent_invited_to_thread(
-                thread_id,
+                thread_info.thread_id,
                 room.room_id,
                 self.agent_name,
             )
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
-            is_thread=is_thread,
-            thread_id=thread_id,
+            is_thread=thread_info.is_thread,
+            thread_id=thread_info.thread_id,
             thread_history=thread_history,
             is_invited_to_thread=is_invited_to_thread,
             mentioned_agents=mentioned_agents,
@@ -706,12 +705,19 @@ class AgentBot:
         session_id = create_session_id(room.room_id, thread_id)
         sender_id = self.matrix_id
 
+        # Get latest thread event for MSC3440 compliance (only for new messages)
+        latest_thread_event_id = None
+        if thread_id and not existing_event_id and not reply_to_event_id:
+            # Only needed for new thread messages without specific reply
+            latest_thread_event_id = thread_history[-1].get("event_id") if thread_history else None
+
         streaming = StreamingResponse(
             room_id=room.room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
             sender_domain=sender_id.domain,
             config=self.config,
+            latest_thread_event_id=latest_thread_event_id,
         )
 
         # If we're editing an existing message, set the event_id
@@ -850,7 +856,17 @@ class AgentBot:
 
         # Always ensure we have a thread_id - use the original message as thread root if needed
         # This ensures agents always respond in threads, even when mentioned in main room
-        effective_thread_id = thread_id or get_safe_thread_root(reply_to_event) or reply_to_event_id
+        reply_thread_info = analyze_thread_info(reply_to_event.source if reply_to_event else None)
+        effective_thread_id = thread_id or reply_thread_info.safe_thread_root or reply_to_event_id
+
+        # Get the latest message in thread for MSC3440 fallback compatibility
+        latest_thread_event_id = None
+        if effective_thread_id and not reply_to_event_id and self.client:
+            # Only fetch if we're not making a genuine reply
+            thread_msgs = await fetch_thread_history(self.client, room.room_id, effective_thread_id)
+            if thread_msgs:
+                # Get the last message's event_id (thread history is in chronological order)
+                latest_thread_event_id = thread_msgs[-1].get("event_id")
 
         content = create_mention_content_from_text(
             self.config,
@@ -858,6 +874,7 @@ class AgentBot:
             sender_domain=sender_domain,
             thread_event_id=effective_thread_id,
             reply_to_event_id=reply_to_event_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
 
         # Add metadata to indicate mentions should be ignored for responses
@@ -882,6 +899,7 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
+        # For edits in threads, we don't need latest_thread_event_id as this is not creating a new message
         content = create_mention_content_from_text(
             self.config,
             new_text,
@@ -914,13 +932,13 @@ class AgentBot:
 
         self.logger.info("Handling AI routing", event_id=event.event_id)
 
-        _, thread_event_id = extract_thread_info(event.source)
+        thread_info = analyze_thread_info(event.source)
         suggested_agent = await suggest_agent_for_message(
             event.body,
             available_agents,
             self.config,
             thread_history,
-            thread_event_id,
+            thread_info.thread_id,
             room.room_id,
             self.thread_invite_manager,
         )
@@ -933,8 +951,17 @@ class AgentBot:
         sender_domain = sender_id.domain
 
         # If no thread exists, create one with the original message as root
+        thread_event_id = thread_info.thread_id
         if not thread_event_id:
-            thread_event_id = event.event_id
+            # Check if the current event can be a thread root
+            thread_event_id = thread_info.safe_thread_root or event.event_id
+
+        # Get latest thread event for MSC3440 compliance when no specific reply
+        latest_thread_event_id = None
+        if thread_event_id and self.client:
+            thread_msgs = await fetch_thread_history(self.client, room.room_id, thread_event_id)
+            if thread_msgs:
+                latest_thread_event_id = thread_msgs[-1].get("event_id")
 
         content = create_mention_content_from_text(
             self.config,
@@ -942,6 +969,7 @@ class AgentBot:
             sender_domain=sender_domain,
             thread_event_id=thread_event_id,
             reply_to_event_id=event.event_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
 
         assert self.client is not None
@@ -955,7 +983,7 @@ class AgentBot:
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912
         self.logger.info("Handling command", command_type=command.type.value)
 
-        is_thread, thread_id = extract_thread_info(event.source)
+        thread_info = analyze_thread_info(event.source)
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
@@ -963,12 +991,12 @@ class AgentBot:
             url = command.args.get("url")
             response_text = await handle_widget_command(client=self.client, room_id=room.room_id, url=url)
             # Send response in thread if in thread, otherwise in main room
-            await self._send_response(room, event.event_id, response_text, thread_id)
+            await self._send_response(room, event.event_id, response_text, thread_info.thread_id)
             return
 
         # For commands that need thread context, use the existing thread or the event will start a new one
         # The _send_response method will automatically create a thread if needed
-        effective_thread_id = thread_id or event.event_id
+        effective_thread_id = thread_info.thread_id or thread_info.safe_thread_root or event.event_id
 
         response_text = ""
 
@@ -1062,7 +1090,7 @@ class AgentBot:
                 room,
                 event.event_id,
                 response_text,
-                thread_id,
+                thread_info.thread_id,
                 reply_to_event=event,
                 skip_mentions=True,
             )

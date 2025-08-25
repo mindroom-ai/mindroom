@@ -46,7 +46,7 @@ dependencies = [
   "fal-client",                                  # for Fal tool
   "fastapi[standard]>=0.116.1",                  # for widget API and future API endpoints
   "ffmpeg",                                      # for MoviePy tool
-  "firecrawl-py",                                # for Firecrawl tool
+  "firecrawl-py<3",                              # for Firecrawl tool
   "google-api-python-client>=2.178",             # for Google Calendar, Google Sheets, Gmail tools, widget API
   "google-auth>=2.40.3",                         # for Google Calendar, Google Sheets, Gmail tools, widget API
   "google-auth-httplib2>=0.2",                   # for Google Calendar, Google Sheets, Gmail tools, widget API

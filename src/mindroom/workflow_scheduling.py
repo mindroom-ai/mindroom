@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
 from .logging_config import get_logger
-from .matrix.client import send_message
+from .matrix.client import fetch_thread_history, send_message
 from .matrix.identity import extract_server_name_from_homeserver
 from .matrix.mentions import create_mention_content_from_text
 
@@ -299,12 +299,20 @@ async def execute_scheduled_workflow(
         # Extract the server name from the client's homeserver for proper agent mentions
         server_name = extract_server_name_from_homeserver(client.homeserver)
 
+        # Get latest thread event for MSC3440 compliance
+        latest_thread_event_id = None
+        if workflow.thread_id:
+            thread_msgs = await fetch_thread_history(client, workflow.room_id, workflow.thread_id)
+            # If no thread messages found, use thread_id as fallback (for new threads)
+            latest_thread_event_id = thread_msgs[-1].get("event_id") if thread_msgs else workflow.thread_id
+
         # Create mention content with the automated message
         content = create_mention_content_from_text(
             config,
             automated_message,
             sender_domain=server_name,
             thread_event_id=workflow.thread_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
 
         # Send the message - agents will see their mentions and respond naturally!
@@ -328,6 +336,8 @@ async def execute_scheduled_workflow(
             error_content["m.relates_to"] = {
                 "rel_type": "m.thread",
                 "event_id": workflow.thread_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": workflow.thread_id},
             }
         await send_message(client, workflow.room_id, error_content)
 

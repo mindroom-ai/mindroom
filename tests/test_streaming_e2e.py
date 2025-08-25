@@ -335,7 +335,11 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 @pytest.mark.asyncio
 @pytest.mark.e2e
 async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
-    """Test that agents DO respond to user edits that add mentions."""
+    """Test that agents DO NOT respond to user edits (even if they add mentions).
+
+    This is by design - the bot ignores all edits to prevent confusion.
+    Users should send a new message if they want a new response after editing.
+    """
     # Create a single bot for this test
     calc_user = AgentMatrixUser(
         agent_name="calculator",
@@ -427,17 +431,13 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             with patch("mindroom.bot.check_agent_mentioned") as mock_check:
                 mock_check.return_value = (["calculator"], True)
 
-                # Process edit - bot SHOULD respond
+                # Process edit - bot should NOT respond (edits are ignored)
                 await bot._on_message(test_room, edit_event)
 
         # Wait for processing
         await asyncio.sleep(0.1)
 
-        # Verify bot responded
-        assert len(events_sent) == 1, "Bot should respond to user edit with mention"
-        response = events_sent[0]
-        content_dict = response.get("content", {})
-        body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
-        assert "4" in body
+        # Verify bot did NOT respond (edits are ignored by design)
+        assert len(events_sent) == 0, "Bot should NOT respond to user edits (even with mentions)"
 
         await bot.stop()
