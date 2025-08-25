@@ -54,9 +54,10 @@ def create_mention_content(
                 "m.in_reply_to": {"event_id": reply_to_event_id},
             }
         else:
+            assert latest_thread_event_id is not None, "latest_thread_event_id is required for thread fallback"
             # Fallback: continuing thread without specific reply
             # Per MSC3440, should point to latest message in thread for backwards compatibility
-            fallback_reply_id = latest_thread_event_id or thread_event_id
+            fallback_reply_id = latest_thread_event_id
             content["m.relates_to"] = {
                 "rel_type": "m.thread",
                 "event_id": thread_event_id,
