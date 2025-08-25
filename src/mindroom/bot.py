@@ -35,6 +35,7 @@ from .matrix.client import (
     edit_message,
     fetch_thread_history,
     get_joined_rooms,
+    get_latest_thread_event_id,
     get_room_members,
     invite_to_room,
     join_room,
@@ -709,7 +710,7 @@ class AgentBot:
         latest_thread_event_id = None
         if thread_id and not existing_event_id and not reply_to_event_id:
             # Only needed for new thread messages without specific reply
-            latest_thread_event_id = thread_history[-1].get("event_id") if thread_history else None
+            latest_thread_event_id = await get_latest_thread_event_id(self.client, room.room_id, thread_id)
 
         streaming = StreamingResponse(
             room_id=room.room_id,
@@ -863,10 +864,7 @@ class AgentBot:
         latest_thread_event_id = None
         if effective_thread_id and not reply_to_event_id and self.client:
             # Only fetch if we're not making a genuine reply
-            thread_msgs = await fetch_thread_history(self.client, room.room_id, effective_thread_id)
-            if thread_msgs:
-                # Get the last message's event_id (thread history is in chronological order)
-                latest_thread_event_id = thread_msgs[-1].get("event_id")
+            latest_thread_event_id = await get_latest_thread_event_id(self.client, room.room_id, effective_thread_id)
 
         content = create_mention_content_from_text(
             self.config,
@@ -959,9 +957,7 @@ class AgentBot:
         # Get latest thread event for MSC3440 compliance when no specific reply
         latest_thread_event_id = None
         if thread_event_id and self.client:
-            thread_msgs = await fetch_thread_history(self.client, room.room_id, thread_event_id)
-            if thread_msgs:
-                latest_thread_event_id = thread_msgs[-1].get("event_id")
+            latest_thread_event_id = await get_latest_thread_event_id(self.client, room.room_id, thread_event_id)
 
         content = create_mention_content_from_text(
             self.config,

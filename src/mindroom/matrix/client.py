@@ -422,6 +422,32 @@ async def fetch_thread_history(
     return list(reversed(messages))  # Return in chronological order
 
 
+async def get_latest_thread_event_id(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+) -> str:
+    """Get the latest event ID in a thread for MSC3440 fallback compliance.
+
+    This function fetches the thread history and returns the latest event ID.
+    If the thread has no messages yet, returns the thread_id itself as fallback.
+
+    Args:
+        client: Matrix client
+        room_id: Room ID
+        thread_id: Thread root event ID
+
+    Returns:
+        The latest event ID in the thread, or thread_id if thread is empty
+
+    """
+    thread_msgs = await fetch_thread_history(client, room_id, thread_id)
+    if thread_msgs:
+        last_event_id = thread_msgs[-1].get("event_id")
+        return str(last_event_id) if last_event_id else thread_id
+    return thread_id
+
+
 def markdown_to_html(text: str) -> str:
     """Convert markdown text to HTML for Matrix formatted messages.
 
