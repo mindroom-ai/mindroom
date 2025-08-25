@@ -422,7 +422,7 @@ async def fetch_thread_history(
     return list(reversed(messages))  # Return in chronological order
 
 
-async def get_latest_thread_event_id(
+async def _latest_thread_event_id(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -446,6 +446,39 @@ async def get_latest_thread_event_id(
         last_event_id = thread_msgs[-1].get("event_id")
         return str(last_event_id) if last_event_id else thread_id
     return thread_id
+
+
+async def get_latest_thread_event_id_if_needed(
+    client: nio.AsyncClient | None,
+    room_id: str,
+    thread_id: str | None,
+    reply_to_event_id: str | None = None,
+    existing_event_id: str | None = None,
+) -> str | None:
+    """Get the latest thread event ID only when needed for MSC3440 compliance.
+
+    This helper encapsulates the common pattern of conditionally fetching
+    the latest thread event ID based on various conditions.
+
+    Args:
+        client: Matrix client (can be None)
+        room_id: Room ID
+        thread_id: Thread root event ID (can be None)
+        reply_to_event_id: Event ID being replied to (if any)
+        existing_event_id: Existing event ID being edited (if any)
+
+    Returns:
+        The latest event ID in the thread if needed, None otherwise
+
+    """
+    # Only fetch latest thread event when:
+    # 1. We have a thread_id
+    # 2. We have a client
+    # 3. We're not editing an existing message
+    # 4. We're not making a genuine reply
+    if thread_id and client and not existing_event_id and not reply_to_event_id:
+        return await _latest_thread_event_id(client, room_id, thread_id)
+    return None
 
 
 def markdown_to_html(text: str) -> str:

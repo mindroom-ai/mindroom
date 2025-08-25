@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
 from .logging_config import get_logger
-from .matrix.client import get_latest_thread_event_id, send_message
+from .matrix.client import get_latest_thread_event_id_if_needed, send_message
 from .matrix.identity import extract_server_name_from_homeserver
 from .matrix.mentions import create_mention_content_from_text
 
@@ -300,9 +300,11 @@ async def execute_scheduled_workflow(
         server_name = extract_server_name_from_homeserver(client.homeserver)
 
         # Get latest thread event for MSC3440 compliance
-        latest_thread_event_id = None
-        if workflow.thread_id:
-            latest_thread_event_id = await get_latest_thread_event_id(client, workflow.room_id, workflow.thread_id)
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            client,
+            workflow.room_id,
+            workflow.thread_id,
+        )
 
         # Create mention content with the automated message
         content = create_mention_content_from_text(
