@@ -303,8 +303,8 @@ async def execute_scheduled_workflow(
         latest_thread_event_id = None
         if workflow.thread_id:
             thread_msgs = await fetch_thread_history(client, workflow.room_id, workflow.thread_id)
-            if thread_msgs:
-                latest_thread_event_id = thread_msgs[-1].get("event_id")
+            # If no thread messages found, use thread_id as fallback (for new threads)
+            latest_thread_event_id = thread_msgs[-1].get("event_id") if thread_msgs else workflow.thread_id
 
         # Create mention content with the automated message
         content = create_mention_content_from_text(
