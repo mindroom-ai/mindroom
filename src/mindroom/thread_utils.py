@@ -163,16 +163,20 @@ def should_agent_respond(  # noqa: PLR0911
         mentioned_agents: List of all agents mentioned in the message
 
     """
-    # Check if agent has access (either native or invited to thread)
+    # Check if agent has access (either native, invited to thread, or in the room)
     has_room_access = room.room_id in configured_rooms or is_dm_room
+    # Also check if agent is actually in the room (joined it)
+    is_in_room = agent_name in [
+        extract_agent_name(user_id, config) for user_id in (room.users.keys() if room.users else [])
+    ]
     has_thread_access = is_thread and is_invited_to_thread
-    has_access = has_room_access or has_thread_access
+    has_access = has_room_access or has_thread_access or is_in_room
 
     # For room messages (not in threads)
     if not is_thread:
-        # In regular rooms, only respond if mentioned
+        # In regular rooms, only respond if mentioned AND has access
         if not is_dm_room:
-            return am_i_mentioned and has_room_access
+            return am_i_mentioned and (has_room_access or is_in_room)
 
         # Special case: DM room without thread started yet
         # If mentioned, respond
@@ -207,8 +211,8 @@ def should_agent_respond(  # noqa: PLR0911
         return False
 
     # Special case: If no agents have spoken yet but this agent is invited to the thread,
-    # they should take ownership of the conversation
-    if len(agents_in_thread) == 0 and is_invited_to_thread:
+    # or the agent is in the room
+    if len(agents_in_thread) == 0 and (is_invited_to_thread or is_in_room):
         return True
 
     # Single agent continues conversation (only if has access)

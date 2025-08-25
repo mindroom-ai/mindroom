@@ -412,17 +412,24 @@ class AgentBot:
             return
 
         # Check if we should process messages in this room
-        # Process if: configured for room OR invited to threads in room
+        # Process if: configured for room OR invited to threads in room OR joined the room
         # 1. Room is in configured rooms list
         # 2. Agent has been invited to threads in this room
         # 3. Currently in a DM room and not configured for it
+        # 4. Agent has joined the room (even if not configured)
         _is_dm_room = await is_dm_room(self.client, room.room_id)
         if not _is_dm_room and room.room_id not in self.rooms:
-            assert self.thread_invite_manager is not None
-            agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
-            if not agent_threads:
-                # Not configured for room and no thread invitations
-                return
+            # Check if we're actually in the room (joined it)
+            joined_rooms = await get_joined_rooms(self.client)
+            if joined_rooms and room.room_id in joined_rooms:
+                # We're in the room, so we should process messages when mentioned
+                self.logger.debug(f"Processing message in joined but unconfigured room {room.room_id}")
+            else:
+                assert self.thread_invite_manager is not None
+                agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
+                if not agent_threads:
+                    # Not configured for room, not joined, and no thread invitations
+                    return
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
