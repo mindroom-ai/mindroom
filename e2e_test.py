@@ -17,9 +17,9 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from mindroom.cli import _run
+from mindroom.config import Config
 from mindroom.matrix import MATRIX_HOMESERVER
-from mindroom.matrix.client import markdown_to_html
-from mindroom.matrix.mentions import parse_mentions_in_text
+from mindroom.matrix.mentions import create_mention_content_from_text
 
 
 class LoginError(Exception):
@@ -84,20 +84,15 @@ class MindRoomE2ETest:
         # Start with the primary agent mention
         full_message = f"@{agent_name} {message}"
 
-        # Parse ALL mentions in the text (including ones in the message body)
-        processed_text, all_mentioned_ids, markdown_text = parse_mentions_in_text(full_message, user_domain)
+        # Load config to use the helper function
+        config = Config.from_yaml()
 
-        # Convert markdown to HTML
-        formatted_html = markdown_to_html(markdown_text)
-
-        # Create content with all mentions properly set
-        content = {
-            "msgtype": "m.text",
-            "body": processed_text,
-            "format": "org.matrix.custom.html",
-            "formatted_body": formatted_html,
-            "m.mentions": {"user_ids": all_mentioned_ids} if all_mentioned_ids else {},
-        }
+        # Create content using the proper helper function
+        content = create_mention_content_from_text(
+            config=config,
+            text=full_message,
+            sender_domain=user_domain,
+        )
 
         response = await self.client.room_send(room_id=self.room_id, message_type="m.room.message", content=content)
 
