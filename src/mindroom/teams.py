@@ -339,7 +339,7 @@ def get_team_model(team_name: str, room_id: str, config: Config) -> str:
     return "default"
 
 
-async def create_team_response(  # noqa: C901
+async def create_team_response(  # noqa: C901, PLR0912
     agent_names: list[str],
     mode: TeamMode,
     message: str,
@@ -352,6 +352,11 @@ async def create_team_response(  # noqa: C901
     agents: list[Agent] = []
     for name in agent_names:
         if name == ROUTER_AGENT_NAME:
+            continue
+
+        # Check if agent exists in orchestrator
+        if name not in orchestrator.agent_bots:
+            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
             continue
 
         # Use the existing agent instance from the bot

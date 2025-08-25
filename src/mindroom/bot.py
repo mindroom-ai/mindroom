@@ -1329,11 +1329,11 @@ class MultiAgentOrchestrator:
         # Setup rooms and have all bots join them
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
 
-        # Create sync tasks for each bot
+        # Create sync tasks for each bot with automatic restart on failure
         sync_tasks = []
         for bot in self.agent_bots.values():
-            # Create a task for each bot's sync loop
-            sync_task = asyncio.create_task(bot.sync_forever())
+            # Create a task for each bot's sync loop with restart wrapper
+            sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
             sync_tasks.append(sync_task)
 
         # Run all sync tasks
@@ -1389,8 +1389,8 @@ class MultiAgentOrchestrator:
                     self.agent_bots[entity_name] = bot
                     # Agent handles its own setup (but doesn't join rooms yet)
                     await bot.start()
-                    # Start sync loop
-                    asyncio.create_task(bot.sync_forever())  # noqa: RUF006
+                    # Start sync loop with automatic restart
+                    asyncio.create_task(_sync_forever_with_restart(bot))  # noqa: RUF006
             # Entity was removed from config
             elif entity_name in self.agent_bots:
                 del self.agent_bots[entity_name]
@@ -1403,7 +1403,7 @@ class MultiAgentOrchestrator:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot
                 await bot.start()
-                asyncio.create_task(bot.sync_forever())  # noqa: RUF006
+                asyncio.create_task(_sync_forever_with_restart(bot))  # noqa: RUF006
 
         # Handle removed entities (cleanup)
         removed_entities = existing_entities - all_new_entities
@@ -1654,6 +1654,43 @@ async def _stop_entities(entities_to_restart: set[str], agent_bots: dict[str, An
         agent_bots.pop(entity_name, None)
 
 
+async def _sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = -1) -> None:
+    """Run sync_forever with automatic restart on failure.
+
+    Args:
+        bot: The bot to run sync for
+        max_retries: Maximum number of retries (-1 for infinite)
+
+    """
+    retry_count = 0
+    while bot.running and (max_retries < 0 or retry_count < max_retries):
+        try:
+            logger.info(f"Starting sync loop for {bot.agent_name}")
+            await bot.sync_forever()
+            # If sync_forever returns normally, the bot was stopped intentionally
+            break
+        except asyncio.CancelledError:
+            # Task was cancelled, exit gracefully
+            logger.info(f"Sync task for {bot.agent_name} was cancelled")
+            break
+        except Exception:
+            retry_count += 1
+            logger.exception(f"Sync loop failed for {bot.agent_name} (retry {retry_count})")
+
+            if not bot.running:
+                # Bot was stopped, don't restart
+                break
+
+            if max_retries >= 0 and retry_count >= max_retries:
+                logger.exception(f"Max retries ({max_retries}) reached for {bot.agent_name}, giving up")
+                break
+
+            # Wait a bit before restarting to avoid rapid restarts
+            wait_time = min(60, 5 * retry_count)  # Exponential backoff, max 60 seconds
+            logger.info(f"Restarting sync loop for {bot.agent_name} in {wait_time} seconds...")
+            await asyncio.sleep(wait_time)
+
+
 async def _handle_config_change(orchestrator: MultiAgentOrchestrator, stop_watching: asyncio.Event) -> None:
     """Handle configuration file changes."""
     logger.info("Configuration file changed, checking for updates...")
@@ -1707,6 +1744,16 @@ async def main(log_level: str, storage_path: Path) -> None:
 
         # Wait for either orchestrator or watcher to complete
         done, pending = await asyncio.wait({orchestrator_task, watcher_task}, return_when=asyncio.FIRST_COMPLETED)
+
+        # Check if any completed task had an exception
+        for task in done:
+            try:
+                task.result()  # This will raise if the task had an exception
+            except asyncio.CancelledError:
+                logger.info("Task was cancelled")
+            except Exception:
+                logger.exception("Task failed with exception")
+                # Don't re-raise - let cleanup happen gracefully
 
         # Cancel any pending tasks
         for task in pending:
