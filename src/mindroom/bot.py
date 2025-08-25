@@ -35,6 +35,7 @@ from .matrix.client import (
     edit_message,
     fetch_thread_history,
     get_joined_rooms,
+    get_latest_thread_event_id_if_needed,
     get_room_members,
     invite_to_room,
     join_room,
@@ -706,10 +707,13 @@ class AgentBot:
         sender_id = self.matrix_id
 
         # Get latest thread event for MSC3440 compliance (only for new messages)
-        latest_thread_event_id = None
-        if thread_id and not existing_event_id and not reply_to_event_id:
-            # Only needed for new thread messages without specific reply
-            latest_thread_event_id = thread_history[-1].get("event_id") if thread_history else None
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            self.client,
+            room.room_id,
+            thread_id,
+            reply_to_event_id,
+            existing_event_id,
+        )
 
         streaming = StreamingResponse(
             room_id=room.room_id,
@@ -860,13 +864,12 @@ class AgentBot:
         effective_thread_id = thread_id or reply_thread_info.safe_thread_root or reply_to_event_id
 
         # Get the latest message in thread for MSC3440 fallback compatibility
-        latest_thread_event_id = None
-        if effective_thread_id and not reply_to_event_id and self.client:
-            # Only fetch if we're not making a genuine reply
-            thread_msgs = await fetch_thread_history(self.client, room.room_id, effective_thread_id)
-            if thread_msgs:
-                # Get the last message's event_id (thread history is in chronological order)
-                latest_thread_event_id = thread_msgs[-1].get("event_id")
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            self.client,
+            room.room_id,
+            effective_thread_id,
+            reply_to_event_id,
+        )
 
         content = create_mention_content_from_text(
             self.config,
@@ -957,11 +960,13 @@ class AgentBot:
             thread_event_id = thread_info.safe_thread_root or event.event_id
 
         # Get latest thread event for MSC3440 compliance when no specific reply
-        latest_thread_event_id = None
-        if thread_event_id and self.client:
-            thread_msgs = await fetch_thread_history(self.client, room.room_id, thread_event_id)
-            if thread_msgs:
-                latest_thread_event_id = thread_msgs[-1].get("event_id")
+        # Note: We use event.event_id as reply_to for routing suggestions
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            self.client,
+            room.room_id,
+            thread_event_id,
+            event.event_id,
+        )
 
         content = create_mention_content_from_text(
             self.config,

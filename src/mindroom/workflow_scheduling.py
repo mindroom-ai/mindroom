@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from agno.agent import Agent
 from cron_descriptor import get_description  # type: ignore[import-untyped]
@@ -14,9 +14,10 @@ from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
 from .logging_config import get_logger
-from .matrix.client import fetch_thread_history, send_message
+from .matrix.client import get_latest_thread_event_id_if_needed, send_message
 from .matrix.identity import extract_server_name_from_homeserver
 from .matrix.mentions import create_mention_content_from_text
+from .matrix.message_builder import build_message_content
 
 if TYPE_CHECKING:
     import nio
@@ -300,11 +301,11 @@ async def execute_scheduled_workflow(
         server_name = extract_server_name_from_homeserver(client.homeserver)
 
         # Get latest thread event for MSC3440 compliance
-        latest_thread_event_id = None
-        if workflow.thread_id:
-            thread_msgs = await fetch_thread_history(client, workflow.room_id, workflow.thread_id)
-            # If no thread messages found, use thread_id as fallback (for new threads)
-            latest_thread_event_id = thread_msgs[-1].get("event_id") if thread_msgs else workflow.thread_id
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            client,
+            workflow.room_id,
+            workflow.thread_id,
+        )
 
         # Create mention content with the automated message
         content = create_mention_content_from_text(
@@ -327,18 +328,13 @@ async def execute_scheduled_workflow(
     except Exception as e:
         logger.exception("Failed to execute scheduled workflow")
 
-        # Send error notification
-        error_content: dict[str, Any] = {
-            "msgtype": "m.text",
-            "body": f"❌ Scheduled task failed: {workflow.description}\nError: {e!s}",
-        }
-        if workflow.thread_id:
-            error_content["m.relates_to"] = {
-                "rel_type": "m.thread",
-                "event_id": workflow.thread_id,
-                "is_falling_back": True,
-                "m.in_reply_to": {"event_id": workflow.thread_id},
-            }
+        # Send error notification using proper message building
+        error_message = f"❌ Scheduled task failed: {workflow.description}\nError: {e!s}"
+        error_content = build_message_content(
+            body=error_message,
+            thread_event_id=workflow.thread_id,
+            latest_thread_event_id=workflow.thread_id,  # Use thread_id as fallback for error messages
+        )
         await send_message(client, workflow.room_id, error_content)
 
 
