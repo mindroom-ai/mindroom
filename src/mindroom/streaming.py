@@ -35,6 +35,7 @@ class StreamingResponse:
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
     update_interval: float = 1.0
+    latest_thread_event_id: str | None = None  # For MSC3440 compliance
 
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
@@ -66,12 +67,16 @@ class StreamingResponse:
         response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=False)
         display_text = response.formatted_text
 
+        # Only use latest_thread_event_id for the initial message (not edits)
+        latest_for_message = self.latest_thread_event_id if self.event_id is None else None
+
         content = create_mention_content_from_text(
             config=self.config,
             text=display_text,
             sender_domain=self.sender_domain,
             thread_event_id=effective_thread_id,
             reply_to_event_id=self.reply_to_event_id,
+            latest_thread_event_id=latest_for_message,
         )
 
         if self.event_id is None:

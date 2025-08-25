@@ -15,6 +15,7 @@ def create_mention_content(
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
     formatted_body: str | None = None,
+    latest_thread_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a properly formatted Matrix message with mentions.
 
@@ -22,8 +23,9 @@ def create_mention_content(
         body: The message body text (plain text version)
         mentioned_user_ids: List of Matrix user IDs to mention (e.g., ["@mindroom_calculator:localhost"])
         thread_event_id: Optional thread root event ID
-        reply_to_event_id: Optional event ID to reply to
+        reply_to_event_id: Optional event ID to reply to (for genuine replies)
         formatted_body: Optional HTML formatted body (if not provided, will convert from markdown)
+        latest_thread_event_id: Optional latest event ID in thread (for MSC3440 fallback compatibility)
 
     Returns:
         Properly formatted content dict for room_send
@@ -41,17 +43,29 @@ def create_mention_content(
         content["m.mentions"] = {"user_ids": mentioned_user_ids}
 
     # Add thread/reply relationship if specified
-    if thread_event_id or reply_to_event_id:
-        relates_to: dict[str, Any] = {}
-
-        if thread_event_id:
-            relates_to["rel_type"] = "m.thread"
-            relates_to["event_id"] = thread_event_id
-
+    if thread_event_id:
+        # Thread message - follow MSC3440 spec for backwards compatibility
         if reply_to_event_id:
-            relates_to["m.in_reply_to"] = {"event_id": reply_to_event_id}
-
-        content["m.relates_to"] = relates_to
+            # Genuine reply to a specific message in the thread
+            content["m.relates_to"] = {
+                "rel_type": "m.thread",
+                "event_id": thread_event_id,
+                "is_falling_back": False,
+                "m.in_reply_to": {"event_id": reply_to_event_id},
+            }
+        else:
+            # Fallback: continuing thread without specific reply
+            # Per MSC3440, should point to latest message in thread for backwards compatibility
+            fallback_reply_id = latest_thread_event_id or thread_event_id
+            content["m.relates_to"] = {
+                "rel_type": "m.thread",
+                "event_id": thread_event_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": fallback_reply_id},
+            }
+    elif reply_to_event_id:
+        # Plain reply without thread (shouldn't happen in this bot)
+        content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to_event_id}}
 
     return content
 
@@ -153,6 +167,7 @@ def create_mention_content_from_text(
     sender_domain: str = "localhost",
     thread_event_id: str | None = None,
     reply_to_event_id: str | None = None,
+    latest_thread_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Parse text for mentions and create properly formatted Matrix message.
 
@@ -163,7 +178,8 @@ def create_mention_content_from_text(
         text: Message text that may contain @agent_name mentions
         sender_domain: Domain part of the sender's user ID
         thread_event_id: Optional thread root event ID
-        reply_to_event_id: Optional event ID to reply to
+        reply_to_event_id: Optional event ID to reply to (for genuine replies)
+        latest_thread_event_id: Optional latest event ID in thread (for fallback compatibility)
 
     Returns:
         Properly formatted content dict for room_send
@@ -181,4 +197,5 @@ def create_mention_content_from_text(
         thread_event_id=thread_event_id,
         reply_to_event_id=reply_to_event_id,
         formatted_body=formatted_html,
+        latest_thread_event_id=latest_thread_event_id,
     )

@@ -287,7 +287,11 @@ class TestStreamingEdits:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test that agents DO respond to user edits that add new mentions."""
+        """Test that agents DO NOT respond to user edits (even those that add mentions).
+
+        This is by design - the bot ignores all edits to prevent confusion.
+        Users should send a new message if they want a new response after editing.
+        """
         # Set up bot
         bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
@@ -339,7 +343,7 @@ class TestStreamingEdits:
             },
         }
 
-        # Process edit - calculator SHOULD respond (it's a user edit with new mention)
+        # Process edit - calculator should NOT respond (bot ignores all edits)
         await bot._on_message(mock_room, edit_event)
-        assert bot.client.room_send.call_count == 1  # type: ignore[union-attr]
-        assert mock_ai_response.call_count == 1
+        assert bot.client.room_send.call_count == 0  # type: ignore[union-attr]
+        assert mock_ai_response.call_count == 0

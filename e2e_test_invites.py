@@ -129,6 +129,8 @@ class InviteE2ETest:
             content["m.relates_to"] = {
                 "rel_type": "m.thread",
                 "event_id": thread_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": thread_id},
             }
 
         response = await self.client.room_send(room_id=room_id, message_type="m.room.message", content=content)
@@ -147,6 +149,8 @@ class InviteE2ETest:
             content["m.relates_to"] = {
                 "rel_type": "m.thread",
                 "event_id": thread_id,
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": thread_id},
             }
 
         response = await self.client.room_send(room_id=room_id, message_type="m.room.message", content=content)

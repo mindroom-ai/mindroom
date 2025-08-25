@@ -10,6 +10,7 @@ import pytest
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import AgentConfig, Config
 from mindroom.matrix.client import create_dm_room
+from mindroom.matrix.thread_info import ThreadInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
 from tests.conftest import TEST_PASSWORD, TEST_TMP_DIR
@@ -318,13 +319,23 @@ class TestDMIntegration:
         with (
             patch("mindroom.bot.fetch_thread_history", return_value=[]),
             patch("mindroom.bot.check_agent_mentioned", return_value=([], False)),
-            patch("mindroom.bot.extract_thread_info", return_value=(False, None)),
+            patch("mindroom.bot.analyze_thread_info") as mock_thread_info,
             patch("mindroom.bot._should_skip_mentions", return_value=False),
             patch("mindroom.bot.extract_agent_name", return_value=None),  # User is not an agent
             patch("mindroom.bot.is_dm_room", return_value=True),  # This is a DM room
             patch.object(bot, "_generate_response") as mock_generate,
             patch("mindroom.bot.interactive.handle_text_response", new=mock_handle),
         ):
+            # Mock thread info to return no thread
+            mock_thread_info.return_value = ThreadInfo(
+                is_thread=False,
+                thread_id=None,
+                can_be_thread_root=True,
+                safe_thread_root=None,
+                has_relations=False,
+                relation_type=None,
+            )
+
             # Create a test message event
             room = MagicMock()
             room.room_id = "!dm:localhost"
@@ -386,13 +397,23 @@ class TestDMIntegration:
         with (
             patch("mindroom.bot.fetch_thread_history", return_value=[]),
             patch("mindroom.bot.check_agent_mentioned", return_value=([], False)),
-            patch("mindroom.bot.extract_thread_info", return_value=(False, None)),
+            patch("mindroom.bot.analyze_thread_info") as mock_thread_info,
             patch("mindroom.bot._should_skip_mentions", return_value=False),
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.bot.is_dm_room", return_value=True),  # This is a DM room
             patch.object(bot, "_generate_response") as mock_generate,
             patch("mindroom.bot.interactive.handle_text_response", new=mock_handle),
         ):
+            # Mock thread info to return no thread
+            mock_thread_info.return_value = ThreadInfo(
+                is_thread=False,
+                thread_id=None,
+                can_be_thread_root=True,
+                safe_thread_root=None,
+                has_relations=False,
+                relation_type=None,
+            )
+
             # Create a test message event in a DM room
             room = MagicMock()
             room.room_id = "!dm:localhost"  # This room is NOT in bot.rooms

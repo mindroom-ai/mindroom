@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from conftest import TEST_PASSWORD
 
 from mindroom.bot import AgentBot
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -25,7 +24,7 @@ async def test_bot_ignores_edit_events() -> None:
         agent_name=ROUTER_AGENT_NAME,
         user_id="@router:example.com",
         display_name="Router",
-        password=TEST_PASSWORD,
+        password="test_password",  # noqa: S106
     )
 
     # Create the bot
@@ -137,7 +136,7 @@ async def test_bot_ignores_multiple_edits() -> None:
         agent_name=ROUTER_AGENT_NAME,
         user_id="@router:example.com",
         display_name="Router",
-        password=TEST_PASSWORD,
+        password="test_password",  # noqa: S106
     )
 
     # Create the bot
@@ -222,7 +221,7 @@ async def test_regular_agent_ignores_edits() -> None:
         agent_name="test_agent",
         user_id="@test_agent:example.com",
         display_name="Test Agent",
-        password=TEST_PASSWORD,
+        password="test_password",  # noqa: S106
     )
 
     # Create the bot
