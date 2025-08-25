@@ -65,7 +65,7 @@ def analyze_thread_info(event_source: dict | None) -> ThreadInfo:
     relates_to = content.get("m.relates_to", {})
 
     # Check for any relation type
-    relation_type = relates_to.get("rel_type") if relates_to else None
+    relation_type = relates_to.get("rel_type")
     has_relations = bool(relates_to)
 
     # Check if this is a thread message

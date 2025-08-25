@@ -7,6 +7,7 @@ from mindroom.config import Config
 
 from .client import markdown_to_html
 from .identity import MatrixID
+from .message_builder import build_message_content
 
 
 def create_mention_content(
@@ -18,6 +19,9 @@ def create_mention_content(
     latest_thread_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a properly formatted Matrix message with mentions.
+
+    This is a compatibility wrapper that delegates to build_message_content.
+    Consider using build_message_content directly for new code.
 
     Args:
         body: The message body text (plain text version)
@@ -31,44 +35,14 @@ def create_mention_content(
         Properly formatted content dict for room_send
 
     """
-    content: dict[str, Any] = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": formatted_body if formatted_body else markdown_to_html(body),
-    }
-
-    # Add mentions if any
-    if mentioned_user_ids:
-        content["m.mentions"] = {"user_ids": mentioned_user_ids}
-
-    # Add thread/reply relationship if specified
-    if thread_event_id:
-        # Thread message - follow MSC3440 spec for backwards compatibility
-        if reply_to_event_id:
-            # Genuine reply to a specific message in the thread
-            content["m.relates_to"] = {
-                "rel_type": "m.thread",
-                "event_id": thread_event_id,
-                "is_falling_back": False,
-                "m.in_reply_to": {"event_id": reply_to_event_id},
-            }
-        else:
-            assert latest_thread_event_id is not None, "latest_thread_event_id is required for thread fallback"
-            # Fallback: continuing thread without specific reply
-            # Per MSC3440, should point to latest message in thread for backwards compatibility
-            fallback_reply_id = latest_thread_event_id
-            content["m.relates_to"] = {
-                "rel_type": "m.thread",
-                "event_id": thread_event_id,
-                "is_falling_back": True,
-                "m.in_reply_to": {"event_id": fallback_reply_id},
-            }
-    elif reply_to_event_id:
-        # Plain reply without thread (shouldn't happen in this bot)
-        content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to_event_id}}
-
-    return content
+    return build_message_content(
+        body=body,
+        formatted_body=formatted_body,
+        mentioned_user_ids=mentioned_user_ids,
+        thread_event_id=thread_event_id,
+        reply_to_event_id=reply_to_event_id,
+        latest_thread_event_id=latest_thread_event_id,
+    )
 
 
 def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tuple[str, list[str], str]:
@@ -192,11 +166,11 @@ def create_mention_content_from_text(
     # The markdown converter will properly handle the [@DisplayName](url) format
     formatted_html = markdown_to_html(markdown_text)
 
-    return create_mention_content(
+    return build_message_content(
         body=plain_text,
+        formatted_body=formatted_html,
         mentioned_user_ids=mentioned_user_ids,
         thread_event_id=thread_event_id,
         reply_to_event_id=reply_to_event_id,
-        formatted_body=formatted_html,
         latest_thread_event_id=latest_thread_event_id,
     )
