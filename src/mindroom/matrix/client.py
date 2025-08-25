@@ -13,6 +13,7 @@ import nio
 
 from mindroom.logging_config import get_logger
 
+from .event_relations import analyze_event_relations
 from .identity import MatrixID, extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
@@ -410,8 +411,8 @@ async def fetch_thread_history(
                     root_message_found = True
                     thread_messages_found += 1
                 else:
-                    relates_to = event.source.get("content", {}).get("m.relates_to", {})
-                    if relates_to.get("rel_type") == "m.thread" and relates_to.get("event_id") == thread_id:
+                    event_relations = analyze_event_relations(event.source)
+                    if event_relations.is_thread and event_relations.thread_id == thread_id:
                         messages.append(_extract_message_data(event))
                         thread_messages_found += 1
 

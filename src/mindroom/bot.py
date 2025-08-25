@@ -42,6 +42,7 @@ from .matrix.client import (
     leave_room,
     send_message,
 )
+from .matrix.event_relations import analyze_event_relations
 from .matrix.identity import (
     MatrixID,
     extract_agent_name,
@@ -50,7 +51,6 @@ from .matrix.identity import (
 from .matrix.mentions import create_mention_content_from_text
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
-from .matrix.thread_info import analyze_thread_info
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
 from .memory import store_conversation_memory
 from .response_tracker import ResponseTracker
@@ -399,8 +399,8 @@ class AgentBot:
         # but this requires complex tracking of message relationships and response regeneration.
         # For now, we ignore all edits to prevent them being treated as new messages.
         # Users who want a new response after editing should send a new message instead.
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        if relates_to.get("rel_type") == "m.replace":
+        event_relations = analyze_event_relations(event.source)
+        if event_relations.is_edit:
             self.logger.debug(f"Skipping edit event {event.event_id}")
             return
 
@@ -597,7 +597,7 @@ class AgentBot:
         transcribed_message = await voice_handler.handle_voice_message(self.client, room, event, self.config)
 
         if transcribed_message:
-            thread_info = analyze_thread_info(event.source)
+            thread_info = analyze_event_relations(event.source)
 
             await self._send_response(
                 room=room,
@@ -626,7 +626,7 @@ class AgentBot:
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
-        thread_info = analyze_thread_info(event.source)
+        thread_info = analyze_event_relations(event.source)
 
         thread_history = []
         is_invited_to_thread = False
@@ -860,7 +860,7 @@ class AgentBot:
 
         # Always ensure we have a thread_id - use the original message as thread root if needed
         # This ensures agents always respond in threads, even when mentioned in main room
-        reply_thread_info = analyze_thread_info(reply_to_event.source if reply_to_event else None)
+        reply_thread_info = analyze_event_relations(reply_to_event.source if reply_to_event else None)
         effective_thread_id = thread_id or reply_thread_info.safe_thread_root or reply_to_event_id
 
         # Get the latest message in thread for MSC3440 fallback compatibility
@@ -935,7 +935,7 @@ class AgentBot:
 
         self.logger.info("Handling AI routing", event_id=event.event_id)
 
-        thread_info = analyze_thread_info(event.source)
+        thread_info = analyze_event_relations(event.source)
         suggested_agent = await suggest_agent_for_message(
             event.body,
             available_agents,
@@ -988,7 +988,7 @@ class AgentBot:
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912
         self.logger.info("Handling command", command_type=command.type.value)
 
-        thread_info = analyze_thread_info(event.source)
+        thread_info = analyze_event_relations(event.source)
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
@@ -1151,13 +1151,16 @@ class AgentBot:
             True if we should skip processing this message
 
         """
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        is_edit = relates_to.get("rel_type") == "m.replace"
+        event_relations = analyze_event_relations(event.source)
 
-        if is_edit:
-            original_event_id = relates_to.get("event_id")
-            if original_event_id and self.response_tracker.has_responded(original_event_id):
-                self.logger.debug("Ignoring edit of already-responded message", original_event_id=original_event_id)
+        if event_relations.is_edit:
+            if event_relations.original_event_id and self.response_tracker.has_responded(
+                event_relations.original_event_id,
+            ):
+                self.logger.debug(
+                    "Ignoring edit of already-responded message",
+                    original_event_id=event_relations.original_event_id,
+                )
                 return True
         elif self.response_tracker.has_responded(event.event_id):
             return True
