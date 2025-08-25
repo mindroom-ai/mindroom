@@ -10,7 +10,7 @@ import pytest
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import AgentConfig, Config
 from mindroom.matrix.client import create_dm_room
-from mindroom.matrix.event_relations import EventRelationInfo
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
 from tests.conftest import TEST_PASSWORD, TEST_TMP_DIR
@@ -327,7 +327,7 @@ class TestDMIntegration:
             patch("mindroom.bot.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
-            mock_thread_info.return_value = EventRelationInfo(
+            mock_thread_info.return_value = EventInfo(
                 is_thread=False,
                 thread_id=None,
                 can_be_thread_root=True,
@@ -413,7 +413,7 @@ class TestDMIntegration:
             patch("mindroom.bot.interactive.handle_text_response", new=mock_handle),
         ):
             # Mock thread info to return no thread
-            mock_thread_info.return_value = EventRelationInfo(
+            mock_thread_info.return_value = EventInfo(
                 is_thread=False,
                 thread_id=None,
                 can_be_thread_root=True,

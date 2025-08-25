@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import nio
 
 from .logging_config import get_logger
-from .matrix.event_relations import analyze_event_relations
+from .matrix.event_info import EventInfo
 from .matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
@@ -156,7 +156,7 @@ async def handle_text_response(
     if not message_text.isdigit() or len(message_text) > 1:
         return None
 
-    thread_info = analyze_event_relations(event.source)
+    thread_info = EventInfo.from_event(event.source)
     thread_id = thread_info.thread_id
 
     # Find matching active questions in this room/thread

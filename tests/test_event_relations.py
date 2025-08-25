@@ -1,6 +1,6 @@
 """Tests for comprehensive event relation analysis."""
 
-from mindroom.matrix.event_relations import analyze_event_relations
+from mindroom.matrix.event_info import EventInfo
 
 
 class TestEventRelations:
@@ -17,7 +17,7 @@ class TestEventRelations:
             },
         }
 
-        info = analyze_event_relations(event_source)
+        info = EventInfo.from_event(event_source)
 
         assert info.is_edit is True
         assert info.original_event_id == "$original_event_123"
@@ -42,7 +42,7 @@ class TestEventRelations:
             },
         }
 
-        info = analyze_event_relations(event_source)
+        info = EventInfo.from_event(event_source)
 
         assert info.is_thread is True
         assert info.thread_id == "$thread_root_456"
@@ -68,7 +68,7 @@ class TestEventRelations:
             },
         }
 
-        info = analyze_event_relations(event_source)
+        info = EventInfo.from_event(event_source)
 
         assert info.is_reaction is True
         assert info.reaction_target_event_id == "$target_event_789"
@@ -97,7 +97,7 @@ class TestEventRelations:
             },
         }
 
-        info = analyze_event_relations(event_source)
+        info = EventInfo.from_event(event_source)
 
         assert info.is_thread is True
         assert info.thread_id == "$thread_root_abc"
@@ -124,7 +124,7 @@ class TestEventRelations:
             },
         }
 
-        info = analyze_event_relations(event_source)
+        info = EventInfo.from_event(event_source)
 
         assert info.is_reply is True
         assert info.reply_to_event_id == "$reply_to_xyz"
@@ -147,7 +147,7 @@ class TestEventRelations:
             },
         }
 
-        info = analyze_event_relations(event_source)
+        info = EventInfo.from_event(event_source)
 
         assert info.has_relations is False
         assert info.can_be_thread_root is True
@@ -163,7 +163,7 @@ class TestEventRelations:
 
     def test_analyze_none_event(self) -> None:
         """Test that None event source is handled gracefully."""
-        info = analyze_event_relations(None)
+        info = EventInfo.from_event(None)
 
         assert info.has_relations is False
         assert info.can_be_thread_root is True
@@ -187,7 +187,7 @@ class TestEventRelations:
             },
         }
 
-        info = analyze_event_relations(event_source)
+        info = EventInfo.from_event(event_source)
 
         assert info.can_be_thread_root is False
         assert info.safe_thread_root == "$original_msg"
@@ -203,16 +203,7 @@ class TestEventRelations:
             },
         }
 
-        info = analyze_event_relations(event_source)
+        info = EventInfo.from_event(event_source)
 
         assert info.can_be_thread_root is False
         assert info.safe_thread_root == "$reacted_msg"
-
-    def test_backward_compatibility(self) -> None:
-        """Test that backward compatibility imports work."""
-        from mindroom.matrix.event_relations import EventRelationInfo, analyze_event_relations  # noqa: PLC0415
-        from mindroom.matrix.thread_info import ThreadInfo, analyze_thread_info  # noqa: PLC0415
-
-        # The imports should be the same objects
-        assert ThreadInfo is EventRelationInfo
-        assert analyze_thread_info is analyze_event_relations

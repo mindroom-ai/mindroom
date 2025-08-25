@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 
 @dataclass
-class EventRelationInfo:
+class EventInfo:
     """Comprehensive analysis of Matrix event relations."""
 
     # Thread information (MSC3440)
@@ -60,8 +60,13 @@ class EventRelationInfo:
     relates_to_event_id: str | None
     """The primary event ID this event relates to (if any)."""
 
+    @staticmethod
+    def from_event(event_source: dict | None) -> EventInfo:
+        """Create EventInfo from a raw event source dictionary."""
+        return _analyze_event_relations(event_source)
 
-def analyze_event_relations(event_source: dict | None) -> EventRelationInfo:
+
+def _analyze_event_relations(event_source: dict | None) -> EventInfo:
     """Analyze complete relation information for a Matrix event.
 
     This unified function provides all relation-related information in one place,
@@ -78,11 +83,11 @@ def analyze_event_relations(event_source: dict | None) -> EventRelationInfo:
         event_source: The event source dictionary (e.g., event.source for nio events)
 
     Returns:
-        EventRelationInfo object with complete relation analysis
+        EventInfo object with complete relation analysis
 
     """
     if not event_source:
-        return EventRelationInfo(
+        return EventInfo(
             is_thread=False,
             thread_id=None,
             can_be_thread_root=True,
@@ -145,7 +150,7 @@ def analyze_event_relations(event_source: dict | None) -> EventRelationInfo:
             # For rich replies, use the event being replied to
             safe_thread_root = str(reply_to_event_id)
 
-    return EventRelationInfo(
+    return EventInfo(
         # Thread info
         is_thread=is_thread,
         thread_id=thread_id,
@@ -166,8 +171,3 @@ def analyze_event_relations(event_source: dict | None) -> EventRelationInfo:
         relation_type=relation_type,
         relates_to_event_id=relates_to_event_id,
     )
-
-
-# Backward compatibility aliases
-ThreadInfo = EventRelationInfo
-analyze_thread_info = analyze_event_relations
