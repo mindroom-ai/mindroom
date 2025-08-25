@@ -411,8 +411,8 @@ async def fetch_thread_history(
                     root_message_found = True
                     thread_messages_found += 1
                 else:
-                    event_relations = EventInfo.from_event(event.source)
-                    if event_relations.is_thread and event_relations.thread_id == thread_id:
+                    event_info = EventInfo.from_event(event.source)
+                    if event_info.is_thread and event_info.thread_id == thread_id:
                         messages.append(_extract_message_data(event))
                         thread_messages_found += 1
 
