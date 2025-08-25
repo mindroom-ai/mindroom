@@ -87,6 +87,7 @@ class TestBotScheduleCommands:
                 scheduled_by="@user:server",
                 full_text="in 5 minutes Check deployment",
                 config=mock_agent_bot.config,
+                mentioned_agents=[],  # No agents mentioned in this command
             )
 
             # Verify response was sent
