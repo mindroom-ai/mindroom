@@ -73,10 +73,23 @@ def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
     storage_path.mkdir(parents=True, exist_ok=True)
     storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
 
+    # Get model config for identity context
+    model_name = agent_config.model or "default"
+    if model_name in config.models:
+        model_config = config.models[model_name]
+        model_provider = model_config.provider.title()  # Capitalize provider name
+        model_id = model_config.id
+    else:
+        # Fallback if model not found
+        model_provider = "AI"
+        model_id = model_name
+
     # Add identity context to all agents using the unified template
     identity_context = agent_prompts.AGENT_IDENTITY_CONTEXT.format(
         display_name=agent_config.display_name,
         agent_name=agent_name,
+        model_provider=model_provider,
+        model_id=model_id,
     )
 
     # Use rich prompt if available, otherwise use YAML config
