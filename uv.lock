@@ -1746,20 +1746,19 @@ wheels = [
 
 [[package]]
 name = "firecrawl-py"
-version = "3.3.2"
+version = "2.16.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
-    { name = "httpx" },
     { name = "nest-asyncio" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/79/18/c4078568d60dc3a36c81b78fb946b8f38b171959d6fb8bf86aa674faa807/firecrawl_py-3.3.2.tar.gz", hash = "sha256:7c5433806edcff52375a67e59a90e933f51fa5951926c92afb86e8654a99ff1f", size = 124387, upload-time = "2025-08-23T23:52:29.009Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/97/7a/e6911fe11d140db5b5deda7a3ad6ee80c7615fcb248097ec7a4bc784eff6/firecrawl_py-2.16.5.tar.gz", hash = "sha256:7f5186bba359a426140a6827b550a604e62bfbeda33ded757952899b1cca4c83", size = 40154, upload-time = "2025-08-06T20:38:23.92Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/43/7b/a73fc536d5a1b5c0b58a540668876c4d29fcfc9668dcb768375f306f1b67/firecrawl_py-3.3.2-py3-none-any.whl", hash = "sha256:af60a91fd34e869cb9bcbf91dbac9d673eda6336ddb843c8d868422ffeb1e1b6", size = 158506, upload-time = "2025-08-23T23:52:27.601Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/99/fa2a41e2c1c5ff3e01150470b0a8a630792a363724c188bf6522e6798be7/firecrawl_py-2.16.5-py3-none-any.whl", hash = "sha256:3caed19b8f21522ab9c2193c2226990f2468e6bc5669ef54aa156e4230a5e35e", size = 75978, upload-time = "2025-08-06T20:38:22.857Z" },
 ]
 
 [[package]]
@@ -3312,7 +3311,7 @@ requires-dist = [
     { name = "fal-client" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.116.1" },
     { name = "ffmpeg" },
-    { name = "firecrawl-py" },
+    { name = "firecrawl-py", specifier = "<3" },
     { name = "google-api-python-client", specifier = ">=2.178" },
     { name = "google-auth", specifier = ">=2.40.3" },
     { name = "google-auth-httplib2", specifier = ">=0.2" },
