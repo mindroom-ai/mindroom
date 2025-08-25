@@ -159,7 +159,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     scheduled_by: str,
     full_text: str,
     config: Config,
-    room: nio.MatrixRoom | None = None,
+    room: nio.MatrixRoom,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -184,24 +184,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
 
     # Validate that all mentioned agents are accessible
-    # If room object not provided, fetch it
+    # Room must be provided by the caller
     if room is None:
-        rooms_response = await client.joined_rooms()
-        if isinstance(rooms_response, nio.JoinedRoomsResponse) and room_id in rooms_response.rooms:
-            # Get room info
-            room_response = await client.room_get_state(room_id)
-            if isinstance(room_response, nio.RoomGetStateResponse):
-                # Create a basic room object - we mainly need the users
-                room = nio.MatrixRoom(room_id, client.user_id)
-                # Try to get members
-                members_response = await client.joined_members(room_id)
-                if isinstance(members_response, nio.JoinedMembersResponse):
-                    for member_id in members_response.members:
-                        room.users[member_id] = nio.RoomMember(member_id, display_name=member_id)
-
-    if room is None:
-        # Fallback - create a minimal room object
-        room = nio.MatrixRoom(room_id, client.user_id)
+        return (None, "❌ Internal error: Room object not provided")
 
     validation_result = await _validate_agent_mentions(
         workflow_result.message,
