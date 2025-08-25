@@ -10,41 +10,6 @@ from .identity import MatrixID
 from .message_builder import build_message_content
 
 
-def create_mention_content(
-    body: str,
-    mentioned_user_ids: list[str],
-    thread_event_id: str | None = None,
-    reply_to_event_id: str | None = None,
-    formatted_body: str | None = None,
-    latest_thread_event_id: str | None = None,
-) -> dict[str, Any]:
-    """Create a properly formatted Matrix message with mentions.
-
-    This is a compatibility wrapper that delegates to build_message_content.
-    Consider using build_message_content directly for new code.
-
-    Args:
-        body: The message body text (plain text version)
-        mentioned_user_ids: List of Matrix user IDs to mention (e.g., ["@mindroom_calculator:localhost"])
-        thread_event_id: Optional thread root event ID
-        reply_to_event_id: Optional event ID to reply to (for genuine replies)
-        formatted_body: Optional HTML formatted body (if not provided, will convert from markdown)
-        latest_thread_event_id: Optional latest event ID in thread (for MSC3440 fallback compatibility)
-
-    Returns:
-        Properly formatted content dict for room_send
-
-    """
-    return build_message_content(
-        body=body,
-        formatted_body=formatted_body,
-        mentioned_user_ids=mentioned_user_ids,
-        thread_event_id=thread_event_id,
-        reply_to_event_id=reply_to_event_id,
-        latest_thread_event_id=latest_thread_event_id,
-    )
-
-
 def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tuple[str, list[str], str]:
     """Parse text for agent mentions and return processed text with user IDs.
 
