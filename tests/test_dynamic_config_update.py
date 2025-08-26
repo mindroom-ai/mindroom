@@ -143,7 +143,11 @@ class TestDynamicConfigUpdate:
                 mock_agent_class.return_value = mock_agent
 
                 # Parse with the updated config
-                result = await parse_workflow_schedule(request, updated_config)
+                result = await parse_workflow_schedule(
+                    request,
+                    updated_config,
+                    available_agents=["email_assistant", "callagent"],  # Both agents available
+                )
 
                 # Verify the workflow was parsed correctly and includes both agents
                 assert hasattr(result, "message")
