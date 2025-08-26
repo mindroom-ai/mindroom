@@ -48,7 +48,7 @@ class AllAgentsRoomsResponse(BaseModel):
     agents: list[AgentRoomsResponse]
 
 
-async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> AgentRoomsResponse | None:
+async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> AgentRoomsResponse:
     """Get Matrix rooms for a specific agent.
 
     Args:
@@ -56,58 +56,47 @@ async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> A
         agent_data: The agent configuration data
 
     Returns:
-        AgentRoomsResponse with room information or None if failed
+        AgentRoomsResponse with room information
 
     """
-    try:
-        # Create or get the agent user
-        agent_user = await create_agent_user(
-            MATRIX_HOMESERVER,
-            agent_id,
-            agent_data.get("display_name", agent_id),
-        )
+    # Create or get the agent user
+    agent_user = await create_agent_user(
+        MATRIX_HOMESERVER,
+        agent_id,
+        agent_data.get("display_name", agent_id),
+    )
 
-        # Login and get the client
-        client = await login_agent_user(MATRIX_HOMESERVER, agent_user)
+    # Login and get the client
+    client = await login_agent_user(MATRIX_HOMESERVER, agent_user)
 
-        # Get all joined rooms from Matrix
-        joined_rooms = await get_joined_rooms(client)
+    # Get all joined rooms from Matrix
+    joined_rooms = await get_joined_rooms(client) or []
 
-        if joined_rooms is None:
-            await client.close()
-            logger.error(f"Failed to get joined rooms for agent {agent_id}")
-            return None
+    # Get configured rooms from config (these are aliases like "lobby", "analysis")
+    configured_room_aliases = agent_data.get("rooms", [])
 
-        # Get configured rooms from config (these are aliases like "lobby", "analysis")
-        configured_room_aliases = agent_data.get("rooms", [])
+    # Resolve room aliases to room IDs for comparison
+    configured_room_ids = resolve_room_aliases(configured_room_aliases)
 
-        # Resolve room aliases to room IDs for comparison
-        configured_room_ids = resolve_room_aliases(configured_room_aliases)
+    # Calculate unconfigured rooms (joined but not in config)
+    unconfigured_rooms = [room for room in joined_rooms if room not in configured_room_ids]
 
-        # Calculate unconfigured rooms (joined but not in config)
-        unconfigured_rooms = [room for room in joined_rooms if room not in configured_room_ids]
+    # Get room names for unconfigured rooms
+    unconfigured_room_details = []
+    for room_id in unconfigured_rooms:
+        room_name = await get_room_name(client, room_id)
+        unconfigured_room_details.append(RoomInfo(room_id=room_id, name=room_name))
 
-        # Get room names for unconfigured rooms
-        unconfigured_room_details = []
-        for room_id in unconfigured_rooms:
-            room_name = await get_room_name(client, room_id)
-            unconfigured_room_details.append(RoomInfo(room_id=room_id, name=room_name))
+    await client.close()
 
-        # Close the client connection
-        await client.close()
-
-        return AgentRoomsResponse(
-            agent_id=agent_id,
-            display_name=agent_data.get("display_name", agent_id),
-            configured_rooms=configured_room_ids,  # Return the resolved IDs, not aliases
-            joined_rooms=joined_rooms,
-            unconfigured_rooms=unconfigured_rooms,
-            unconfigured_room_details=unconfigured_room_details,
-        )
-
-    except Exception:
-        logger.exception(f"Error getting rooms for agent {agent_id}")
-        return None
+    return AgentRoomsResponse(
+        agent_id=agent_id,
+        display_name=agent_data.get("display_name", agent_id),
+        configured_rooms=configured_room_ids,
+        joined_rooms=joined_rooms,
+        unconfigured_rooms=unconfigured_rooms,
+        unconfigured_room_details=unconfigured_room_details,
+    )
 
 
 @router.get("/agents/rooms")
@@ -125,14 +114,8 @@ async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
         agents = config.get("agents", {})
 
     # Gather room information for all agents concurrently
-    tasks = []
-    for agent_id, agent_data in agents.items():
-        tasks.append(get_agent_matrix_rooms(agent_id, agent_data))
-
-    results = await asyncio.gather(*tasks)
-
-    # Filter out None results
-    agents_rooms = [result for result in results if result is not None]
+    tasks = [get_agent_matrix_rooms(agent_id, agent_data) for agent_id, agent_data in agents.items()]
+    agents_rooms = await asyncio.gather(*tasks)
 
     return AllAgentsRoomsResponse(agents=agents_rooms)
 
@@ -159,11 +142,7 @@ async def get_agent_rooms(agent_id: str) -> AgentRoomsResponse:
             raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
         agent_data = agents[agent_id]
 
-    result = await get_agent_matrix_rooms(agent_id, agent_data)
-    if result is None:
-        raise HTTPException(status_code=500, detail=f"Failed to get rooms for agent {agent_id}")
-
-    return result
+    return await get_agent_matrix_rooms(agent_id, agent_data)
 
 
 @router.post("/rooms/leave")
@@ -187,33 +166,28 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
         if request.agent_id not in agents:
             raise HTTPException(status_code=404, detail=f"Agent {request.agent_id} not found")
 
-    try:
-        # Get agent configuration
-        agent_data = agents.get(request.agent_id, {})
+    # Get agent configuration
+    agent_data = agents[request.agent_id]
 
-        # Create or get the agent user
-        agent_user = await create_agent_user(
-            MATRIX_HOMESERVER,
-            request.agent_id,
-            agent_data.get("display_name", request.agent_id),
-        )
+    # Create or get the agent user
+    agent_user = await create_agent_user(
+        MATRIX_HOMESERVER,
+        request.agent_id,
+        agent_data.get("display_name", request.agent_id),
+    )
 
-        # Login and get the client
-        client = await login_agent_user(MATRIX_HOMESERVER, agent_user)
+    # Login and get the client
+    client = await login_agent_user(MATRIX_HOMESERVER, agent_user)
 
-        # Leave the room
-        success = await leave_room(client, request.room_id)
+    # Leave the room
+    success = await leave_room(client, request.room_id)
 
-        # Close the client connection
-        await client.close()
+    # Close the client connection
+    await client.close()
 
-        if not success:
-            raise HTTPException(status_code=500, detail=f"Failed to leave room {request.room_id}")  # noqa: TRY301
-        return {"success": True}  # noqa: TRY300
-
-    except Exception as e:
-        logger.exception(f"Error leaving room {request.room_id} for agent {request.agent_id}")
-        raise HTTPException(status_code=500, detail=f"Error leaving room: {e!s}") from e
+    if not success:
+        raise HTTPException(status_code=500, detail=f"Failed to leave room {request.room_id}")
+    return {"success": True}
 
 
 @router.post("/rooms/leave-bulk")

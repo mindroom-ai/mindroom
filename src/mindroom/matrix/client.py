@@ -312,7 +312,7 @@ async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
     return None
 
 
-async def get_room_name(client: nio.AsyncClient, room_id: str) -> str | None:  # noqa: C901, PLR0912
+async def get_room_name(client: nio.AsyncClient, room_id: str) -> str:
     """Get the display name of a Matrix room.
 
     Args:
@@ -320,50 +320,38 @@ async def get_room_name(client: nio.AsyncClient, room_id: str) -> str | None:  #
         room_id: The room ID to get the name for
 
     Returns:
-        Room name if found, fallback name for DM/unnamed rooms, or None
+        Room name if found, fallback name for DM/unnamed rooms
 
     """
-    try:
-        response = await client.room_get_state_event(room_id, "m.room.name")
-        if isinstance(response, nio.RoomGetStateEventResponse):
-            name = response.content.get("name")
-            if name is not None:
-                return str(name)
-    except Exception:  # noqa: S110
-        pass
+    # Try to get the room name directly
+    response = await client.room_get_state_event(room_id, "m.room.name")
+    if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("name"):
+        return str(response.content["name"])
 
-    # Fallback: try to get from room state
-    try:
-        response = await client.room_get_state(room_id)
-        if isinstance(response, nio.RoomGetStateResponse):
-            # First check for room name
-            for event in response.events:
-                if event.get("type") == "m.room.name":
-                    name = event.get("content", {}).get("name")
-                    if name is not None:
-                        return str(name)
+    # Get room state for fallback naming
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        return "Unnamed Room"
 
-            # If no room name, check if it's a DM and get the other member's name
-            members = []
-            for event in response.events:
-                if event.get("type") == "m.room.member":
-                    content = event.get("content", {})
-                    state_key = event.get("state_key", "")
-                    if content.get("membership") == "join":
-                        displayname = content.get("displayname", state_key)
-                        if state_key != client.user_id:  # Don't include ourselves
-                            members.append(displayname)
+    # Check for room name in state events
+    for event in response.events:
+        if event.get("type") == "m.room.name" and event.get("content", {}).get("name"):
+            return str(event["content"]["name"])
 
-            # If it looks like a DM (2 members), use the other person's name
-            if len(members) == 1:
-                return f"DM with {members[0]}"
-            if len(members) > 1:
-                # Multiple members, create a comma-separated list
-                return f"Room with {', '.join(members[:3])}" + (" and others" if len(members) > 3 else "")
-    except Exception:  # noqa: S110
-        pass
+    # Build member list for DM/group room names
+    members = [
+        event.get("content", {}).get("displayname", event.get("state_key", ""))
+        for event in response.events
+        if event.get("type") == "m.room.member"
+        and event.get("content", {}).get("membership") == "join"
+        and event.get("state_key") != client.user_id
+    ]
 
-    # Final fallback: return a generic name
+    if len(members) == 1:
+        return f"DM with {members[0]}"
+    if members:
+        return f"Room with {', '.join(members[:3])}" + (" and others" if len(members) > 3 else "")
+
     return "Unnamed Room"
 
 

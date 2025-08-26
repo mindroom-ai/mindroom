@@ -41,7 +41,7 @@ export function UnconfiguredRooms() {
     setError(null);
     try {
       const response = await fetchAPI(API_ENDPOINTS.matrix.agentsRooms);
-      setAgentsRooms(response.agents || []);
+      setAgentsRooms(response.agents);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load agent rooms');
       console.error('Error loading agent rooms:', err);
@@ -117,7 +117,7 @@ export function UnconfiguredRooms() {
         await loadAgentRooms();
       } else {
         // Handle partial failures
-        const failed = response.results?.filter((r: any) => !r.success) || [];
+        const failed = response.results.filter((r: any) => !r.success);
         if (failed.length > 0) {
           setError(`Failed to leave ${failed.length} room(s). Please try again.`);
         }
