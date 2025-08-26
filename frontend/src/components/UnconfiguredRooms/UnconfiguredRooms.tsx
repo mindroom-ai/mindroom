@@ -34,8 +34,8 @@ export function UnconfiguredRooms() {
     setLoading(true);
     setError(null);
     try {
-      // Use mock endpoints for demonstration (switch to API_ENDPOINTS.matrix when Matrix server is configured)
-      const response = await fetchAPI(API_ENDPOINTS.matrixMock.agentsRooms);
+      // Use real Matrix endpoints (switch back to matrixMock if Matrix server unavailable)
+      const response = await fetchAPI(API_ENDPOINTS.matrix.agentsRooms);
       setAgentsRooms(response.agents || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load agent rooms');
@@ -98,8 +98,8 @@ export function UnconfiguredRooms() {
         return { agent_id, room_id };
       });
 
-      // Use mock endpoints for demonstration (switch to API_ENDPOINTS.matrix when Matrix server is configured)
-      const response = await fetchAPI(API_ENDPOINTS.matrixMock.leaveRoomsBulk, {
+      // Use real Matrix endpoints (switch back to matrixMock if Matrix server unavailable)
+      const response = await fetchAPI(API_ENDPOINTS.matrix.leaveRoomsBulk, {
         method: 'POST',
         body: JSON.stringify(requests),
       });
