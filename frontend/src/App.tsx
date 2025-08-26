@@ -12,6 +12,7 @@ import { ModelConfig } from '@/components/ModelConfig/ModelConfig';
 import { MemoryConfig } from '@/components/MemoryConfig/MemoryConfig';
 import { VoiceConfig } from '@/components/VoiceConfig/VoiceConfig';
 import { Integrations } from '@/components/Integrations/Integrations';
+import { UnconfiguredRooms } from '@/components/UnconfiguredRooms/UnconfiguredRooms';
 import { SyncStatus } from '@/components/SyncStatus/SyncStatus';
 import { Dashboard } from '@/components/Dashboard/Dashboard';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -111,6 +112,12 @@ function AppContent() {
                 🏠 Rooms
               </TabsTrigger>
               <TabsTrigger
+                value="unconfigured-rooms"
+                className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
+              >
+                🚪 Unconfigured
+              </TabsTrigger>
+              <TabsTrigger
                 value="models"
                 className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
               >
@@ -196,6 +203,12 @@ function AppContent() {
                 >
                   <RoomEditor />
                 </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="unconfigured-rooms" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+              <div className="h-full overflow-hidden">
+                <UnconfiguredRooms />
               </div>
             </TabsContent>
 
