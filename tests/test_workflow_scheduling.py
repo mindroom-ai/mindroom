@@ -386,7 +386,6 @@ class TestIntegrationWithScheduling:
                 client=client,
                 room_id="!room:server",
                 thread_id="$thread123",
-                agent_user_id="@bot:server",
                 scheduled_by="@user:server",
                 full_text="Daily at 9am, research AI news",
                 config=config,

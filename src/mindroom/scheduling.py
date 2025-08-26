@@ -155,7 +155,6 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str | None,
-    agent_user_id: str,  # noqa: ARG001
     scheduled_by: str,
     full_text: str,
     config: Config,
