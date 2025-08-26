@@ -149,7 +149,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "ping me in 5 minutes to check the deployment",
             config=mock_config,
-            available_agents=[],  # No agents needed for simple reminder
+            available_agents=["general"],  # At least one agent required
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -198,7 +198,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "Schedule something",
             config=mock_config,
-            available_agents=[],  # No agents available
+            available_agents=["general"],  # At least one agent required
         )
 
         assert isinstance(result, WorkflowParseError)

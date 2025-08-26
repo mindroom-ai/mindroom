@@ -287,7 +287,7 @@ class TestEventDrivenScheduling:
         await parse_workflow_schedule(
             "Test request",
             mock_config,
-            available_agents=[],  # Empty list for testing
+            available_agents=["test_agent"],  # Need at least one agent
         )
 
         # Verify the prompt contains event-driven guidance

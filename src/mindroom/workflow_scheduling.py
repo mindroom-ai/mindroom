@@ -109,7 +109,8 @@ async def parse_workflow_schedule(
         current_time = datetime.now(UTC)
 
     # Get available agents for the prompt - only use agents actually in the room
-    agent_list = ", ".join(f"@{name}" for name in available_agents) if available_agents else "No agents available"
+    assert available_agents, "No agents available for scheduling"
+    agent_list = ", ".join(f"@{name}" for name in available_agents)
 
     prompt = f"""Parse this scheduling request into a structured workflow.
 
