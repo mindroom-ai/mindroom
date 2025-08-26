@@ -156,7 +156,7 @@ export function UnconfiguredRooms() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Unconfigured Rooms</h2>
+          <h2 className="text-2xl font-semibold tracking-tight">External Rooms</h2>
           <p className="text-sm text-muted-foreground mt-1">
             Manage rooms that agents have joined but are not in the configuration
           </p>
@@ -183,7 +183,7 @@ export function UnconfiguredRooms() {
               <div>
                 <CardTitle className="text-base">Summary</CardTitle>
                 <CardDescription>
-                  {totalUnconfiguredRooms} unconfigured room
+                  {totalUnconfiguredRooms} external room
                   {totalUnconfiguredRooms !== 1 ? 's' : ''} found across{' '}
                   {agentsRooms.filter(a => a.unconfigured_rooms.length > 0).length} agent
                   {agentsRooms.filter(a => a.unconfigured_rooms.length > 0).length !== 1 ? 's' : ''}
@@ -228,7 +228,7 @@ export function UnconfiguredRooms() {
                     <div>
                       <CardTitle className="text-lg">{agent.display_name}</CardTitle>
                       <CardDescription>
-                        {agent.unconfigured_rooms.length} unconfigured room
+                        {agent.unconfigured_rooms.length} external room
                         {agent.unconfigured_rooms.length !== 1 ? 's' : ''}
                       </CardDescription>
                     </div>

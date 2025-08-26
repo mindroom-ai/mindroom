@@ -115,7 +115,7 @@ function AppContent() {
                 value="unconfigured-rooms"
                 className="rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap"
               >
-                🚪 Unconfigured
+                🚪 External
               </TabsTrigger>
               <TabsTrigger
                 value="models"
