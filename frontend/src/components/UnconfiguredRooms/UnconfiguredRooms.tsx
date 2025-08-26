@@ -93,7 +93,10 @@ export function UnconfiguredRooms() {
 
     try {
       const requests: RoomLeaveRequest[] = Array.from(selectedRooms).map(key => {
-        const [agent_id, room_id] = key.split(':');
+        // Split only on the first colon to preserve the room ID format (!room:server)
+        const colonIndex = key.indexOf(':');
+        const agent_id = key.substring(0, colonIndex);
+        const room_id = key.substring(colonIndex + 1);
         return { agent_id, room_id };
       });
 
