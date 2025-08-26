@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Trash2, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react';
 import { API_ENDPOINTS, fetchAPI } from '../../lib/api';
 import { Button } from '../ui/button';
@@ -7,7 +7,6 @@ import { Badge } from '../ui/badge';
 import { Checkbox } from '../ui/checkbox';
 import { Alert, AlertDescription } from '../ui/alert';
 import { ScrollArea } from '../ui/scroll-area';
-import { Skeleton } from '../ui/skeleton';
 import { cn } from '../../lib/utils';
 
 interface AgentRoomsInfo {
@@ -138,9 +137,9 @@ export function UnconfiguredRooms() {
   if (loading) {
     return (
       <div className="space-y-4">
-        <Skeleton className="h-20 w-full" />
-        <Skeleton className="h-40 w-full" />
-        <Skeleton className="h-40 w-full" />
+        <div className="h-20 w-full animate-pulse rounded-md bg-muted" />
+        <div className="h-40 w-full animate-pulse rounded-md bg-muted" />
+        <div className="h-40 w-full animate-pulse rounded-md bg-muted" />
       </div>
     );
   }
@@ -155,13 +154,8 @@ export function UnconfiguredRooms() {
             Manage rooms that agents have joined but are not in the configuration
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={loadAgentRooms}
-          disabled={loading}
-        >
-          <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
+        <Button variant="outline" size="sm" onClick={loadAgentRooms} disabled={loading}>
+          <RefreshCw className={cn('h-4 w-4 mr-2', loading && 'animate-spin')} />
           Refresh
         </Button>
       </div>
@@ -182,7 +176,10 @@ export function UnconfiguredRooms() {
               <div>
                 <CardTitle className="text-base">Summary</CardTitle>
                 <CardDescription>
-                  {totalUnconfiguredRooms} unconfigured room{totalUnconfiguredRooms !== 1 ? 's' : ''} found across {agentsRooms.filter(a => a.unconfigured_rooms.length > 0).length} agent{agentsRooms.filter(a => a.unconfigured_rooms.length > 0).length !== 1 ? 's' : ''}
+                  {totalUnconfiguredRooms} unconfigured room
+                  {totalUnconfiguredRooms !== 1 ? 's' : ''} found across{' '}
+                  {agentsRooms.filter(a => a.unconfigured_rooms.length > 0).length} agent
+                  {agentsRooms.filter(a => a.unconfigured_rooms.length > 0).length !== 1 ? 's' : ''}
                 </CardDescription>
               </div>
               {selectedRooms.size > 0 && (
@@ -224,7 +221,8 @@ export function UnconfiguredRooms() {
                     <div>
                       <CardTitle className="text-lg">{agent.display_name}</CardTitle>
                       <CardDescription>
-                        {agent.unconfigured_rooms.length} unconfigured room{agent.unconfigured_rooms.length !== 1 ? 's' : ''}
+                        {agent.unconfigured_rooms.length} unconfigured room
+                        {agent.unconfigured_rooms.length !== 1 ? 's' : ''}
                       </CardDescription>
                     </div>
                     <div className="flex gap-2">
@@ -234,7 +232,9 @@ export function UnconfiguredRooms() {
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => deselectAllForAgent(agent.agent_id, agent.unconfigured_rooms)}
+                              onClick={() =>
+                                deselectAllForAgent(agent.agent_id, agent.unconfigured_rooms)
+                              }
                             >
                               Deselect All
                             </Button>
@@ -242,7 +242,9 @@ export function UnconfiguredRooms() {
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => selectAllForAgent(agent.agent_id, agent.unconfigured_rooms)}
+                              onClick={() =>
+                                selectAllForAgent(agent.agent_id, agent.unconfigured_rooms)
+                              }
                             >
                               Select All
                             </Button>
@@ -257,13 +259,13 @@ export function UnconfiguredRooms() {
                     {agent.unconfigured_rooms.map(roomId => {
                       const key = `${agent.agent_id}:${roomId}`;
                       const isSelected = selectedRooms.has(key);
-                      
+
                       return (
                         <div
                           key={roomId}
                           className={cn(
-                            "flex items-center space-x-3 p-3 rounded-lg border transition-colors",
-                            isSelected ? "bg-muted/50 border-primary/20" : "hover:bg-muted/30"
+                            'flex items-center space-x-3 p-3 rounded-lg border transition-colors',
+                            isSelected ? 'bg-muted/50 border-primary/20' : 'hover:bg-muted/30'
                           )}
                         >
                           <Checkbox

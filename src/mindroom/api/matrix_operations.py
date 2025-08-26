@@ -3,13 +3,12 @@
 import asyncio
 from typing import Any
 
-import nio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix import MATRIX_HOMESERVER
-from mindroom.matrix.client import get_joined_rooms, leave_room, matrix_client
+from mindroom.matrix.client import get_joined_rooms, leave_room
 from mindroom.matrix.users import create_agent_user, login_agent_user
 
 logger = get_logger(__name__)
@@ -49,6 +48,7 @@ async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> A
 
     Returns:
         AgentRoomsResponse with room information or None if failed
+
     """
     try:
         # Create or get the agent user
@@ -57,13 +57,13 @@ async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> A
             agent_id,
             agent_data.get("display_name", agent_id),
         )
-        
+
         # Login and get the client
         client = await login_agent_user(MATRIX_HOMESERVER, agent_user)
-        
+
         # Get all joined rooms from Matrix
         joined_rooms = await get_joined_rooms(client)
-        
+
         # Close the client connection
         await client.close()
 
@@ -98,7 +98,7 @@ async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
     and unconfigured rooms (joined but not in config) for each agent.
     """
     from .main import config, config_lock
-    
+
     agents_rooms = []
 
     with config_lock:
@@ -129,9 +129,10 @@ async def get_agent_rooms(agent_id: str) -> AgentRoomsResponse:
 
     Raises:
         HTTPException: If agent not found or error occurs
+
     """
     from .main import config, config_lock
-    
+
     with config_lock:
         agents = config.get("agents", {})
         if agent_id not in agents:
@@ -157,9 +158,10 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
 
     Raises:
         HTTPException: If agent not found or leave operation fails
+
     """
     from .main import config, config_lock
-    
+
     with config_lock:
         agents = config.get("agents", {})
         if request.agent_id not in agents:
@@ -168,20 +170,20 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
     try:
         # Get agent configuration
         agent_data = agents.get(request.agent_id, {})
-        
+
         # Create or get the agent user
         agent_user = await create_agent_user(
             MATRIX_HOMESERVER,
             request.agent_id,
             agent_data.get("display_name", request.agent_id),
         )
-        
+
         # Login and get the client
         client = await login_agent_user(MATRIX_HOMESERVER, agent_user)
-        
+
         # Leave the room
         success = await leave_room(client, request.room_id)
-        
+
         # Close the client connection
         await client.close()
 
@@ -206,6 +208,7 @@ async def leave_rooms_bulk(requests: list[RoomLeaveRequest]) -> dict[str, Any]:
 
     Returns:
         Results for each request
+
     """
     results = []
     for request in requests:
@@ -213,11 +216,13 @@ async def leave_rooms_bulk(requests: list[RoomLeaveRequest]) -> dict[str, Any]:
             result = await leave_room_endpoint(request)
             results.append({"agent_id": request.agent_id, "room_id": request.room_id, "success": True})
         except HTTPException as e:
-            results.append({
-                "agent_id": request.agent_id,
-                "room_id": request.room_id,
-                "success": False,
-                "error": e.detail,
-            })
+            results.append(
+                {
+                    "agent_id": request.agent_id,
+                    "room_id": request.room_id,
+                    "success": False,
+                    "error": e.detail,
+                },
+            )
 
     return {"results": results, "success": all(r["success"] for r in results)}

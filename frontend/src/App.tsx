@@ -206,7 +206,10 @@ function AppContent() {
               </div>
             </TabsContent>
 
-            <TabsContent value="unconfigured-rooms" className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0">
+            <TabsContent
+              value="unconfigured-rooms"
+              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
+            >
               <div className="h-full overflow-hidden">
                 <UnconfiguredRooms />
               </div>

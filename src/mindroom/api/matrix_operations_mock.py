@@ -55,15 +55,15 @@ async def get_agent_matrix_rooms_mock(agent_id: str, agent_data: dict[str, Any])
     """
     # Get configured rooms from the agent data
     configured_rooms = agent_data.get("rooms", [])
-    
+
     # Simulate additional rooms the agent has joined
     # For demo purposes, add 0-3 unconfigured rooms per agent
     num_extra_rooms = random.randint(0, 3)
     unconfigured_rooms = generate_mock_room_ids(num_extra_rooms)
-    
+
     # The joined rooms are both configured and unconfigured
     joined_rooms = configured_rooms + unconfigured_rooms
-    
+
     return AgentRoomsResponse(
         agent_id=agent_id,
         display_name=agent_data.get("display_name", agent_id),
@@ -81,7 +81,7 @@ async def get_all_agents_rooms_mock() -> AllAgentsRoomsResponse:
     and unconfigured rooms for demonstration purposes.
     """
     from .main import config, config_lock
-    
+
     agents_rooms = []
 
     with config_lock:
@@ -99,7 +99,7 @@ async def get_all_agents_rooms_mock() -> AllAgentsRoomsResponse:
 async def get_agent_rooms_mock(agent_id: str) -> AgentRoomsResponse:
     """Get mock room information for a specific agent."""
     from .main import config, config_lock
-    
+
     with config_lock:
         agents = config.get("agents", {})
         if agent_id not in agents:
@@ -113,7 +113,7 @@ async def get_agent_rooms_mock(agent_id: str) -> AgentRoomsResponse:
 async def leave_room_mock(request: RoomLeaveRequest) -> dict[str, bool]:
     """Mock endpoint to simulate leaving a room."""
     from .main import config, config_lock
-    
+
     with config_lock:
         agents = config.get("agents", {})
         if request.agent_id not in agents:
@@ -121,7 +121,7 @@ async def leave_room_mock(request: RoomLeaveRequest) -> dict[str, bool]:
 
     # Simulate a small delay for the operation
     await asyncio.sleep(0.1)
-    
+
     logger.info(f"Mock: Agent {request.agent_id} left room {request.room_id}")
     return {"success": True}
 
@@ -133,17 +133,21 @@ async def leave_rooms_bulk_mock(requests: list[RoomLeaveRequest]) -> dict[str, A
     for request in requests:
         try:
             result = await leave_room_mock(request)
-            results.append({
-                "agent_id": request.agent_id,
-                "room_id": request.room_id,
-                "success": True
-            })
+            results.append(
+                {
+                    "agent_id": request.agent_id,
+                    "room_id": request.room_id,
+                    "success": True,
+                },
+            )
         except HTTPException as e:
-            results.append({
-                "agent_id": request.agent_id,
-                "room_id": request.room_id,
-                "success": False,
-                "error": e.detail,
-            })
+            results.append(
+                {
+                    "agent_id": request.agent_id,
+                    "room_id": request.room_id,
+                    "success": False,
+                    "error": e.detail,
+                },
+            )
 
     return {"results": results, "success": all(r["success"] for r in results)}
