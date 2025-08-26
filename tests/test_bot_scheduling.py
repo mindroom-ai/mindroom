@@ -83,10 +83,11 @@ class TestBotScheduleCommands:
                 client=mock_agent_bot.client,
                 room_id="!test:server",
                 thread_id="$thread123",
-                agent_user_id="@mindroom_general:localhost",
                 scheduled_by="@user:server",
                 full_text="in 5 minutes Check deployment",
                 config=mock_agent_bot.config,
+                room=room,
+                mentioned_agents=[],  # No agents mentioned in this command
             )
 
             # Verify response was sent

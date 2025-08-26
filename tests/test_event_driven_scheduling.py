@@ -69,6 +69,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "If I get an email about 'urgent', call me",
             mock_config,
+            available_agents=["email_assistant", "phone_agent"],
         )
 
         # Verify the result is a workflow (not an error)
@@ -110,6 +111,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "When Bitcoin drops below $40k, notify me",
             mock_config,
+            available_agents=["crypto_agent", "notification_agent"],  # Agents for this workflow
         )
 
         # Verify
@@ -144,6 +146,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "If server CPU goes above 80%, scale up",
             mock_config,
+            available_agents=["monitoring_agent", "ops_agent"],
         )
 
         # Verify
@@ -178,6 +181,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "When the build fails, create a ticket",
             mock_config,
+            available_agents=["ci_agent", "ticket_agent"],
         )
 
         # Verify
@@ -212,6 +216,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "When someone mentions our product on Reddit, analyze it",
             mock_config,
+            available_agents=["reddit_agent", "analyst"],
         )
 
         # Verify
@@ -246,6 +251,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "Whenever I get an email from my boss, notify me immediately",
             mock_config,
+            available_agents=["email_assistant", "notification_agent"],
         )
 
         # Verify
@@ -281,6 +287,7 @@ class TestEventDrivenScheduling:
         await parse_workflow_schedule(
             "Test request",
             mock_config,
+            available_agents=["test_agent"],  # Need at least one agent
         )
 
         # Verify the prompt contains event-driven guidance
