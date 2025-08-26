@@ -73,7 +73,7 @@ async def get_agent_matrix_rooms_mock(agent_id: str, agent_data: dict[str, Any])
     )
 
 
-@router.get("/agents/rooms", response_model=AllAgentsRoomsResponse)
+@router.get("/agents/rooms")
 async def get_all_agents_rooms_mock() -> AllAgentsRoomsResponse:
     """Get mock room information for all agents.
 
@@ -95,7 +95,7 @@ async def get_all_agents_rooms_mock() -> AllAgentsRoomsResponse:
     return AllAgentsRoomsResponse(agents=agents_rooms)
 
 
-@router.get("/agents/{agent_id}/rooms", response_model=AgentRoomsResponse)
+@router.get("/agents/{agent_id}/rooms")
 async def get_agent_rooms_mock(agent_id: str) -> AgentRoomsResponse:
     """Get mock room information for a specific agent."""
     from .main import config, config_lock
@@ -132,7 +132,7 @@ async def leave_rooms_bulk_mock(requests: list[RoomLeaveRequest]) -> dict[str, A
     results = []
     for request in requests:
         try:
-            result = await leave_room_mock(request)
+            await leave_room_mock(request)
             results.append(
                 {
                     "agent_id": request.agent_id,

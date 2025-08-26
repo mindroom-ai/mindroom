@@ -86,11 +86,11 @@ async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> A
         )
 
     except Exception as e:
-        logger.error(f"Error getting rooms for agent {agent_id}: {e}")
+        logger.exception(f"Error getting rooms for agent {agent_id}: {e}")
         return None
 
 
-@router.get("/agents/rooms", response_model=AllAgentsRoomsResponse)
+@router.get("/agents/rooms")
 async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
     """Get room information for all agents.
 
@@ -117,7 +117,7 @@ async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
     return AllAgentsRoomsResponse(agents=agents_rooms)
 
 
-@router.get("/agents/{agent_id}/rooms", response_model=AgentRoomsResponse)
+@router.get("/agents/{agent_id}/rooms")
 async def get_agent_rooms(agent_id: str) -> AgentRoomsResponse:
     """Get room information for a specific agent.
 
@@ -189,13 +189,12 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
 
         if not success:
             raise HTTPException(status_code=500, detail=f"Failed to leave room {request.room_id}")
-
         return {"success": True}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error leaving room {request.room_id} for agent {request.agent_id}: {e}")
+        logger.exception(f"Error leaving room {request.room_id} for agent {request.agent_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error leaving room: {e!s}") from e
 
 
@@ -213,7 +212,7 @@ async def leave_rooms_bulk(requests: list[RoomLeaveRequest]) -> dict[str, Any]:
     results = []
     for request in requests:
         try:
-            result = await leave_room_endpoint(request)
+            await leave_room_endpoint(request)
             results.append({"agent_id": request.agent_id, "room_id": request.room_id, "success": True})
         except HTTPException as e:
             results.append(
