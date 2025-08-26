@@ -181,6 +181,10 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
             if agent_name not in available_agents:
                 available_agents.append(agent_name)
 
+    # If no agents found in thread or mentions, fall back to agents in the room
+    if not available_agents:
+        available_agents = get_available_agents_in_room(room, config)
+
     # Parse the workflow request with available agents
     workflow_result = await parse_workflow_schedule(full_text, config, available_agents)
 
