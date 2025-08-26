@@ -9,12 +9,18 @@ import { Alert, AlertDescription } from '../ui/alert';
 import { ScrollArea } from '../ui/scroll-area';
 import { cn } from '../../lib/utils';
 
+interface RoomInfo {
+  room_id: string;
+  name?: string;
+}
+
 interface AgentRoomsInfo {
   agent_id: string;
   display_name: string;
   configured_rooms: string[];
   joined_rooms: string[];
   unconfigured_rooms: string[];
+  unconfigured_room_details?: RoomInfo[];
 }
 
 interface RoomLeaveRequest {
@@ -257,9 +263,10 @@ export function UnconfiguredRooms() {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-2">
-                    {agent.unconfigured_rooms.map(roomId => {
+                    {agent.unconfigured_rooms.map((roomId, index) => {
                       const key = `${agent.agent_id}:${roomId}`;
                       const isSelected = selectedRooms.has(key);
+                      const roomDetails = agent.unconfigured_room_details?.[index];
 
                       return (
                         <div
@@ -275,8 +282,14 @@ export function UnconfiguredRooms() {
                             disabled={leavingRooms}
                           />
                           <div className="flex-1 min-w-0">
+                            {/* Show room name if available */}
+                            {roomDetails?.name && (
+                              <div className="font-medium text-sm mb-1">{roomDetails.name}</div>
+                            )}
                             <div className="flex items-center gap-2">
-                              <code className="text-sm font-mono truncate">{roomId}</code>
+                              <code className="text-xs font-mono truncate text-muted-foreground">
+                                {roomId}
+                              </code>
                               {roomId.startsWith('!') && roomId.includes(':') && (
                                 <Badge variant="outline" className="text-xs">
                                   {roomId.split(':')[1]}

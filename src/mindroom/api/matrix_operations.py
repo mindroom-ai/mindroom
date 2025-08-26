@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix import MATRIX_HOMESERVER
-from mindroom.matrix.client import get_joined_rooms, leave_room
+from mindroom.matrix.client import get_joined_rooms, get_room_name, leave_room
 from mindroom.matrix.rooms import resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user
 
@@ -24,6 +24,13 @@ class RoomLeaveRequest(BaseModel):
     room_id: str
 
 
+class RoomInfo(BaseModel):
+    """Information about a room."""
+
+    room_id: str
+    name: str | None = None
+
+
 class AgentRoomsResponse(BaseModel):
     """Response containing agent rooms information."""
 
@@ -32,6 +39,7 @@ class AgentRoomsResponse(BaseModel):
     configured_rooms: list[str]
     joined_rooms: list[str]
     unconfigured_rooms: list[str]
+    unconfigured_room_details: list[RoomInfo] = []
 
 
 class AllAgentsRoomsResponse(BaseModel):
@@ -65,10 +73,8 @@ async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> A
         # Get all joined rooms from Matrix
         joined_rooms = await get_joined_rooms(client)
 
-        # Close the client connection
-        await client.close()
-
         if joined_rooms is None:
+            await client.close()
             logger.error(f"Failed to get joined rooms for agent {agent_id}")
             return None
 
@@ -81,12 +87,22 @@ async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> A
         # Calculate unconfigured rooms (joined but not in config)
         unconfigured_rooms = [room for room in joined_rooms if room not in configured_room_ids]
 
+        # Get room names for unconfigured rooms
+        unconfigured_room_details = []
+        for room_id in unconfigured_rooms:
+            room_name = await get_room_name(client, room_id)
+            unconfigured_room_details.append(RoomInfo(room_id=room_id, name=room_name))
+
+        # Close the client connection
+        await client.close()
+
         return AgentRoomsResponse(
             agent_id=agent_id,
             display_name=agent_data.get("display_name", agent_id),
             configured_rooms=configured_room_ids,  # Return the resolved IDs, not aliases
             joined_rooms=joined_rooms,
             unconfigured_rooms=unconfigured_rooms,
+            unconfigured_room_details=unconfigured_room_details,
         )
 
     except Exception:

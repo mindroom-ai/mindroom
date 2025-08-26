@@ -312,6 +312,39 @@ async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
     return None
 
 
+async def get_room_name(client: nio.AsyncClient, room_id: str) -> str | None:
+    """Get the display name of a Matrix room.
+
+    Args:
+        client: Authenticated Matrix client
+        room_id: The room ID to get the name for
+
+    Returns:
+        Room name if found, None otherwise
+
+    """
+    try:
+        response = await client.room_get_state_event(room_id, "m.room.name")
+        if isinstance(response, nio.RoomGetStateEventResponse):
+            name = response.content.get("name")
+            return str(name) if name is not None else None
+    except Exception:
+        pass
+
+    # Fallback: try to get from room state
+    try:
+        response = await client.room_get_state(room_id)
+        if isinstance(response, nio.RoomGetStateResponse):
+            for event in response.events:
+                if event.get("type") == "m.room.name":
+                    name = event.get("content", {}).get("name")
+                    return str(name) if name is not None else None
+    except Exception:
+        pass
+
+    return None
+
+
 async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
     """Leave a Matrix room.
 
