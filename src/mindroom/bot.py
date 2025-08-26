@@ -1251,6 +1251,7 @@ class MultiAgentOrchestrator:
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
     _created_room_ids: dict[str, str] = field(default_factory=dict, init=False)
+    _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
 
     async def _ensure_user_account(self) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -1335,10 +1336,12 @@ class MultiAgentOrchestrator:
 
         # Create sync tasks for each bot with automatic restart on failure
         sync_tasks = []
-        for bot in self.agent_bots.values():
+        for entity_name, bot in self.agent_bots.items():
             # Create a task for each bot's sync loop with restart wrapper
             sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
             sync_tasks.append(sync_task)
+            # Store the task reference for later cancellation
+            self._sync_tasks[entity_name] = sync_task
 
         # Run all sync tasks
         await asyncio.gather(*sync_tasks)
@@ -1372,7 +1375,7 @@ class MultiAgentOrchestrator:
 
         # Stop entities that need restarting
         if entities_to_restart:
-            await _stop_entities(entities_to_restart, self.agent_bots)
+            await _stop_entities(entities_to_restart, self.agent_bots, self._sync_tasks)
 
         # Update config
         self.config = new_config
@@ -1394,7 +1397,8 @@ class MultiAgentOrchestrator:
                     # Agent handles its own setup (but doesn't join rooms yet)
                     await bot.start()
                     # Start sync loop with automatic restart
-                    asyncio.create_task(_sync_forever_with_restart(bot))  # noqa: RUF006
+                    sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+                    self._sync_tasks[entity_name] = sync_task
             # Entity was removed from config
             elif entity_name in self.agent_bots:
                 del self.agent_bots[entity_name]
@@ -1407,11 +1411,20 @@ class MultiAgentOrchestrator:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot
                 await bot.start()
-                asyncio.create_task(_sync_forever_with_restart(bot))  # noqa: RUF006
+                sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+                self._sync_tasks[entity_name] = sync_task
 
         # Handle removed entities (cleanup)
         removed_entities = existing_entities - all_new_entities
         for entity_name in removed_entities:
+            # Cancel sync task first
+            if entity_name in self._sync_tasks:
+                task = self._sync_tasks[entity_name]
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                del self._sync_tasks[entity_name]
+
             if entity_name in self.agent_bots:
                 bot = self.agent_bots[entity_name]
                 await bot.cleanup()  # Agent handles its own cleanup
@@ -1433,6 +1446,13 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+
+        # First cancel all sync tasks
+        for entity_name, task in list(self._sync_tasks.items()):
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            del self._sync_tasks[entity_name]
 
         # Signal all bots to stop their sync loops
         for bot in self.agent_bots.values():
@@ -1644,7 +1664,23 @@ def _create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
     )
 
 
-async def _stop_entities(entities_to_restart: set[str], agent_bots: dict[str, Any]) -> None:
+async def _stop_entities(
+    entities_to_restart: set[str],
+    agent_bots: dict[str, Any],
+    sync_tasks: dict[str, asyncio.Task] | None = None,
+) -> None:
+    # First cancel sync tasks to prevent duplicates
+    if sync_tasks:
+        for entity_name in entities_to_restart:
+            if entity_name in sync_tasks:
+                task = sync_tasks[entity_name]
+                task.cancel()
+                # Wait for task to be cancelled
+                with suppress(asyncio.CancelledError):
+                    await task
+                # Remove from sync_tasks dict
+                del sync_tasks[entity_name]
+
     stop_tasks = []
     for entity_name in entities_to_restart:
         if entity_name in agent_bots:
