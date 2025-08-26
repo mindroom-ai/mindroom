@@ -312,7 +312,7 @@ async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
     return None
 
 
-async def get_room_name(client: nio.AsyncClient, room_id: str) -> str | None:
+async def get_room_name(client: nio.AsyncClient, room_id: str) -> str | None:  # noqa: C901, PLR0912
     """Get the display name of a Matrix room.
 
     Args:
@@ -320,29 +320,51 @@ async def get_room_name(client: nio.AsyncClient, room_id: str) -> str | None:
         room_id: The room ID to get the name for
 
     Returns:
-        Room name if found, None otherwise
+        Room name if found, fallback name for DM/unnamed rooms, or None
 
     """
     try:
         response = await client.room_get_state_event(room_id, "m.room.name")
         if isinstance(response, nio.RoomGetStateEventResponse):
             name = response.content.get("name")
-            return str(name) if name is not None else None
-    except Exception:
+            if name is not None:
+                return str(name)
+    except Exception:  # noqa: S110
         pass
 
     # Fallback: try to get from room state
     try:
         response = await client.room_get_state(room_id)
         if isinstance(response, nio.RoomGetStateResponse):
+            # First check for room name
             for event in response.events:
                 if event.get("type") == "m.room.name":
                     name = event.get("content", {}).get("name")
-                    return str(name) if name is not None else None
-    except Exception:
+                    if name is not None:
+                        return str(name)
+
+            # If no room name, check if it's a DM and get the other member's name
+            members = []
+            for event in response.events:
+                if event.get("type") == "m.room.member":
+                    content = event.get("content", {})
+                    state_key = event.get("state_key", "")
+                    if content.get("membership") == "join":
+                        displayname = content.get("displayname", state_key)
+                        if state_key != client.user_id:  # Don't include ourselves
+                            members.append(displayname)
+
+            # If it looks like a DM (2 members), use the other person's name
+            if len(members) == 1:
+                return f"DM with {members[0]}"
+            if len(members) > 1:
+                # Multiple members, create a comma-separated list
+                return f"Room with {', '.join(members[:3])}" + (" and others" if len(members) > 3 else "")
+    except Exception:  # noqa: S110
         pass
 
-    return None
+    # Final fallback: return a generic name
+    return "Unnamed Room"
 
 
 async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:

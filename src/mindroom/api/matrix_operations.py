@@ -117,7 +117,7 @@ async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
     Returns information about configured rooms, joined rooms,
     and unconfigured rooms (joined but not in config) for each agent.
     """
-    from .main import config, config_lock
+    from .main import config, config_lock  # noqa: PLC0415
 
     agents_rooms = []
 
@@ -151,7 +151,7 @@ async def get_agent_rooms(agent_id: str) -> AgentRoomsResponse:
         HTTPException: If agent not found or error occurs
 
     """
-    from .main import config, config_lock
+    from .main import config, config_lock  # noqa: PLC0415
 
     with config_lock:
         agents = config.get("agents", {})
@@ -180,7 +180,7 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
         HTTPException: If agent not found or leave operation fails
 
     """
-    from .main import config, config_lock
+    from .main import config, config_lock  # noqa: PLC0415
 
     with config_lock:
         agents = config.get("agents", {})
@@ -208,8 +208,8 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
         await client.close()
 
         if not success:
-            raise HTTPException(status_code=500, detail=f"Failed to leave room {request.room_id}")
-        return {"success": True}
+            raise HTTPException(status_code=500, detail=f"Failed to leave room {request.room_id}")  # noqa: TRY301
+        return {"success": True}  # noqa: TRY300
 
     except Exception as e:
         logger.exception(f"Error leaving room {request.room_id} for agent {request.agent_id}")

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def mock_matrix_client():
+def mock_matrix_client() -> AsyncMock:
     """Create a mock Matrix client."""
     client = AsyncMock()
     client.close = AsyncMock()
@@ -16,14 +16,14 @@ def mock_matrix_client():
 
 
 @pytest.fixture
-def mock_agent_user():
+def mock_agent_user() -> MagicMock:
     """Create a mock agent user."""
     user = MagicMock()
     user.agent_name = "test_agent"
     user.user_id = "@mindroom_test_agent:localhost"
     user.display_name = "Test Agent"
-    user.password = "test_password"
-    user.access_token = "test_token"
+    user.password = "test_password"  # noqa: S105
+    user.access_token = "test_token"  # noqa: S105
     return user
 
 
@@ -34,8 +34,8 @@ class TestMatrixOperations:
     async def test_get_all_agents_rooms(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,
-        mock_matrix_client: Any,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test getting room information for all agents."""
         with (
@@ -65,8 +65,8 @@ class TestMatrixOperations:
     async def test_get_specific_agent_rooms(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,
-        mock_matrix_client: Any,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test getting room information for a specific agent."""
         with (
@@ -98,8 +98,8 @@ class TestMatrixOperations:
     async def test_leave_room(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,
-        mock_matrix_client: Any,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test leaving a room."""
         with (
@@ -119,8 +119,8 @@ class TestMatrixOperations:
     async def test_leave_room_failure(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,
-        mock_matrix_client: Any,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test failing to leave a room."""
         with (
@@ -151,8 +151,8 @@ class TestMatrixOperations:
     async def test_leave_rooms_bulk(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,
-        mock_matrix_client: Any,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test bulk leaving rooms."""
         with (
@@ -177,8 +177,8 @@ class TestMatrixOperations:
     async def test_leave_rooms_bulk_partial_failure(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,
-        mock_matrix_client: Any,
+        mock_agent_user: Any,  # noqa: ANN401
+        mock_matrix_client: Any,  # noqa: ANN401
     ) -> None:
         """Test bulk leaving rooms with partial failure."""
         # Mock different behaviors for different calls
@@ -226,7 +226,7 @@ class TestMatrixOperationsIntegration:
     async def test_matrix_login_error_handling(
         self,
         test_client: TestClient,
-        mock_agent_user: Any,
+        mock_agent_user: Any,  # noqa: ANN401
     ) -> None:
         """Test error handling when Matrix login fails."""
         with (
