@@ -352,15 +352,48 @@ class TestIntegrationWithScheduling:
             description="Daily AI research",
         )
 
-        with patch("mindroom.scheduling.run_cron_task", new=AsyncMock()):
+        # Create a proper config with the research agent configured for the room
+        import nio  # noqa: PLC0415
+
+        from mindroom.config import AgentConfig, Config, RouterConfig  # noqa: PLC0415
+
+        config = Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Research agent",
+                    rooms=["!room:server"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        # Create a mock room with research agent
+        room = nio.MatrixRoom("!room:server", "@bot:server")
+        room.users["@mindroom_research:server"] = nio.RoomMember(
+            user_id="@mindroom_research:server",
+            display_name="Research",
+            avatar_url=None,
+        )
+
+        with (
+            patch("mindroom.scheduling.run_cron_task", new=AsyncMock()),
+            patch(
+                "mindroom.scheduling.ThreadInviteManager",
+            ) as mock_invite_manager,
+        ):
+            # Mock that research is invited to the thread
+            mock_manager = mock_invite_manager.return_value
+            mock_manager.get_thread_agents = AsyncMock(return_value=["research"])
+
             task_id, message = await schedule_task(
                 client=client,
                 room_id="!room:server",
                 thread_id="$thread123",
-                agent_user_id="@bot:server",
                 scheduled_by="@user:server",
                 full_text="Daily at 9am, research AI news",
-                config=MagicMock(),
+                config=config,
+                room=room,
             )
 
             assert task_id is not None
