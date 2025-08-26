@@ -14,7 +14,7 @@ allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git branch:*)
 
 ## Important: Speech-to-Text Usage
 **The user often dictates using speech-to-text**, so expect:
-- Typos and incorrect words (e.g., "conda" instead of "uv")
+- Typos and incorrect words
 - Imperfect sentence structure
 - Homophone substitutions (e.g., "to/too/two", "there/their")
 - Missing punctuation or capitalization
