@@ -47,14 +47,6 @@ export const API_ENDPOINTS = {
     leaveRoomsBulk: `${API_BASE_URL}/api/matrix/rooms/leave-bulk`,
   },
 
-  // Matrix mock operations (for demonstration when Matrix server is not available)
-  matrixMock: {
-    agentsRooms: `${API_BASE_URL}/api/matrix-mock/agents/rooms`,
-    agentRooms: (agentId: string) => `${API_BASE_URL}/api/matrix-mock/agents/${agentId}/rooms`,
-    leaveRoom: `${API_BASE_URL}/api/matrix-mock/rooms/leave`,
-    leaveRoomsBulk: `${API_BASE_URL}/api/matrix-mock/rooms/leave-bulk`,
-  },
-
   // Other endpoints
   tools: `${API_BASE_URL}/api/tools`,
   rooms: `${API_BASE_URL}/api/rooms`,

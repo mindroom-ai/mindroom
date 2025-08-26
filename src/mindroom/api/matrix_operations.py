@@ -85,8 +85,8 @@ async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> A
             unconfigured_rooms=unconfigured_rooms,
         )
 
-    except Exception as e:
-        logger.exception(f"Error getting rooms for agent {agent_id}: {e}")
+    except Exception:
+        logger.exception(f"Error getting rooms for agent {agent_id}")
         return None
 
 
@@ -191,10 +191,8 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
             raise HTTPException(status_code=500, detail=f"Failed to leave room {request.room_id}")
         return {"success": True}
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.exception(f"Error leaving room {request.room_id} for agent {request.agent_id}: {e}")
+        logger.exception(f"Error leaving room {request.room_id} for agent {request.agent_id}")
         raise HTTPException(status_code=500, detail=f"Error leaving room: {e!s}") from e
 
 
