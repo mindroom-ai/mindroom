@@ -136,3 +136,9 @@ matty thread-reply "test_room" t1 "@mindroom_research find information about X"
 - **Thread IDs**: Use t1, t2, t3 to reference threads (persistent across sessions)
 - **Output formats**: Add `--format json` for machine-readable output
 - **Streaming responses**: If you see "⋯" in agent messages, they're still typing. Agents stream responses by editing messages, which may take 10+ seconds to complete. Re-check the thread after waiting.
+
+# Important Instruction Reminders
+Do what has been asked; nothing more, nothing less.
+NEVER create files unless they're absolutely necessary for achieving your goal.
+ALWAYS prefer editing an existing file to creating a new one.
+NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
