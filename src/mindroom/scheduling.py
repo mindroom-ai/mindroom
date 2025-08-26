@@ -14,10 +14,11 @@ import pytz
 
 from .logging_config import get_logger
 from .matrix import MATRIX_HOMESERVER
+from .matrix.client import fetch_thread_history
 from .matrix.identity import extract_agent_name, extract_server_name_from_homeserver
 from .matrix.mentions import parse_mentions_in_text
 from .thread_invites import ThreadInviteManager
-from .thread_utils import get_available_agents_in_room
+from .thread_utils import get_agents_in_thread, get_available_agents_in_room
 from .workflow_scheduling import (
     ScheduledWorkflow,
     WorkflowParseError,
@@ -159,6 +160,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     full_text: str,
     config: Config,
     room: nio.MatrixRoom,
+    mentioned_agents: list[str] | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -166,8 +168,25 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         Tuple of (task_id, response_message)
 
     """
-    # Parse the workflow request
-    workflow_result = await parse_workflow_schedule(full_text, config)
+    # Get agents that are available in the thread
+    available_agents = []
+    if thread_id:
+        # Get agents already participating in the thread
+        thread_history = await fetch_thread_history(client, room_id, thread_id)
+        available_agents = get_agents_in_thread(thread_history, config)
+
+    # Add any agents mentioned in the command itself
+    if mentioned_agents:
+        for agent_name in mentioned_agents:
+            if agent_name not in available_agents:
+                available_agents.append(agent_name)
+
+    # If no agents found in thread or mentions, fall back to agents in the room
+    if not available_agents:
+        available_agents = get_available_agents_in_room(room, config)
+
+    # Parse the workflow request with available agents
+    workflow_result = await parse_workflow_schedule(full_text, config, available_agents)
 
     if isinstance(workflow_result, WorkflowParseError):
         error_msg = f"❌ {workflow_result.error}"

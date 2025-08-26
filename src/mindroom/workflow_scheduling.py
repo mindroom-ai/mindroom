@@ -86,6 +86,7 @@ class WorkflowParseError(BaseModel):
 async def parse_workflow_schedule(
     request: str,
     config: Config,
+    available_agents: list[str],
     current_time: datetime | None = None,
 ) -> ScheduledWorkflow | WorkflowParseError:
     """Parse natural language into structured workflow using AI.
@@ -107,8 +108,9 @@ async def parse_workflow_schedule(
     if current_time is None:
         current_time = datetime.now(UTC)
 
-    # Get available agents for the prompt
-    agent_list = ", ".join(f"@{name}" for name in config.agents)
+    # Get available agents for the prompt - only use agents actually in the room
+    assert available_agents, "No agents available for scheduling"
+    agent_list = ", ".join(f"@{name}" for name in available_agents)
 
     prompt = f"""Parse this scheduling request into a structured workflow.
 
