@@ -272,16 +272,18 @@ export function UnconfiguredRooms() {
                         <div
                           key={roomId}
                           className={cn(
-                            'flex items-center space-x-3 p-3 rounded-lg border transition-colors',
+                            'flex items-center space-x-3 p-3 rounded-lg border transition-colors cursor-pointer',
                             isSelected ? 'bg-muted/50 border-primary/20' : 'hover:bg-muted/30'
                           )}
+                          onClick={() => toggleRoomSelection(agent.agent_id, roomId)}
                         >
                           <Checkbox
                             checked={isSelected}
                             onCheckedChange={() => toggleRoomSelection(agent.agent_id, roomId)}
                             disabled={leavingRooms}
+                            onClick={e => e.stopPropagation()}
                           />
-                          <div className="flex-1 min-w-0">
+                          <div className="flex-1 min-w-0 select-none">
                             {/* Show room name if available */}
                             {roomDetails?.name && (
                               <div className="font-medium text-sm mb-1">{roomDetails.name}</div>
@@ -291,7 +293,7 @@ export function UnconfiguredRooms() {
                                 {roomId}
                               </code>
                               {roomId.startsWith('!') && roomId.includes(':') && (
-                                <Badge variant="outline" className="text-xs">
+                                <Badge variant="outline" className="text-xs pointer-events-none">
                                   {roomId.split(':')[1]}
                                 </Badge>
                               )}
@@ -306,7 +308,8 @@ export function UnconfiguredRooms() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => {
+                            onClick={e => {
+                              e.stopPropagation();
                               // Open room in Element/Matrix client
                               const matrixUrl = `https://matrix.to/#/${roomId}`;
                               window.open(matrixUrl, '_blank');
