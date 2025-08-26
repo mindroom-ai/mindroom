@@ -49,6 +49,7 @@ from .matrix.identity import (
     extract_server_name_from_homeserver,
 )
 from .matrix.mentions import create_mention_content_from_text
+from .matrix.presence import should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
@@ -811,8 +812,27 @@ class AgentBot:
             name=f"memory_save_{self.agent_name}_{session_id}",
         )
 
+        # Dynamically determine whether to use streaming based on user presence
+        # Only check presence if streaming is globally enabled
+        use_streaming = self.enable_streaming
+        if use_streaming:
+            # Check if the user is online to decide whether to stream
+            use_streaming = await should_use_streaming(
+                self.client,
+                room_id,
+                self.config,
+                requester_user_id=user_id,
+            )
+
+            self.logger.debug(
+                "Streaming decision",
+                room_id=room_id,
+                user_id=user_id,
+                use_streaming=use_streaming,
+            )
+
         # Dispatch to appropriate method
-        if self.enable_streaming:
+        if use_streaming:
             await self._process_and_respond_streaming(
                 room,
                 prompt,

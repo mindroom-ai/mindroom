@@ -228,8 +228,10 @@ class TestAgentBot:
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
+    @patch("mindroom.matrix.presence.should_use_streaming")
     async def test_agent_bot_on_message_mentioned(
         self,
+        mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
         mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,
@@ -247,6 +249,8 @@ class TestAgentBot:
         mock_ai_response_streaming.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Test response"
         mock_fetch_history.return_value = []
+        # Mock the presence check to return same value as enable_streaming
+        mock_should_use_streaming.return_value = enable_streaming
 
         config = Config.from_yaml()
 
@@ -258,6 +262,18 @@ class TestAgentBot:
             config=config,
         )
         bot.client = AsyncMock()
+
+        # Mock presence check to return user online when streaming is enabled
+        if enable_streaming:
+            mock_presence_response = MagicMock()
+            mock_presence_response.__class__ = nio.PresenceGetResponse
+            mock_presence_response.presence = "online"
+            bot.client.get_presence.return_value = mock_presence_response
+        else:
+            mock_presence_response = MagicMock()
+            mock_presence_response.__class__ = nio.PresenceGetResponse
+            mock_presence_response.presence = "offline"
+            bot.client.get_presence.return_value = mock_presence_response
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -345,8 +361,10 @@ class TestAgentBot:
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
+    @patch("mindroom.matrix.presence.should_use_streaming")
     async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,
+        mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
         mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,
@@ -417,6 +435,8 @@ class TestAgentBot:
         mock_ai_response_streaming.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Thread response"
         mock_team_arun.return_value = "Team response"
+        # Mock the presence check to return same value as enable_streaming
+        mock_should_use_streaming.return_value = enable_streaming
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
