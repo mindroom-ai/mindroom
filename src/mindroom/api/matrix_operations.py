@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from mindroom.logging_config import get_logger
 from mindroom.matrix import MATRIX_HOMESERVER
 from mindroom.matrix.client import get_joined_rooms, leave_room
+from mindroom.matrix.rooms import resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user
 
 logger = get_logger(__name__)
@@ -71,16 +72,19 @@ async def get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> A
             logger.error(f"Failed to get joined rooms for agent {agent_id}")
             return None
 
-        # Get configured rooms from config
-        configured_rooms = agent_data.get("rooms", [])
+        # Get configured rooms from config (these are aliases like "lobby", "analysis")
+        configured_room_aliases = agent_data.get("rooms", [])
+
+        # Resolve room aliases to room IDs for comparison
+        configured_room_ids = resolve_room_aliases(configured_room_aliases)
 
         # Calculate unconfigured rooms (joined but not in config)
-        unconfigured_rooms = [room for room in joined_rooms if room not in configured_rooms]
+        unconfigured_rooms = [room for room in joined_rooms if room not in configured_room_ids]
 
         return AgentRoomsResponse(
             agent_id=agent_id,
             display_name=agent_data.get("display_name", agent_id),
-            configured_rooms=configured_rooms,
+            configured_rooms=configured_room_ids,  # Return the resolved IDs, not aliases
             joined_rooms=joined_rooms,
             unconfigured_rooms=unconfigured_rooms,
         )
