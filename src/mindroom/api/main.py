@@ -16,6 +16,7 @@ from mindroom.api.credentials import router as credentials_router
 from mindroom.api.google_integration import router as google_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
 from mindroom.api.integrations import router as integrations_router
+from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.tools import router as tools_router
 from mindroom.config import Config
 
@@ -100,6 +101,7 @@ app.include_router(credentials_router)
 app.include_router(google_router)
 app.include_router(homeassistant_router)
 app.include_router(integrations_router)
+app.include_router(matrix_router)
 app.include_router(tools_router)
 
 
