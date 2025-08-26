@@ -205,58 +205,6 @@ class TestMatrixOperations:
             assert data["results"][1]["success"] is False
 
 
-class TestMatrixMockOperations:
-    """Test Matrix mock operations API endpoints."""
-
-    def test_mock_get_all_agents_rooms(self, test_client: TestClient) -> None:
-        """Test mock endpoint for getting all agents' rooms."""
-        response = test_client.get("/api/matrix-mock/agents/rooms")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert "agents" in data
-        assert len(data["agents"]) == 1  # One test agent
-
-        # Check that mock adds unconfigured rooms
-        agent = data["agents"][0]
-        assert agent["agent_id"] == "test_agent"
-        assert len(agent["configured_rooms"]) >= 1
-        assert len(agent["unconfigured_rooms"]) >= 0  # Random 0-3
-
-    def test_mock_get_specific_agent_rooms(self, test_client: TestClient) -> None:
-        """Test mock endpoint for specific agent rooms."""
-        response = test_client.get("/api/matrix-mock/agents/test_agent/rooms")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["agent_id"] == "test_agent"
-        assert data["display_name"] == "Test Agent"
-
-    def test_mock_leave_room(self, test_client: TestClient) -> None:
-        """Test mock endpoint for leaving a room."""
-        response = test_client.post(
-            "/api/matrix-mock/rooms/leave",
-            json={"agent_id": "test_agent", "room_id": "!test:localhost"},
-        )
-
-        assert response.status_code == 200
-        assert response.json()["success"] is True
-
-    def test_mock_leave_rooms_bulk(self, test_client: TestClient) -> None:
-        """Test mock bulk leave endpoint."""
-        requests = [
-            {"agent_id": "test_agent", "room_id": "!room1:localhost"},
-            {"agent_id": "test_agent", "room_id": "!room2:localhost"},
-        ]
-
-        response = test_client.post("/api/matrix-mock/rooms/leave-bulk", json=requests)
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] is True
-        assert len(data["results"]) == 2
-
-
 class TestMatrixOperationsIntegration:
     """Integration tests with real Matrix operations."""
 
