@@ -1058,10 +1058,10 @@ class AgentBot:
                 client=self.client,
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
-                agent_user_id=self.agent_user.user_id,
                 scheduled_by=event.sender,
                 full_text=full_text,
                 config=self.config,
+                room=room,
             )
 
         elif command.type == CommandType.LIST_SCHEDULES:
