@@ -41,7 +41,7 @@ MESSAGE_PREVIEW_LENGTH = 50
 _running_tasks: dict[str, asyncio.Task] = {}
 
 
-class AgentValidationResult(NamedTuple):
+class _AgentValidationResult(NamedTuple):
     """Result of agent mention validation."""
 
     all_valid: bool
@@ -55,7 +55,7 @@ async def _validate_agent_mentions(
     thread_id: str | None,
     config: Config,
     client: nio.AsyncClient,
-) -> AgentValidationResult:
+) -> _AgentValidationResult:
     """Validate that all mentioned agents are accessible.
 
     Args:
@@ -66,7 +66,7 @@ async def _validate_agent_mentions(
         client: Matrix client for checking thread invitations
 
     Returns:
-        AgentValidationResult with validation status and agent lists
+        _AgentValidationResult with validation status and agent lists
 
     """
     # Use the existing parse_mentions_in_text to extract agent mentions
@@ -78,7 +78,7 @@ async def _validate_agent_mentions(
 
     if not mentioned_user_ids:
         # No agents mentioned, validation passes
-        return AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
+        return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
 
     # Extract agent names from the mentioned user IDs
 
@@ -90,7 +90,7 @@ async def _validate_agent_mentions(
 
     if not mentioned_agents:
         # No valid agents mentioned
-        return AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
+        return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
 
     valid_agents = []
     invalid_agents = []
@@ -120,7 +120,7 @@ async def _validate_agent_mentions(
                 invalid_agents.append(agent_name)
 
     all_valid = len(invalid_agents) == 0
-    return AgentValidationResult(
+    return _AgentValidationResult(
         all_valid=all_valid,
         valid_agents=valid_agents,
         invalid_agents=invalid_agents,
