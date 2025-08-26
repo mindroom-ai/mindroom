@@ -379,8 +379,17 @@ async def run_cron_task(
     except asyncio.CancelledError:
         logger.info(f"Cron task {task_id} was cancelled")
         raise
-    except Exception:
+    except Exception as e:
         logger.exception(f"Error in cron task {task_id}")
+        # Send error notification to user
+        if workflow.room_id:
+            error_message = f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
+            error_content = build_message_content(
+                body=error_message,
+                thread_event_id=workflow.thread_id,
+                latest_thread_event_id=workflow.thread_id,
+            )
+            await send_message(client, workflow.room_id, error_content)
 
 
 async def run_once_task(
@@ -411,5 +420,14 @@ async def run_once_task(
     except asyncio.CancelledError:
         logger.info(f"One-time task {task_id} was cancelled")
         raise
-    except Exception:
+    except Exception as e:
         logger.exception(f"Error in one-time task {task_id}")
+        # Send error notification to user
+        if workflow.room_id:
+            error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
+            error_content = build_message_content(
+                body=error_message,
+                thread_event_id=workflow.thread_id,
+                latest_thread_event_id=workflow.thread_id,
+            )
+            await send_message(client, workflow.room_id, error_content)
