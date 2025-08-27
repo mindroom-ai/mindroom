@@ -58,9 +58,9 @@ class MindRoomE2ETest:
         with Path("matrix_state.yaml").open() as f:  # noqa: ASYNC230
             users_data = yaml.safe_load(f)
 
-        # Use the main user account
-        self.username = users_data["accounts"]["user"]["username"]
-        self.password = users_data["accounts"]["user"]["password"]
+        # Use the agent_user account
+        self.username = users_data["accounts"]["agent_user"]["username"]
+        self.password = users_data["accounts"]["agent_user"]["password"]
         self.room_id = users_data["rooms"]["lobby"]["room_id"]
 
         # Create client
