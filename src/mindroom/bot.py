@@ -157,7 +157,6 @@ class MessageContext:
     is_thread: bool
     thread_id: str | None
     thread_history: list[dict]
-    is_invited_to_thread: bool
     mentioned_agents: list[str]
 
 
@@ -476,7 +475,6 @@ class AgentBot:
             configured_rooms=self.rooms,
             thread_history=context.thread_history,
             config=self.config,
-            is_invited_to_thread=context.is_invited_to_thread,
             mentioned_agents=context.mentioned_agents,
         )
 
@@ -610,7 +608,6 @@ class AgentBot:
             is_thread=event_info.is_thread,
             thread_id=event_info.thread_id,
             thread_history=thread_history,
-            is_invited_to_thread=True,  # Agents can now respond in any room they're in
             mentioned_agents=mentioned_agents,
         )
 
