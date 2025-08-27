@@ -150,31 +150,21 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 - [uv](https://github.com/astral-sh/uv) for Python package management
 - Node.js 20+ and [pnpm](https://pnpm.io/) (optional, for web UI)
 
-### Installation
+### Installation and starting
 
 ```bash
 # Clone and install
 git clone https://github.com/yourusername/mindroom
-cd mindroom
-./quickstart.sh  # Sets up everything automatically
 ```
-
-This automatically:
-- ✅ Installs all Python dependencies
-- ✅ Sets up configuration from example
-- ✅ Prepares the web UI (if Node.js/pnpm available)
-- ✅ Shows you how to start everything
-
-### Starting MindRoom
 
 ```bash
 # Option 1: Start everything with Zellij (recommended)
 ./scripts/start
 
-# Option 2: Start just the agents
+# Option 2.1: Start just the agents
 uv run mindroom run
 
-# Option 3: Start the web UI separately
+# Option 2.1: Start the web UI separately
 ./run-ui.sh
 ```
 
