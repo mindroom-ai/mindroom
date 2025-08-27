@@ -1250,7 +1250,6 @@ class MultiAgentOrchestrator:
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
-    _created_room_ids: dict[str, str] = field(default_factory=dict, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
 
     async def _ensure_user_account(self) -> None:
@@ -1505,9 +1504,7 @@ class MultiAgentOrchestrator:
         # Directly create rooms using the router's client
         assert self.config is not None
         room_ids = await ensure_all_rooms_exist(router_bot.client, self.config)
-
-        # Store room IDs for later use
-        self._created_room_ids = room_ids
+        logger.info(f"Ensured existence of {len(room_ids)} rooms")
 
     async def _ensure_room_invitations(self) -> None:  # noqa: C901, PLR0912
         """Ensure all agents and the user are invited to their configured rooms.
