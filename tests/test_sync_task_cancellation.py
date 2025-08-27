@@ -137,6 +137,7 @@ async def test_orchestrator_tracks_sync_tasks() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for sync task management
+@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_orchestrator_update_config_cancels_old_tasks() -> None:
     """Test that update_config properly cancels old sync tasks."""
     with (
