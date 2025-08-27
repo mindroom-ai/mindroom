@@ -953,12 +953,6 @@ def _restart_instance(  # noqa: PLR0912, PLR0915
             console.print(f"[dim]{result.stderr}[/dim]")
         raise typer.Exit(1)
 
-    # Clean up stale matrix_state.yaml file to prevent connection issues
-    matrix_state_file = Path(instance.data_dir) / "tmp" / "matrix_state.yaml"
-    if matrix_state_file.exists():
-        console.print("[dim]Removing stale matrix_state.yaml[/dim]")
-        matrix_state_file.unlink()
-
     # Start the instance
     env_file = ENV_DIR / f"{name}.env"
     if not env_file.exists():
