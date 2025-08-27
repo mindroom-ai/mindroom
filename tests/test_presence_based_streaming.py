@@ -73,9 +73,8 @@ class TestPresenceDetection:
         """Test that is_user_online returns False on presence check error."""
         mock_client = AsyncMock(spec=nio.AsyncClient)
 
-        # Mock error response
-        mock_error = Mock(spec=nio.PresenceGetError)
-        mock_error.message = "Forbidden"
+        # Mock error response - create instance properly
+        mock_error = nio.PresenceGetError.from_dict({"errcode": "M_FORBIDDEN", "error": "Forbidden"})
         mock_client.get_presence.return_value = mock_error
 
         result = await is_user_online(mock_client, "@user:example.com")

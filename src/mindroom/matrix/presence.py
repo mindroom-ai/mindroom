@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-import nio  # noqa: TC002
+import nio
 
 from mindroom.logging_config import get_logger
 
@@ -28,6 +28,15 @@ async def is_user_online(
     """
     try:
         response = await client.get_presence(user_id)
+
+        # Check if we got an error response
+        if isinstance(response, nio.PresenceGetError):
+            logger.warning(
+                "Presence API error",
+                user_id=user_id,
+                error=response.message,
+            )
+            return False
 
         # Presence states: "online", "unavailable" (busy/idle), "offline"
         # We consider both "online" and "unavailable" as "online" for streaming purposes
