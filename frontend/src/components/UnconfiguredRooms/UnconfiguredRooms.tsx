@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Trash2, RefreshCw, ExternalLink, AlertCircle } from 'lucide-react';
-import { API_ENDPOINTS, API_BASE_URL, fetchAPI } from '../../lib/api';
+import { API_ENDPOINTS, fetchAPI } from '../../lib/api';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
 import { Badge } from '../ui/badge';
@@ -40,15 +40,11 @@ export function UnconfiguredRooms() {
     setLoading(true);
     setError(null);
     try {
-      console.log('Loading agent rooms from:', API_ENDPOINTS.matrix.agentsRooms);
-      console.log('API_BASE_URL is:', API_BASE_URL);
       const response = await fetchAPI(API_ENDPOINTS.matrix.agentsRooms);
-      console.log('Agent rooms response:', response);
       setAgentsRooms(response.agents);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load agent rooms');
       console.error('Error loading agent rooms:', err);
-      console.error('Failed URL was:', API_ENDPOINTS.matrix.agentsRooms);
     } finally {
       setLoading(false);
     }

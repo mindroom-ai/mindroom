@@ -65,7 +65,6 @@ export async function fetchAPI(url: string, options?: RequestInit) {
   const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
   try {
-    console.log(`Fetching API: ${url}`);
     const response = await fetch(url, {
       ...options,
       signal: controller.signal,
@@ -78,14 +77,14 @@ export async function fetchAPI(url: string, options?: RequestInit) {
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      throw new Error(`API call failed: ${response.status} ${response.statusText} for URL: ${url}`);
+      throw new Error(`API call failed: ${response.status} ${response.statusText}`);
     }
 
     return response.json();
   } catch (error) {
     clearTimeout(timeoutId);
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`API call timed out after 30 seconds for URL: ${url}`);
+      throw new Error('API call timed out');
     }
     throw error;
   }
