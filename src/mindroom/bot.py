@@ -820,15 +820,7 @@ class AgentBot:
             use_streaming = await should_use_streaming(
                 self.client,
                 room_id,
-                self.config,
                 requester_user_id=user_id,
-            )
-
-            self.logger.debug(
-                "Streaming decision",
-                room_id=room_id,
-                user_id=user_id,
-                use_streaming=use_streaming,
             )
 
         # Dispatch to appropriate method

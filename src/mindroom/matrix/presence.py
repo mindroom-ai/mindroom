@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
 
-import nio
+import nio  # noqa: TC002
 
 from mindroom.logging_config import get_logger
-
-if TYPE_CHECKING:
-    from mindroom.config import Config
 
 logger = get_logger(__name__)
 
@@ -33,28 +29,20 @@ async def is_user_online(
     try:
         response = await client.get_presence(user_id)
 
-        if isinstance(response, nio.PresenceGetResponse):
-            # Presence states: "online", "unavailable" (busy/idle), "offline"
-            # We consider both "online" and "unavailable" as "online" for streaming purposes
-            # since "unavailable" usually means the user is idle but still has the client open
-            is_online = response.presence in ("online", "unavailable")
+        # Presence states: "online", "unavailable" (busy/idle), "offline"
+        # We consider both "online" and "unavailable" as "online" for streaming purposes
+        # since "unavailable" usually means the user is idle but still has the client open
+        is_online = response.presence in ("online", "unavailable")
 
-            logger.debug(
-                "User presence check",
-                user_id=user_id,
-                presence=response.presence,
-                is_online=is_online,
-                last_active_ago=response.last_active_ago,
-            )
-
-            return is_online
-        # Presence check failed - default to non-streaming (safer)
-        logger.warning(
-            "Failed to get user presence",
+        logger.debug(
+            "User presence check",
             user_id=user_id,
-            error=response.message if hasattr(response, "message") else str(response),
+            presence=response.presence,
+            is_online=is_online,
+            last_active_ago=response.last_active_ago,
         )
-        return False  # noqa: TRY300
+
+        return is_online  # noqa: TRY300
 
     except Exception:
         logger.exception(
@@ -68,7 +56,6 @@ async def is_user_online(
 async def should_use_streaming(
     client: nio.AsyncClient,
     room_id: str,
-    config: Config,  # noqa: ARG001
     requester_user_id: str | None = None,
 ) -> bool:
     """Determine if streaming should be used based on user presence.
@@ -80,7 +67,6 @@ async def should_use_streaming(
     Args:
         client: The Matrix client
         room_id: The room where the interaction is happening
-        config: The bot configuration
         requester_user_id: The user who sent the message (optional)
 
     Returns:

@@ -108,13 +108,11 @@ class TestStreamingDecision:
         mock_is_user_online.return_value = True
 
         mock_client = AsyncMock(spec=nio.AsyncClient)
-        mock_config = Mock(spec=Config)
 
         with patch.dict("os.environ", {"MINDROOM_ENABLE_STREAMING": "true"}):
             result = await should_use_streaming(
                 mock_client,
                 "!room:example.com",
-                mock_config,
                 requester_user_id="@user:example.com",
             )
 
@@ -131,13 +129,11 @@ class TestStreamingDecision:
         mock_is_user_online.return_value = False
 
         mock_client = AsyncMock(spec=nio.AsyncClient)
-        mock_config = Mock(spec=Config)
 
         with patch.dict("os.environ", {"MINDROOM_ENABLE_STREAMING": "true"}):
             result = await should_use_streaming(
                 mock_client,
                 "!room:example.com",
-                mock_config,
                 requester_user_id="@user:example.com",
             )
 
@@ -148,13 +144,11 @@ class TestStreamingDecision:
     async def test_should_use_streaming_when_globally_disabled(self) -> None:
         """Test that streaming is not used when globally disabled."""
         mock_client = AsyncMock(spec=nio.AsyncClient)
-        mock_config = Mock(spec=Config)
 
         with patch.dict("os.environ", {"MINDROOM_ENABLE_STREAMING": "false"}):
             result = await should_use_streaming(
                 mock_client,
                 "!room:example.com",
-                mock_config,
                 requester_user_id="@user:example.com",
             )
 
@@ -170,13 +164,11 @@ class TestStreamingDecision:
     ) -> None:
         """Test that streaming defaults to True when no requester specified."""
         mock_client = AsyncMock(spec=nio.AsyncClient)
-        mock_config = Mock(spec=Config)
 
         with patch.dict("os.environ", {"MINDROOM_ENABLE_STREAMING": "true"}):
             result = await should_use_streaming(
                 mock_client,
                 "!room:example.com",
-                mock_config,
                 requester_user_id=None,
             )
 
