@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 @pytest.mark.asyncio
 @pytest.mark.e2e  # Mark as end-to-end test
+@pytest.mark.requires_matrix  # Requires real Matrix server for streaming e2e test
 @patch("mindroom.matrix.users.ensure_all_agent_users")
 @patch("mindroom.bot.login_agent_user")
 @patch("mindroom.bot.AgentBot.ensure_user_account")

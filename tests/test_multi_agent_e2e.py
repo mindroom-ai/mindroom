@@ -409,6 +409,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_matrix  # Requires real Matrix server for multi-agent orchestration
 async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     """Test that the orchestrator manages multiple agents correctly."""
     with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure:
