@@ -11,30 +11,25 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.config import Config
-    from mindroom.matrix.identity import MatrixID
 
 logger = get_logger(__name__)
 
 
 async def is_user_online(
     client: nio.AsyncClient,
-    user_id: str | MatrixID,
+    user_id: str,
 ) -> bool:
     """Check if a Matrix user is currently online.
 
     Args:
         client: The Matrix client to use for the presence check
-        user_id: The Matrix user ID to check (either string or MatrixID object)
+        user_id: The Matrix user ID string (e.g., "@user:example.com")
 
     Returns:
         True if the user is online or unavailable (active but busy),
         False if offline or presence check fails
 
     """
-    # Convert MatrixID to string if needed
-    if hasattr(user_id, "full_id"):
-        user_id = user_id.full_id
-
     try:
         response = await client.get_presence(user_id)
 

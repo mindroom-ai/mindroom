@@ -10,7 +10,6 @@ import pytest
 
 from mindroom.bot import AgentBot, create_bot_for_entity
 from mindroom.config import Config
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
 
@@ -67,24 +66,6 @@ class TestPresenceDetection:
         result = await is_user_online(mock_client, "@user:example.com")
 
         assert result is False
-        mock_client.get_presence.assert_called_once_with("@user:example.com")
-
-    @pytest.mark.asyncio
-    async def test_is_user_online_with_matrix_id(self) -> None:
-        """Test that is_user_online works with MatrixID objects."""
-        mock_client = AsyncMock(spec=nio.AsyncClient)
-
-        # Mock successful presence response
-        mock_response = Mock(spec=nio.PresenceGetResponse)
-        mock_response.presence = "online"
-        mock_response.last_active_ago = 1000
-        mock_client.get_presence.return_value = mock_response
-
-        # Use a MatrixID object
-        matrix_id = MatrixID(username="user", domain="example.com")
-        result = await is_user_online(mock_client, matrix_id)
-
-        assert result is True
         mock_client.get_presence.assert_called_once_with("@user:example.com")
 
     @pytest.mark.asyncio
