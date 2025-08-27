@@ -82,7 +82,6 @@ logger = get_logger(__name__)
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
-CLEANUP_INTERVAL_SECONDS = 3600
 
 
 def _should_skip_mentions(event_source: dict) -> bool:
@@ -404,11 +403,6 @@ class AgentBot:
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
-        assert self.config is not None
-        sender_agent_name = extract_agent_name(event.sender, self.config)
-        if sender_agent_name:
-            self.logger.debug(f"Received message from agent: {sender_agent_name}")
-
         # Try to parse as command
         command = command_parser.parse(event.body)
         if command:  # ONLY router handles the command
@@ -418,6 +412,10 @@ class AgentBot:
             return
 
         context = await self._extract_message_context(room, event)
+
+        # Check if the sender is an agent
+        assert self.config is not None
+        sender_agent_name = extract_agent_name(event.sender, self.config)
 
         # Ignore messages from other agents unless we are mentioned,
         # except when the router is posting a voice transcription (VOICE_PREFIX),
@@ -604,8 +602,6 @@ class AgentBot:
         event_info = EventInfo.from_event(event.source)
 
         thread_history = []
-        # Agents can now respond in any room they're in
-        is_invited_to_thread = True
         if event_info.thread_id:
             thread_history = await fetch_thread_history(self.client, room.room_id, event_info.thread_id)
 
@@ -614,7 +610,7 @@ class AgentBot:
             is_thread=event_info.is_thread,
             thread_id=event_info.thread_id,
             thread_history=thread_history,
-            is_invited_to_thread=is_invited_to_thread,
+            is_invited_to_thread=True,  # Agents can now respond in any room they're in
             mentioned_agents=mentioned_agents,
         )
 
