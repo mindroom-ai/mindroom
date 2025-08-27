@@ -218,11 +218,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         suggestions = []
         for agent in validation_result.invalid_agents:
             if agent in config.agents:
-                if thread_id:
-                    suggestions.append(f"Use `!invite {agent}` to invite @{agent} to this thread")
-                else:
-                    # Agent exists but not configured for this room
-                    suggestions.append(f"@{agent} is not configured for this room")
+                # Agent exists but not available in this room/thread
+                suggestions.append(f"@{agent} is not available in this {'thread' if thread_id else 'room'}")
             else:
                 suggestions.append(f"@{agent} does not exist")
 

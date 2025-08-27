@@ -25,10 +25,9 @@ def test_invalid_commands() -> None:
     # Commands that should return UNKNOWN
     unknown_commands = [
         "!invalid",
-        "!invite",  # Missing agent name
-        "!uninvite",  # Missing agent name
-        "!invite calculator for",  # Incomplete duration
-        "!invite calculator for hours",  # Invalid duration format
+        "!unknowncmd",
+        "!test123",
+        "!notacommand",
     ]
 
     for cmd_text in unknown_commands:
