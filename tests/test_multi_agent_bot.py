@@ -612,6 +612,8 @@ class TestMultiAgentOrchestrator:
         assert not orchestrator.running
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.Config.from_yaml")
     async def test_orchestrator_initialize(
         self,
@@ -638,6 +640,8 @@ class TestMultiAgentOrchestrator:
         assert "router" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.Config.from_yaml")
     async def test_orchestrator_start(
         self,
@@ -680,6 +684,8 @@ class TestMultiAgentOrchestrator:
             mock_start.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.Config.from_yaml")
     async def test_orchestrator_stop(
         self,
@@ -715,6 +721,8 @@ class TestMultiAgentOrchestrator:
                 bot.client.close.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator streaming
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.Config.from_yaml")
     @patch("mindroom.bot.ENABLE_STREAMING", False)
     async def test_orchestrator_streaming_env_var(

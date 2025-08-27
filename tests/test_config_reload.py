@@ -413,6 +413,8 @@ async def test_team_room_changes_on_config_reload(
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_matrix  # This test requires a real Matrix server or extensive mocking
+@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
     initial_config: Config,
     updated_config: Config,

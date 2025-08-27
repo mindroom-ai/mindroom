@@ -12,11 +12,11 @@ from mindroom.config import Config
 
 
 @pytest.mark.asyncio
-async def test_cancel_sync_task():
+async def test_cancel_sync_task() -> None:
     """Test the _cancel_sync_task helper function."""
 
     # Create a real cancelled task for testing
-    async def dummy_coro():
+    async def dummy_coro() -> None:
         await asyncio.sleep(1)
 
     task = asyncio.create_task(dummy_coro())
@@ -31,7 +31,7 @@ async def test_cancel_sync_task():
 
 
 @pytest.mark.asyncio
-async def test_cancel_sync_task_missing_entity():
+async def test_cancel_sync_task_missing_entity() -> None:
     """Test _cancel_sync_task with non-existent entity."""
     sync_tasks = {}
 
@@ -42,7 +42,7 @@ async def test_cancel_sync_task_missing_entity():
 
 
 @pytest.mark.asyncio
-async def test_stop_entities_cancels_sync_tasks():
+async def test_stop_entities_cancels_sync_tasks() -> None:
     """Test that _stop_entities properly cancels sync tasks."""
     # Use patch to mock _cancel_sync_task since we tested it separately
     with patch("mindroom.bot._cancel_sync_task") as mock_cancel:
@@ -89,11 +89,11 @@ async def test_stop_entities_cancels_sync_tasks():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_tracks_sync_tasks():
+async def test_orchestrator_tracks_sync_tasks() -> None:
     """Test that MultiAgentOrchestrator properly tracks sync tasks."""
     with (
         patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
-        patch("mindroom.bot._sync_forever_with_restart") as mock_sync_forever,
+        patch("mindroom.bot._sync_forever_with_restart"),
         patch("mindroom.bot.ensure_all_rooms_exist") as mock_ensure_rooms,
         patch("mindroom.bot.ensure_user_in_rooms") as mock_ensure_user,
         patch("mindroom.bot.create_agent_user") as mock_create_user,
@@ -136,14 +136,16 @@ async def test_orchestrator_tracks_sync_tasks():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_update_config_cancels_old_tasks():
+@pytest.mark.requires_matrix  # Requires real Matrix server for sync task management
+@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
+async def test_orchestrator_update_config_cancels_old_tasks() -> None:
     """Test that update_config properly cancels old sync tasks."""
     with (
         patch("mindroom.bot.Config.from_yaml") as mock_from_yaml,
         patch("mindroom.bot._identify_entities_to_restart") as mock_identify,
         patch("mindroom.bot._stop_entities") as mock_stop_entities,
         patch("mindroom.bot.create_bot_for_entity") as mock_create_bot,
-        patch("mindroom.bot._sync_forever_with_restart") as mock_sync_forever,
+        patch("mindroom.bot._sync_forever_with_restart"),
         patch("mindroom.bot._create_temp_user") as mock_create_temp_user,
     ):
         # Create orchestrator with existing agent
@@ -190,7 +192,7 @@ async def test_orchestrator_update_config_cancels_old_tasks():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_stop_cancels_all_tasks():
+async def test_orchestrator_stop_cancels_all_tasks() -> None:
     """Test that stop() cancels all sync tasks."""
     with patch("mindroom.bot._cancel_sync_task") as mock_cancel:
         orchestrator = MultiAgentOrchestrator(storage_path=MagicMock())
@@ -198,7 +200,7 @@ async def test_orchestrator_stop_cancels_all_tasks():
         # Track which tasks are cancelled
         cancelled = []
 
-        async def track_cancel(name, tasks):
+        async def track_cancel(name: str, tasks: dict) -> None:
             cancelled.append(name)
             tasks.pop(name, None)
 
