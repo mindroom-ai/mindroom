@@ -20,3 +20,4 @@ MATRIX_STATE_FILE = Path(STORAGE_PATH) / "matrix_state.yaml"
 
 # Other constants
 VOICE_PREFIX = "🎤 "
+ENABLE_STREAMING = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"

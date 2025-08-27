@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -64,8 +64,10 @@ class TestStreamingBehavior:
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.should_use_streaming")
     async def test_streaming_agent_mentions_another_agent(  # noqa: PLR0915
         self,
+        mock_should_use_streaming: AsyncMock,
         mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,
         mock_helper_agent: AgentMatrixUser,
@@ -73,6 +75,14 @@ class TestStreamingBehavior:
         tmp_path: Path,
     ) -> None:
         """Test complete flow of one agent streaming and mentioning another."""
+
+        # Configure streaming - helper will stream, calculator won't
+        def side_effect(client: Any, room_id: str, requester_user_id: str | None = None) -> bool:  # noqa: ARG001, ANN401
+            # Helper streams when mentioned by user
+            return requester_user_id == "@user:localhost"
+
+        mock_should_use_streaming.side_effect = side_effect
+
         # Set up helper bot (the one that will stream)
         config = self.config
 

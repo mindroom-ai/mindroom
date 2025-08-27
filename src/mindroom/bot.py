@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -26,7 +25,7 @@ from .commands import (
     handle_widget_command,
 )
 from .config import Config
-from .constants import ROUTER_AGENT_NAME, VOICE_PREFIX
+from .constants import ENABLE_STREAMING, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import MATRIX_HOMESERVER
@@ -49,6 +48,7 @@ from .matrix.identity import (
     extract_server_name_from_homeserver,
 )
 from .matrix.mentions import create_mention_content_from_text
+from .matrix.presence import should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
@@ -123,7 +123,7 @@ def create_bot_for_entity(
         Bot instance or None if entity not found in config
 
     """
-    enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+    enable_streaming = ENABLE_STREAMING
 
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
@@ -811,8 +811,19 @@ class AgentBot:
             name=f"memory_save_{self.agent_name}_{session_id}",
         )
 
+        # Dynamically determine whether to use streaming based on user presence
+        # Only check presence if streaming is globally enabled
+        use_streaming = self.enable_streaming
+        if use_streaming:
+            # Check if the user is online to decide whether to stream
+            use_streaming = await should_use_streaming(
+                self.client,
+                room_id,
+                requester_user_id=user_id,
+            )
+
         # Dispatch to appropriate method
-        if self.enable_streaming:
+        if use_streaming:
             await self._process_and_respond_streaming(
                 room,
                 prompt,

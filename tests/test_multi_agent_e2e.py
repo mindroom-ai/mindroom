@@ -101,8 +101,11 @@ async def test_agent_processes_direct_mention(
                 payload={"event_id": "$response_event:example.org"},
             )
 
-            # Mock the AI response
-            with patch("mindroom.bot.ai_response_streaming") as mock_ai:
+            # Mock the AI response and presence check
+            with (
+                patch("mindroom.bot.ai_response_streaming") as mock_ai,
+                patch("mindroom.bot.should_use_streaming", return_value=True),
+            ):
 
                 async def mock_streaming_response() -> AsyncGenerator[str, None]:
                     yield "15% of 200 is 30"
