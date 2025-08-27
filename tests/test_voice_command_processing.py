@@ -30,9 +30,6 @@ async def test_router_processes_own_voice_transcriptions() -> None:
     )
     bot.response_tracker = MagicMock()
     bot.response_tracker.has_responded.return_value = False
-    bot.thread_invite_manager = MagicMock()
-    bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
-    bot.thread_invite_manager.update_agent_activity = AsyncMock()
     bot.logger = MagicMock()
 
     # Create mock room and event
@@ -42,9 +39,9 @@ async def test_router_processes_own_voice_transcriptions() -> None:
     # Create event that looks like voice transcription from router
     event = MagicMock()
     event.sender = "@mindroom_router:example.com"  # From router itself
-    event.body = "🎤 !invite calculator"  # Voice transcription with command
+    event.body = "🎤 !schedule daily"  # Voice transcription with command
     event.event_id = "test_event"
-    event.source = {"content": {"body": "🎤 !invite calculator"}}
+    event.source = {"content": {"body": "🎤 !schedule daily"}}
 
     # Mock the command handling and interactive handler
     with (
@@ -58,8 +55,7 @@ async def test_router_processes_own_voice_transcriptions() -> None:
     # The command should be handled even though it's from router
     mock_handle.assert_called_once()
     command = mock_handle.call_args[0][2]
-    assert command.type.value == "invite"
-    assert command.args["agent_name"] == "calculator"
+    assert command.type.value == "schedule"
 
 
 @pytest.mark.asyncio

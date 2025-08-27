@@ -190,12 +190,8 @@ Agents ONLY respond in threads (not main room). Within threads:
 2. **Single agent continues** - One agent in thread? It keeps responding
 3. **Multiple agents collaborate** - They work together, not compete
 4. **Smart routing** - System picks the best agent for new threads
-5. **Invited agents are natives** - `!invite @agent` makes them full participants
 
 ### Available Commands
-- `!invite <agent>` - Invite agent to current thread
-- `!uninvite <agent>` - Remove agent from thread
-- `!list_invites` - See all invited agents
 - `!widget [url]` - Add configuration widget to room
 - `!schedule <time> <message>` - Schedule tasks and reminders
 - `!list_schedules` - List all scheduled tasks
