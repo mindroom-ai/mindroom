@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import os
-
 import nio
 
+from mindroom.constants import ENABLE_STREAMING
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -83,7 +82,7 @@ async def should_use_streaming(
 
     """
     # Check if streaming is globally disabled
-    if os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() != "true":
+    if not ENABLE_STREAMING:
         return False
 
     # If no requester specified, we can't check presence, default to streaming

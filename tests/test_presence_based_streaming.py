@@ -140,16 +140,16 @@ class TestStreamingDecision:
         mock_is_user_online.assert_called_once_with(mock_client, "@user:example.com")
 
     @pytest.mark.asyncio
+    @patch("mindroom.matrix.presence.ENABLE_STREAMING", False)
     async def test_should_use_streaming_when_globally_disabled(self) -> None:
         """Test that streaming is not used when globally disabled."""
         mock_client = AsyncMock(spec=nio.AsyncClient)
 
-        with patch.dict("os.environ", {"MINDROOM_ENABLE_STREAMING": "false"}):
-            result = await should_use_streaming(
-                mock_client,
-                "!room:example.com",
-                requester_user_id="@user:example.com",
-            )
+        result = await should_use_streaming(
+            mock_client,
+            "!room:example.com",
+            requester_user_id="@user:example.com",
+        )
 
         assert result is False
         # Should not even check presence when globally disabled

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -26,7 +25,7 @@ from .commands import (
     handle_widget_command,
 )
 from .config import Config
-from .constants import ROUTER_AGENT_NAME, VOICE_PREFIX
+from .constants import ENABLE_STREAMING, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import MATRIX_HOMESERVER
@@ -124,7 +123,7 @@ def create_bot_for_entity(
         Bot instance or None if entity not found in config
 
     """
-    enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+    enable_streaming = ENABLE_STREAMING
 
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
