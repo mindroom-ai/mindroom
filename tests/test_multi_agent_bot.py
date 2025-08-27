@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -228,7 +227,7 @@ class TestAgentBot:
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
-    @patch("mindroom.matrix.presence.should_use_streaming")
+    @patch("mindroom.bot.should_use_streaming")
     async def test_agent_bot_on_message_mentioned(
         self,
         mock_should_use_streaming: AsyncMock,
@@ -264,16 +263,27 @@ class TestAgentBot:
         bot.client = AsyncMock()
 
         # Mock presence check to return user online when streaming is enabled
+        # We need to create a proper mock response that will be returned by get_presence
         if enable_streaming:
+            # Create a mock that looks like PresenceGetResponse
             mock_presence_response = MagicMock()
-            mock_presence_response.__class__ = nio.PresenceGetResponse
             mock_presence_response.presence = "online"
-            bot.client.get_presence.return_value = mock_presence_response
+            mock_presence_response.last_active_ago = 1000
+
+            # Make get_presence return this response (as a coroutine since it's async)
+            async def mock_get_presence(user_id: str) -> MagicMock:  # noqa: ARG001
+                return mock_presence_response
+
+            bot.client.get_presence = mock_get_presence
         else:
             mock_presence_response = MagicMock()
-            mock_presence_response.__class__ = nio.PresenceGetResponse
             mock_presence_response.presence = "offline"
-            bot.client.get_presence.return_value = mock_presence_response
+            mock_presence_response.last_active_ago = 3600000
+
+            async def mock_get_presence(user_id: str) -> MagicMock:  # noqa: ARG001
+                return mock_presence_response
+
+            bot.client.get_presence = mock_get_presence
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -361,7 +371,7 @@ class TestAgentBot:
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
-    @patch("mindroom.matrix.presence.should_use_streaming")
+    @patch("mindroom.bot.should_use_streaming")
     async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,
         mock_should_use_streaming: AsyncMock,
@@ -706,13 +716,13 @@ class TestMultiAgentOrchestrator:
 
     @pytest.mark.asyncio
     @patch("mindroom.config.Config.from_yaml")
-    @patch.dict(os.environ, {"MINDROOM_ENABLE_STREAMING": "false"})
+    @patch("mindroom.bot.ENABLE_STREAMING", False)
     async def test_orchestrator_streaming_env_var(
         self,
         mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """Test that orchestrator respects MINDROOM_ENABLE_STREAMING environment variable."""
+        """Test that orchestrator respects ENABLE_STREAMING constant."""
         # Mock config with just 2 agents
         mock_config = MagicMock()
         mock_config.agents = {
