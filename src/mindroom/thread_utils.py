@@ -92,9 +92,7 @@ def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[s
     Note: Router agent is excluded as it's not a regular conversation participant.
     """
     agents = []
-    room_members = list(room.users.keys()) if room.users else []
-
-    for member_id in room_members:
+    for member_id in room.users:
         agent_name = extract_agent_name(member_id, config)
         if agent_name and agent_name != ROUTER_AGENT_NAME:
             agents.append(agent_name)
@@ -179,9 +177,7 @@ def should_agent_respond(  # noqa: PLR0911, C901
     # Check if agent has access (either configured for room or in DM)
     has_room_access = room.room_id in configured_rooms or is_dm_room
     # Also check if agent is actually in the room (joined it but not configured)
-    is_in_room = agent_name in [
-        extract_agent_name(user_id, config) for user_id in (room.users.keys() if room.users else [])
-    ]
+    is_in_room = agent_name in [extract_agent_name(user_id, config) for user_id in room.users]
     # has_access means either configured for room/DM or explicitly in the room
     has_access = has_room_access or is_in_room
 
