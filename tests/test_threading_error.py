@@ -67,7 +67,6 @@ class TestThreadingBehavior:
 
         # Initialize components that depend on client
         bot.response_tracker = MagicMock()
-        bot.thread_invite_manager = MagicMock()
 
         # Mock the agent to return a response
         mock_agent = MagicMock()
@@ -122,8 +121,6 @@ class TestThreadingBehavior:
 
         # Initialize the bot (to set up components it needs)
         bot.response_tracker.has_responded.return_value = False  # type: ignore[attr-defined]
-        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)  # type: ignore[method-assign]
-        bot.thread_invite_manager.update_agent_activity = AsyncMock()  # type: ignore[method-assign]
 
         # Mock interactive.handle_text_response to return None (not an interactive response)
         # Mock _generate_response to capture the call and send a test response
@@ -191,8 +188,6 @@ class TestThreadingBehavior:
 
         # Initialize response tracking
         bot.response_tracker.has_responded.return_value = False  # type: ignore[attr-defined]
-        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)  # type: ignore[method-assign]
-        bot.thread_invite_manager.update_agent_activity = AsyncMock()  # type: ignore[method-assign]
 
         # Mock interactive.handle_text_response and make AI fast
         with (
@@ -254,7 +249,6 @@ class TestThreadingBehavior:
 
         # Initialize components that depend on client
         bot.response_tracker = MagicMock()
-        bot.thread_invite_manager = MagicMock()
 
         # Mock the agent to return a response
         mock_agent = MagicMock()
@@ -349,7 +343,6 @@ class TestThreadingBehavior:
 
         # Initialize components that depend on client
         bot.response_tracker = MagicMock()
-        bot.thread_invite_manager = MagicMock()
 
         # Mock the agent to return a response
         mock_agent = MagicMock()
@@ -453,8 +446,6 @@ class TestThreadingBehavior:
 
         # Initialize response tracking
         bot.response_tracker.has_responded.return_value = False  # type: ignore[attr-defined]
-        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)  # type: ignore[method-assign]
-        bot.thread_invite_manager.update_agent_activity = AsyncMock()  # type: ignore[method-assign]
 
         # Mock interactive.handle_text_response and generate_response
         with (
