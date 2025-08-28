@@ -393,10 +393,10 @@ class AgentBot:
 
         # Quick check: if we're in a DM room or configured for this room, we process messages
         _is_dm_room = await is_dm_room(self.client, room.room_id)
-        _is_configured = room.room_id in self.rooms
+        is_configured = room.room_id in self.rooms
 
         # If not DM and not configured, we need to check mentions before doing expensive operations
-        _needs_mention_check = not _is_dm_room and not _is_configured
+        needs_mention_check = not _is_dm_room and not is_configured
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
@@ -411,7 +411,7 @@ class AgentBot:
         context = await self._extract_message_context(room, event)
 
         # Now check if we should skip based on room access
-        if _needs_mention_check:
+        if needs_mention_check:
             # Not in DM and not configured - only process if mentioned AND in the room
             if not context.am_i_mentioned:
                 # Not mentioned, definitely skip
