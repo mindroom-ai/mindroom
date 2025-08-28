@@ -11,6 +11,7 @@ from typing import Any
 import markdown
 import nio
 
+from mindroom.constants import ENCRYPTION_KEYS_DIR
 from mindroom.logging_config import get_logger
 
 from .event_info import EventInfo
@@ -56,7 +57,9 @@ def create_matrix_client(
     # Default store path for encryption support
     if store_path is None and user_id:
         safe_user_id = user_id.replace(":", "_").replace("@", "")
-        store_path = f".nio_store/{safe_user_id}"
+        store_path = str(ENCRYPTION_KEYS_DIR / safe_user_id)
+        # Ensure the directory exists
+        Path(store_path).mkdir(parents=True, exist_ok=True)
 
     client = nio.AsyncClient(homeserver, user_id, store_path=store_path, ssl=ssl_context)
 

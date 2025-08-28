@@ -27,6 +27,7 @@ SESSIONS_DIR = STORAGE_PATH_OBJ / "sessions"
 TRACKING_DIR = STORAGE_PATH_OBJ / "tracking"
 MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
 CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
+ENCRYPTION_KEYS_DIR = STORAGE_PATH_OBJ / "encryption_keys"
 
 # Other constants
 VOICE_PREFIX = "🎤 "

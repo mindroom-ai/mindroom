@@ -194,6 +194,9 @@ logs/
 # Matrix state files (contain sensitive data)
 matrix_state.yaml
 
+# Matrix encryption keys (contain sensitive data)
+.nio_store/
+
 # Vite cache
 frontend/.vite/
 # Test and setup files
