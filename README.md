@@ -146,7 +146,7 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 ## Quick Start
 
 ### Prerequisites
-- Python 3.11+
+- Python 3.12+
 - [uv](https://github.com/astral-sh/uv) for Python package management
 - Node.js 20+ and [pnpm](https://pnpm.io/) (optional, for web UI)
 
