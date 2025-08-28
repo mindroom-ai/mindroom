@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 import mindroom.credentials
-from mindroom.constants import STORAGE_PATH
+from mindroom.constants import CREDENTIALS_DIR
 from mindroom.credentials import CredentialsManager, get_credentials_manager
 
 
@@ -30,8 +30,7 @@ class TestCredentialsManager:
     def test_initialization_default_path(self) -> None:
         """Test that default path is created correctly."""
         manager = CredentialsManager()
-        expected_path = Path(STORAGE_PATH) / "credentials"
-        assert manager.base_path == expected_path
+        assert manager.base_path == CREDENTIALS_DIR
         assert manager.base_path.exists()
 
     def test_initialization_custom_path(self, temp_credentials_dir: Path) -> None:
@@ -221,5 +220,4 @@ class TestGlobalCredentialsManager:
     def test_global_manager_default_path(self) -> None:
         """Test that global manager uses the default path."""
         manager = get_credentials_manager()
-        expected_path = Path(STORAGE_PATH) / "credentials"
-        assert manager.base_path == expected_path
+        assert manager.base_path == CREDENTIALS_DIR

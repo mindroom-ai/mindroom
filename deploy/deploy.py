@@ -484,12 +484,9 @@ def _create_instance_directories(instance: Instance) -> None:
     base_dirs = [
         "config",
         "mindroom_data",
-        "mindroom_data/state",
-        "mindroom_data/state/matrix",
-        "mindroom_data/state/agents",
-        "mindroom_data/state/agents/sessions",
-        "mindroom_data/state/agents/tracking",
-        "mindroom_data/state/memory",  # For mem0/chroma vector DB
+        "mindroom_data/sessions",
+        "mindroom_data/tracking",
+        "mindroom_data/memory",  # For mem0/chroma vector DB
         "mindroom_data/credentials",
         "logs",
     ]

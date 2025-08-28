@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .constants import STORAGE_PATH
+from .constants import CREDENTIALS_DIR
 
 
 class CredentialsManager:
@@ -23,7 +23,7 @@ class CredentialsManager:
 
         """
         if base_path is None:
-            self.base_path = Path(STORAGE_PATH) / "credentials"
+            self.base_path = CREDENTIALS_DIR
         else:
             self.base_path = Path(base_path)
 

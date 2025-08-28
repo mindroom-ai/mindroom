@@ -16,11 +16,13 @@ DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 
 STORAGE_PATH = os.getenv("STORAGE_PATH", "mindroom_data")
 STORAGE_PATH_OBJ = Path(STORAGE_PATH)
-STATE_DIR = STORAGE_PATH_OBJ / "state"
-MATRIX_STATE_DIR = STATE_DIR / "matrix"
 
-# Specific files
-MATRIX_STATE_FILE = MATRIX_STATE_DIR / "matrix_state.yaml"
+# Specific files and directories
+MATRIX_STATE_FILE = STORAGE_PATH_OBJ / "matrix_state.yaml"
+SESSIONS_DIR = STORAGE_PATH_OBJ / "sessions"
+TRACKING_DIR = STORAGE_PATH_OBJ / "tracking"
+MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
+CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
 
 # Other constants
 VOICE_PREFIX = "🎤 "
