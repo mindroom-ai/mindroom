@@ -509,50 +509,57 @@ class TestCommandHandling:
 
     @pytest.mark.asyncio
     async def test_router_error_without_mentions_ignored_by_other_agents(self) -> None:
-        """Test that bot.py filters out agent messages without mentions before calling should_agent_respond.
+        """Test the exact scenario where RouterAgent sends an error without mentions.
 
-        In practice, should_agent_respond is never called with router errors in thread_history
-        because bot.py filters them out first. This test verifies the actual behavior.
+        With the simplified logic:
+        - Router messages are excluded from agents_in_thread
+        - Single agent will take ownership after router error
+        - Multiple agents will not respond (wait for routing)
         """
-        # Test the realistic scenario: thread history WITHOUT the router error
-        # (because bot.py would have filtered it out)
+        # Create thread history with user command and router error
         thread_history = [
             {
                 "event_id": "$user_msg",
                 "sender": "@user:localhost",
                 "content": {"msgtype": "m.text", "body": "!schedule remind me in 1 min", "m.mentions": {}},
             },
-            # Router error would NOT be in thread_history when should_agent_respond is called
-            # because bot.py returns early for agent messages without mentions
+            {
+                "event_id": "$router_error",
+                "sender": "@mindroom_router:localhost",
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "❌ Unable to parse the schedule request\n\n💡 Try something like 'in 5 minutes Check the deployment'",
+                    "m.mentions": {},  # No mentions!
+                },
+            },
         ]
 
-        # Finance agent with no router error in history, multiple agents available
+        # With simplified logic: Single agent (finance) takes ownership when router is only other participant
         should_respond = should_agent_respond(
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
-            room=create_mock_room("!test:localhost", ["finance", "calculator", "router"]),  # Multiple non-router agents
+            room=create_mock_room("!test:localhost", ["finance", "router"]),
             is_dm_room=False,
-            thread_history=thread_history,
+            thread_history=thread_history,  # Full history including router's error
             config=self.config,
         )
 
-        # Should not respond - multiple agents available, let router decide
-        assert not should_respond, "Finance agent should not respond when multiple agents available"
+        # Finance is the only non-router agent, so it takes ownership
+        assert should_respond, "Finance agent SHOULD respond when it's the only non-router agent"
 
-        # Test with finance as only agent (router excluded from available_agents)
+        # Test with multiple agents - nobody responds
         should_respond = should_agent_respond(
             agent_name="finance",
             am_i_mentioned=False,
             is_thread=True,
-            room=create_mock_room("!test:localhost", ["finance"]),  # Only finance, no router
+            room=create_mock_room("!test:localhost", ["finance", "calculator", "router"]),
             is_dm_room=False,
-            thread_history=thread_history,
+            thread_history=thread_history,  # Include router's error in history
             config=self.config,
         )
 
-        # Should respond - only agent available
-        assert should_respond, "Finance agent should respond when it's the only agent available"
+        assert not should_respond, "Finance agent should NOT respond when multiple agents available"
 
     @pytest.mark.asyncio
     async def test_router_error_prevents_team_formation(self) -> None:
