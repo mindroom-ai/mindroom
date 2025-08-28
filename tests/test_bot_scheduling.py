@@ -12,6 +12,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
 
@@ -533,6 +534,7 @@ class TestCommandHandling:
         # So we test the scenario with the full thread history
         should_respond = should_agent_respond(
             agent_name="finance",
+            agent_matrix_id=MatrixID.parse("@mindroom_finance:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!test:localhost", ["finance", "router"]),
@@ -548,6 +550,7 @@ class TestCommandHandling:
         # The bot.py logic prevents this case from ever reaching should_agent_respond
         should_respond = should_agent_respond(
             agent_name="finance",
+            agent_matrix_id=MatrixID.parse("@mindroom_finance:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!test:localhost", ["finance", "router"]),
