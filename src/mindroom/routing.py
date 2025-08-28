@@ -25,19 +25,27 @@ class AgentSuggestion(BaseModel):
     reasoning: str = Field(description="Brief explanation of why this agent was chosen")
 
 
-async def suggest_agent_for_message(
+async def suggest_agent_for_message(  # noqa: C901
     message: str,
-    available_agents: list[str],
+    available_agents: list[MatrixID],
     config: Config,
     thread_context: list[dict[str, Any]] | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message."""
     try:
-        # Use all available agents
-        all_agents = available_agents
+        # Convert MatrixID objects to agent names
+        # Extract the actual agent name from the username (remove 'mindroom_' prefix)
+        agent_names = []
+        for mid in available_agents:
+            # Try to get the configured agent name first
+            name = mid.agent_name(config)
+            if name is None:
+                # If not configured, extract from username
+                name = mid.username.removeprefix("mindroom_")
+            agent_names.append(name)
         # Build agent descriptions
         agent_descriptions = []
-        for agent_name in all_agents:
+        for agent_name in agent_names:
             description = describe_agent(agent_name, config)
             agent_descriptions.append(f"{agent_name}:\n  {description}")
 
@@ -92,8 +100,8 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             return None
 
         # The AI should only suggest agents from the available list
-        if suggestion.agent_name not in all_agents:
-            logger.warning("AI suggested invalid agent", suggested=suggestion.agent_name, available=all_agents)
+        if suggestion.agent_name not in agent_names:
+            logger.warning("AI suggested invalid agent", suggested=suggestion.agent_name, available=agent_names)
             return None
 
         logger.info("Routing decision", agent=suggestion.agent_name, reason=suggestion.reasoning)

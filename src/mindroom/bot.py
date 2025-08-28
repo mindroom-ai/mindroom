@@ -927,11 +927,9 @@ class AgentBot:
         self.logger.info("Handling AI routing", event_id=event.event_id)
 
         event_info = EventInfo.from_event(event.source)
-        # Convert MatrixIDs to agent names for suggest_agent_for_message
-        available_agent_names = [mid.agent_name(self.config) or "" for mid in available_agents]
         suggested_agent = await suggest_agent_for_message(
             event.body,
-            available_agent_names,
+            available_agents,
             self.config,
             thread_history,
         )
