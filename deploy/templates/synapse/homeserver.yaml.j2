@@ -4,6 +4,9 @@
 server_name: "{{ matrix_server_name }}"
 public_baseurl: https://{{ matrix_server_name }}/
 
+# Security key for macaroons - auto-generated per instance
+macaroon_secret_key: "{{ macaroon_secret_key }}"
+
 # HTTP listener
 listeners:
   - port: 8008
@@ -161,9 +164,10 @@ password_config:
 push:
   enabled: false
 
-# Email - disabled for local development
-email:
-  enable_notifs: false
+# Email - completely disabled for local development
+# Commenting out the entire email block to avoid configuration errors
+# email:
+#   enable_notifs: false
 
 # Room complexity limits - disabled
 limit_remote_rooms:
