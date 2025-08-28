@@ -644,10 +644,15 @@ class AgentBot:
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(room, reply_to_event_id, response.formatted_text, thread_id)
         if event_id and response.option_map and response.options_list:
+            # For interactive questions, use the same thread root that _send_response uses:
+            # - If already in a thread, use that thread_id
+            # - If not in a thread, use reply_to_event_id (the user's message) as thread root
+            # This ensures consistency with how the bot creates threads
+            thread_root_for_registration = thread_id if thread_id else reply_to_event_id
             interactive.register_interactive_question(
                 event_id,
                 room.room_id,
-                thread_id,
+                thread_root_for_registration,
                 response.option_map,
                 self.agent_name,
             )
@@ -718,10 +723,15 @@ class AgentBot:
         if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
             response = interactive.parse_and_format_interactive(streaming.accumulated_text, extract_mapping=True)
             if response.option_map and response.options_list:
+                # For interactive questions, use the same thread root that _send_response uses:
+                # - If already in a thread, use that thread_id
+                # - If not in a thread, use reply_to_event_id (the user's message) as thread root
+                # This ensures consistency with how the bot creates threads
+                thread_root_for_registration = thread_id if thread_id else reply_to_event_id
                 interactive.register_interactive_question(
                     streaming.event_id,
                     room.room_id,
-                    thread_id,
+                    thread_root_for_registration,
                     response.option_map,
                     self.agent_name,
                 )
