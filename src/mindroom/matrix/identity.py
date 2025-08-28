@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar
 
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import MATRIX_SERVER_NAME, ROUTER_AGENT_NAME
 
 if TYPE_CHECKING:
     from mindroom.config import Config
@@ -134,8 +133,8 @@ def extract_server_name_from_homeserver(homeserver: str) -> str:
     from the actual Matrix server name.
     """
     # Check for explicit server name override (for federation/docker setups)
-    if server_name := os.getenv("MATRIX_SERVER_NAME"):
-        return server_name
+    if MATRIX_SERVER_NAME:
+        return MATRIX_SERVER_NAME
 
     # Otherwise extract from homeserver URL
     # Remove protocol

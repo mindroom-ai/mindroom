@@ -30,10 +30,11 @@ CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
 
 # Other constants
 VOICE_PREFIX = "🎤 "
-ENABLE_STREAMING = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
-ENABLE_AI_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
+ENABLE_STREAMING = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() != "false"
+ENABLE_AI_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() != "false"
 
 # Matrix
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
 # (for federation setups where hostname != server_name)
 MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)
+MATRIX_SSL_VERIFY = os.getenv("MATRIX_SSL_VERIFY", "true").lower() != "false"
