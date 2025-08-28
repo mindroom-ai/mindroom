@@ -134,7 +134,7 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
     return mentioned_agents
 
 
-def should_agent_respond(  # noqa: PLR0911
+def should_agent_respond(  # noqa: PLR0911, C901
     agent_name: str,
     am_i_mentioned: bool,
     is_thread: bool,
@@ -143,7 +143,6 @@ def should_agent_respond(  # noqa: PLR0911
     configured_rooms: list[str],
     thread_history: list[dict],
     config: Config,
-    is_invited_to_thread: bool = False,
     mentioned_agents: list[str] | None = None,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
@@ -159,20 +158,17 @@ def should_agent_respond(  # noqa: PLR0911
         configured_rooms: Rooms this agent is configured for
         thread_history: History of messages in the thread
         config: Application configuration
-        is_invited_to_thread: Whether agent is invited to this thread
         mentioned_agents: List of all agents mentioned in the message
 
     """
-    # Check if agent has access (either native or invited to thread)
-    has_room_access = room.room_id in configured_rooms or is_dm_room
-    has_thread_access = is_thread and is_invited_to_thread
-    has_access = has_room_access or has_thread_access
+    # Check if agent has access
+    has_access = room.room_id in configured_rooms or is_dm_room
 
     # For room messages (not in threads)
     if not is_thread:
         # In regular rooms, only respond if mentioned
         if not is_dm_room:
-            return am_i_mentioned and has_room_access
+            return am_i_mentioned and has_access
 
         # Special case: DM room without thread started yet
         # If mentioned, respond
@@ -194,7 +190,7 @@ def should_agent_respond(  # noqa: PLR0911
     if mentioned_agents and not am_i_mentioned:
         return False
 
-    # Thread logic - invited agents behave like native agents
+    # Thread logic - agents respond if mentioned and have access
     if am_i_mentioned and has_access:
         return True
 
@@ -206,10 +202,26 @@ def should_agent_respond(  # noqa: PLR0911
         # Team will handle the response
         return False
 
-    # Special case: If no agents have spoken yet but this agent is invited to the thread,
-    # they should take ownership of the conversation
-    if len(agents_in_thread) == 0 and is_invited_to_thread:
-        return True
+    # Special case: Check if ONLY the router has participated (router is excluded from agents_in_thread)
+    # If the router has sent messages but no other agents, agents should not take ownership
+    if len(agents_in_thread) == 0 and has_access:
+        # Check if router has actually spoken in the thread
+        for msg in thread_history:
+            sender = msg.get("sender", "")
+            sender_agent = extract_agent_name(sender, config)
+            if sender_agent == ROUTER_AGENT_NAME:
+                # Router has spoken, don't take ownership
+                return False
+
+        # No agents (including router) have spoken
+        # Check if multiple agents could respond - if so, let router decide
+        available_agents = get_available_agents_in_room(room, config)
+        if len(available_agents) > 1:
+            # Multiple agents available - let router decide who responds
+            return False
+
+        # Single agent with access - take ownership
+        return agent_name in available_agents
 
     # Single agent continues conversation (only if has access)
     return [agent_name] == agents_in_thread and has_access

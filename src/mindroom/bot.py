@@ -20,8 +20,6 @@ from .commands import (
     CommandType,
     command_parser,
     get_command_help,
-    handle_invite_command,
-    handle_list_invites_command,
     handle_widget_command,
 )
 from .config import Config
@@ -65,7 +63,6 @@ from .scheduling import (
 )
 from .streaming import IN_PROGRESS_MARKER, StreamingResponse
 from .teams import TeamMode, create_team_response, get_team_model, handle_team_formation, should_form_team
-from .thread_invites import ThreadInviteManager
 from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
@@ -85,7 +82,6 @@ logger = get_logger(__name__)
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
-CLEANUP_INTERVAL_SECONDS = 3600
 
 
 def _should_skip_mentions(event_source: dict) -> bool:
@@ -161,7 +157,6 @@ class MessageContext:
     is_thread: bool
     thread_id: str | None
     thread_history: list[dict]
-    is_invited_to_thread: bool
     mentioned_agents: list[str]
 
 
@@ -177,8 +172,6 @@ class AgentBot:
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
-    thread_invite_manager: ThreadInviteManager = field(init=False)
-    invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
 
@@ -218,13 +211,8 @@ class AgentBot:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
-        """Leave any rooms this agent is no longer configured for.
-
-        Note: Agents will stay in rooms where they have thread invitations,
-        even if not configured for the room.
-        """
+        """Leave any rooms this agent is no longer configured for."""
         assert self.client is not None
-        assert self.thread_invite_manager is not None
 
         # Get all rooms we're currently in
         joined_rooms = await get_joined_rooms(self.client)
@@ -234,13 +222,8 @@ class AgentBot:
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.rooms)
 
-        # Leave rooms we're no longer configured for AND have no thread invitations
+        # Leave rooms we're no longer configured for
         for room_id in current_rooms - configured_rooms:
-            agent_threads = await self.thread_invite_manager.get_agent_threads(room_id, self.agent_name)
-            if agent_threads:
-                self.logger.info(f"Staying in room {room_id} due to {len(agent_threads)} thread invitation(s)")
-                continue
-
             if await is_dm_room(self.client, room_id):
                 self.logger.debug(f"Preserving DM room {room_id} during cleanup")
                 continue
@@ -306,9 +289,8 @@ class AgentBot:
         # Set avatar if available
         await self._set_avatar_if_available()
 
-        # Initialize response tracker and thread invite manager
+        # Initialize response tracker
         self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
-        self.thread_invite_manager = ThreadInviteManager(self.client)
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
@@ -325,11 +307,9 @@ class AgentBot:
         # Router bot has additional responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
             try:
-                await cleanup_all_orphaned_bots(self.client, self.config, self.thread_invite_manager)
+                await cleanup_all_orphaned_bots(self.client, self.config)
             except Exception as e:
                 self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
-
-            asyncio.create_task(self._periodic_cleanup())  # noqa: RUF006
 
         # Note: Room joining is deferred until after invitations are handled
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
@@ -418,12 +398,6 @@ class AgentBot:
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
-        assert self.config is not None
-        sender_agent_name = extract_agent_name(event.sender, self.config)
-        if sender_agent_name:
-            assert self.thread_invite_manager is not None
-            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
-
         # Try to parse as command
         command = command_parser.parse(event.body)
         if command:  # ONLY router handles the command
@@ -433,6 +407,10 @@ class AgentBot:
             return
 
         context = await self._extract_message_context(room, event)
+
+        # Check if the sender is an agent
+        assert self.config is not None
+        sender_agent_name = extract_agent_name(event.sender, self.config)
 
         # Ignore messages from other agents unless we are mentioned,
         # except when the router is posting a voice transcription (VOICE_PREFIX),
@@ -492,7 +470,6 @@ class AgentBot:
             configured_rooms=self.rooms,
             thread_history=context.thread_history,
             config=self.config,
-            is_invited_to_thread=context.is_invited_to_thread,
             mentioned_agents=context.mentioned_agents,
         )
 
@@ -514,14 +491,13 @@ class AgentBot:
         self.response_tracker.mark_responded(event.event_id)
 
     async def _is_room_message_eligible(self, room: nio.MatrixRoom, is_dm: bool) -> bool:
-        """Return True if this agent should process messages in the given room."""
+        """Return True if this agent should process messages in the given room.
+
+        Thread invite system was removed; eligibility is DM or configured room.
+        """
         if is_dm:
             return True
-        if room.room_id in self.rooms:
-            return True
-        assert self.thread_invite_manager is not None
-        agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
-        return bool(agent_threads)
+        return room.room_id in self.rooms
 
     def _is_from_other_agent_without_mention(
         self,
@@ -624,7 +600,6 @@ class AgentBot:
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
-        assert self.thread_invite_manager is not None
 
         # Check if mentions should be ignored for this message
         skip_mentions = _should_skip_mentions(event.source)
@@ -642,21 +617,14 @@ class AgentBot:
         event_info = EventInfo.from_event(event.source)
 
         thread_history = []
-        is_invited_to_thread = False
         if event_info.thread_id:
             thread_history = await fetch_thread_history(self.client, room.room_id, event_info.thread_id)
-            is_invited_to_thread = await self.thread_invite_manager.is_agent_invited_to_thread(
-                event_info.thread_id,
-                room.room_id,
-                self.agent_name,
-            )
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
             is_thread=event_info.is_thread,
             thread_id=event_info.thread_id,
             thread_history=thread_history,
-            is_invited_to_thread=is_invited_to_thread,
             mentioned_agents=mentioned_agents,
         )
 
@@ -975,9 +943,6 @@ class AgentBot:
             available_agents,
             self.config,
             thread_history,
-            event_info.thread_id,
-            room.room_id,
-            self.thread_invite_manager,
         )
         if not suggested_agent:
             return
@@ -1019,7 +984,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912
+    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
         self.logger.info("Handling command", command_type=command.type.value)
 
         event_info = EventInfo.from_event(event.source)
@@ -1039,42 +1004,7 @@ class AgentBot:
 
         response_text = ""
 
-        if command.type == CommandType.INVITE:
-            # Handle invite command
-            agent_name = command.args["agent_name"]
-            agent_domain = self.matrix_id.domain
-
-            assert self.client is not None
-            assert self.thread_invite_manager is not None
-            response_text = await handle_invite_command(
-                room_id=room.room_id,
-                thread_id=effective_thread_id,
-                agent_name=agent_name,
-                sender=event.sender,
-                agent_domain=agent_domain,
-                client=self.client,
-                thread_invite_manager=self.thread_invite_manager,
-                config=self.config,
-            )
-
-        elif command.type == CommandType.UNINVITE:
-            agent_name = command.args["agent_name"]
-            assert self.thread_invite_manager is not None
-            removed = await self.thread_invite_manager.remove_invite(effective_thread_id, room.room_id, agent_name)
-            if removed:
-                response_text = f"✅ Removed @{agent_name} from this thread."
-            else:
-                response_text = f"❌ @{agent_name} was not invited to this thread."
-
-        elif command.type == CommandType.LIST_INVITES:
-            assert self.thread_invite_manager is not None
-            response_text = await handle_list_invites_command(
-                room.room_id,
-                effective_thread_id,
-                self.thread_invite_manager,
-            )
-
-        elif command.type == CommandType.HELP:
+        if command.type == CommandType.HELP:
             topic = command.args.get("topic")
             response_text = get_command_help(topic)
 
@@ -1138,39 +1068,6 @@ class AgentBot:
                 skip_mentions=True,
             )
             self.response_tracker.mark_responded(event.event_id)
-
-    async def _periodic_cleanup(self) -> None:
-        """Periodically clean up expired thread invitations."""
-        while self.running:
-            try:
-                # Wait for 1 hour between cleanups
-                await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
-
-                # Get all rooms the bot is in
-                assert self.client is not None
-                joined_rooms = await get_joined_rooms(self.client)
-                if joined_rooms is None:
-                    continue
-
-                total_removed = 0
-                for room_id in joined_rooms:
-                    try:
-                        assert self.thread_invite_manager is not None
-                        removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
-                            room_id,
-                            timeout_hours=self.invitation_timeout_hours,
-                        )
-                        total_removed += removed_count
-                    except Exception as e:
-                        self.logger.exception("Failed to cleanup room", room_id=room_id, error=str(e))
-
-                if total_removed > 0:
-                    self.logger.info(f"Periodic cleanup removed {total_removed} expired agents")
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.exception("Error in periodic cleanup", error=str(e))
 
     def _should_skip_duplicate_response(self, event: nio.RoomMessageText) -> bool:
         """Check if we should skip responding to avoid duplicates.

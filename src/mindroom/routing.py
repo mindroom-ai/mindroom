@@ -14,7 +14,6 @@ from .matrix.identity import MatrixID
 
 if TYPE_CHECKING:
     from .config import Config
-    from .thread_invites import ThreadInviteManager
 
 logger = get_logger(__name__)
 
@@ -31,19 +30,11 @@ async def suggest_agent_for_message(
     available_agents: list[str],
     config: Config,
     thread_context: list[dict[str, Any]] | None = None,
-    thread_id: str | None = None,
-    room_id: str | None = None,
-    thread_invite_manager: ThreadInviteManager | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message."""
     try:
-        # If we have a thread_id and room_id, include invited agents
-        if thread_id and room_id and thread_invite_manager:
-            invited_agents = await thread_invite_manager.get_thread_agents(thread_id, room_id)
-            # Combine available and invited agents (deduplicated)
-            all_agents = list(set(available_agents + invited_agents))
-        else:
-            all_agents = available_agents
+        # Use all available agents
+        all_agents = available_agents
         # Build agent descriptions
         agent_descriptions = []
         for agent_name in all_agents:

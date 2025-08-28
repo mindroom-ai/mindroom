@@ -376,16 +376,7 @@ class TestIntegrationWithScheduling:
             avatar_url=None,
         )
 
-        with (
-            patch("mindroom.scheduling.run_cron_task", new=AsyncMock()),
-            patch(
-                "mindroom.scheduling.ThreadInviteManager",
-            ) as mock_invite_manager,
-        ):
-            # Mock that research is invited to the thread
-            mock_manager = mock_invite_manager.return_value
-            mock_manager.get_thread_agents = AsyncMock(return_value=["research"])
-
+        with patch("mindroom.scheduling.run_cron_task", new=AsyncMock()):
             task_id, message = await schedule_task(
                 client=client,
                 room_id="!room:server",
