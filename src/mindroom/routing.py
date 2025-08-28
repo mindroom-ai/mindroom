@@ -27,17 +27,19 @@ class AgentSuggestion(BaseModel):
 
 async def suggest_agent_for_message(
     message: str,
-    available_agents: list[str],
+    available_agents: list[MatrixID],
     config: Config,
     thread_context: list[dict[str, Any]] | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message."""
     try:
-        # Use all available agents
-        all_agents = available_agents
+        # The available_agents list already contains only configured agents
+        agent_names = [mid.agent_name(config) for mid in available_agents]
+
         # Build agent descriptions
         agent_descriptions = []
-        for agent_name in all_agents:
+        for agent_name in agent_names:
+            assert agent_name is not None
             description = describe_agent(agent_name, config)
             agent_descriptions.append(f"{agent_name}:\n  {description}")
 
@@ -92,8 +94,8 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             return None
 
         # The AI should only suggest agents from the available list
-        if suggestion.agent_name not in all_agents:
-            logger.warning("AI suggested invalid agent", suggested=suggestion.agent_name, available=all_agents)
+        if suggestion.agent_name not in agent_names:
+            logger.warning("AI suggested invalid agent", suggested=suggestion.agent_name, available=agent_names)
             return None
 
         logger.info("Routing decision", agent=suggestion.agent_name, reason=suggestion.reasoning)

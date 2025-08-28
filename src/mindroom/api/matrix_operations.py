@@ -6,8 +6,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from mindroom.constants import MATRIX_HOMESERVER
 from mindroom.logging_config import get_logger
-from mindroom.matrix import MATRIX_HOMESERVER
 from mindroom.matrix.client import get_joined_rooms, get_room_name, leave_room
 from mindroom.matrix.rooms import resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user

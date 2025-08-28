@@ -18,13 +18,12 @@ from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
 from .logging_config import get_logger
-from .matrix import MATRIX_HOMESERVER
 from .matrix.client import (
     fetch_thread_history,
     get_latest_thread_event_id_if_needed,
     send_message,
 )
-from .matrix.identity import extract_agent_name, extract_server_name_from_homeserver
+from .matrix.identity import MatrixID
 from .matrix.mentions import create_mention_content_from_text, parse_mentions_in_text
 from .matrix.message_builder import build_message_content
 from .thread_utils import get_agents_in_thread, get_available_agents_in_room
@@ -48,8 +47,8 @@ class _AgentValidationResult(NamedTuple):
     """Result of agent mention validation."""
 
     all_valid: bool
-    valid_agents: list[str]
-    invalid_agents: list[str]
+    valid_agents: list[MatrixID]
+    invalid_agents: list[MatrixID]
 
 
 # ---- Workflow scheduling primitives ----
@@ -100,7 +99,7 @@ class WorkflowParseError(BaseModel):
 async def parse_workflow_schedule(
     request: str,
     config: Config,
-    available_agents: list[str],
+    available_agents: list[MatrixID],
     current_time: datetime | None = None,
 ) -> ScheduledWorkflow | WorkflowParseError:
     """Parse natural language into structured workflow using AI."""
@@ -194,7 +193,6 @@ async def execute_scheduled_workflow(
         automated_message = (
             f"⏰ [Automated Task]\n{workflow.message}\n\n_Note: Automated task - no follow-up expected._"
         )
-        server_name = extract_server_name_from_homeserver(client.homeserver)
         latest_thread_event_id = await get_latest_thread_event_id_if_needed(
             client,
             workflow.room_id,
@@ -203,7 +201,7 @@ async def execute_scheduled_workflow(
         content = create_mention_content_from_text(
             config,
             automated_message,
-            sender_domain=server_name,
+            sender_domain=config.domain,
             thread_event_id=workflow.thread_id,
             latest_thread_event_id=latest_thread_event_id,
         )
@@ -320,12 +318,8 @@ async def _validate_agent_mentions(
         _AgentValidationResult with validation status and agent lists
 
     """
-    # Use the existing parse_mentions_in_text to extract agent mentions
-    # Get the proper server domain from the homeserver URL or MATRIX_SERVER_NAME env var
-    server_domain = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
-
     # Parse mentions - this handles all the agent name resolution properly
-    _, mentioned_user_ids, _ = parse_mentions_in_text(message, server_domain, config)
+    _, mentioned_user_ids, _ = parse_mentions_in_text(message, config.domain, config)
 
     if not mentioned_user_ids:
         # No agents mentioned, validation passes
@@ -333,38 +327,38 @@ async def _validate_agent_mentions(
 
     # Extract agent names from the mentioned user IDs
 
-    mentioned_agents = []
+    mentioned_agents: list[MatrixID] = []
     for user_id in mentioned_user_ids:
-        agent_name = extract_agent_name(user_id, config)
-        if agent_name and agent_name not in mentioned_agents:
-            mentioned_agents.append(agent_name)
+        mid = MatrixID.parse(user_id)
+        agent_name = mid.agent_name(config)
+        if agent_name and mid not in mentioned_agents:
+            mentioned_agents.append(mid)
 
     if not mentioned_agents:
         # No valid agents mentioned
         return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
 
-    valid_agents = []
-    invalid_agents = []
+    valid_agents: list[MatrixID] = []
+    invalid_agents: list[MatrixID] = []
 
     if thread_id:
         # For threads, check if agents are in the room
         room_agents = get_available_agents_in_room(room, config)
 
         # Agents can now respond in any room they're in
-        for agent_name in mentioned_agents:
-            if agent_name in room_agents:
-                valid_agents.append(agent_name)
+        for mid in mentioned_agents:
+            if mid in room_agents:
+                valid_agents.append(mid)
             else:
-                invalid_agents.append(agent_name)
+                invalid_agents.append(mid)
     else:
         # For room messages, check if agents are configured for the room
         room_agents = get_available_agents_in_room(room, config)
-
-        for agent_name in mentioned_agents:
-            if agent_name in room_agents:
-                valid_agents.append(agent_name)
+        for mid in mentioned_agents:
+            if mid in room_agents:
+                valid_agents.append(mid)
             else:
-                invalid_agents.append(agent_name)
+                invalid_agents.append(mid)
 
     all_valid = len(invalid_agents) == 0
     return _AgentValidationResult(
@@ -406,7 +400,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     full_text: str,
     config: Config,
     room: nio.MatrixRoom,
-    mentioned_agents: list[str] | None = None,
+    mentioned_agents: list[MatrixID] | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -415,7 +409,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
     """
     # Get agents that are available in the thread
-    available_agents = []
+    available_agents: list[MatrixID] = []
     if thread_id:
         # Get agents already participating in the thread
         thread_history = await fetch_thread_history(client, room_id, thread_id)
@@ -423,9 +417,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
     # Add any agents mentioned in the command itself
     if mentioned_agents:
-        for agent_name in mentioned_agents:
-            if agent_name not in available_agents:
-                available_agents.append(agent_name)
+        for mid in mentioned_agents:
+            if mid not in available_agents:
+                available_agents.append(mid)
 
     # If no agents found in thread or mentions, fall back to agents in the room
     if not available_agents:
@@ -448,16 +442,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
 
     # Validate that all mentioned agents are accessible
-    # Room must be provided by the caller
-    if room is None:
-        return (None, "❌ Internal error: Room object not provided")
-
-    validation_result = await _validate_agent_mentions(
-        workflow_result.message,
-        room,
-        thread_id,
-        config,
-    )
+    validation_result = await _validate_agent_mentions(workflow_result.message, room, thread_id, config)
 
     if not validation_result.all_valid:
         error_msg = "❌ Failed to schedule: The following agents are not available in this "
@@ -465,16 +450,17 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
             error_msg += "thread"
         else:
             error_msg += "room"
-        error_msg += f": {', '.join(f'@{agent}' for agent in validation_result.invalid_agents)}"
+        error_msg += f": {', '.join(agent.full_id for agent in validation_result.invalid_agents)}"
 
         # Provide helpful suggestions
-        suggestions = []
+        suggestions: list[str] = []
         for agent in validation_result.invalid_agents:
-            if agent in config.agents:
+            agent_name = agent.agent_name(config)
+            if agent_name:
                 # Agent exists but not available in this room/thread
-                suggestions.append(f"@{agent} is not available in this {'thread' if thread_id else 'room'}")
+                suggestions.append(f"{agent.full_id} is not available in this {'thread' if thread_id else 'room'}")
             else:
-                suggestions.append(f"@{agent} does not exist")
+                suggestions.append(f"{agent.full_id} does not exist")
 
         if suggestions:
             error_msg += "\n\n💡 " + "\n💡 ".join(suggestions)

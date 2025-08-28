@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .constants import ROUTER_AGENT_NAME
-from .matrix.identity import extract_agent_name
+from .matrix.identity import MatrixID, extract_agent_name
+from .matrix.rooms import resolve_room_aliases
 
 if TYPE_CHECKING:
     import nio
@@ -13,14 +14,14 @@ if TYPE_CHECKING:
     from .config import Config
 
 
-def check_agent_mentioned(event_source: dict, agent_name: str, config: Config) -> tuple[list[str], bool]:
+def check_agent_mentioned(event_source: dict, agent_id: MatrixID | None, config: Config) -> tuple[list[MatrixID], bool]:
     """Check if an agent is mentioned in a message.
 
     Returns (mentioned_agents, am_i_mentioned).
     """
     mentions = event_source.get("content", {}).get("m.mentions", {})
     mentioned_agents = get_mentioned_agents(mentions, config)
-    am_i_mentioned = agent_name in mentioned_agents
+    am_i_mentioned = agent_id in mentioned_agents
     return mentioned_agents, am_i_mentioned
 
 
@@ -30,7 +31,7 @@ def create_session_id(room_id: str, thread_id: str | None) -> str:
     return f"{room_id}:{thread_id}" if thread_id else room_id
 
 
-def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[str]:
+def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[MatrixID]:
     """Get list of unique agents that have participated in thread.
 
     Note: Router agent is excluded from the participant list as it's not
@@ -38,33 +39,82 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
 
     Preserves the order of first participation while preventing duplicates.
     """
-    agents = []
-    seen_agents = set()
+    agents: list[MatrixID] = []
+    seen_ids: set[str] = set()
+
+    for msg in thread_history:
+        sender: str = msg.get("sender", "")
+        agent_name = extract_agent_name(sender, config)
+
+        # Skip router agent and invalid senders
+        if not agent_name or agent_name == ROUTER_AGENT_NAME:
+            continue
+
+        if sender not in seen_ids:
+            try:
+                matrix_id = MatrixID.parse(sender)
+                agents.append(matrix_id)
+                seen_ids.add(sender)
+            except ValueError:
+                # Skip invalid Matrix IDs
+                pass
+
+    return agents
+
+
+def get_agent_matrix_ids_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[MatrixID]:
+    """Get list of unique agent Matrix IDs that have participated in thread.
+
+    Note: Router agent is excluded from the participant list as it's not
+    a conversation participant.
+
+    Preserves the order of first participation while preventing duplicates.
+
+    Returns:
+        List of MatrixID objects for agents who participated in the thread.
+
+    """
+    agent_ids = []
+    seen_ids = set()
 
     for msg in thread_history:
         sender = msg.get("sender", "")
         agent_name = extract_agent_name(sender, config)
-        if agent_name and agent_name != ROUTER_AGENT_NAME and agent_name not in seen_agents:
-            agents.append(agent_name)
-            seen_agents.add(agent_name)
 
-    return agents
+        # Skip router agent and invalid senders
+        if not agent_name or agent_name == ROUTER_AGENT_NAME:
+            continue
+
+        try:
+            matrix_id = MatrixID.parse(sender)
+            if matrix_id.full_id not in seen_ids:
+                agent_ids.append(matrix_id)
+                seen_ids.add(matrix_id.full_id)
+        except ValueError:
+            # Skip invalid Matrix IDs
+            pass
+
+    return agent_ids
 
 
-def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[str]:
+def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[MatrixID]:
     """Extract agent names from mentions."""
     user_ids = mentions.get("user_ids", [])
-    agents = []
+    agents: list[MatrixID] = []
 
     for user_id in user_ids:
-        agent_name = extract_agent_name(user_id, config)
-        if agent_name:
-            agents.append(agent_name)
+        mid = MatrixID.parse(user_id)
+        if mid.agent_name(config):
+            agents.append(mid)
 
     return agents
 
 
-def has_user_responded_after_message(thread_history: list[dict], target_event_id: str, user_id: str) -> bool:
+def has_user_responded_after_message(
+    thread_history: list[dict],
+    target_event_id: str,
+    user_id: MatrixID,
+) -> bool:
     """Check if a user has sent any messages after a specific message in the thread.
 
     Args:
@@ -81,25 +131,71 @@ def has_user_responded_after_message(thread_history: list[dict], target_event_id
     for msg in thread_history:
         if msg["event_id"] == target_event_id:
             found_target = True
-        elif found_target and msg["sender"] == user_id:
+        elif found_target and msg["sender"] == user_id.full_id:
             return True
     return False
 
 
-def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[str]:
-    """Get list of available agents in a room.
+def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[MatrixID]:
+    """Get list of available agent MatrixIDs in a room.
 
     Note: Router agent is excluded as it's not a regular conversation participant.
     """
-    agents = []
-    room_members = list(room.users.keys()) if room.users else []
+    agents: list[MatrixID] = []
 
-    for member_id in room_members:
-        agent_name = extract_agent_name(member_id, config)
+    for member_id in room.users:
+        mid = MatrixID.parse(member_id)
+        agent_name = mid.agent_name(config)
+        # Exclude router agent
         if agent_name and agent_name != ROUTER_AGENT_NAME:
-            agents.append(agent_name)
+            agents.append(mid)
 
-    return sorted(agents)
+    return sorted(agents, key=lambda x: x.full_id)
+
+
+def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config) -> list[MatrixID]:
+    """Get list of available agent Matrix IDs in a room.
+
+    Note: Router agent is excluded as it's not a regular conversation participant.
+
+    Returns:
+        List of MatrixID objects for agents in the room.
+
+    """
+    agent_ids = []
+
+    for member_id in room.users:
+        agent_name = extract_agent_name(member_id, config)
+        # Exclude router agent
+        if agent_name and agent_name != ROUTER_AGENT_NAME:
+            try:
+                matrix_id = MatrixID.parse(member_id)
+                agent_ids.append(matrix_id)
+            except ValueError:
+                # Skip invalid Matrix IDs
+                pass
+
+    return sorted(agent_ids, key=lambda x: x.full_id)
+
+
+def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixID]:
+    """Get list of agent MatrixIDs configured for a specific room.
+
+    This returns only agents that have the room in their configuration,
+    not just agents that happen to be present in the room.
+
+    Note: Router agent is excluded as it's not a regular conversation participant.
+    """
+    configured_agents: list[MatrixID] = []
+
+    # Check which agents should be in this room
+    for agent_name, agent_config in config.agents.items():
+        if agent_name != ROUTER_AGENT_NAME:
+            resolved_rooms = resolve_room_aliases(agent_config.rooms)
+            if room_id in resolved_rooms:
+                configured_agents.append(config.ids[agent_name])
+
+    return sorted(configured_agents, key=lambda x: x.full_id)
 
 
 def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
@@ -112,13 +208,13 @@ def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], confi
     return False
 
 
-def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[str]:
-    """Get all unique agents that have been mentioned anywhere in the thread.
+def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[MatrixID]:
+    """Get all unique agent MatrixIDs that have been mentioned anywhere in the thread.
 
     Preserves the order of first mention while preventing duplicates.
     """
     mentioned_agents = []
-    seen_agents = set()
+    seen_ids = set()
 
     for msg in thread_history:
         content = msg.get("content", {})
@@ -127,9 +223,9 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
 
         # Add agents in order, but only if not seen before
         for agent in agents:
-            if agent not in seen_agents:
+            if agent.full_id not in seen_ids:
                 mentioned_agents.append(agent)
-                seen_agents.add(agent)
+                seen_ids.add(agent.full_id)
 
     return mentioned_agents
 
@@ -143,7 +239,7 @@ def should_agent_respond(  # noqa: PLR0911, C901
     configured_rooms: list[str],
     thread_history: list[dict],
     config: Config,
-    mentioned_agents: list[str] | None = None,
+    mentioned_agents: list[MatrixID] | None = None,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
 
@@ -158,15 +254,18 @@ def should_agent_respond(  # noqa: PLR0911, C901
         configured_rooms: Rooms this agent is configured for
         thread_history: History of messages in the thread
         config: Application configuration
-        mentioned_agents: List of all agents mentioned in the message
+        mentioned_agents: List of all agent MatrixIDs mentioned in the message
 
     """
-    # Check if agent has access
-    has_access = room.room_id in configured_rooms or is_dm_room
+    agent_matrix_id = config.ids[agent_name]
+
+    has_room_access = room.room_id in configured_rooms
+    is_in_room = agent_matrix_id.full_id in room.users
+    has_access = has_room_access or is_in_room
 
     # For room messages (not in threads)
     if not is_thread:
-        # In regular rooms, only respond if mentioned
+        # In regular rooms, only respond if mentioned AND has access
         if not is_dm_room:
             return am_i_mentioned and has_access
 
@@ -183,7 +282,7 @@ def should_agent_respond(  # noqa: PLR0911, C901
         available_agents = get_available_agents_in_room(room, config)
         # Single agent in DM should respond naturally
         # Multiple agents or unable to determine - let team formation handle it
-        return len(available_agents) == 1 and agent_name in available_agents
+        return len(available_agents) == 1 and any(a.full_id == agent_matrix_id.full_id for a in available_agents)
 
     # If other agents are mentioned but not this one, don't respond
     # This handles the case where a user explicitly redirects to another agent
@@ -204,14 +303,15 @@ def should_agent_respond(  # noqa: PLR0911, C901
 
     # Special case: Check if ONLY the router has participated (router is excluded from agents_in_thread)
     # If the router has sent messages but no other agents, agents should not take ownership
+    # However, if this agent is in the room (even if not configured), it can respond
     if len(agents_in_thread) == 0 and has_access:
         # Check if router has actually spoken in the thread
         for msg in thread_history:
             sender = msg.get("sender", "")
-            sender_agent = extract_agent_name(sender, config)
-            if sender_agent == ROUTER_AGENT_NAME:
-                # Router has spoken, don't take ownership
-                return False
+            # Compare full Matrix IDs to check for router
+            if sender == config.ids[ROUTER_AGENT_NAME].full_id:
+                # Router has spoken, only respond if mentioned
+                return am_i_mentioned
 
         # No agents (including router) have spoken
         # Check if multiple agents could respond - if so, let router decide
@@ -221,7 +321,7 @@ def should_agent_respond(  # noqa: PLR0911, C901
             return False
 
         # Single agent with access - take ownership
-        return agent_name in available_agents
+        return any(a.full_id == agent_matrix_id.full_id for a in available_agents)
 
     # Single agent continues conversation (only if has access)
-    return [agent_name] == agents_in_thread and has_access
+    return len(agents_in_thread) == 1 and agents_in_thread[0].full_id == agent_matrix_id.full_id and has_access

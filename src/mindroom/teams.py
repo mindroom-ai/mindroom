@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from .bot import MultiAgentOrchestrator
     from .config import Config
+    from .matrix.identity import MatrixID
 
 
 logger = get_logger(__name__)
@@ -159,7 +160,7 @@ class ShouldFormTeamResult(NamedTuple):
     """Result of should_form_team."""
 
     should_form_team: bool
-    agents: list[str]
+    agents: list[MatrixID]
     mode: TeamMode
 
 
@@ -226,9 +227,9 @@ Return the mode and a one-sentence reason why."""
 
 
 async def should_form_team(
-    tagged_agents: list[str],
-    agents_in_thread: list[str],
-    all_mentioned_in_thread: list[str],
+    tagged_agents: list[MatrixID],
+    agents_in_thread: list[MatrixID],
+    all_mentioned_in_thread: list[MatrixID],
     room: nio.MatrixRoom,
     message: str | None = None,
     config: Config | None = None,
@@ -252,7 +253,7 @@ async def should_form_team(
 
     """
     # Determine which agents will form the team
-    team_agents: list[str] = []
+    team_agents: list[MatrixID] = []
 
     # Case 1: Multiple agents explicitly tagged
     if len(tagged_agents) > 1:
@@ -286,7 +287,9 @@ async def should_form_team(
 
     # Determine the mode - use AI if enabled and we have the necessary context
     if use_ai_decision and message and config:
-        mode = await determine_team_mode(message, team_agents, config)
+        # Convert MatrixID to agent names for the AI prompt
+        agent_names = [mid.agent_name(config) or mid.username for mid in team_agents]
+        mode = await determine_team_mode(message, agent_names, config)
     else:
         # Fallback to hardcoded logic when AI decision is disabled or unavailable
         # Use COORDINATE when agents are explicitly tagged (they likely have different roles)
@@ -440,7 +443,7 @@ async def create_team_response(  # noqa: C901, PLR0912
 
 async def handle_team_formation(
     agent_name: str,
-    form_team_agents: list[str],
+    form_team_agents: list[MatrixID],
     form_team_mode: TeamMode,
     event_body: str,
     room_id: str,
@@ -468,15 +471,19 @@ async def handle_team_formation(
 
     """
     # Let the first agent alphabetically handle the team
-    first_agent = min(form_team_agents)
+    # Convert MatrixID objects to agent names for comparison and team response
+    agent_names = [mid.agent_name(config) or mid.username for mid in form_team_agents]
+    first_agent = min(agent_names)
+    logger.debug(f"Team formation: agent_names={agent_names}, first_agent={first_agent}, current_agent={agent_name}")
     if agent_name != first_agent:
         # Other agents in the team don't respond individually
+        logger.debug(f"Agent {agent_name} is not first agent {first_agent}, returning None")
         return None
 
     # Create and execute team response
     model_name = get_team_model(agent_name, room_id, config)
     return await create_team_response(
-        agent_names=form_team_agents,
+        agent_names=agent_names,
         mode=form_team_mode,
         message=event_body,
         orchestrator=orchestrator,

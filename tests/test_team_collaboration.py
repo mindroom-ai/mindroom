@@ -174,9 +174,10 @@ class TestTeamFormation:
 
         # Verify both agents are in thread
         agents_in_thread = get_agents_in_thread(thread_history, self.config)
-        assert "code" in agents_in_thread
-        assert "security" in agents_in_thread
-        assert len(agents_in_thread) == 2
+        agent_names = [mid.agent_name(self.config) for mid in agents_in_thread]
+        assert "code" in agent_names
+        assert "security" in agent_names
+        assert len(agent_names) == 2
 
 
 class TestTeamCollaboration:
@@ -310,7 +311,8 @@ class TestTeamResponseBehavior:
         # No mentions in follow-up would cause single agent to continue
 
         agents_in_thread = get_agents_in_thread(thread_history, self.config)
-        assert agents_in_thread == ["code"]
+        agent_names = [mid.agent_name(self.config) for mid in agents_in_thread]
+        assert agent_names == ["code"]
         # Single agent should continue responding
 
     @pytest.mark.asyncio
@@ -369,9 +371,10 @@ class TestTeamResponseBehavior:
         ]
 
         agents = get_agents_in_thread(thread_with_both, self.config)
+        agent_names = [mid.agent_name(self.config) for mid in agents]
         assert len(agents) == 2
-        assert "research" in agents
-        assert "analyst" in agents
+        assert "research" in agent_names
+        assert "analyst" in agent_names
 
 
 class TestTeamEdgeCases:
@@ -487,7 +490,8 @@ class TestRouterTeamFormation:
 
         # Should form a team with both agents
         assert result.should_form_team is True
-        assert sorted(result.agents) == ["agent1", "agent2"]
+        agent_names = sorted([mid.agent_name(config) for mid in result.agents])
+        assert agent_names == ["agent1", "agent2"]
 
         # Test DM room with single agent (should not form team)
         room.users = {"@mindroom_agent1:localhost": None}

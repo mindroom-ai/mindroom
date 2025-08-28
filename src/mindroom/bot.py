@@ -23,10 +23,9 @@ from .commands import (
     handle_widget_command,
 )
 from .config import Config
-from .constants import ENABLE_STREAMING, ROUTER_AGENT_NAME, VOICE_PREFIX
+from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
-from .matrix import MATRIX_HOMESERVER
 from .matrix.client import (
     check_and_set_avatar,
     edit_message,
@@ -68,7 +67,7 @@ from .thread_utils import (
     create_session_id,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
-    get_available_agents_in_room,
+    get_configured_agents_for_room,
     has_user_responded_after_message,
     should_agent_respond,
 )
@@ -157,7 +156,7 @@ class MessageContext:
     is_thread: bool
     thread_id: str | None
     thread_history: list[dict]
-    mentioned_agents: list[str]
+    mentioned_agents: list[MatrixID]
 
 
 @dataclass
@@ -188,7 +187,7 @@ class AgentBot:
     @cached_property
     def matrix_id(self) -> MatrixID:
         """Get the Matrix ID for this agent bot."""
-        return MatrixID.parse(self.agent_user.user_id)
+        return self.agent_user.matrix_id
 
     @cached_property
     def agent(self) -> Agent:
@@ -370,6 +369,7 @@ class AgentBot:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
+        self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
             return
@@ -385,18 +385,25 @@ class AgentBot:
             self.logger.debug(f"Skipping edit event {event.event_id}")
             return
 
+        # Compare sender as MatrixID for more robust comparison
         if (
-            event.sender == self.agent_user.user_id
+            event.sender == self.matrix_id.full_id
             # Allow processing of voice transcriptions the router sent on behalf of users
             and not event.body.startswith(VOICE_PREFIX)
         ):
             return
 
-        # Check if we should process messages in this room (DM or configured rooms only)
+        # Check if we should process messages in this room
+        # Process if: configured for room OR in the room OR in a DM room
         _is_dm_room = await is_dm_room(self.client, room.room_id)
         if not _is_dm_room and room.room_id not in self.rooms:
-            # Not configured for room
-            return
+            # Not configured for this room - check if we're actually in it
+            if not room.users or self.matrix_id.full_id not in room.users:
+                # Not configured and not in the room - skip
+                self.logger.debug("Skipping message - not configured and not in room")
+                return
+            # We're in the room, process messages when mentioned
+            self.logger.debug("Processing message - agent is in room (invited)")
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
@@ -448,7 +455,8 @@ class AgentBot:
         )
 
         # Dynamic team formation: only the first agent (alphabetically) handles team formation
-        if form_team.should_form_team and self.agent_name in form_team.agents:
+        # Check if this agent's MatrixID is in the team agents list
+        if form_team.should_form_team and self.matrix_id in form_team.agents:
             team_response = await handle_team_formation(
                 agent_name=self.agent_name,
                 form_team_agents=form_team.agents,
@@ -509,7 +517,7 @@ class AgentBot:
             thread_history = []
             if thread_id:
                 thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-                if has_user_responded_after_message(thread_history, event.reacts_to, self.client.user_id):
+                if has_user_responded_after_message(thread_history, event.reacts_to, self.matrix_id):
                     self.logger.info(
                         "Ignoring reaction - agent already responded after this question",
                         reacted_to=event.reacts_to,
@@ -558,7 +566,7 @@ class AgentBot:
             return
 
         # Don't process our own voice messages
-        if event.sender == self.agent_user.user_id:
+        if event.sender == self.matrix_id.full_id:
             return
 
         # Check if we've already responded to this voice message (e.g., after restart)
@@ -590,10 +598,10 @@ class AgentBot:
 
         if skip_mentions:
             # Don't detect mentions if the message has skip_mentions metadata
-            mentioned_agents: list[str] = []
+            mentioned_agents: list[MatrixID] = []
             am_i_mentioned = False
         else:
-            mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name, self.config)
+            mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.matrix_id, self.config)
 
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
@@ -914,9 +922,10 @@ class AgentBot:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
 
-        available_agents = get_available_agents_in_room(room, self.config)
+        # Use configured agents only - router should not suggest random agents
+        available_agents = get_configured_agents_for_room(room.room_id, self.config)
         if not available_agents:
-            self.logger.debug("No available agents to route to")
+            self.logger.debug("No configured agents to route to in this room")
             return
 
         self.logger.info("Handling AI routing", event_id=event.event_id)
@@ -996,7 +1005,7 @@ class AgentBot:
             full_text = command.args["full_text"]
 
             # Get mentioned agents from the command text
-            mentioned_agents, _ = check_agent_mentioned(event.source, "", self.config)
+            mentioned_agents, _ = check_agent_mentioned(event.source, None, self.config)
 
             assert self.client is not None
             task_id, response_text = await schedule_task(

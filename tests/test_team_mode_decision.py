@@ -180,7 +180,7 @@ class TestShouldFormTeam:
             mock_determine.return_value = TeamMode.COORDINATE
 
             result = await should_form_team(
-                tagged_agents=["email", "phone"],
+                tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
                 agents_in_thread=[],
                 all_mentioned_in_thread=[],
                 room=MagicMock(spec=nio.MatrixRoom),
@@ -190,7 +190,7 @@ class TestShouldFormTeam:
             )
 
             assert result.should_form_team is True
-            assert result.agents == ["email", "phone"]
+            assert [mid.agent_name(mock_config) for mid in result.agents] == ["email", "phone"]
             assert result.mode == TeamMode.COORDINATE
             mock_determine.assert_called_once_with(
                 "Send email then call",
@@ -202,7 +202,7 @@ class TestShouldFormTeam:
     async def test_should_form_team_without_ai_decision(self, mock_config):
         """Test team formation with hardcoded mode selection."""
         result = await should_form_team(
-            tagged_agents=["email", "phone"],
+            tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),
@@ -212,7 +212,7 @@ class TestShouldFormTeam:
         )
 
         assert result.should_form_team is True
-        assert result.agents == ["email", "phone"]
+        assert [mid.agent_name(mock_config) for mid in result.agents] == ["email", "phone"]
         # Hardcoded logic: multiple tagged agents = COORDINATE
         assert result.mode == TeamMode.COORDINATE
 
@@ -220,7 +220,7 @@ class TestShouldFormTeam:
     async def test_should_form_team_no_message_fallback(self, mock_config):
         """Test fallback to hardcoded logic when message is None."""
         result = await should_form_team(
-            tagged_agents=["email", "phone"],
+            tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),
@@ -230,15 +230,15 @@ class TestShouldFormTeam:
         )
 
         assert result.should_form_team is True
-        assert result.agents == ["email", "phone"]
+        assert [mid.agent_name(mock_config) for mid in result.agents] == ["email", "phone"]
         # Should use hardcoded logic when message is None
         assert result.mode == TeamMode.COORDINATE
 
     @pytest.mark.asyncio
-    async def test_should_form_team_no_config_fallback(self):
+    async def test_should_form_team_no_config_fallback(self, mock_config):
         """Test fallback to hardcoded logic when config is None."""
         result = await should_form_team(
-            tagged_agents=["email", "phone"],
+            tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),
@@ -248,15 +248,15 @@ class TestShouldFormTeam:
         )
 
         assert result.should_form_team is True
-        assert result.agents == ["email", "phone"]
+        assert [mid.agent_name(mock_config) for mid in result.agents] == ["email", "phone"]
         # Should use hardcoded logic when config is None
         assert result.mode == TeamMode.COORDINATE
 
     @pytest.mark.asyncio
-    async def test_should_form_team_no_team_needed(self):
+    async def test_should_form_team_no_team_needed(self, mock_config):
         """Test when no team formation is needed."""
         result = await should_form_team(
-            tagged_agents=["email"],  # Only one agent
+            tagged_agents=[mock_config.ids["email"]],  # Only one agent
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),
@@ -277,7 +277,7 @@ class TestShouldFormTeam:
 
             result = await should_form_team(
                 tagged_agents=[],
-                agents_in_thread=["research", "analyst"],
+                agents_in_thread=[mock_config.ids["research"], mock_config.ids["analyst"]],
                 all_mentioned_in_thread=[],
                 room=MagicMock(spec=nio.MatrixRoom),
                 message="Continue the analysis",
@@ -286,7 +286,7 @@ class TestShouldFormTeam:
             )
 
             assert result.should_form_team is True
-            assert result.agents == ["research", "analyst"]
+            assert [mid.agent_name(mock_config) for mid in result.agents] == ["research", "analyst"]
             assert result.mode == TeamMode.COLLABORATE
 
     @pytest.mark.asyncio
@@ -298,7 +298,11 @@ class TestShouldFormTeam:
             result = await should_form_team(
                 tagged_agents=[],
                 agents_in_thread=[],
-                all_mentioned_in_thread=["email", "phone", "research"],
+                all_mentioned_in_thread=[
+                    mock_config.ids["email"],
+                    mock_config.ids["phone"],
+                    mock_config.ids["research"],
+                ],
                 room=MagicMock(spec=nio.MatrixRoom),
                 message="Let's continue",
                 config=mock_config,
@@ -306,7 +310,7 @@ class TestShouldFormTeam:
             )
 
             assert result.should_form_team is True
-            assert result.agents == ["email", "phone", "research"]
+            assert [mid.agent_name(mock_config) for mid in result.agents] == ["email", "phone", "research"]
             assert result.mode == TeamMode.COLLABORATE
 
 
@@ -328,7 +332,7 @@ class TestIntegrationScenarios:
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await should_form_team(
-                    tagged_agents=["email", "phone"],
+                    tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
                     room=MagicMock(spec=nio.MatrixRoom),
@@ -339,7 +343,7 @@ class TestIntegrationScenarios:
 
                 assert result.should_form_team is True
                 assert result.mode == TeamMode.COORDINATE
-                assert set(result.agents) == {"email", "phone"}
+                assert {mid.agent_name(mock_config) for mid in result.agents} == {"email", "phone"}
 
     @pytest.mark.asyncio
     async def test_brainstorming_scenario(self, mock_config):
@@ -356,7 +360,7 @@ class TestIntegrationScenarios:
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await should_form_team(
-                    tagged_agents=["research", "analyst"],
+                    tagged_agents=[mock_config.ids["research"], mock_config.ids["analyst"]],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
                     room=MagicMock(spec=nio.MatrixRoom),
@@ -367,14 +371,14 @@ class TestIntegrationScenarios:
 
                 assert result.should_form_team is True
                 assert result.mode == TeamMode.COLLABORATE
-                assert set(result.agents) == {"research", "analyst"}
+                assert {mid.agent_name(mock_config) for mid in result.agents} == {"research", "analyst"}
 
     @pytest.mark.asyncio
-    async def test_backwards_compatibility(self):
+    async def test_backwards_compatibility(self, mock_config):
         """Test that the function still works with old call signature."""
         # Old code might call without message and config
         result = await should_form_team(
-            tagged_agents=["email", "phone"],
+            tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),
@@ -382,5 +386,5 @@ class TestIntegrationScenarios:
 
         # Should still work with hardcoded logic
         assert result.should_form_team is True
-        assert result.agents == ["email", "phone"]
+        assert [mid.agent_name(mock_config) for mid in result.agents] == ["email", "phone"]
         assert result.mode == TeamMode.COORDINATE  # Hardcoded for multiple tagged

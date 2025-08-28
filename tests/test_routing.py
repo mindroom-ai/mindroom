@@ -10,6 +10,7 @@ import pytest
 from mindroom.agents import describe_agent
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import extract_agent_name, has_any_agent_mentions_in_thread
@@ -23,7 +24,14 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_for_message_basic(self) -> None:
         """Test basic agent suggestion functionality."""
-        config = Config(router=RouterConfig(model="default"))
+        # Create config with the agents we're testing
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+                "general": AgentConfig(display_name="General", rooms=[]),
+            },
+            router=RouterConfig(model="default"),
+        )
 
         with patch("mindroom.routing.get_model_instance"):
             # Mock the Agent and response
@@ -36,7 +44,12 @@ class TestAIRouting:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
-                result = await suggest_agent_for_message("What is 2 + 2?", ["calculator", "general"], config)
+                # Create MatrixID objects for agents
+                agents = [
+                    MatrixID(username="mindroom_calculator", domain="localhost"),
+                    MatrixID(username="mindroom_general", domain="localhost"),
+                ]
+                result = await suggest_agent_for_message("What is 2 + 2?", agents, config)
 
                 assert result == "calculator"
                 assert "calculator" in mock_agent.arun.call_args[0][0]
@@ -45,7 +58,15 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_with_thread_context(self) -> None:
         """Test agent suggestion with thread history."""
-        config = Config(router=RouterConfig(model="default"))
+        # Create config with the agents we're testing
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+                "finance": AgentConfig(display_name="Finance", rooms=[]),
+                "general": AgentConfig(display_name="General", rooms=[]),
+            },
+            router=RouterConfig(model="default"),
+        )
         thread_context = [
             {"sender": "@user:localhost", "body": "I need help with my taxes"},
             {"sender": "@mindroom_finance:localhost", "body": "I can help with that"},
@@ -58,9 +79,15 @@ class TestAIRouting:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
+                # Create MatrixID objects for agents
+                agents = [
+                    MatrixID(username="mindroom_calculator", domain="localhost"),
+                    MatrixID(username="mindroom_finance", domain="localhost"),
+                    MatrixID(username="mindroom_general", domain="localhost"),
+                ]
                 result = await suggest_agent_for_message(
                     "How do I calculate deductions?",
-                    ["calculator", "finance", "general"],
+                    agents,
                     config,
                     thread_context,
                 )
@@ -74,7 +101,14 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_unavailable_returns_none(self) -> None:
         """Test that suggesting unavailable agent returns None."""
-        config = Config(router=RouterConfig(model="default"))
+        # Create config with the agents we're testing
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+                "general": AgentConfig(display_name="General", rooms=[]),
+            },
+            router=RouterConfig(model="default"),
+        )
 
         with patch("mindroom.routing.get_model_instance"):
             mock_agent = AsyncMock()
@@ -87,9 +121,14 @@ class TestAIRouting:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.routing.Agent", return_value=mock_agent):
+                # Create MatrixID objects for agents
+                agents = [
+                    MatrixID(username="mindroom_calculator", domain="localhost"),
+                    MatrixID(username="mindroom_general", domain="localhost"),
+                ]  # code not available
                 result = await suggest_agent_for_message(
                     "How do I write a Python function?",
-                    ["calculator", "general"],  # code not available
+                    agents,
                     config,
                 )
                 # Should return None when agent is not available
@@ -98,12 +137,19 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_error_handling(self) -> None:
         """Test error handling in agent suggestion."""
-        config = Config(router=RouterConfig(model="default"))
+        # Create config with the agents we're testing
+        config = Config(
+            agents={
+                "general": AgentConfig(display_name="General", rooms=[]),
+            },
+            router=RouterConfig(model="default"),
+        )
 
         with patch("mindroom.routing.get_model_instance") as mock_model:
             mock_model.side_effect = ValueError("Model error")
 
-            result = await suggest_agent_for_message("Test message", ["general"], config)
+            agents = [MatrixID(username="mindroom_general", domain="localhost")]
+            result = await suggest_agent_for_message("Test message", agents, config)
 
             assert result is None
 

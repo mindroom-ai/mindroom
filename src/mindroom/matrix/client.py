@@ -11,6 +11,7 @@ from typing import Any
 import markdown
 import nio
 
+from mindroom.constants import ENCRYPTION_KEYS_DIR
 from mindroom.logging_config import get_logger
 
 from .event_info import EventInfo
@@ -31,6 +32,41 @@ def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
             ssl_context = ssl_module.create_default_context()
         return ssl_context
     return None
+
+
+def create_matrix_client(
+    homeserver: str,
+    user_id: str | None = None,
+    access_token: str | None = None,
+    store_path: str | None = None,
+) -> nio.AsyncClient:
+    """Create a Matrix client with consistent configuration.
+
+    Args:
+        homeserver: The Matrix homeserver URL
+        user_id: Optional user ID for authenticated client
+        access_token: Optional access token for authenticated client
+        store_path: Optional path for encryption key storage (defaults to .nio_store/<user_id>)
+
+    Returns:
+        nio.AsyncClient: Configured Matrix client instance
+
+    """
+    ssl_context = _maybe_ssl_context(homeserver)
+
+    # Default store path for encryption support
+    if store_path is None and user_id:
+        safe_user_id = user_id.replace(":", "_").replace("@", "")
+        store_path = str(ENCRYPTION_KEYS_DIR / safe_user_id)
+        # Ensure the directory exists
+        Path(store_path).mkdir(parents=True, exist_ok=True)
+
+    client = nio.AsyncClient(homeserver, user_id, store_path=store_path, ssl=ssl_context)
+
+    if access_token:
+        client.access_token = access_token
+
+    return client
 
 
 @asynccontextmanager
@@ -54,12 +90,7 @@ async def matrix_client(
             response = await client.login(password="secret")
 
     """
-    ssl_context = _maybe_ssl_context(homeserver)
-    if access_token:
-        client = nio.AsyncClient(homeserver, user_id, store_path=".nio_store", ssl=ssl_context)
-        client.access_token = access_token
-    else:
-        client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
+    client = create_matrix_client(homeserver, user_id, access_token)
 
     try:
         yield client
@@ -82,8 +113,7 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
         ValueError: If login fails
 
     """
-    ssl_context = _maybe_ssl_context(homeserver)
-    client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
+    client = create_matrix_client(homeserver, user_id)
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):

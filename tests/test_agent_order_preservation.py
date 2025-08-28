@@ -73,7 +73,9 @@ class TestAgentOrderPreservation:
         agents = get_mentioned_agents(mentions, mock_config)
 
         # Order should be preserved as phone, email, research
-        assert agents == ["phone", "email", "research"]
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in agents]
+        assert agent_names == ["phone", "email", "research"]
 
     def test_get_agents_in_thread_preserves_order(self, mock_config):
         """Test that get_agents_in_thread preserves order of first participation."""
@@ -88,7 +90,9 @@ class TestAgentOrderPreservation:
         agents = get_agents_in_thread(thread_history, mock_config)
 
         # Order should be: research, email, phone, analyst (in order of first appearance)
-        assert agents == ["research", "email", "phone", "analyst"]
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in agents]
+        assert agent_names == ["research", "email", "phone", "analyst"]
 
     def test_get_agents_in_thread_excludes_router(self, mock_config):
         """Test that router agent is excluded from thread participants."""
@@ -101,8 +105,10 @@ class TestAgentOrderPreservation:
         agents = get_agents_in_thread(thread_history, mock_config)
 
         # Router should be excluded
-        assert agents == ["email", "phone"]
-        assert ROUTER_AGENT_NAME not in agents
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in agents]
+        assert agent_names == ["email", "phone"]
+        assert ROUTER_AGENT_NAME not in agent_names
 
     def test_get_all_mentioned_agents_preserves_order(self, mock_config):
         """Test that get_all_mentioned_agents_in_thread preserves order of first mention."""
@@ -136,7 +142,9 @@ class TestAgentOrderPreservation:
         agents = get_all_mentioned_agents_in_thread(thread_history, mock_config)
 
         # Order should be: phone, email, research, analyst (in order of first mention)
-        assert agents == ["phone", "email", "research", "analyst"]
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in agents]
+        assert agent_names == ["phone", "email", "research", "analyst"]
 
     def test_no_duplicates_in_mentioned_agents(self, mock_config):
         """Test that duplicates are removed while preserving order."""
@@ -170,8 +178,10 @@ class TestAgentOrderPreservation:
         agents = get_all_mentioned_agents_in_thread(thread_history, mock_config)
 
         # Should have no duplicates, order preserved from first mention
-        assert agents == ["email", "phone", "research"]
-        assert len(agents) == len(set(agents))  # No duplicates
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in agents]
+        assert agent_names == ["email", "phone", "research"]
+        assert len(agent_names) == len(set(agent_names))  # No duplicates
 
     def test_empty_thread_returns_empty_list(self, mock_config):
         """Test that empty thread returns empty list."""
@@ -194,9 +204,12 @@ class TestAgentOrderPreservation:
         agents2 = get_mentioned_agents(mentions_order2, mock_config)
 
         # Different orders should be preserved
-        assert agents1 == ["email", "phone"]
-        assert agents2 == ["phone", "email"]
-        assert agents1 != agents2  # Order matters!
+        # Convert MatrixID objects to agent names for comparison
+        agent_names1 = [mid.agent_name(mock_config) for mid in agents1]
+        agent_names2 = [mid.agent_name(mock_config) for mid in agents2]
+        assert agent_names1 == ["email", "phone"]
+        assert agent_names2 == ["phone", "email"]
+        assert agent_names1 != agent_names2  # Order matters!
 
 
 class TestIntegrationWithTeamFormation:
@@ -205,8 +218,12 @@ class TestIntegrationWithTeamFormation:
     @pytest.mark.asyncio
     async def test_coordinate_mode_respects_order(self, mock_config) -> None:
         """Test that coordinate mode will execute agents in the preserved order."""
-        # When agents are tagged in specific order
-        tagged_agents = ["phone", "email", "research"]  # User tagged in this order
+        # When agents are tagged in specific order - use MatrixID objects
+        tagged_agents = [
+            mock_config.ids["phone"],
+            mock_config.ids["email"],
+            mock_config.ids["research"],
+        ]  # User tagged in this order
 
         result = await should_form_team(
             tagged_agents=tagged_agents,
@@ -219,7 +236,9 @@ class TestIntegrationWithTeamFormation:
         )
 
         # Agents should be in the same order as tagged
-        assert result.agents == ["phone", "email", "research"]
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in result.agents]
+        assert agent_names == ["phone", "email", "research"]
         assert result.mode == TeamMode.COORDINATE  # Multiple tagged = coordinate
 
         # This order should flow through to team execution

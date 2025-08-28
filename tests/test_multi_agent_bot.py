@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config, ModelConfig
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 
@@ -85,6 +86,15 @@ class TestAgentBot:
 
         mock_config.router = MagicMock(model="default")
         mock_config.get_all_configured_rooms = MagicMock(return_value=["!test:localhost"])
+
+        # Add the ids property for MatrixID lookups
+        mock_config.ids = {
+            "calculator": MatrixID(username="mindroom_calculator", domain="localhost"),
+            "general": MatrixID(username="mindroom_general", domain="localhost"),
+            "router": MatrixID(username="mindroom_router", domain="localhost"),
+        }
+        mock_config.domain = "localhost"
+
         return mock_config
 
     @pytest.mark.asyncio
@@ -417,14 +427,14 @@ class TestAgentBot:
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
-        # Mock room users to include the agent
-        mock_room.users = {"@mindroom_calculator:localhost": MagicMock()}
+        # Mock room users to include the agent - use the actual agent's user_id
+        mock_room.users = {mock_agent_user.user_id: MagicMock()}
 
         # Test 1: Thread with only this agent - should respond without mention
         mock_fetch_history.return_value = [
             {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
             {
-                "sender": "@mindroom_calculator:localhost",
+                "sender": mock_agent_user.user_id,
                 "body": "My previous response",
                 "timestamp": 124,
                 "event_id": "prev2",
@@ -479,9 +489,9 @@ class TestAgentBot:
         # Test 2: Thread with multiple agents - should NOT respond without mention
         test2_history = [
             {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
-            {"sender": "@mindroom_calculator:localhost", "body": "My response", "timestamp": 124, "event_id": "prev2"},
+            {"sender": mock_agent_user.user_id, "body": "My response", "timestamp": 124, "event_id": "prev2"},
             {
-                "sender": "@mindroom_general:localhost",
+                "sender": config.ids["general"].full_id if "general" in config.ids else "@mindroom_general:localhost",
                 "body": "Another agent response",
                 "timestamp": 125,
                 "event_id": "prev3",

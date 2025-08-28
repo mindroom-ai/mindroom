@@ -406,7 +406,12 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = Config(
+            router=RouterConfig(model="default"),
+            agents={
+                "calculator": AgentConfig(display_name="Calculator Agent", role="Calculator"),
+            },
+        )
         bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
@@ -420,7 +425,8 @@ class TestCommandHandling:
         mock_context.is_thread = True
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = []
-        mock_context.mentioned_agents = ["calculator"]
+        # mentioned_agents should be a list of MatrixID objects
+        mock_context.mentioned_agents = [config.ids["calculator"]] if "calculator" in config.ids else []
         bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
 
         # Mock should_agent_respond to return True
