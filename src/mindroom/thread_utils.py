@@ -266,46 +266,26 @@ def should_agent_respond(  # noqa: PLR0911
 
     agent_matrix_id = config.ids[agent_name]
 
-    # For room messages (not in threads)
+    # Non-thread messages
     if not is_thread:
-        # In regular rooms, only respond if mentioned (already handled above)
         if not is_dm_room:
-            return False
-
-        # DM room without mentions - check how many agents are in the room
+            return False  # Regular room, no mention
+        # DM room - respond if we're the only agent
         available_agents = get_available_agents_in_room(room, config)
-        # Single agent in DM should respond naturally
-        # Multiple agents or unable to determine - let team formation handle it
-        return len(available_agents) == 1 and agent_matrix_id in available_agents
+        return len(available_agents) == 1  # Must be us if we received the event
 
-    # Thread logic (no mentions at this point)
-    # Check agent participation (excluding router)
+    # Thread messages (no mentions at this point)
     agents_in_thread = get_agents_in_thread(thread_history, config)
 
-    # Multiple agents in thread with no specific mention - team scenario
-    if len(agents_in_thread) > 1:
-        # Team will handle the response
-        return False
+    # If agents have participated, continue only if we're the single agent
+    if agents_in_thread:
+        return len(agents_in_thread) == 1 and agents_in_thread[0].full_id == agent_matrix_id.full_id
 
-    # Single agent continues conversation
-    if len(agents_in_thread) == 1:
-        return agents_in_thread[0].full_id == agent_matrix_id.full_id
+    # No agents in thread yet - decide if we should take ownership
+    # Check if router has already routed
+    if any(extract_agent_name(msg.get("sender", ""), config) == ROUTER_AGENT_NAME for msg in thread_history):
+        return False  # Router has routed, wait for mentioned agent
 
-    # No agents in thread yet (only router or no one has spoken)
-    # Check if router has spoken
-    router_has_spoken = any(msg.get("sender", "") == config.ids[ROUTER_AGENT_NAME].full_id for msg in thread_history)
-
-    if router_has_spoken:
-        # Router has routed, wait for mentioned agent
-        # (we already returned False above since not mentioned)
-        return False
-
-    # No agents (including router) have spoken
-    # Check if multiple agents could respond - if so, let router decide
+    # Router hasn't acted - should we take ownership?
     available_agents = get_available_agents_in_room(room, config)
-    if len(available_agents) > 1:
-        # Multiple agents available - let router decide who responds
-        return False
-
-    # Single agent with access - take ownership
-    return len(available_agents) == 1 and agent_matrix_id in available_agents
+    return len(available_agents) == 1  # Take ownership if we're the only option
