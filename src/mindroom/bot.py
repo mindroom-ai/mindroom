@@ -68,7 +68,7 @@ from .thread_utils import (
     create_session_id,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
-    get_available_agents_in_room,
+    get_configured_agents_for_room,
     has_user_responded_after_message,
     should_agent_respond,
 )
@@ -918,9 +918,10 @@ class AgentBot:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
 
-        available_agents = get_available_agents_in_room(room, self.config)
+        # Use configured agents only - not just any agent in the room
+        available_agents = get_configured_agents_for_room(room.room_id, self.config)
         if not available_agents:
-            self.logger.debug("No available agents to route to")
+            self.logger.debug("No configured agents to route to in this room")
             return
 
         self.logger.info("Handling AI routing", event_id=event.event_id)

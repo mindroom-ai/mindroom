@@ -14,7 +14,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config import AgentConfig, Config, ModelConfig
+from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 
@@ -29,9 +29,11 @@ def setup_test_bot(
     storage_path: Path,
     room_id: str,
     enable_streaming: bool = False,
+    config: Config | None = None,
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
-    config = Config.from_yaml()
+    if config is None:
+        config = Config.from_yaml()
 
     bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()
@@ -144,6 +146,24 @@ class TestRoutingRegression:
         """Test that router DOES activate when no agents are mentioned."""
         test_room_id = "!research:localhost"
 
+        # Create test config with agents configured for the test room
+        test_config = Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="MindRoomResearch",
+                    rooms=[test_room_id],  # Configured for test room
+                ),
+                "news": AgentConfig(
+                    display_name="MindRoomNews",
+                    rooms=[test_room_id],  # Configured for test room
+                ),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+
         # Create router agent
         router_agent = AgentMatrixUser(
             agent_name="router",
@@ -152,14 +172,14 @@ class TestRoutingRegression:
             user_id="@mindroom_router:localhost",
         )
 
-        # Set up router bot
-        router_bot = setup_test_bot(router_agent, tmp_path, test_room_id)
+        # Set up router bot with test config
+        router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
-        # Set up research bot
-        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
+        # Set up research bot with test config
+        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id, config=test_config)
 
-        # Set up news bot
-        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)
+        # Set up news bot with test config
+        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id, config=test_config)
 
         # Mock AI responses
         mock_ai_response.return_value = "I can help with that!"

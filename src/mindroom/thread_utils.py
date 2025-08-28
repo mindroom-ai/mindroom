@@ -102,6 +102,21 @@ def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[s
     return sorted(agents)
 
 
+def get_configured_agents_for_room(room_id: str, config: Config) -> list[str]:
+    """Get list of agents configured for a specific room.
+
+    This returns only agents that have the room in their configuration,
+    not just agents that happen to be present in the room.
+
+    Note: Router agent is excluded as it's not a regular conversation participant.
+    """
+    configured_agents = []
+    for agent_name, agent_config in config.agents.items():
+        if agent_name != ROUTER_AGENT_NAME and room_id in agent_config.rooms:
+            configured_agents.append(agent_name)
+    return sorted(configured_agents)
+
+
 def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
     """Check if any agents are mentioned anywhere in the thread."""
     for msg in thread_history:
