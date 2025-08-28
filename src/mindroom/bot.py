@@ -290,7 +290,8 @@ class AgentBot:
         await self._set_avatar_if_available()
 
         # Initialize response tracker
-        self.response_tracker = ResponseTracker(self.agent_name)
+        # Use storage_path for tests to ensure isolation
+        self.response_tracker = ResponseTracker(self.agent_name, base_path=self.storage_path)
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)

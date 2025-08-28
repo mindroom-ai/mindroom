@@ -99,7 +99,7 @@ class TestAgentBot:
         mock_load_config.return_value = self.create_mock_config()
         config = mock_load_config.return_value
 
-        bot = AgentBot(mock_agent_user, tmp_path, rooms=["!test:localhost"], config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config, rooms=["!test:localhost"])
         assert bot.agent_user == mock_agent_user
         assert bot.agent_name == "calculator"
         assert bot.rooms == ["!test:localhost"]
