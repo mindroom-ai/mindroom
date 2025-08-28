@@ -90,6 +90,7 @@ class TestDMResponseLogic:
             is_dm_room=True,  # DM mode enabled
             thread_history=[],  # No previous messages
             config=config,
+            mentioned_agents=None,  # No agents mentioned
         )
 
         assert should_respond is True
@@ -136,8 +137,7 @@ class TestDMResponseLogic:
         other_agent_id = config.ids["other_agent"].full_id
         room.users = {test_agent_id: None, other_agent_id: None}
 
-        # In practice, if other agents are mentioned, team formation happens first.
-        # This test now verifies behavior with multiple agents and no mentions.
+        # Another agent is mentioned, not this one
         should_respond = should_agent_respond(
             agent_name="test_agent",
             am_i_mentioned=False,
@@ -146,6 +146,7 @@ class TestDMResponseLogic:
             is_dm_room=True,  # DM mode enabled
             thread_history=[],
             config=config,
+            mentioned_agents=[config.ids["other_agent"]],  # Other agent mentioned with correct domain
         )
 
         assert should_respond is False
@@ -175,6 +176,7 @@ class TestDMResponseLogic:
             is_dm_room=True,  # DM mode enabled
             thread_history=[],
             config=config,
+            mentioned_agents=None,  # No agents mentioned
         )
 
         should_respond_other = should_agent_respond(
@@ -185,6 +187,7 @@ class TestDMResponseLogic:
             is_dm_room=True,  # DM mode enabled
             thread_history=[],
             config=config,
+            mentioned_agents=None,  # No agents mentioned
         )
 
         # Agents should not respond individually - team formation is handled at bot level

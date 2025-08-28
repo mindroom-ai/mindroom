@@ -466,6 +466,7 @@ class AgentBot:
             is_dm_room=_is_dm_room,
             thread_history=context.thread_history,
             config=self.config,
+            mentioned_agents=context.mentioned_agents,
         ):
             return
 
