@@ -490,7 +490,7 @@ def _create_instance_directories(instance: Instance) -> None:
         "mindroom_data/state/agents/sessions",
         "mindroom_data/state/agents/tracking",
         "mindroom_data/state/memory",  # For mem0/chroma vector DB
-        "mindroom_data/credentials",  # Moved from mindroom/credentials
+        "mindroom_data/credentials",
         "logs",
     ]
 
