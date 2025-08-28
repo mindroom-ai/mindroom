@@ -393,7 +393,8 @@ class AgentBot:
 
         # Check if we should process messages in this room (DM or configured rooms only)
         _is_dm_room = await is_dm_room(self.client, room.room_id)
-        if not (_is_dm_room or room.room_id in self.rooms):
+        if not _is_dm_room and room.room_id not in self.rooms:
+            # Not configured for room
             return
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
@@ -415,7 +416,11 @@ class AgentBot:
         # Ignore messages from other agents unless we are mentioned,
         # except when the router is posting a voice transcription (VOICE_PREFIX),
         # which should be treated as a user-originated message.
-        if self._is_from_other_agent_without_mention(sender_agent_name, context, event):
+        is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
+        is_from_other_agent_without_mention = (
+            sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription
+        )
+        if is_from_other_agent_without_mention:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
@@ -489,19 +494,6 @@ class AgentBot:
             user_id=event.sender,
         )
         self.response_tracker.mark_responded(event.event_id)
-
-    def _is_from_other_agent_without_mention(
-        self,
-        sender_agent_name: str | None,
-        context: MessageContext,
-        event: nio.RoomMessageText,
-    ) -> bool:
-        """True if message is from another agent and we weren't mentioned explicitly.
-
-        Router voice transcriptions (VOICE_PREFIX) are treated as user-originated.
-        """
-        is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
-        return bool(sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""

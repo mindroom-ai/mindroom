@@ -52,7 +52,7 @@ class _AgentValidationResult(NamedTuple):
     invalid_agents: list[str]
 
 
-# ---- Workflow scheduling primitives (consolidated) ----
+# ---- Workflow scheduling primitives ----
 
 
 class CronSchedule(BaseModel):
