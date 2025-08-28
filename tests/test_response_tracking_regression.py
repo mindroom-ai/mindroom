@@ -76,7 +76,7 @@ class TestResponseTrackingRegression:
         )
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        bot.response_tracker = ResponseTracker(bot.agent_name)
+        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -147,7 +147,7 @@ class TestResponseTrackingRegression:
         )
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        bot.response_tracker = ResponseTracker(bot.agent_name)
+        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -226,7 +226,7 @@ class TestResponseTrackingRegression:
         )
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        bot.response_tracker = ResponseTracker(bot.agent_name)
+        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
