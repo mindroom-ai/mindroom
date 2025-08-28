@@ -446,7 +446,7 @@ def _copy_credentials_to_instance(instance: Instance) -> None:
     if not source_dir.exists():
         return
 
-    target_dir = Path(instance.data_dir) / "mindroom" / "credentials"
+    target_dir = Path(instance.data_dir) / "mindroom_data" / "credentials"
 
     # Copy all credential files
     for cred_file in source_dir.glob("*.json"):
@@ -483,16 +483,15 @@ def _create_instance_directories(instance: Instance) -> None:
     # Base directories needed by all instances
     base_dirs = [
         "config",
-        "mindroom_data",  # Changed from 'tmp' to 'mindroom_data'
-        "mindroom_data/state",  # Create nested structure
+        "mindroom_data",
+        "mindroom_data/state",
         "mindroom_data/state/matrix",
         "mindroom_data/state/agents",
         "mindroom_data/state/agents/sessions",
         "mindroom_data/state/agents/tracking",
+        "mindroom_data/state/memory",  # For mem0/chroma vector DB
+        "mindroom_data/credentials",  # Moved from mindroom/credentials
         "logs",
-        "mindroom",
-        "mindroom/credentials",
-        "mem0",
     ]
 
     for subdir in base_dirs:

@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 
-def migrate_data(old_base: Path = Path("tmp"), new_base: Path = Path("mindroom_data")) -> None:  # noqa: C901, PLR0912
+def migrate_data(old_base: Path = Path("tmp"), new_base: Path = Path("mindroom_data")) -> None:  # noqa: C901, PLR0912, PLR0915
     """Migrate data from old tmp/ structure to new mindroom_data/ structure.
 
     Args:
@@ -78,6 +78,33 @@ def migrate_data(old_base: Path = Path("tmp"), new_base: Path = Path("mindroom_d
         new_chroma.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(old_chroma), str(new_chroma))
         migrated_items.append(f"  ✓ Chroma database: {old_chroma} → {new_chroma}")
+
+    # Migrate mem0 directory if it exists at the old location
+    old_mem0 = old_base.parent / "mem0"
+    if old_mem0.exists():
+        new_mem0 = new_base / "state" / "memory" / "mem0"
+        new_mem0.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old_mem0), str(new_mem0))
+        migrated_items.append(f"  ✓ Mem0 data: {old_mem0} → {new_mem0}")
+
+    # Migrate credentials from mindroom/credentials to mindroom_data/credentials
+    old_credentials = old_base.parent / "mindroom" / "credentials"
+    if old_credentials.exists():
+        new_credentials = new_base / "credentials"
+        new_credentials.mkdir(parents=True, exist_ok=True)
+        # Copy each credential file
+        for cred_file in old_credentials.glob("*.json"):
+            shutil.copy2(str(cred_file), str(new_credentials / cred_file.name))
+        migrated_items.append(f"  ✓ Credentials: {old_credentials} → {new_credentials}")
+        # Remove old credentials directory after successful copy
+        try:
+            shutil.rmtree(old_credentials)
+            # Remove mindroom directory if empty
+            old_mindroom = old_credentials.parent
+            if not any(old_mindroom.iterdir()):
+                old_mindroom.rmdir()
+        except (OSError, PermissionError) as e:
+            print(f"  ⚠ Could not remove old credentials directory: {e}")
 
     # Clean up old directories if empty
     try:
