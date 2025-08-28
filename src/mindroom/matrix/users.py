@@ -9,7 +9,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
 from .client import login, register_user
-from .identity import MatrixID, extract_server_name_from_homeserver, parse_matrix_id
+from .identity import MatrixID, extract_server_name_from_homeserver
 from .state import MatrixState
 
 logger = get_logger(__name__)
@@ -19,7 +19,7 @@ def extract_domain_from_user_id(user_id: str) -> str:
     """Extract domain from a Matrix user ID like "@user:example.com"."""
     if not user_id.startswith("@") or ":" not in user_id:
         return "localhost"
-    return parse_matrix_id(user_id).domain
+    return MatrixID.parse(user_id).domain
 
 
 @dataclass

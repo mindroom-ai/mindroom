@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import nio
@@ -158,8 +159,6 @@ async def ensure_room_exists(
 
         # Set room avatar if available (for newly created rooms)
         # Note: Avatars can also be updated later using scripts/generate_avatars.py
-        from pathlib import Path  # noqa: PLC0415
-
         avatar_path = Path(__file__).parent.parent.parent.parent / "avatars" / "rooms" / f"{room_key}.png"
         if avatar_path.exists():
             if await check_and_set_avatar(client, avatar_path, room_id=created_room_id):
@@ -200,14 +199,10 @@ async def ensure_all_rooms_exist(
             continue
 
         # Get power users for this room
-        power_users = get_agent_ids_for_room(room_key, config, client.homeserver)
+        power_users = get_agent_ids_for_room(room_key, config)
 
         # Ensure room exists
-        room_id = await ensure_room_exists(
-            client=client,
-            room_key=room_key,
-            power_users=power_users,
-        )
+        room_id = await ensure_room_exists(client=client, room_key=room_key, power_users=power_users)
 
         if room_id:
             room_ids[room_key] = room_id
@@ -215,10 +210,7 @@ async def ensure_all_rooms_exist(
     return room_ids
 
 
-async def ensure_user_in_rooms(
-    homeserver: str,
-    room_ids: dict[str, str],
-) -> None:
+async def ensure_user_in_rooms(homeserver: str, room_ids: dict[str, str]) -> None:
     """Ensure the user account is a member of all specified rooms.
 
     Args:

@@ -20,24 +20,12 @@ class MatrixID:
     username: str
     domain: str
 
-    # Class constants
     AGENT_PREFIX: ClassVar[str] = "mindroom_"
-    DEFAULT_DOMAIN: ClassVar[str] = "mindroom.space"
-    MATRIX_ID_PARTS: ClassVar[int] = 2  # Matrix IDs have username:domain
 
     @classmethod
     def parse(cls, matrix_id: str) -> MatrixID:
         """Parse a Matrix ID like @mindroom_calculator:localhost."""
-        if not matrix_id.startswith("@"):
-            msg = f"Invalid Matrix ID: {matrix_id}"
-            raise ValueError(msg)
-
-        parts = matrix_id[1:].split(":", 1)
-        if len(parts) != cls.MATRIX_ID_PARTS:
-            msg = f"Invalid Matrix ID format: {matrix_id}"
-            raise ValueError(msg)
-
-        return cls(username=parts[0], domain=parts[1])
+        return _parse_matrix_id(matrix_id)
 
     @classmethod
     def from_agent(cls, agent_name: str, domain: str) -> MatrixID:
@@ -54,19 +42,9 @@ class MatrixID:
         """Get the full Matrix ID like @mindroom_calculator:localhost."""
         return f"@{self.username}:{self.domain}"
 
-    @property
-    def is_agent(self) -> bool:
-        """Check if this is an agent ID."""
-        return self.username.startswith(self.AGENT_PREFIX)
-
-    @property
-    def is_mindroom_domain(self) -> bool:
-        """Check if this is on the mindroom.space domain."""
-        return self.domain == self.DEFAULT_DOMAIN
-
     def agent_name(self, config: Config) -> str | None:
         """Extract agent name if this is an agent ID."""
-        if not self.is_agent:
+        if not self.username.startswith(self.AGENT_PREFIX):
             return None
 
         # Remove prefix
@@ -114,18 +92,27 @@ class ThreadStateKey:
         return self.key
 
 
-@lru_cache(maxsize=256)
-def parse_matrix_id(matrix_id: str) -> MatrixID:
-    """Cached parsing of Matrix IDs."""
-    return MatrixID.parse(matrix_id)
+@lru_cache(maxsize=512)
+def _parse_matrix_id(matrix_id: str) -> MatrixID:
+    """Cached wrapper around MatrixID.parse for performance."""
+    if not matrix_id.startswith("@"):
+        msg = f"Invalid Matrix ID: {matrix_id}"
+        raise ValueError(msg)
+
+    parts = matrix_id[1:].split(":", 1)
+    if len(parts) != 2:
+        msg = f"Invalid Matrix ID format: {matrix_id}"
+        raise ValueError(msg)
+
+    return MatrixID(username=parts[0], domain=parts[1])
 
 
 def is_agent_id(matrix_id: str, config: Config) -> bool:
     """Quick check if a Matrix ID is an agent."""
     if not matrix_id.startswith("@") or ":" not in matrix_id:
         return False
-    mid = parse_matrix_id(matrix_id)
-    return mid.is_agent and mid.agent_name(config) is not None
+    mid = MatrixID.parse(matrix_id)
+    return mid.agent_name(config) is not None
 
 
 def extract_agent_name(sender_id: str, config: Config) -> str | None:
@@ -135,7 +122,7 @@ def extract_agent_name(sender_id: str, config: Config) -> str | None:
     """
     if not sender_id.startswith("@") or ":" not in sender_id:
         return None
-    mid = parse_matrix_id(sender_id)
+    mid = MatrixID.parse(sender_id)
     return mid.agent_name(config)
 
 

@@ -9,9 +9,8 @@ from agno.storage.sqlite import SqliteStorage
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
-from .constants import MATRIX_HOMESERVER, ROUTER_AGENT_NAME
+from .constants import ROUTER_AGENT_NAME
 from .logging_config import get_logger
-from .matrix.identity import MatrixID, extract_server_name_from_homeserver
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
@@ -183,20 +182,15 @@ def describe_agent(agent_name: str, config: Config) -> str:
     return "\n  ".join(parts)
 
 
-def get_agent_ids_for_room(room_key: str, config: Config, homeserver: str | None = None) -> list[str]:
+def get_agent_ids_for_room(room_key: str, config: Config) -> list[str]:
     """Get all agent Matrix IDs assigned to a specific room."""
-    # Determine server name
-    server_url = homeserver or MATRIX_HOMESERVER
-    server_name = extract_server_name_from_homeserver(server_url)
-
     # Always include the router agent
-    agent_ids = [MatrixID.from_agent(ROUTER_AGENT_NAME, server_name).full_id]
+    agent_ids = [config.ids[ROUTER_AGENT_NAME].full_id]
 
     # Add agents from config
     for agent_name, agent_cfg in config.agents.items():
         if room_key in agent_cfg.rooms:
-            agent_ids.append(MatrixID.from_agent(agent_name, server_name).full_id)
-
+            agent_ids.append(config.ids[agent_name].full_id)
     return agent_ids
 
 

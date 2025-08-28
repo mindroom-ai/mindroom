@@ -74,15 +74,16 @@ class TestDMResponseLogic:
             agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
         )
 
-        # Mock room with single agent
+        # Mock room with single agent - use the correct domain from config
         room = MagicMock()
         room.room_id = "!dm:localhost"
-        room.users = {"@mindroom_test_agent:localhost": None}
+        # Use the actual MatrixID from config to ensure domain matches
+        agent_matrix_id = config.ids["test_agent"].full_id
+        room.users = {agent_matrix_id: None}
 
         # In DM mode, agent should respond when no one else has
         should_respond = should_agent_respond(
             agent_name="test_agent",
-            agent_matrix_id=MatrixID.parse("@mindroom_test_agent:example.org"),
             am_i_mentioned=False,  # Not mentioned
             is_thread=False,
             room=room,
@@ -90,6 +91,7 @@ class TestDMResponseLogic:
             configured_rooms=[],  # Not configured for this room
             thread_history=[],  # No previous messages
             config=config,
+            mentioned_agents=None,  # No agents mentioned
         )
 
         assert should_respond is True
@@ -100,15 +102,16 @@ class TestDMResponseLogic:
             agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
         )
 
-        # Mock room with single agent
+        # Mock room with single agent - use the correct domain from config
         room = MagicMock()
         room.room_id = "!dm:localhost"
-        room.users = {"@mindroom_test_agent:localhost": None}
+        # Use the actual MatrixID from config to ensure domain matches
+        agent_matrix_id = config.ids["test_agent"].full_id
+        room.users = {agent_matrix_id: None}
 
         # When mentioned, always respond
         should_respond = should_agent_respond(
             agent_name="test_agent",
-            agent_matrix_id=MatrixID.parse("@mindroom_test_agent:example.org"),
             am_i_mentioned=True,  # Mentioned
             is_thread=False,
             room=room,
@@ -129,15 +132,16 @@ class TestDMResponseLogic:
             },
         )
 
-        # Mock room with multiple agents
+        # Mock room with multiple agents - use the correct domains from config
         room = MagicMock()
         room.room_id = "!dm:localhost"
-        room.users = {"@mindroom_test_agent:localhost": None, "@mindroom_other_agent:localhost": None}
+        test_agent_id = config.ids["test_agent"].full_id
+        other_agent_id = config.ids["other_agent"].full_id
+        room.users = {test_agent_id: None, other_agent_id: None}
 
         # Another agent is mentioned, not this one
         should_respond = should_agent_respond(
             agent_name="test_agent",
-            agent_matrix_id=MatrixID.parse("@mindroom_test_agent:example.org"),
             am_i_mentioned=False,
             is_thread=False,
             room=room,
@@ -145,7 +149,7 @@ class TestDMResponseLogic:
             configured_rooms=[],
             thread_history=[],
             config=config,
-            mentioned_agents=["other_agent"],  # Other agent mentioned
+            mentioned_agents=[config.ids["other_agent"]],  # Other agent mentioned with correct domain
         )
 
         assert should_respond is False
@@ -159,15 +163,16 @@ class TestDMResponseLogic:
             },
         )
 
-        # Mock room with multiple agents
+        # Mock room with multiple agents - use the correct domains from config
         room = MagicMock()
         room.room_id = "!dm:localhost"
-        room.users = {"@mindroom_test_agent:localhost": None, "@mindroom_other_agent:localhost": None}
+        test_agent_id = config.ids["test_agent"].full_id
+        other_agent_id = config.ids["other_agent"].full_id
+        room.users = {test_agent_id: None, other_agent_id: None}
 
         # No mentions - agents should not respond individually (team formation happens at a higher level)
         should_respond_test = should_agent_respond(
             agent_name="test_agent",
-            agent_matrix_id=MatrixID.parse("@mindroom_test_agent:example.org"),
             am_i_mentioned=False,
             is_thread=False,
             room=room,
@@ -175,12 +180,11 @@ class TestDMResponseLogic:
             configured_rooms=[],
             thread_history=[],
             config=config,
-            mentioned_agents=[],  # No agents mentioned
+            mentioned_agents=None,  # No agents mentioned
         )
 
         should_respond_other = should_agent_respond(
             agent_name="other_agent",
-            agent_matrix_id=MatrixID.parse("@mindroom_other_agent:example.org"),
             am_i_mentioned=False,
             is_thread=False,
             room=room,
@@ -188,7 +192,7 @@ class TestDMResponseLogic:
             configured_rooms=[],
             thread_history=[],
             config=config,
-            mentioned_agents=[],  # No agents mentioned
+            mentioned_agents=None,  # No agents mentioned
         )
 
         # Agents should not respond individually - team formation is handled at bot level
@@ -202,15 +206,19 @@ class TestDMMessageContext:
 
     async def test_extract_dm_context(self) -> None:
         """Test extracting message context in DM mode."""
+        config = Config()
+
         # Create a bot with mocked components
+        # Use the correct MatrixID from config
+        test_agent_matrix_id = (
+            config.ids["test_agent"] if "test_agent" in config.ids else MatrixID.parse("@mindroom_test_agent:localhost")
+        )
         agent_user = AgentMatrixUser(
             agent_name="test_agent",
-            user_id="@test_agent:localhost",
+            user_id=test_agent_matrix_id.full_id,
             display_name="Test Agent",
             password=TEST_PASSWORD,
         )
-
-        config = Config()
         bot = AgentBot(
             agent_user=agent_user,
             storage_path=TEST_TMP_DIR,
@@ -253,14 +261,18 @@ class TestDMIntegration:
 
     async def test_agent_accepts_dm_invites(self) -> None:
         """Test that agents accept DM invitations when configured."""
+        config = Config()
+
+        # Use the correct MatrixID from config
+        test_agent_matrix_id = (
+            config.ids["test_agent"] if "test_agent" in config.ids else MatrixID.parse("@mindroom_test_agent:localhost")
+        )
         agent_user = AgentMatrixUser(
             agent_name="test_agent",
-            user_id="@test_agent:localhost",
+            user_id=test_agent_matrix_id.full_id,
             display_name="Test Agent",
             password=TEST_PASSWORD,
         )
-
-        config = Config()
 
         bot = AgentBot(
             agent_user=agent_user,
@@ -293,9 +305,13 @@ class TestDMIntegration:
         config.agents = {"researcher": MagicMock()}
 
         # Create and configure a bot
+        # Use the correct MatrixID from config
+        researcher_matrix_id = (
+            config.ids["researcher"] if "researcher" in config.ids else MatrixID.parse("@mindroom_researcher:localhost")
+        )
         agent_user = AgentMatrixUser(
             agent_name="researcher",
-            user_id="@mindroom_researcher:localhost",
+            user_id=researcher_matrix_id.full_id,
             display_name="Researcher",
             password=TEST_PASSWORD,
         )
@@ -309,7 +325,9 @@ class TestDMIntegration:
         )
 
         bot.client = AsyncMock()
-        bot.client.user_id = "@mindroom_researcher:localhost"
+        bot.client.user_id = (
+            config.ids["researcher"].full_id if "researcher" in config.ids else "@mindroom_researcher:localhost"
+        )
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded = MagicMock(return_value=False)
         bot.orchestrator = orchestrator
@@ -350,7 +368,11 @@ class TestDMIntegration:
             room = MagicMock()
             room.room_id = "!dm:localhost"
             room.name = "DM with researcher"
-            room.users = {"@mindroom_researcher:localhost": None}  # Single agent in room
+            # Use the correct MatrixID from config
+            researcher_id = (
+                config.ids["researcher"].full_id if "researcher" in config.ids else "@mindroom_researcher:localhost"
+            )
+            room.users = {researcher_id: None}  # Single agent in room
 
             event = MagicMock(spec=nio.RoomMessageText)
             event.body = "Hello researcher, can you help?"
@@ -374,15 +396,17 @@ class TestDMIntegration:
 
     async def test_agent_processes_dm_messages_when_not_configured_for_room(self) -> None:
         """Test that agents process messages in DM rooms even when not configured for them."""
-        agent_user = AgentMatrixUser(
-            agent_name="test_agent",
-            user_id="@mindroom_test_agent:localhost",
-            display_name="Test Agent",
-            password=TEST_PASSWORD,
-        )
-
         config = Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
+        )
+
+        # Use the correct MatrixID from config
+        test_agent_matrix_id = config.ids["test_agent"]
+        agent_user = AgentMatrixUser(
+            agent_name="test_agent",
+            user_id=test_agent_matrix_id.full_id,
+            display_name="Test Agent",
+            password=TEST_PASSWORD,
         )
 
         # Agent is NOT configured for any rooms
@@ -394,7 +418,7 @@ class TestDMIntegration:
         )
 
         bot.client = AsyncMock()
-        bot.client.user_id = "@mindroom_test_agent:localhost"
+        bot.client.user_id = config.ids["test_agent"].full_id
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded = MagicMock(return_value=False)
         bot.logger = MagicMock()
@@ -434,7 +458,9 @@ class TestDMIntegration:
             room = MagicMock()
             room.room_id = "!dm:localhost"  # This room is NOT in bot.rooms
             room.name = "DM Room"
-            room.users = {"@mindroom_test_agent:localhost": None}  # Single agent in room
+            # Use the correct MatrixID from config
+            test_agent_id = config.ids["test_agent"].full_id
+            room.users = {test_agent_id: None}  # Single agent in room
 
             event = MagicMock(spec=nio.RoomMessageText)
             event.body = "Hello agent!"

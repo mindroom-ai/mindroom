@@ -12,7 +12,6 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
 
@@ -407,7 +406,12 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = Config(
+            router=RouterConfig(model="default"),
+            agents={
+                "calculator": AgentConfig(display_name="Calculator Agent", role="Calculator"),
+            },
+        )
         bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
@@ -421,7 +425,8 @@ class TestCommandHandling:
         mock_context.is_thread = True
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = []
-        mock_context.mentioned_agents = ["calculator"]
+        # mentioned_agents should be a list of MatrixID objects
+        mock_context.mentioned_agents = [config.ids["calculator"]] if "calculator" in config.ids else []
         bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
 
         # Mock should_agent_respond to return True
@@ -534,7 +539,6 @@ class TestCommandHandling:
         # So we test the scenario with the full thread history
         should_respond = should_agent_respond(
             agent_name="finance",
-            agent_matrix_id=MatrixID.parse("@mindroom_finance:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!test:localhost", ["finance", "router"]),
@@ -550,7 +554,6 @@ class TestCommandHandling:
         # The bot.py logic prevents this case from ever reaching should_agent_respond
         should_respond = should_agent_respond(
             agent_name="finance",
-            agent_matrix_id=MatrixID.parse("@mindroom_finance:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!test:localhost", ["finance", "router"]),

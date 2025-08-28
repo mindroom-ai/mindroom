@@ -156,7 +156,7 @@ class MessageContext:
     is_thread: bool
     thread_id: str | None
     thread_history: list[dict]
-    mentioned_agents: list[str]
+    mentioned_agents: list[MatrixID]
 
 
 @dataclass
@@ -441,7 +441,7 @@ class AgentBot:
 
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = await should_form_team(
-            context.mentioned_agents,
+            context.mentioned_agents if context.mentioned_agents else [],
             agents_in_thread,
             all_mentioned_in_thread,
             room=room,
@@ -451,7 +451,9 @@ class AgentBot:
         )
 
         # Dynamic team formation: only the first agent (alphabetically) handles team formation
-        if form_team.should_form_team and self.agent_name in form_team.agents:
+        # Check if this agent's MatrixID is in the team agents list
+        agent_matrix_id = self.config.ids[self.agent_name]
+        if form_team.should_form_team and any(mid.full_id == agent_matrix_id.full_id for mid in form_team.agents):
             team_response = await handle_team_formation(
                 agent_name=self.agent_name,
                 form_team_agents=form_team.agents,
@@ -472,7 +474,6 @@ class AgentBot:
 
         should_respond = should_agent_respond(
             agent_name=self.agent_name,
-            agent_matrix_id=self.matrix_id,
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
             room=room,
@@ -594,10 +595,10 @@ class AgentBot:
 
         if skip_mentions:
             # Don't detect mentions if the message has skip_mentions metadata
-            mentioned_agents: list[str] = []
+            mentioned_agents: list[MatrixID] = []
             am_i_mentioned = False
         else:
-            mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name, self.config)
+            mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.matrix_id, self.config)
 
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
@@ -927,9 +928,11 @@ class AgentBot:
         self.logger.info("Handling AI routing", event_id=event.event_id)
 
         event_info = EventInfo.from_event(event.source)
+        # Convert MatrixIDs to agent names for suggest_agent_for_message
+        available_agent_names = [mid.agent_name(self.config) or "" for mid in available_agents]
         suggested_agent = await suggest_agent_for_message(
             event.body,
-            available_agents,
+            available_agent_names,
             self.config,
             thread_history,
         )
@@ -1001,7 +1004,7 @@ class AgentBot:
             full_text = command.args["full_text"]
 
             # Get mentioned agents from the command text
-            mentioned_agents, _ = check_agent_mentioned(event.source, "", self.config)
+            mentioned_agents, _ = check_agent_mentioned(event.source, None, self.config)
 
             assert self.client is not None
             task_id, response_text = await schedule_task(

@@ -146,6 +146,13 @@ class Config(BaseModel):
     )
 
     @cached_property
+    def domain(self) -> str:
+        """Extract the domain from the MATRIX_HOMESERVER."""
+        from .matrix.identity import extract_server_name_from_homeserver  # noqa: PLC0415
+
+        return extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+
+    @cached_property
     def ids(self) -> dict[str, MatrixID]:
         """Get MatrixID objects for all agents and teams.
 
@@ -153,21 +160,20 @@ class Config(BaseModel):
             Dictionary mapping agent/team names to their MatrixID objects.
 
         """
-        from .matrix.identity import MatrixID, extract_server_name_from_homeserver  # noqa: PLC0415
+        from .matrix.identity import MatrixID  # noqa: PLC0415
 
-        server_domain = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
         mapping: dict[str, MatrixID] = {}
 
         # Add all agents
         for agent_name in self.agents:
-            mapping[agent_name] = MatrixID.from_agent(agent_name, server_domain)
+            mapping[agent_name] = MatrixID.from_agent(agent_name, self.domain)
 
         # Add router agent separately (it's not in config.agents)
-        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, server_domain)
+        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, self.domain)
 
         # Add all teams
         for team_name in self.teams:
-            mapping[team_name] = MatrixID.from_agent(team_name, server_domain)
+            mapping[team_name] = MatrixID.from_agent(team_name, self.domain)
         return mapping
 
     @classmethod

@@ -16,7 +16,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from mindroom.config import AgentConfig, Config, ModelConfig
-from mindroom.matrix.identity import MatrixID
 from mindroom.thread_utils import should_agent_respond
 
 
@@ -25,7 +24,7 @@ def create_mock_room(room_id: str = "#test:example.org", agents: list[str] | Non
     room = MagicMock()
     room.room_id = room_id
     if agents:
-        room.users = {f"@mindroom_{agent}:example.org": None for agent in agents}
+        room.users = {f"@mindroom_{agent}:localhost": None for agent in agents}
     else:
         room.users = {}
     return room
@@ -51,7 +50,6 @@ class TestAgentResponseLogic:
         """If an agent is mentioned, it should always respond."""
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=True,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -71,7 +69,6 @@ class TestAgentResponseLogic:
 
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -87,7 +84,6 @@ class TestAgentResponseLogic:
         # Test 1: Invited agent with no agents in thread - router decides (multiple agents)
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -105,7 +101,6 @@ class TestAgentResponseLogic:
         ]
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -124,7 +119,6 @@ class TestAgentResponseLogic:
         ]
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -140,7 +134,6 @@ class TestAgentResponseLogic:
         # Multiple agents with access - router should decide
         should_respond = should_agent_respond(
             agent_name="general",
-            agent_matrix_id=MatrixID.parse("@mindroom_general:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -155,7 +148,6 @@ class TestAgentResponseLogic:
         # (router decides) but CAN respond if mentioned
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -169,7 +161,6 @@ class TestAgentResponseLogic:
         # But if mentioned, agent in room can respond even if not configured
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=True,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -184,7 +175,6 @@ class TestAgentResponseLogic:
         """If no agents have participated, router decides who responds (multiple agents available)."""
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -205,7 +195,6 @@ class TestAgentResponseLogic:
 
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -220,7 +209,6 @@ class TestAgentResponseLogic:
         """If not in a thread, use router to determine response."""
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=False,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -235,7 +223,6 @@ class TestAgentResponseLogic:
         """If agent is not in room (native or invited), don't respond."""
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -250,7 +237,6 @@ class TestAgentResponseLogic:
         """Agents respond when mentioned in room (will create thread)."""
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=True,
             is_thread=False,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -277,7 +263,6 @@ class TestAgentResponseLogic:
         # Non-mentioned agent should not respond
         should_respond = should_agent_respond(
             agent_name="general",
-            agent_matrix_id=MatrixID.parse("@mindroom_general:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -293,7 +278,6 @@ class TestAgentResponseLogic:
         # Scenario 1: Empty thread, native agent
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -311,7 +295,6 @@ class TestAgentResponseLogic:
         ]
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -326,7 +309,6 @@ class TestAgentResponseLogic:
         """Agent without room access doesn't respond to room messages."""
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=False,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -342,7 +324,6 @@ class TestAgentResponseLogic:
         # Should behave same as native agent when invited
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -367,7 +348,6 @@ class TestAgentResponseLogic:
         # Multiple agents present, nobody should respond without mention
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -383,7 +363,6 @@ class TestAgentResponseLogic:
         # Room message scenario - agent1 is NOT mentioned but agent2 IS mentioned
         should_respond = should_agent_respond(
             agent_name="agent1",
-            agent_matrix_id=MatrixID.parse("@mindroom_agent1:example.org"),
             am_i_mentioned=False,
             is_thread=False,
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"]),
@@ -398,7 +377,6 @@ class TestAgentResponseLogic:
         # Now test when no agents are mentioned - router should be used
         should_respond = should_agent_respond(
             agent_name="agent1",
-            agent_matrix_id=MatrixID.parse("@mindroom_agent1:example.org"),
             am_i_mentioned=False,
             is_thread=False,
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"]),
@@ -414,7 +392,6 @@ class TestAgentResponseLogic:
         # Test when current agent is mentioned
         should_respond = should_agent_respond(
             agent_name="agent1",
-            agent_matrix_id=MatrixID.parse("@mindroom_agent1:example.org"),
             am_i_mentioned=True,
             is_thread=True,
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"]),
@@ -431,7 +408,6 @@ class TestAgentResponseLogic:
         # Only one agent in the room
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator"]),  # Only calculator in room
@@ -449,7 +425,6 @@ class TestAgentResponseLogic:
         ]
         should_respond = should_agent_respond(
             agent_name="calculator",
-            agent_matrix_id=MatrixID.parse("@mindroom_calculator:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator"]),  # Only calculator
@@ -476,7 +451,6 @@ class TestAgentResponseLogic:
         # GeneralAgent should NOT respond because ResearchAgent is mentioned
         should_respond = should_agent_respond(
             agent_name="general",
-            agent_matrix_id=MatrixID.parse("@mindroom_general:example.org"),
             am_i_mentioned=False,  # GeneralAgent is NOT mentioned
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
@@ -491,7 +465,6 @@ class TestAgentResponseLogic:
         # But if no agents are mentioned, general should continue the conversation
         should_respond = should_agent_respond(
             agent_name="general",
-            agent_matrix_id=MatrixID.parse("@mindroom_general:example.org"),
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
