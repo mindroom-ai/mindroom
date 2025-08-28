@@ -76,7 +76,9 @@ async def test_schedule_validates_agents_in_room() -> None:
         # Should fail because calculator is not in test_room
         assert task_id is None
         assert "❌ Failed to schedule" in response
-        assert "@calculator" in response
+        # The response will contain the full Matrix ID
+        calculator_matrix_id = config.ids["calculator"].full_id
+        assert calculator_matrix_id in response
         assert "not available in this room" in response
 
 
@@ -131,7 +133,9 @@ async def test_schedule_validates_agents_in_thread() -> None:
         # Should fail because calculator is not in the room
         assert task_id is None
         assert "❌ Failed to schedule" in response
-        assert "@calculator" in response
+        # The response will contain the full Matrix ID
+        calculator_matrix_id = config.ids["calculator"].full_id
+        assert calculator_matrix_id in response
         assert "not available in this thread" in response
 
 
@@ -249,9 +253,12 @@ async def test_schedule_with_multiple_agents_validation() -> None:
         # Should fail because calculator is not in room
         assert task_id is None
         assert "❌ Failed to schedule" in response
-        assert "@calculator" in response
+        # The response will contain the full Matrix ID
+        calculator_matrix_id = config.ids["calculator"].full_id
+        assert calculator_matrix_id in response
         # Researcher should not be mentioned as invalid
-        assert "@researcher" not in response.split("not available")[1] if "not available" in response else True
+        researcher_matrix_id = config.ids["researcher"].full_id
+        assert researcher_matrix_id not in response.split("not available")[1] if "not available" in response else True
 
 
 @pytest.mark.asyncio

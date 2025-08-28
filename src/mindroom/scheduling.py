@@ -454,16 +454,16 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
             error_msg += "thread"
         else:
             error_msg += "room"
-        error_msg += f": {', '.join(f'@{agent}' for agent in validation_result.invalid_agents)}"
+        error_msg += f": {', '.join(agent.full_id for agent in validation_result.invalid_agents)}"
 
         # Provide helpful suggestions
         suggestions: list[str] = []
         for agent in validation_result.invalid_agents:
             if agent.username in config.agents:
                 # Agent exists but not available in this room/thread
-                suggestions.append(f"@{agent.full_id} is not available in this {'thread' if thread_id else 'room'}")
+                suggestions.append(f"{agent.full_id} is not available in this {'thread' if thread_id else 'room'}")
             else:
-                suggestions.append(f"@{agent.full_id} does not exist")
+                suggestions.append(f"{agent.full_id} does not exist")
 
         if suggestions:
             error_msg += "\n\n💡 " + "\n💡 ".join(suggestions)
