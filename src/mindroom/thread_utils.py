@@ -51,6 +51,37 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
     return agents
 
 
+def get_agent_matrix_ids_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[MatrixID]:
+    """Get list of unique agent Matrix IDs that have participated in thread.
+
+    Note: Router agent is excluded from the participant list as it's not
+    a conversation participant.
+
+    Preserves the order of first participation while preventing duplicates.
+
+    Returns:
+        List of MatrixID objects for agents who participated in the thread.
+
+    """
+    agent_ids = []
+    seen_ids = set()
+
+    for msg in thread_history:
+        sender = msg.get("sender", "")
+        agent_name = extract_agent_name(sender, config)
+        if agent_name and agent_name != ROUTER_AGENT_NAME:
+            try:
+                matrix_id = MatrixID.parse(sender)
+                if matrix_id.full_id not in seen_ids:
+                    agent_ids.append(matrix_id)
+                    seen_ids.add(matrix_id.full_id)
+            except ValueError:
+                # Skip invalid Matrix IDs
+                pass
+
+    return agent_ids
+
+
 def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[str]:
     """Extract agent names from mentions."""
     user_ids = mentions.get("user_ids", [])
@@ -100,6 +131,29 @@ def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[s
     return sorted(agents)
 
 
+def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config) -> list[MatrixID]:
+    """Get list of available agent Matrix IDs in a room.
+
+    Note: Router agent is excluded as it's not a regular conversation participant.
+
+    Returns:
+        List of MatrixID objects for agents in the room.
+
+    """
+    agent_ids = []
+    for member_id in room.users:
+        agent_name = extract_agent_name(member_id, config)
+        if agent_name and agent_name != ROUTER_AGENT_NAME:
+            try:
+                matrix_id = MatrixID.parse(member_id)
+                agent_ids.append(matrix_id)
+            except ValueError:
+                # Skip invalid Matrix IDs
+                pass
+
+    return sorted(agent_ids, key=lambda x: x.full_id)
+
+
 def get_configured_agents_for_room(room_id: str, config: Config) -> list[str]:
     """Get list of agents configured for a specific room.
 
@@ -113,6 +167,25 @@ def get_configured_agents_for_room(room_id: str, config: Config) -> list[str]:
         if agent_name != ROUTER_AGENT_NAME and room_id in agent_config.rooms:
             configured_agents.append(agent_name)
     return sorted(configured_agents)
+
+
+def get_configured_agent_matrix_ids_for_room(room_id: str, config: Config) -> list[MatrixID]:
+    """Get list of agent Matrix IDs configured for a specific room.
+
+    This returns only agents that have the room in their configuration,
+    not just agents that happen to be present in the room.
+
+    Note: Router agent is excluded as it's not a regular conversation participant.
+
+    Returns:
+        List of MatrixID objects for agents configured for the room.
+
+    """
+    agent_ids = []
+    for agent_name, agent_config in config.agents.items():
+        if agent_name != ROUTER_AGENT_NAME and room_id in agent_config.rooms:
+            agent_ids.append(config.ids[agent_name])
+    return sorted(agent_ids, key=lambda x: x.full_id)
 
 
 def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:

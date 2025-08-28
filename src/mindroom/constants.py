@@ -21,3 +21,8 @@ MATRIX_STATE_FILE = Path(STORAGE_PATH) / "matrix_state.yaml"
 # Other constants
 VOICE_PREFIX = "🎤 "
 ENABLE_STREAMING = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+
+# Matrix
+MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
+# (for federation setups where hostname != server_name)
+MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)

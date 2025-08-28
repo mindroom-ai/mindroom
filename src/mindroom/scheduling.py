@@ -17,8 +17,8 @@ from croniter import croniter  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
+from .constants import MATRIX_HOMESERVER
 from .logging_config import get_logger
-from .matrix import MATRIX_HOMESERVER
 from .matrix.client import (
     fetch_thread_history,
     get_latest_thread_event_id_if_needed,

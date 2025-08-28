@@ -23,10 +23,9 @@ from .commands import (
     handle_widget_command,
 )
 from .config import Config
-from .constants import ENABLE_STREAMING, ROUTER_AGENT_NAME, VOICE_PREFIX
+from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
-from .matrix import MATRIX_HOMESERVER
 from .matrix.client import (
     check_and_set_avatar,
     edit_message,

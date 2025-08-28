@@ -9,9 +9,8 @@ from agno.storage.sqlite import SqliteStorage
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
-from .constants import ROUTER_AGENT_NAME
+from .constants import MATRIX_HOMESERVER, ROUTER_AGENT_NAME
 from .logging_config import get_logger
-from .matrix import MATRIX_HOMESERVER
 from .matrix.identity import MatrixID, extract_server_name_from_homeserver
 from .tools_metadata import get_tool_by_name
 
