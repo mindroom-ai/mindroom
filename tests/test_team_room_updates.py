@@ -18,6 +18,8 @@ class TestTeamRoomUpdates:
     """Test team room configuration updates."""
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for team room management
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     async def test_team_room_change_triggers_restart(self) -> None:
         """Test that changing a team's room configuration triggers a restart."""
         # Create initial config
@@ -91,6 +93,8 @@ class TestTeamRoomUpdates:
                     assert mock_create_bot.call_count == 5
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for team creation
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     async def test_new_team_gets_created(self) -> None:
         """Test that a new team in config gets created."""
         # Start with no teams
@@ -151,6 +155,8 @@ class TestTeamRoomUpdates:
                     assert "new_team" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for team configuration
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     async def test_no_change_no_restart(self) -> None:
         """Test that no changes in team config doesn't trigger restart."""
         config_data: dict[str, Any] = {

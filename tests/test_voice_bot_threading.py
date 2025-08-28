@@ -27,7 +27,6 @@ def mock_router_bot() -> AgentBot:
     config = Config.from_yaml()
     bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
-    bot.thread_invite_manager = AsyncMock()
     bot.logger = MagicMock()
     bot._send_response = AsyncMock()  # type: ignore[method-assign]
     bot.response_tracker = MagicMock()

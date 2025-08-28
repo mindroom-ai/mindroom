@@ -42,8 +42,6 @@ async def test_bot_ignores_edit_events() -> None:
     # Mock other dependencies
     bot.response_tracker = MagicMock()
     bot.response_tracker.has_responded.return_value = False
-    bot.thread_invite_manager = AsyncMock()
-    bot.thread_invite_manager.get_agent_threads.return_value = []
     bot.logger = MagicMock()
 
     # Create a room
@@ -152,8 +150,6 @@ async def test_bot_ignores_multiple_edits() -> None:
     bot.client.user_id = "@router:example.com"
     bot.response_tracker = MagicMock()
     bot.response_tracker.has_responded.return_value = False
-    bot.thread_invite_manager = AsyncMock()
-    bot.thread_invite_manager.get_agent_threads.return_value = []
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@router:example.com")
@@ -237,8 +233,6 @@ async def test_regular_agent_ignores_edits() -> None:
     bot.client.user_id = "@test_agent:example.com"
     bot.response_tracker = MagicMock()
     bot.response_tracker.has_responded.return_value = False
-    bot.thread_invite_manager = AsyncMock()
-    bot.thread_invite_manager.get_agent_threads.return_value = []
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")

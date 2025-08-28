@@ -39,6 +39,7 @@ Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy 
 - **No unnecessary try-except**: Only catch what can actually fail
 - **Remove unused code**: Functions, imports, variables - delete ruthlessly
 - **No premature abstraction**: Concrete implementations first
+- **NO DUCKTYPING**: Explicit is better than implicit, so no `hasattr` or `getattr`, just use proper types with `isinstance` checks if needed
 
 ## Check for Common Cruft:
 

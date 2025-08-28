@@ -212,10 +212,8 @@ class TestDMMessageContext:
             rooms=[],  # Not configured for any rooms
         )
 
-        # Mock the client and thread invite manager
+        # Mock the client
         bot.client = AsyncMock()
-        bot.thread_invite_manager = AsyncMock()
-        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
 
         # Mock fetch_thread_history - DMs now use threads like regular rooms
         with patch("mindroom.bot.fetch_thread_history", return_value=[]) as mock_fetch:
@@ -306,8 +304,6 @@ class TestDMIntegration:
 
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_researcher:localhost"
-        bot.thread_invite_manager = AsyncMock()
-        bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded = MagicMock(return_value=False)
         bot.orchestrator = orchestrator
@@ -393,8 +389,6 @@ class TestDMIntegration:
 
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_test_agent:localhost"
-        bot.thread_invite_manager = AsyncMock()
-        bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded = MagicMock(return_value=False)
         bot.logger = MagicMock()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -21,12 +20,10 @@ from .commands import (
     CommandType,
     command_parser,
     get_command_help,
-    handle_invite_command,
-    handle_list_invites_command,
     handle_widget_command,
 )
 from .config import Config
-from .constants import ROUTER_AGENT_NAME, VOICE_PREFIX
+from .constants import ENABLE_STREAMING, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix import MATRIX_HOMESERVER
@@ -49,6 +46,7 @@ from .matrix.identity import (
     extract_server_name_from_homeserver,
 )
 from .matrix.mentions import create_mention_content_from_text
+from .matrix.presence import should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
@@ -65,7 +63,6 @@ from .scheduling import (
 )
 from .streaming import IN_PROGRESS_MARKER, StreamingResponse
 from .teams import TeamMode, create_team_response, get_team_model, handle_team_formation, should_form_team
-from .thread_invites import ThreadInviteManager
 from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
@@ -85,7 +82,6 @@ logger = get_logger(__name__)
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
-CLEANUP_INTERVAL_SECONDS = 3600
 
 
 def _should_skip_mentions(event_source: dict) -> bool:
@@ -123,7 +119,7 @@ def create_bot_for_entity(
         Bot instance or None if entity not found in config
 
     """
-    enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+    enable_streaming = ENABLE_STREAMING
 
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
@@ -161,7 +157,6 @@ class MessageContext:
     is_thread: bool
     thread_id: str | None
     thread_history: list[dict]
-    is_invited_to_thread: bool
     mentioned_agents: list[str]
 
 
@@ -177,8 +172,6 @@ class AgentBot:
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
     response_tracker: ResponseTracker = field(init=False)
-    thread_invite_manager: ThreadInviteManager = field(init=False)
-    invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
 
@@ -218,13 +211,8 @@ class AgentBot:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
-        """Leave any rooms this agent is no longer configured for.
-
-        Note: Agents will stay in rooms where they have thread invitations,
-        even if not configured for the room.
-        """
+        """Leave any rooms this agent is no longer configured for."""
         assert self.client is not None
-        assert self.thread_invite_manager is not None
 
         # Get all rooms we're currently in
         joined_rooms = await get_joined_rooms(self.client)
@@ -234,13 +222,8 @@ class AgentBot:
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.rooms)
 
-        # Leave rooms we're no longer configured for AND have no thread invitations
+        # Leave rooms we're no longer configured for
         for room_id in current_rooms - configured_rooms:
-            agent_threads = await self.thread_invite_manager.get_agent_threads(room_id, self.agent_name)
-            if agent_threads:
-                self.logger.info(f"Staying in room {room_id} due to {len(agent_threads)} thread invitation(s)")
-                continue
-
             if await is_dm_room(self.client, room_id):
                 self.logger.debug(f"Preserving DM room {room_id} during cleanup")
                 continue
@@ -306,9 +289,8 @@ class AgentBot:
         # Set avatar if available
         await self._set_avatar_if_available()
 
-        # Initialize response tracker and thread invite manager
+        # Initialize response tracker
         self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
-        self.thread_invite_manager = ThreadInviteManager(self.client)
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
@@ -325,11 +307,9 @@ class AgentBot:
         # Router bot has additional responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
             try:
-                await cleanup_all_orphaned_bots(self.client, self.config, self.thread_invite_manager)
+                await cleanup_all_orphaned_bots(self.client, self.config)
             except Exception as e:
                 self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
-
-            asyncio.create_task(self._periodic_cleanup())  # noqa: RUF006
 
         # Note: Room joining is deferred until after invitations are handled
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
@@ -412,11 +392,10 @@ class AgentBot:
             return
 
         # Check if we should process messages in this room
-        # Process if: configured for room OR invited to threads in room OR joined the room
+        # Process if: configured for room OR joined the room OR in a DM room
         # 1. Room is in configured rooms list
-        # 2. Agent has been invited to threads in this room
-        # 3. Currently in a DM room and not configured for it
-        # 4. Agent has joined the room (even if not configured)
+        # 2. Agent has joined the room (even if not configured)
+        # 3. Currently in a DM room
         _is_dm_room = await is_dm_room(self.client, room.room_id)
         if not _is_dm_room and room.room_id not in self.rooms:
             # Check if we're actually in the room (joined it)
@@ -425,19 +404,10 @@ class AgentBot:
                 # We're in the room, so we should process messages when mentioned
                 self.logger.debug(f"Processing message in joined but unconfigured room {room.room_id}")
             else:
-                assert self.thread_invite_manager is not None
-                agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
-                if not agent_threads:
-                    # Not configured for room, not joined, and no thread invitations
-                    return
+                # Not configured for room and not joined
+                return
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
-
-        assert self.config is not None
-        sender_agent_name = extract_agent_name(event.sender, self.config)
-        if sender_agent_name:
-            assert self.thread_invite_manager is not None
-            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
 
         # Try to parse as command
         command = command_parser.parse(event.body)
@@ -449,11 +419,18 @@ class AgentBot:
 
         context = await self._extract_message_context(room, event)
 
+        # Check if the sender is an agent
+        assert self.config is not None
+        sender_agent_name = extract_agent_name(event.sender, self.config)
+
         # Ignore messages from other agents unless we are mentioned,
         # except when the router is posting a voice transcription (VOICE_PREFIX),
         # which should be treated as a user-originated message.
         is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
-        if sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription:
+        is_from_other_agent_without_mention = (
+            sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription
+        )
+        if is_from_other_agent_without_mention:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
@@ -508,7 +485,6 @@ class AgentBot:
             configured_rooms=self.rooms,
             thread_history=context.thread_history,
             config=self.config,
-            is_invited_to_thread=context.is_invited_to_thread,
             mentioned_agents=context.mentioned_agents,
         )
 
@@ -617,7 +593,6 @@ class AgentBot:
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
-        assert self.thread_invite_manager is not None
 
         # Check if mentions should be ignored for this message
         skip_mentions = _should_skip_mentions(event.source)
@@ -635,21 +610,14 @@ class AgentBot:
         event_info = EventInfo.from_event(event.source)
 
         thread_history = []
-        is_invited_to_thread = False
         if event_info.thread_id:
             thread_history = await fetch_thread_history(self.client, room.room_id, event_info.thread_id)
-            is_invited_to_thread = await self.thread_invite_manager.is_agent_invited_to_thread(
-                event_info.thread_id,
-                room.room_id,
-                self.agent_name,
-            )
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
             is_thread=event_info.is_thread,
             thread_id=event_info.thread_id,
             thread_history=thread_history,
-            is_invited_to_thread=is_invited_to_thread,
             mentioned_agents=mentioned_agents,
         )
 
@@ -686,10 +654,15 @@ class AgentBot:
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(room, reply_to_event_id, response.formatted_text, thread_id)
         if event_id and response.option_map and response.options_list:
+            # For interactive questions, use the same thread root that _send_response uses:
+            # - If already in a thread, use that thread_id
+            # - If not in a thread, use reply_to_event_id (the user's message) as thread root
+            # This ensures consistency with how the bot creates threads
+            thread_root_for_registration = thread_id if thread_id else reply_to_event_id
             interactive.register_interactive_question(
                 event_id,
                 room.room_id,
-                thread_id,
+                thread_root_for_registration,
                 response.option_map,
                 self.agent_name,
             )
@@ -760,10 +733,15 @@ class AgentBot:
         if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
             response = interactive.parse_and_format_interactive(streaming.accumulated_text, extract_mapping=True)
             if response.option_map and response.options_list:
+                # For interactive questions, use the same thread root that _send_response uses:
+                # - If already in a thread, use that thread_id
+                # - If not in a thread, use reply_to_event_id (the user's message) as thread root
+                # This ensures consistency with how the bot creates threads
+                thread_root_for_registration = thread_id if thread_id else reply_to_event_id
                 interactive.register_interactive_question(
                     streaming.event_id,
                     room.room_id,
-                    thread_id,
+                    thread_root_for_registration,
                     response.option_map,
                     self.agent_name,
                 )
@@ -818,8 +796,19 @@ class AgentBot:
             name=f"memory_save_{self.agent_name}_{session_id}",
         )
 
+        # Dynamically determine whether to use streaming based on user presence
+        # Only check presence if streaming is globally enabled
+        use_streaming = self.enable_streaming
+        if use_streaming:
+            # Check if the user is online to decide whether to stream
+            use_streaming = await should_use_streaming(
+                self.client,
+                room_id,
+                requester_user_id=user_id,
+            )
+
         # Dispatch to appropriate method
-        if self.enable_streaming:
+        if use_streaming:
             await self._process_and_respond_streaming(
                 room,
                 prompt,
@@ -947,9 +936,6 @@ class AgentBot:
             available_agents,
             self.config,
             thread_history,
-            event_info.thread_id,
-            room.room_id,
-            self.thread_invite_manager,
         )
         if not suggested_agent:
             return
@@ -991,7 +977,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912
+    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
         self.logger.info("Handling command", command_type=command.type.value)
 
         event_info = EventInfo.from_event(event.source)
@@ -1011,42 +997,7 @@ class AgentBot:
 
         response_text = ""
 
-        if command.type == CommandType.INVITE:
-            # Handle invite command
-            agent_name = command.args["agent_name"]
-            agent_domain = self.matrix_id.domain
-
-            assert self.client is not None
-            assert self.thread_invite_manager is not None
-            response_text = await handle_invite_command(
-                room_id=room.room_id,
-                thread_id=effective_thread_id,
-                agent_name=agent_name,
-                sender=event.sender,
-                agent_domain=agent_domain,
-                client=self.client,
-                thread_invite_manager=self.thread_invite_manager,
-                config=self.config,
-            )
-
-        elif command.type == CommandType.UNINVITE:
-            agent_name = command.args["agent_name"]
-            assert self.thread_invite_manager is not None
-            removed = await self.thread_invite_manager.remove_invite(effective_thread_id, room.room_id, agent_name)
-            if removed:
-                response_text = f"✅ Removed @{agent_name} from this thread."
-            else:
-                response_text = f"❌ @{agent_name} was not invited to this thread."
-
-        elif command.type == CommandType.LIST_INVITES:
-            assert self.thread_invite_manager is not None
-            response_text = await handle_list_invites_command(
-                room.room_id,
-                effective_thread_id,
-                self.thread_invite_manager,
-            )
-
-        elif command.type == CommandType.HELP:
+        if command.type == CommandType.HELP:
             topic = command.args.get("topic")
             response_text = get_command_help(topic)
 
@@ -1110,39 +1061,6 @@ class AgentBot:
                 skip_mentions=True,
             )
             self.response_tracker.mark_responded(event.event_id)
-
-    async def _periodic_cleanup(self) -> None:
-        """Periodically clean up expired thread invitations."""
-        while self.running:
-            try:
-                # Wait for 1 hour between cleanups
-                await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
-
-                # Get all rooms the bot is in
-                assert self.client is not None
-                joined_rooms = await get_joined_rooms(self.client)
-                if joined_rooms is None:
-                    continue
-
-                total_removed = 0
-                for room_id in joined_rooms:
-                    try:
-                        assert self.thread_invite_manager is not None
-                        removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
-                            room_id,
-                            timeout_hours=self.invitation_timeout_hours,
-                        )
-                        total_removed += removed_count
-                    except Exception as e:
-                        self.logger.exception("Failed to cleanup room", room_id=room_id, error=str(e))
-
-                if total_removed > 0:
-                    self.logger.info(f"Periodic cleanup removed {total_removed} expired agents")
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.exception("Error in periodic cleanup", error=str(e))
 
     def _should_skip_duplicate_response(self, event: nio.RoomMessageText) -> bool:
         """Check if we should skip responding to avoid duplicates.
@@ -1257,7 +1175,7 @@ class MultiAgentOrchestrator:
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
-    _created_room_ids: dict[str, str] = field(default_factory=dict, init=False)
+    _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
 
     async def _ensure_user_account(self) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -1341,14 +1259,14 @@ class MultiAgentOrchestrator:
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
 
         # Create sync tasks for each bot with automatic restart on failure
-        sync_tasks = []
-        for bot in self.agent_bots.values():
+        for entity_name, bot in self.agent_bots.items():
             # Create a task for each bot's sync loop with restart wrapper
             sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
-            sync_tasks.append(sync_task)
+            # Store the task reference for later cancellation
+            self._sync_tasks[entity_name] = sync_task
 
         # Run all sync tasks
-        await asyncio.gather(*sync_tasks)
+        await asyncio.gather(*tuple(self._sync_tasks.values()))
 
     async def update_config(self) -> bool:  # noqa: C901, PLR0912
         """Update configuration with simplified self-managing agents.
@@ -1379,7 +1297,7 @@ class MultiAgentOrchestrator:
 
         # Stop entities that need restarting
         if entities_to_restart:
-            await _stop_entities(entities_to_restart, self.agent_bots)
+            await _stop_entities(entities_to_restart, self.agent_bots, self._sync_tasks)
 
         # Update config
         self.config = new_config
@@ -1401,7 +1319,8 @@ class MultiAgentOrchestrator:
                     # Agent handles its own setup (but doesn't join rooms yet)
                     await bot.start()
                     # Start sync loop with automatic restart
-                    asyncio.create_task(_sync_forever_with_restart(bot))  # noqa: RUF006
+                    sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+                    self._sync_tasks[entity_name] = sync_task
             # Entity was removed from config
             elif entity_name in self.agent_bots:
                 del self.agent_bots[entity_name]
@@ -1414,11 +1333,15 @@ class MultiAgentOrchestrator:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot
                 await bot.start()
-                asyncio.create_task(_sync_forever_with_restart(bot))  # noqa: RUF006
+                sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+                self._sync_tasks[entity_name] = sync_task
 
         # Handle removed entities (cleanup)
         removed_entities = existing_entities - all_new_entities
         for entity_name in removed_entities:
+            # Cancel sync task first
+            await _cancel_sync_task(entity_name, self._sync_tasks)
+
             if entity_name in self.agent_bots:
                 bot = self.agent_bots[entity_name]
                 await bot.cleanup()  # Agent handles its own cleanup
@@ -1440,6 +1363,10 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+
+        # First cancel all sync tasks
+        for entity_name in list(self._sync_tasks.keys()):
+            await _cancel_sync_task(entity_name, self._sync_tasks)
 
         # Signal all bots to stop their sync loops
         for bot in self.agent_bots.values():
@@ -1502,9 +1429,7 @@ class MultiAgentOrchestrator:
         # Directly create rooms using the router's client
         assert self.config is not None
         room_ids = await ensure_all_rooms_exist(router_bot.client, self.config)
-
-        # Store room IDs for later use
-        self._created_room_ids = room_ids
+        logger.info(f"Ensured existence of {len(room_ids)} rooms")
 
     async def _ensure_room_invitations(self) -> None:  # noqa: C901, PLR0912
         """Ensure all agents and the user are invited to their configured rooms.
@@ -1651,7 +1576,25 @@ def _create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
     )
 
 
-async def _stop_entities(entities_to_restart: set[str], agent_bots: dict[str, Any]) -> None:
+async def _cancel_sync_task(entity_name: str, sync_tasks: dict[str, asyncio.Task]) -> None:
+    """Cancel and remove a sync task for an entity."""
+    if entity_name in sync_tasks:
+        task = sync_tasks[entity_name]
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        del sync_tasks[entity_name]
+
+
+async def _stop_entities(
+    entities_to_restart: set[str],
+    agent_bots: dict[str, Any],
+    sync_tasks: dict[str, asyncio.Task],
+) -> None:
+    # Cancel sync tasks to prevent duplicates
+    for entity_name in entities_to_restart:
+        await _cancel_sync_task(entity_name, sync_tasks)
+
     stop_tasks = []
     for entity_name in entities_to_restart:
         if entity_name in agent_bots:

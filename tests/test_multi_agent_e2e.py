@@ -101,8 +101,11 @@ async def test_agent_processes_direct_mention(
                 payload={"event_id": "$response_event:example.org"},
             )
 
-            # Mock the AI response
-            with patch("mindroom.bot.ai_response_streaming") as mock_ai:
+            # Mock the AI response and presence check
+            with (
+                patch("mindroom.bot.ai_response_streaming") as mock_ai,
+                patch("mindroom.bot.should_use_streaming", return_value=True),
+            ):
 
                 async def mock_streaming_response() -> AsyncGenerator[str, None]:
                     yield "15% of 200 is 30"
@@ -406,6 +409,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_matrix  # Requires real Matrix server for multi-agent orchestration
+@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     """Test that the orchestrator manages multiple agents correctly."""
     with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure:

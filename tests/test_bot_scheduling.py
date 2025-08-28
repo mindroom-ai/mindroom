@@ -42,7 +42,6 @@ def mock_agent_bot() -> AgentBot:
     config = Config.from_yaml()  # Load actual config for testing
     bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
-    bot.thread_invite_manager = AsyncMock()
     bot.logger = MagicMock()
     bot._send_response = AsyncMock()  # type: ignore[method-assign]
     return bot
@@ -462,7 +461,6 @@ class TestCommandHandling:
         bot._generate_response = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
-        bot.thread_invite_manager = AsyncMock()  # Mock the thread invite manager
 
         # Mock context extraction
         mock_context = MagicMock()
@@ -585,7 +583,6 @@ class TestCommandHandling:
         bot._send_response = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
-        bot.thread_invite_manager = AsyncMock()
         bot.orchestrator = MagicMock()
 
         # Create thread history with multiple agents mentioned
@@ -683,7 +680,6 @@ class TestCommandHandling:
         bot._generate_response = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
-        bot.thread_invite_manager = AsyncMock()
 
         # Create thread history that mimics the real scenario
         thread_history = [
@@ -789,7 +785,6 @@ class TestCommandHandling:
         bot._generate_response = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
-        bot.thread_invite_manager = AsyncMock()
 
         # Mock context extraction - no agents mentioned
         mock_context = MagicMock()

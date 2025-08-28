@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config
-from mindroom.workflow_scheduling import CronSchedule, ScheduledWorkflow, parse_workflow_schedule
+from mindroom.scheduling import CronSchedule, ScheduledWorkflow, parse_workflow_schedule
 
 
 class TestDynamicConfigUpdate:
@@ -116,7 +116,7 @@ class TestDynamicConfigUpdate:
         request = "whenever i get an email with title urgent, notify @callagent to send me a text"
 
         # Mock the AI model to return a proper workflow
-        with patch("mindroom.workflow_scheduling.get_model_instance") as mock_get_model:
+        with patch("mindroom.scheduling.get_model_instance") as mock_get_model:
             mock_agent = MagicMock()
             mock_response = MagicMock()
 
@@ -139,7 +139,7 @@ class TestDynamicConfigUpdate:
             mock_model = MagicMock()
             mock_get_model.return_value = mock_model
 
-            with patch("mindroom.workflow_scheduling.Agent") as mock_agent_class:
+            with patch("mindroom.scheduling.Agent") as mock_agent_class:
                 mock_agent_class.return_value = mock_agent
 
                 # Parse with the updated config

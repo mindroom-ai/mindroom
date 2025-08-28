@@ -81,19 +81,18 @@ class TestAgentResponseLogic:
 
     def test_invited_agent_behaves_like_native_agent(self) -> None:
         """Invited agents should follow the same rules as native agents."""
-        # Test 1: Invited agent with no agents in thread - should take ownership
+        # Test 1: Invited agent with no agents in thread - router decides (multiple agents)
         should_respond = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
             is_dm_room=False,
-            configured_rooms=[],  # Not native to room
+            configured_rooms=["!room:localhost"],  # Has access to room
             thread_history=[],
             config=self.config,
-            is_invited_to_thread=True,  # Agent is invited
         )
-        assert should_respond is True  # Invited agent takes ownership when no one has spoken
+        assert should_respond is False  # Router decides when multiple agents available
 
         # Test 2: Invited agent as only agent in thread - should continue
         thread_history = [
@@ -106,10 +105,9 @@ class TestAgentResponseLogic:
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
             is_dm_room=False,
-            configured_rooms=[],  # Not native to room
+            configured_rooms=["!room:localhost"],  # Has access
             thread_history=thread_history,
             config=self.config,
-            is_invited_to_thread=True,  # Agent is invited
         )
         assert should_respond is True
 
@@ -125,45 +123,56 @@ class TestAgentResponseLogic:
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
             is_dm_room=False,
-            configured_rooms=[],  # Not native to room
+            configured_rooms=["!room:localhost"],  # Has access
             thread_history=thread_history,
             config=self.config,
-            is_invited_to_thread=True,  # Agent is invited
         )
         assert should_respond is False
 
-    def test_only_invited_agent_responds_when_no_history(self) -> None:
-        """When no agents have spoken yet, only invited agents should respond."""
-        # Non-invited agent should not respond
+    def test_only_agent_with_access_responds_when_no_history(self) -> None:
+        """When no agents have spoken yet, router decides who responds if multiple agents available."""
+        # Multiple agents with access - router should decide
         should_respond = should_agent_respond(
             agent_name="general",
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
             is_dm_room=False,
-            configured_rooms=["!room:localhost"],  # Native to room
+            configured_rooms=["!room:localhost"],  # Has access
             thread_history=[],  # No one has spoken
             config=self.config,
-            is_invited_to_thread=False,  # Not invited
         )
-        assert should_respond is False  # Should wait for router or invited agent
+        assert should_respond is False  # Router decides when multiple agents available
 
-        # Invited agent should respond
+        # Agent in room but not configured - should not respond when multiple agents available
+        # (router decides) but CAN respond if mentioned
         should_respond = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
             is_dm_room=False,
-            configured_rooms=[],  # Not native
+            configured_rooms=[],  # Not configured
             thread_history=[],  # No one has spoken
             config=self.config,
-            is_invited_to_thread=True,  # Invited
         )
-        assert should_respond is True  # Should take ownership
+        assert should_respond is False  # Router decides when multiple agents available
+
+        # But if mentioned, agent in room can respond even if not configured
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=True,
+            is_thread=True,
+            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"]),
+            is_dm_room=False,
+            configured_rooms=[],  # Not configured
+            thread_history=[],  # No one has spoken
+            config=self.config,
+        )
+        assert should_respond is True  # Can respond when mentioned even if not configured
 
     def test_no_agents_in_thread_uses_router(self) -> None:
-        """If no agents have participated, use router."""
+        """If no agents have participated, router decides who responds (multiple agents available)."""
         should_respond = should_agent_respond(
             agent_name="calculator",
             am_i_mentioned=False,
@@ -174,7 +183,7 @@ class TestAgentResponseLogic:
             thread_history=[],
             config=self.config,
         )
-        assert should_respond is False
+        assert should_respond is False  # Router decides when multiple agents available
 
     def test_multiple_agents_nobody_responds(self) -> None:
         """If multiple agents in thread, nobody responds unless mentioned."""
@@ -393,6 +402,38 @@ class TestAgentResponseLogic:
         )
         # Agent1 SHOULD respond and should NOT use router
         assert should_respond
+
+    def test_single_agent_takes_ownership_of_empty_thread(self) -> None:
+        """When there's only one agent with access to an empty thread, it takes ownership."""
+        # Only one agent in the room
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            room=create_mock_room("!room:localhost", ["calculator"]),  # Only calculator in room
+            is_dm_room=False,
+            configured_rooms=["!room:localhost"],  # Has access
+            thread_history=[],  # Empty thread
+            config=self.config,
+        )
+        assert should_respond is True  # Single agent takes ownership
+
+        # Thread with only user messages - single agent should also take ownership
+        thread_history = [
+            {"sender": "@user:localhost", "body": "I need help"},
+            {"sender": "@user:localhost", "body": "Anyone there?"},
+        ]
+        should_respond = should_agent_respond(
+            agent_name="calculator",
+            am_i_mentioned=False,
+            is_thread=True,
+            room=create_mock_room("!room:localhost", ["calculator"]),  # Only calculator
+            is_dm_room=False,
+            configured_rooms=["!room:localhost"],
+            thread_history=thread_history,
+            config=self.config,
+        )
+        assert should_respond is True  # Single agent takes ownership when only users have spoken
 
     def test_agent_stops_when_user_mentions_other_agent(self) -> None:
         """Test that an agent stops responding when user mentions a different agent.

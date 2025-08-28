@@ -106,8 +106,6 @@ async def test_extract_context_with_skip_mentions() -> None:
     bot.config = AsyncMock()
     bot.agent_name = "email_agent"
     bot.client = AsyncMock()
-    bot.thread_invite_manager = AsyncMock()
-    bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
     bot.logger = AsyncMock()
 
     # Create room

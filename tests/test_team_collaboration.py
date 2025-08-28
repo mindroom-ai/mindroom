@@ -10,7 +10,6 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import get_agents_in_thread
 
 from .conftest import TEST_PASSWORD
@@ -110,8 +109,6 @@ class TestTeamFormation:
         analyst_bot.client = AsyncMock()
         research_bot.response_tracker = MagicMock()
         analyst_bot.response_tracker = MagicMock()
-        research_bot.thread_invite_manager = ThreadInviteManager(research_bot.client)
-        analyst_bot.thread_invite_manager = ThreadInviteManager(analyst_bot.client)
 
         # Create message mentioning both agents
         message_event: dict[str, Any] = {

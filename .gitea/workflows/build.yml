@@ -41,7 +41,8 @@ jobs:
           - frontend
         platform:
           - linux/amd64
-          - linux/arm64
+          # Skip ARM64 for now to save time and resources
+          # - linux/arm64
 
     steps:
     - name: Checkout code

@@ -119,6 +119,8 @@ async def test_router_joins_rooms_on_start(config_with_rooms: Config, monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_matrix  # Requires real Matrix server for router room management
+@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_orchestrator_creates_router_with_all_rooms(
     config_with_rooms: Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -183,6 +185,8 @@ async def test_orchestrator_creates_router_with_all_rooms(
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_matrix  # Requires real Matrix server for router room updates
+@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that the router updates its room list when config changes."""
     # Initial config with some rooms

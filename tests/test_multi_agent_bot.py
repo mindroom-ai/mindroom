@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,7 +14,6 @@ from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
-from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD
 
@@ -228,8 +226,10 @@ class TestAgentBot:
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
+    @patch("mindroom.bot.should_use_streaming")
     async def test_agent_bot_on_message_mentioned(
         self,
+        mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
         mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,
@@ -247,6 +247,8 @@ class TestAgentBot:
         mock_ai_response_streaming.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Test response"
         mock_fetch_history.return_value = []
+        # Mock the presence check to return same value as enable_streaming
+        mock_should_use_streaming.return_value = enable_streaming
 
         config = Config.from_yaml()
 
@@ -259,6 +261,29 @@ class TestAgentBot:
         )
         bot.client = AsyncMock()
 
+        # Mock presence check to return user online when streaming is enabled
+        # We need to create a proper mock response that will be returned by get_presence
+        if enable_streaming:
+            # Create a mock that looks like PresenceGetResponse
+            mock_presence_response = MagicMock()
+            mock_presence_response.presence = "online"
+            mock_presence_response.last_active_ago = 1000
+
+            # Make get_presence return this response (as a coroutine since it's async)
+            async def mock_get_presence(user_id: str) -> MagicMock:  # noqa: ARG001
+                return mock_presence_response
+
+            bot.client.get_presence = mock_get_presence
+        else:
+            mock_presence_response = MagicMock()
+            mock_presence_response.presence = "offline"
+            mock_presence_response.last_active_ago = 3600000
+
+            async def mock_get_presence(user_id: str) -> MagicMock:  # noqa: ARG001
+                return mock_presence_response
+
+            bot.client.get_presence = mock_get_presence
+
         # Mock successful room_send response
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
@@ -266,7 +291,6 @@ class TestAgentBot:
 
         # Initialize response tracker with isolated path
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
@@ -321,9 +345,6 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
-        # Initialize thread_invite_manager and response_tracker as would happen in run()
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
-        bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
         mock_room = MagicMock()
@@ -345,8 +366,10 @@ class TestAgentBot:
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.ai_response_streaming")
     @patch("mindroom.bot.fetch_thread_history")
+    @patch("mindroom.bot.should_use_streaming")
     async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,
+        mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
         mock_ai_response_streaming: AsyncMock,
         mock_ai_response: AsyncMock,
@@ -391,7 +414,6 @@ class TestAgentBot:
 
         # Initialize response tracker with isolated path
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
@@ -417,6 +439,8 @@ class TestAgentBot:
         mock_ai_response_streaming.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Thread response"
         mock_team_arun.return_value = "Team response"
+        # Mock the presence check to return same value as enable_streaming
+        mock_should_use_streaming.return_value = enable_streaming
 
         mock_event = MagicMock()
         mock_event.sender = "@user:localhost"
@@ -544,7 +568,6 @@ class TestAgentBot:
         bot.client = AsyncMock()
         # Initialize response tracker with isolated path
         bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
         # Mark an event as already responded
         bot.response_tracker.mark_responded("event123")
@@ -582,6 +605,8 @@ class TestMultiAgentOrchestrator:
         assert not orchestrator.running
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.Config.from_yaml")
     async def test_orchestrator_initialize(
         self,
@@ -608,6 +633,8 @@ class TestMultiAgentOrchestrator:
         assert "router" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.Config.from_yaml")
     async def test_orchestrator_start(
         self,
@@ -650,6 +677,8 @@ class TestMultiAgentOrchestrator:
             mock_start.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.Config.from_yaml")
     async def test_orchestrator_stop(
         self,
@@ -685,14 +714,16 @@ class TestMultiAgentOrchestrator:
                 bot.client.close.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator streaming
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.Config.from_yaml")
-    @patch.dict(os.environ, {"MINDROOM_ENABLE_STREAMING": "false"})
+    @patch("mindroom.bot.ENABLE_STREAMING", False)
     async def test_orchestrator_streaming_env_var(
         self,
         mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
-        """Test that orchestrator respects MINDROOM_ENABLE_STREAMING environment variable."""
+        """Test that orchestrator respects ENABLE_STREAMING constant."""
         # Mock config with just 2 agents
         mock_config = MagicMock()
         mock_config.agents = {

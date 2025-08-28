@@ -146,35 +146,25 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 ## Quick Start
 
 ### Prerequisites
-- Python 3.11+
+- Python 3.12+
 - [uv](https://github.com/astral-sh/uv) for Python package management
 - Node.js 20+ and [pnpm](https://pnpm.io/) (optional, for web UI)
 
-### Installation
+### Installation and starting
 
 ```bash
 # Clone and install
 git clone https://github.com/yourusername/mindroom
-cd mindroom
-./quickstart.sh  # Sets up everything automatically
 ```
-
-This automatically:
-- ✅ Installs all Python dependencies
-- ✅ Sets up configuration from example
-- ✅ Prepares the web UI (if Node.js/pnpm available)
-- ✅ Shows you how to start everything
-
-### Starting MindRoom
 
 ```bash
 # Option 1: Start everything with Zellij (recommended)
 ./scripts/start
 
-# Option 2: Start just the agents
+# Option 2.1: Start just the agents
 uv run mindroom run
 
-# Option 3: Start the web UI separately
+# Option 2.1: Start the web UI separately
 ./run-ui.sh
 ```
 
@@ -200,12 +190,8 @@ Agents ONLY respond in threads (not main room). Within threads:
 2. **Single agent continues** - One agent in thread? It keeps responding
 3. **Multiple agents collaborate** - They work together, not compete
 4. **Smart routing** - System picks the best agent for new threads
-5. **Invited agents are natives** - `!invite @agent` makes them full participants
 
 ### Available Commands
-- `!invite <agent>` - Invite agent to current thread
-- `!uninvite <agent>` - Remove agent from thread
-- `!list_invites` - See all invited agents
 - `!widget [url]` - Add configuration widget to room
 - `!schedule <time> <message>` - Schedule tasks and reminders
 - `!list_schedules` - List all scheduled tasks

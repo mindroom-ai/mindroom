@@ -58,13 +58,21 @@ class MindRoomE2ETest:
         with Path("matrix_state.yaml").open() as f:  # noqa: ASYNC230
             users_data = yaml.safe_load(f)
 
-        # Use the main user account
-        self.username = users_data["accounts"]["user"]["username"]
-        self.password = users_data["accounts"]["user"]["password"]
+        # Use the agent_user account
+        self.username = users_data["accounts"]["agent_user"]["username"]
+        self.password = users_data["accounts"]["agent_user"]["password"]
         self.room_id = users_data["rooms"]["lobby"]["room_id"]
 
         # Create client
-        self.client = nio.AsyncClient(MATRIX_HOMESERVER, f"@{self.username}:localhost")
+        # Extract domain from homeserver URL
+        domain = "m-test.mindroom.chat"  # Use the actual server domain
+        config = nio.AsyncClientConfig(encryption_enabled=False)
+        self.client = nio.AsyncClient(
+            MATRIX_HOMESERVER,
+            f"@{self.username}:{domain}",
+            config=config,
+            ssl=False,  # Disable SSL verification for test server
+        )
 
     async def login(self) -> None:
         """Login to Matrix."""
@@ -77,7 +85,7 @@ class MindRoomE2ETest:
     async def send_mention(self, agent_name: str, message: str) -> str:
         """Send a message with proper Matrix mention."""
         # Extract domain from the logged-in user's ID
-        user_domain = "localhost"  # default
+        user_domain = "m-test.mindroom.chat"  # Use the actual server domain
         if self.client.user_id and ":" in self.client.user_id:
             user_domain = self.client.user_id.split(":", 1)[1]
 
