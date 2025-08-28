@@ -15,7 +15,6 @@ import pytest
 from mindroom.bot import TeamBot
 from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD, TEST_TMP_DIR
 
@@ -122,10 +121,6 @@ class TestTeamRoomMembership:
         # Mock the client
         mock_client = AsyncMock()
         bot.client = mock_client
-
-        # Initialize thread_invite_manager as would happen in start()
-        bot.thread_invite_manager = ThreadInviteManager(mock_client)
-        bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
 
         # Mock joined_rooms to return a room the team is in
         joined_rooms_response = MagicMock()

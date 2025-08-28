@@ -49,11 +49,6 @@ async def test_agent_ignores_user_message_mentioning_other_agents() -> None:
     general_bot.response_tracker = Mock()
     general_bot.response_tracker.has_responded = Mock(return_value=False)
 
-    # Mock thread invite manager
-    general_bot.thread_invite_manager = AsyncMock()
-    general_bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
-    general_bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
-
     # Create a test room
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_general:localhost")
 
@@ -123,11 +118,6 @@ async def test_agent_responds_when_mentioned_along_with_others() -> None:
     # Mock response tracker
     general_bot.response_tracker = Mock()
     general_bot.response_tracker.has_responded = Mock(return_value=False)
-
-    # Mock thread invite manager
-    general_bot.thread_invite_manager = AsyncMock()
-    general_bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
-    general_bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
 
     # Create a test room
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_general:localhost")

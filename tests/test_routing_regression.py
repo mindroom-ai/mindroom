@@ -17,7 +17,6 @@ from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
-from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD
 
@@ -37,7 +36,6 @@ def setup_test_bot(
     bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()
     bot.response_tracker = ResponseTracker(bot.agent_name, base_path=storage_path)
-    bot.thread_invite_manager = ThreadInviteManager(bot.client)
     return bot
 
 

@@ -138,8 +138,6 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
-        thread_invite_manager = MagicMock()
-
         # Mock a room with no configured bots (DM room)
         with patch(
             "mindroom.config.Config.get_configured_bots_for_room",
@@ -149,7 +147,6 @@ class TestDMPreservationDuringCleanup:
                 client,
                 "!dm:server",
                 config,
-                thread_invite_manager,
             )
 
             # Should not kick anyone from DM room
@@ -168,9 +165,6 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
-        thread_invite_manager = MagicMock()
-        thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
-
         # Mock room members - includes an orphaned bot
         members = ["@user:server", "@mindroom_orphaned:server", "@mindroom_configured_agent:server"]
 
@@ -194,7 +188,6 @@ class TestDMPreservationDuringCleanup:
                 client,
                 "!regular:server",
                 config,
-                thread_invite_manager,
             )
 
             # Should kick the orphaned bot
@@ -216,7 +209,6 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
-        thread_invite_manager = MagicMock()
 
         # Mock joined rooms - mix of configured and DM rooms
         joined_rooms = ["!configured:server", "!dm:server", "!another_dm:server"]
@@ -248,9 +240,7 @@ class TestDMPreservationDuringCleanup:
             patch("mindroom.room_cleanup.is_dm_room", side_effect=mock_is_dm_room),
         ):
             client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
-            thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
-
-            result = await cleanup_all_orphaned_bots(client, config, thread_invite_manager)
+            result = await cleanup_all_orphaned_bots(client, config)
 
             # Should process configured room but skip DM rooms
             assert "!configured:server" in result

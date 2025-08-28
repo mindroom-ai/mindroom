@@ -17,7 +17,6 @@ from .matrix import MATRIX_HOMESERVER
 from .matrix.client import fetch_thread_history
 from .matrix.identity import extract_agent_name, extract_server_name_from_homeserver
 from .matrix.mentions import parse_mentions_in_text
-from .thread_invites import ThreadInviteManager
 from .thread_utils import get_agents_in_thread, get_available_agents_in_room
 from .workflow_scheduling import (
     ScheduledWorkflow,
@@ -55,7 +54,6 @@ async def _validate_agent_mentions(
     room: nio.MatrixRoom,
     thread_id: str | None,
     config: Config,
-    client: nio.AsyncClient,
 ) -> _AgentValidationResult:
     """Validate that all mentioned agents are accessible.
 
@@ -64,7 +62,6 @@ async def _validate_agent_mentions(
         room: The Matrix room object
         thread_id: The thread ID where the schedule will execute (if in a thread)
         config: Application configuration
-        client: Matrix client for checking thread invitations
 
     Returns:
         _AgentValidationResult with validation status and agent lists
@@ -97,16 +94,12 @@ async def _validate_agent_mentions(
     invalid_agents = []
 
     if thread_id:
-        # For threads, check both room agents and thread invitations
-        thread_invite_manager = ThreadInviteManager(client)
-        thread_agents = await thread_invite_manager.get_thread_agents(thread_id, room.room_id)
-
-        # Also get agents naturally in the room
+        # For threads, check if agents are in the room
         room_agents = get_available_agents_in_room(room, config)
 
-        # An agent is valid if it's either in the room or invited to the thread
+        # Agents can now respond in any room they're in
         for agent_name in mentioned_agents:
-            if agent_name in room_agents or agent_name in thread_agents:
+            if agent_name in room_agents:
                 valid_agents.append(agent_name)
             else:
                 invalid_agents.append(agent_name)
@@ -211,7 +204,6 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         room,
         thread_id,
         config,
-        client,
     )
 
     if not validation_result.all_valid:
@@ -226,11 +218,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         suggestions = []
         for agent in validation_result.invalid_agents:
             if agent in config.agents:
-                if thread_id:
-                    suggestions.append(f"Use `!invite {agent}` to invite @{agent} to this thread")
-                else:
-                    # Agent exists but not configured for this room
-                    suggestions.append(f"@{agent} is not configured for this room")
+                # Agent exists but not available in this room/thread
+                suggestions.append(f"@{agent} is not available in this {'thread' if thread_id else 'room'}")
             else:
                 suggestions.append(f"@{agent} does not exist")
 

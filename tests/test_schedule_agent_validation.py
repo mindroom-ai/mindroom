@@ -107,45 +107,38 @@ async def test_schedule_validates_agents_in_thread() -> None:
     # Create a mock room with assistant
     room = create_mock_room("test_room", ["@mindroom_assistant:localhost"])
 
-    # Mock the thread invite check
-    with patch("mindroom.scheduling.ThreadInviteManager") as mock_invite_manager:
-        mock_manager = mock_invite_manager.return_value
-        # Calculator is NOT invited to the thread
-        mock_manager.get_thread_agents = AsyncMock(return_value=[])
+    # Mock the workflow parsing
+    mock_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="@calculator please calculate 2+2",
+        description="Calculate something",
+    )
 
-        # Mock the workflow parsing
-        mock_workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC) + timedelta(minutes=5),
-            message="@calculator please calculate 2+2",
-            description="Calculate something",
+    with patch("mindroom.scheduling.parse_workflow_schedule") as mock_parse:
+        mock_parse.return_value = mock_workflow
+
+        # Try to schedule in a thread
+        task_id, response = await schedule_task(
+            client=client,
+            room_id="test_room",
+            thread_id="$thread123",
+            scheduled_by="@user:localhost",
+            full_text="in 5 minutes ask calculator to calculate",
+            config=config,
+            room=room,
         )
 
-        with patch("mindroom.scheduling.parse_workflow_schedule") as mock_parse:
-            mock_parse.return_value = mock_workflow
-
-            # Try to schedule in a thread
-            task_id, response = await schedule_task(
-                client=client,
-                room_id="test_room",
-                thread_id="$thread123",
-                scheduled_by="@user:localhost",
-                full_text="in 5 minutes ask calculator to calculate",
-                config=config,
-                room=room,
-            )
-
-            # Should fail because calculator is not invited to thread
-            assert task_id is None
-            assert "❌ Failed to schedule" in response
-            assert "@calculator" in response
-            assert "not available in this thread" in response
-            assert "!invite calculator" in response
+        # Should fail because calculator is not in the room
+        assert task_id is None
+        assert "❌ Failed to schedule" in response
+        assert "@calculator" in response
+        assert "not available in this thread" in response
 
 
 @pytest.mark.asyncio
-async def test_schedule_allows_invited_agents_in_thread() -> None:
-    """Test that schedule command allows agents invited to threads."""
+async def test_schedule_allows_agents_in_room() -> None:
+    """Test that schedule command allows agents that are in the room."""
     # Create config
     config = Config(
         agents={
@@ -157,7 +150,7 @@ async def test_schedule_allows_invited_agents_in_thread() -> None:
             "calculator": AgentConfig(
                 display_name="Calculator",
                 role="Math calculations",
-                rooms=[],  # Not in room, but will be invited to thread
+                rooms=["test_room"],  # Calculator is also in the room
             ),
         },
         router=RouterConfig(model="default"),
@@ -167,40 +160,35 @@ async def test_schedule_allows_invited_agents_in_thread() -> None:
     client = AsyncMock()
     client.room_put_state = AsyncMock()
 
-    # Create a mock room
-    room = create_mock_room("test_room", ["@mindroom_assistant:localhost"])
+    # Create a mock room with both agents
+    room = create_mock_room("test_room", ["@mindroom_assistant:localhost", "@mindroom_calculator:localhost"])
 
-    # Mock the thread invite check - calculator IS invited
-    with patch("mindroom.scheduling.ThreadInviteManager") as mock_invite_manager:
-        mock_manager = mock_invite_manager.return_value
-        mock_manager.get_thread_agents = AsyncMock(return_value=["calculator"])
+    # Mock the workflow parsing
+    mock_workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="@calculator please calculate 2+2",
+        description="Calculate something",
+    )
 
-        # Mock the workflow parsing
-        mock_workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC) + timedelta(minutes=5),
-            message="@calculator please calculate 2+2",
-            description="Calculate something",
+    with patch("mindroom.scheduling.parse_workflow_schedule") as mock_parse:
+        mock_parse.return_value = mock_workflow
+
+        # Try to schedule in a thread where calculator is in the room
+        task_id, response = await schedule_task(
+            client=client,
+            room_id="test_room",
+            thread_id="$thread123",
+            scheduled_by="@user:localhost",
+            full_text="in 5 minutes ask calculator to calculate",
+            config=config,
+            room=room,
         )
 
-        with patch("mindroom.scheduling.parse_workflow_schedule") as mock_parse:
-            mock_parse.return_value = mock_workflow
-
-            # Try to schedule in a thread where calculator is invited
-            task_id, response = await schedule_task(
-                client=client,
-                room_id="test_room",
-                thread_id="$thread123",
-                scheduled_by="@user:localhost",
-                full_text="in 5 minutes ask calculator to calculate",
-                config=config,
-                room=room,
-            )
-
-            # Should succeed because calculator is invited to thread
-            assert task_id is not None
-            assert "✅ Scheduled" in response
-            assert "❌" not in response
+        # Should succeed because calculator is in the room
+        assert task_id is not None
+        assert "✅ Scheduled" in response
+        assert "❌" not in response
 
 
 @pytest.mark.asyncio
