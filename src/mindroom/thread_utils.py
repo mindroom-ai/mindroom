@@ -230,7 +230,7 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
     return mentioned_agents
 
 
-def should_agent_respond(  # noqa: PLR0911
+def should_agent_respond(
     agent_name: str,
     am_i_mentioned: bool,
     is_thread: bool,
@@ -282,12 +282,6 @@ def should_agent_respond(  # noqa: PLR0911
         return len(agents_in_thread) == 1 and agents_in_thread[0].full_id == agent_matrix_id.full_id
 
     # No agents in thread yet - should we take ownership?
-    # Note: In practice, bot.py filters out agent messages without mentions,
-    # so this function isn't called for router errors. But for completeness:
-    # Don't take ownership if router has engaged (even if it failed)
-    if any(extract_agent_name(msg.get("sender", ""), config) == ROUTER_AGENT_NAME for msg in thread_history):
-        return False
-
-    # Only take ownership if we're the only agent available
+    # Only if we're the only agent available (let router decide if multiple)
     available_agents = get_available_agents_in_room(room, config)
     return len(available_agents) == 1
