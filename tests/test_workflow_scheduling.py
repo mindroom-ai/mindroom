@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-from mindroom.scheduling import schedule_task
-from mindroom.workflow_scheduling import (
+from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
     WorkflowParseError,
     execute_scheduled_workflow,
     parse_workflow_schedule,
+    schedule_task,
 )
 
 
@@ -92,8 +92,8 @@ class TestScheduledWorkflow:
 class TestParseWorkflowSchedule:
     """Test parse_workflow_schedule function."""
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_parse_research_email_workflow(
         self,
         mock_agent_class: Mock,
@@ -126,8 +126,8 @@ class TestParseWorkflowSchedule:
         assert "@research" in result.message
         assert "@email_assistant" in result.message
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_parse_simple_reminder(
         self,
         mock_agent_class: Mock,
@@ -156,8 +156,8 @@ class TestParseWorkflowSchedule:
         assert result.schedule_type == "once"
         assert result.message == "Check the deployment status"
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_parse_daily_task(self, mock_agent_class: Mock, mock_get_model: Mock, mock_config: MagicMock) -> None:  # noqa: ARG002
         """Test parsing daily recurring task."""
         mock_agent = AsyncMock()
@@ -182,8 +182,8 @@ class TestParseWorkflowSchedule:
         assert result.cron_schedule.to_cron_string() == "0 9 * * *"
         assert "@finance" in result.message
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_parse_error_handling(
         self,
         mock_agent_class: Mock,
@@ -228,7 +228,7 @@ class TestExecuteScheduledWorkflow:
 
         # Verify message was sent
 
-        with patch("mindroom.workflow_scheduling.send_message", new=AsyncMock()) as mock_send:
+        with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
             await execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_called_once()
 
@@ -253,7 +253,7 @@ class TestExecuteScheduledWorkflow:
             room_id="!room:server",
         )
 
-        with patch("mindroom.workflow_scheduling.send_message", new=AsyncMock()) as mock_send:
+        with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
             await execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_called_once()
 
@@ -279,7 +279,7 @@ class TestExecuteScheduledWorkflow:
         # Mock send_message to raise an error only on the first call
         mock_send = AsyncMock(side_effect=[Exception("Send failed"), None])
 
-        with patch("mindroom.workflow_scheduling.send_message", new=mock_send):
+        with patch("mindroom.scheduling.send_message", new=mock_send):
             # Should not raise, but log error
             await execute_scheduled_workflow(client, workflow, config)
 
@@ -303,7 +303,7 @@ class TestExecuteScheduledWorkflow:
             room_id=None,  # No room ID
         )
 
-        with patch("mindroom.workflow_scheduling.send_message", new=AsyncMock()) as mock_send:
+        with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
             await execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_not_called()
 

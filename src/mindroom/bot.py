@@ -391,10 +391,7 @@ class AgentBot:
         ):
             return
 
-        # Check if we should process messages in this room
-        # Process if: configured for room OR in a DM room
-        # 1. Room is in configured rooms list
-        # 2. Currently in a DM room
+        # Check if we should process messages in this room (DM or configured rooms only)
         _is_dm_room = await is_dm_room(self.client, room.room_id)
         if not _is_dm_room and room.room_id not in self.rooms:
             # Not configured for room
@@ -420,7 +417,10 @@ class AgentBot:
         # except when the router is posting a voice transcription (VOICE_PREFIX),
         # which should be treated as a user-originated message.
         is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
-        if sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription:
+        is_from_other_agent_without_mention = (
+            sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription
+        )
+        if is_from_other_agent_without_mention:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 

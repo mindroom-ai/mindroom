@@ -8,8 +8,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.scheduling import cancel_all_scheduled_tasks, list_scheduled_tasks
-from mindroom.workflow_scheduling import ScheduledWorkflow
+from mindroom.scheduling import ScheduledWorkflow, cancel_all_scheduled_tasks, list_scheduled_tasks
 
 
 @pytest.mark.asyncio
