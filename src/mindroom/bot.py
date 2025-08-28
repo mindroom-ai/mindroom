@@ -385,8 +385,9 @@ class AgentBot:
             self.logger.debug(f"Skipping edit event {event.event_id}")
             return
 
+        # Compare sender as MatrixID for more robust comparison
         if (
-            event.sender == self.agent_user.user_id
+            event.sender == self.matrix_id.full_id
             # Allow processing of voice transcriptions the router sent on behalf of users
             and not event.body.startswith(VOICE_PREFIX)
         ):
@@ -397,7 +398,7 @@ class AgentBot:
         _is_dm_room = await is_dm_room(self.client, room.room_id)
         if not _is_dm_room and room.room_id not in self.rooms:
             # Not configured for this room - check if we're actually in it
-            agent_id = self.agent_user.user_id
+            agent_id = self.matrix_id.full_id
             self.logger.debug(
                 "Room check",
                 room_id=room.room_id,
@@ -525,7 +526,7 @@ class AgentBot:
             thread_history = []
             if thread_id:
                 thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-                if has_user_responded_after_message(thread_history, event.reacts_to, self.client.user_id):
+                if has_user_responded_after_message(thread_history, event.reacts_to, self.matrix_id):
                     self.logger.info(
                         "Ignoring reaction - agent already responded after this question",
                         reacted_to=event.reacts_to,
@@ -574,7 +575,7 @@ class AgentBot:
             return
 
         # Don't process our own voice messages
-        if event.sender == self.agent_user.user_id:
+        if event.sender == self.matrix_id.full_id:
             return
 
         # Check if we've already responded to this voice message (e.g., after restart)

@@ -109,7 +109,11 @@ def get_mentioned_agents(mentions: dict[str, Any], config: Config) -> list[Matri
     return agents
 
 
-def has_user_responded_after_message(thread_history: list[dict], target_event_id: str, user_id: str) -> bool:
+def has_user_responded_after_message(
+    thread_history: list[dict],
+    target_event_id: str,
+    user_id: MatrixID,
+) -> bool:
     """Check if a user has sent any messages after a specific message in the thread.
 
     Args:
@@ -126,7 +130,7 @@ def has_user_responded_after_message(thread_history: list[dict], target_event_id
     for msg in thread_history:
         if msg["event_id"] == target_event_id:
             found_target = True
-        elif found_target and msg["sender"] == user_id:
+        elif found_target and msg["sender"] == user_id.full_id:
             return True
     return False
 

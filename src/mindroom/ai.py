@@ -20,9 +20,9 @@ from agno.run.response import (
     ToolCallCompletedEvent,
     ToolCallStartedEvent,
 )
-from dotenv import load_dotenv
 
 from .agents import create_agent
+from .constants import ENABLE_AI_CACHE
 from .credentials import get_credentials_manager
 from .logging_config import get_logger
 from .memory import build_memory_enhanced_prompt
@@ -37,9 +37,6 @@ if TYPE_CHECKING:
     from .config import Config
 
 logger = get_logger(__name__)
-
-load_dotenv()
-ENABLE_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
 
 
 def _extract_response_content(response: RunResponse) -> str:
@@ -96,7 +93,7 @@ def _format_tool_completed_message(event: ToolCallCompletedEvent) -> str:
 @functools.cache
 def get_cache(storage_path: Path) -> diskcache.Cache | None:
     """Get or create a cache instance for the given storage path."""
-    return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_CACHE else None
+    return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_AI_CACHE else None
 
 
 def _set_api_key_env_var(provider: str) -> None:

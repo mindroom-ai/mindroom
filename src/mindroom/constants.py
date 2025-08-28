@@ -8,6 +8,10 @@ codebase.
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Agent names
 ROUTER_AGENT_NAME = "router"
 
@@ -27,6 +31,7 @@ CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
 # Other constants
 VOICE_PREFIX = "🎤 "
 ENABLE_STREAMING = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+ENABLE_AI_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
 
 # Matrix
 MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
