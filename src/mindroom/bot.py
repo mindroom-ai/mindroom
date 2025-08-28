@@ -416,9 +416,9 @@ class AgentBot:
             if not context.am_i_mentioned:
                 # Not mentioned, definitely skip
                 return
-            # We're mentioned - check if we're actually in the room (expensive call)
-            joined_rooms = await get_joined_rooms(self.client)
-            if not joined_rooms or room.room_id not in joined_rooms:
+            # We're mentioned - check if we're actually in the room
+            agent_id = self.agent_user.user_id
+            if not room.users or agent_id not in room.users:
                 # Not in the room, can't respond even if mentioned
                 return
             # We're mentioned AND in the room, continue processing
