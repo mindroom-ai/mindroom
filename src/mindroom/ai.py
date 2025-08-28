@@ -246,7 +246,7 @@ async def _prepare_agent_and_prompt(
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
-    agent = create_agent(agent_name, storage_path, config)
+    agent = create_agent(agent_name, config)
     return agent, full_prompt
 
 

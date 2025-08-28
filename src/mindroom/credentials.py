@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .constants import CREDENTIALS_DIR
+
 
 class CredentialsManager:
     """Centralized credentials storage and retrieval for MindRoom."""
@@ -17,12 +19,11 @@ class CredentialsManager:
 
         Args:
             base_path: Base directory for storing credentials.
-                      Defaults to ~/.mindroom/credentials/
+                      Defaults to STORAGE_PATH/credentials (usually mindroom_data/credentials)
 
         """
         if base_path is None:
-            # Use a dedicated credentials directory in the user's home
-            self.base_path = Path.home() / ".mindroom" / "credentials"
+            self.base_path = CREDENTIALS_DIR
         else:
             self.base_path = Path(base_path)
 
@@ -128,8 +129,8 @@ class CredentialsManager:
         self.save_credentials(service, credentials)
 
 
-# Global instance for convenience
-_credentials_manager = CredentialsManager()
+# Global instance for convenience (lazy initialization)
+_credentials_manager: CredentialsManager | None = None
 
 
 def get_credentials_manager() -> CredentialsManager:
@@ -139,4 +140,7 @@ def get_credentials_manager() -> CredentialsManager:
         The global CredentialsManager instance
 
     """
+    global _credentials_manager
+    if _credentials_manager is None:
+        _credentials_manager = CredentialsManager()
     return _credentials_manager

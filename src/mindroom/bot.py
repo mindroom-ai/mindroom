@@ -193,7 +193,7 @@ class AgentBot:
     @cached_property
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        return create_agent(agent_name=self.agent_name, storage_path=self.storage_path / "agents", config=self.config)
+        return create_agent(agent_name=self.agent_name, config=self.config)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -290,7 +290,8 @@ class AgentBot:
         await self._set_avatar_if_available()
 
         # Initialize response tracker
-        self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
+        # Use storage_path for tests to ensure isolation
+        self.response_tracker = ResponseTracker(self.agent_name, base_path=self.storage_path)
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
