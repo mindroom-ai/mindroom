@@ -50,9 +50,13 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
             continue
 
         if sender not in seen_ids:
-            matrix_id = MatrixID.parse(sender)
-            agents.append(matrix_id)
-            seen_ids.add(sender)
+            try:
+                matrix_id = MatrixID.parse(sender)
+                agents.append(matrix_id)
+                seen_ids.add(sender)
+            except ValueError:
+                # Skip invalid Matrix IDs
+                pass
 
     return agents
 
@@ -69,8 +73,8 @@ def get_agent_matrix_ids_in_thread(thread_history: list[dict[str, Any]], config:
         List of MatrixID objects for agents who participated in the thread.
 
     """
-    agent_ids: list[MatrixID] = []
-    seen_ids: set[MatrixID] = set()
+    agent_ids = []
+    seen_ids = set()
 
     for msg in thread_history:
         sender = msg.get("sender", "")
@@ -80,10 +84,14 @@ def get_agent_matrix_ids_in_thread(thread_history: list[dict[str, Any]], config:
         if not agent_name or agent_name == ROUTER_AGENT_NAME:
             continue
 
-        matrix_id = MatrixID.parse(sender)
-        if matrix_id not in seen_ids:
-            agent_ids.append(matrix_id)
-            seen_ids.add(matrix_id)
+        try:
+            matrix_id = MatrixID.parse(sender)
+            if matrix_id.full_id not in seen_ids:
+                agent_ids.append(matrix_id)
+                seen_ids.add(matrix_id.full_id)
+        except ValueError:
+            # Skip invalid Matrix IDs
+            pass
 
     return agent_ids
 
@@ -155,8 +163,12 @@ def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config)
         agent_name = extract_agent_name(member_id, config)
         # Exclude router agent
         if agent_name and agent_name != ROUTER_AGENT_NAME:
-            matrix_id = MatrixID.parse(member_id)
-            agent_ids.append(matrix_id)
+            try:
+                matrix_id = MatrixID.parse(member_id)
+                agent_ids.append(matrix_id)
+            except ValueError:
+                # Skip invalid Matrix IDs
+                pass
 
     return sorted(agent_ids, key=lambda x: x.full_id)
 

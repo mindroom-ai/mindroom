@@ -25,7 +25,7 @@ class AgentSuggestion(BaseModel):
     reasoning: str = Field(description="Brief explanation of why this agent was chosen")
 
 
-async def suggest_agent_for_message(  # noqa: C901
+async def suggest_agent_for_message(
     message: str,
     available_agents: list[MatrixID],
     config: Config,
@@ -33,19 +33,13 @@ async def suggest_agent_for_message(  # noqa: C901
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message."""
     try:
-        # Convert MatrixID objects to agent names
-        # Extract the actual agent name from the username (remove 'mindroom_' prefix)
-        agent_names = []
-        for mid in available_agents:
-            # Try to get the configured agent name first
-            name = mid.agent_name(config)
-            if name is None:
-                # If not configured, extract from username
-                name = mid.username.removeprefix("mindroom_")
-            agent_names.append(name)
+        # The available_agents list already contains only configured agents
+        agent_names = [mid.agent_name(config) for mid in available_agents]
+
         # Build agent descriptions
         agent_descriptions = []
         for agent_name in agent_names:
+            assert agent_name is not None
             description = describe_agent(agent_name, config)
             agent_descriptions.append(f"{agent_name}:\n  {description}")
 
