@@ -509,13 +509,12 @@ class TestCommandHandling:
 
     @pytest.mark.asyncio
     async def test_router_error_without_mentions_ignored_by_other_agents(self) -> None:
-        """Test the exact scenario where RouterAgent sends an error without mentions.
+        """Test the exact scenario where RouterAgent sends an error without mentions and other agents ignore it."""
+        # This tests the specific case where:
+        # 1. User sends a schedule command
+        # 2. RouterAgent fails to parse it and sends an error message
+        # 3. FinanceAgent should NOT respond to the error message
 
-        With the simplified logic:
-        - Router messages are excluded from agents_in_thread
-        - Single agent will take ownership after router error
-        - Multiple agents will not respond (wait for routing)
-        """
         # Create thread history with user command and router error
         thread_history = [
             {
@@ -534,7 +533,11 @@ class TestCommandHandling:
             },
         ]
 
-        # With simplified logic: Single agent (finance) takes ownership when router is only other participant
+        # NOTE: In reality, when router sends an error without mentions,
+        # bot.py returns early and never calls should_agent_respond.
+        # But we test what WOULD happen if it were called:
+
+        # Test with single agent (finance only, router excluded from available_agents)
         should_respond = should_agent_respond(
             agent_name="finance",
             am_i_mentioned=False,
@@ -545,8 +548,8 @@ class TestCommandHandling:
             config=self.config,
         )
 
-        # Finance is the only non-router agent, so it takes ownership
-        assert should_respond, "Finance agent SHOULD respond when it's the only non-router agent"
+        # With new logic: Single agent takes ownership (router excluded)
+        assert should_respond, "Single agent takes ownership after router error"
 
         # Test with multiple agents - nobody responds
         should_respond = should_agent_respond(
@@ -559,7 +562,63 @@ class TestCommandHandling:
             config=self.config,
         )
 
-        assert not should_respond, "Finance agent should NOT respond when multiple agents available"
+        assert not should_respond, "Multiple agents wait for routing"
+
+    @pytest.mark.asyncio
+    async def test_router_error_actual_behavior(self) -> None:
+        """Test the ACTUAL behavior when router sends an error - through full message flow."""
+        # Create finance agent
+        agent_user = AgentMatrixUser(
+            agent_name="finance",
+            user_id="@mindroom_finance:localhost",
+            display_name="Finance Agent",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
+        )
+
+        config = Config(router=RouterConfig(model="default"))
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        bot.client = AsyncMock()
+        bot.client.user_id = "@mindroom_finance:localhost"
+        bot.logger = MagicMock()
+        bot._generate_response = AsyncMock()  # type: ignore[method-assign]
+        bot.response_tracker = MagicMock()
+
+        # Mock context extraction for router's error message
+        mock_context = MagicMock()
+        mock_context.am_i_mentioned = False
+        mock_context.mentioned_agents = []
+        mock_context.is_thread = True
+        mock_context.thread_id = "$thread123"
+        mock_context.thread_history = []
+        bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
+
+        # Create router's error message event
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id=bot.client.user_id)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$router_error",
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "❌ Unable to parse the schedule request",
+                },
+            },
+        )
+
+        with (
+            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.bot.extract_agent_name", return_value="router"),
+        ):
+            await bot._on_message(room, event)
+
+        # Verify finance agent did NOT process the message
+        bot._generate_response.assert_not_called()
+
+        # Verify it was caught early by the agent message check
+        debug_calls = [call[0][0] for call in bot.logger.debug.call_args_list]
+        assert "Ignoring message from other agent (not mentioned)" in debug_calls
 
     @pytest.mark.asyncio
     async def test_router_error_prevents_team_formation(self) -> None:
