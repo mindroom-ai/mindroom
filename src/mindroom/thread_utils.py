@@ -275,7 +275,7 @@ def should_agent_respond(
         agents_in_thread = get_agents_in_thread(thread_history, config)
         if agents_in_thread:
             # Continue only if we're the single agent
-            return len(agents_in_thread) == 1 and agents_in_thread[0].full_id == agent_matrix_id.full_id
+            return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 
     # No agents in thread yet OR DM room without thread
     # Respond if we're the only agent available
