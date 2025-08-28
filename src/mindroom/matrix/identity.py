@@ -110,8 +110,7 @@ def _parse_matrix_id(matrix_id: str) -> MatrixID:
 
 def is_agent_id(matrix_id: str, config: Config) -> bool:
     """Quick check if a Matrix ID is an agent."""
-    mid = MatrixID.parse(matrix_id)
-    return mid.agent_name(config) is not None
+    return extract_agent_name(matrix_id, config) is not None
 
 
 def extract_agent_name(sender_id: str, config: Config) -> str | None:
