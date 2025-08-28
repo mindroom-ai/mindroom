@@ -555,7 +555,7 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
     response = await client.room_get_state(room_id)
 
     if not isinstance(response, nio.RoomGetStateResponse):
-        logger.error("Failed to get room state", response=str(response))
+        logger.error("Failed to get room state", response=str(response), room_id=room_id, thread_id=thread_id)
         return "Unable to retrieve scheduled tasks."
 
     tasks = []
@@ -767,6 +767,6 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config:
             continue
 
     if restored_count > 0:
-        logger.info(f"Restored {restored_count} scheduled tasks in room {room_id}")
+        logger.info("Restored scheduled tasks in room", room_id=room_id, restored_count=restored_count)
 
     return restored_count
