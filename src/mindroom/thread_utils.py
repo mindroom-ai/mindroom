@@ -258,12 +258,9 @@ def should_agent_respond(  # noqa: PLR0911, C901
 
     """
     agent_matrix_id = config.ids[agent_name]
-    # Check if agent has access (either configured for room or in DM)
-    has_room_access = room.room_id in configured_rooms or is_dm_room
-    # Also check if agent is actually in the room (joined it but not configured)
-    # Use the full Matrix ID to avoid confusion between agents on different servers
+
+    has_room_access = room.room_id in configured_rooms
     is_in_room = agent_matrix_id.full_id in room.users
-    # has_access means either configured for room/DM or explicitly in the room
     has_access = has_room_access or is_in_room
 
     # For room messages (not in threads)
