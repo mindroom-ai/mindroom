@@ -191,15 +191,11 @@ def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixI
     # Check which agents should be in this room
     for agent_name, agent_config in config.agents.items():
         if agent_name != ROUTER_AGENT_NAME:
-            resolved_rooms = set(resolve_room_aliases(agent_config.rooms))
+            resolved_rooms = resolve_room_aliases(agent_config.rooms)
             if room_id in resolved_rooms:
                 configured_agents.append(config.ids[agent_name])
 
     return sorted(configured_agents, key=lambda x: x.full_id)
-
-
-# Deprecated: Use get_configured_agents_for_room instead
-get_configured_agent_matrix_ids_for_room = get_configured_agents_for_room
 
 
 def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
