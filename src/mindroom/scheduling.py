@@ -442,10 +442,6 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
 
     # Validate that all mentioned agents are accessible
-    # Room must be provided by the caller
-    if room is None:
-        return (None, "❌ Internal error: Room object not provided")
-
     validation_result = await _validate_agent_mentions(workflow_result.message, room, thread_id, config)
 
     if not validation_result.all_valid:
@@ -459,7 +455,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         # Provide helpful suggestions
         suggestions: list[str] = []
         for agent in validation_result.invalid_agents:
-            if agent.username in config.agents:
+            agent_name = agent.agent_name(config)
+            if agent_name:
                 # Agent exists but not available in this room/thread
                 suggestions.append(f"{agent.full_id} is not available in this {'thread' if thread_id else 'room'}")
             else:

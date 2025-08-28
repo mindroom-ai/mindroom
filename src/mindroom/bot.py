@@ -187,7 +187,7 @@ class AgentBot:
     @cached_property
     def matrix_id(self) -> MatrixID:
         """Get the Matrix ID for this agent bot."""
-        return MatrixID.parse(self.agent_user.user_id)
+        return self.agent_user.matrix_id
 
     @cached_property
     def agent(self) -> Agent:
@@ -441,7 +441,7 @@ class AgentBot:
 
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = await should_form_team(
-            context.mentioned_agents if context.mentioned_agents else [],
+            context.mentioned_agents,
             agents_in_thread,
             all_mentioned_in_thread,
             room=room,
@@ -452,8 +452,7 @@ class AgentBot:
 
         # Dynamic team formation: only the first agent (alphabetically) handles team formation
         # Check if this agent's MatrixID is in the team agents list
-        agent_matrix_id = self.config.ids[self.agent_name]
-        if form_team.should_form_team and any(mid.full_id == agent_matrix_id.full_id for mid in form_team.agents):
+        if form_team.should_form_team and self.matrix_id in form_team.agents:
             team_response = await handle_team_formation(
                 agent_name=self.agent_name,
                 form_team_agents=form_team.agents,

@@ -5,8 +5,11 @@ from collections.abc import AsyncGenerator
 
 import pytest_asyncio
 from aioresponses import aioresponses
+from dotenv import load_dotenv
 
 __all__ = ["TEST_ACCESS_TOKEN", "TEST_MEMORY_DIR", "TEST_PASSWORD", "TEST_TMP_DIR", "aioresponse"]
+
+load_dotenv()
 
 # Test credentials constants - not real credentials, safe for testing
 TEST_PASSWORD = "mock_test_password"  # noqa: S105

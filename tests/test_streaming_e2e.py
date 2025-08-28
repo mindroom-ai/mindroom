@@ -12,7 +12,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import Config, RouterConfig
+from mindroom.config import AgentConfig, Config, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
@@ -371,9 +371,17 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
         mock_client.room_send.side_effect = mock_room_send
 
-        # Create bot
+        # Create bot with calculator agent in config
 
-        config = Config(router=RouterConfig(model="default"))
+        config = Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    rooms=["!test:localhost"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        )
 
         bot = AgentBot(calc_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config)
         await bot.start()

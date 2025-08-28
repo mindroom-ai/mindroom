@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 
 from mindroom import __version__
@@ -14,6 +15,7 @@ from mindroom.bot import main as bot_main
 
 app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
 console = Console()
+load_dotenv()
 
 
 @app.command()

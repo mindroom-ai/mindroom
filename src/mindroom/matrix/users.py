@@ -1,6 +1,7 @@
 """Matrix user account management for agents."""
 
 from dataclasses import dataclass
+from functools import cached_property
 
 import nio
 
@@ -32,7 +33,7 @@ class AgentMatrixUser:
     password: str
     access_token: str | None = None
 
-    @property
+    @cached_property
     def matrix_id(self) -> MatrixID:
         """MatrixID object from user_id."""
         return MatrixID.parse(self.user_id)

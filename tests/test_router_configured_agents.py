@@ -2,7 +2,8 @@
 
 from unittest.mock import MagicMock
 
-from mindroom.config import AgentConfig, Config, ModelConfig
+from mindroom.config import MATRIX_HOMESERVER, AgentConfig, Config, ModelConfig
+from mindroom.matrix.identity import extract_server_name_from_homeserver
 from mindroom.thread_utils import get_available_agents_in_room, get_configured_agents_for_room
 
 
@@ -35,20 +36,23 @@ class TestRouterAgentSelection:
         """Test that get_configured_agents_for_room only returns configured agents."""
         # Test general room - should have calculator and research
         configured = get_configured_agents_for_room("#general:localhost", self.config)
-        assert configured == ["calculator", "research"]
-        assert "writer" not in configured
+        configured_names = [mid.agent_name(self.config) for mid in configured]
+        assert configured_names == ["calculator", "research"]
+        assert "writer" not in configured_names
 
         # Test math room - should only have calculator
         configured = get_configured_agents_for_room("#math:localhost", self.config)
-        assert configured == ["calculator"]
-        assert "research" not in configured
-        assert "writer" not in configured
+        configured_names = [mid.agent_name(self.config) for mid in configured]
+        assert configured_names == ["calculator"]
+        assert "research" not in configured_names
+        assert "writer" not in configured_names
 
         # Test writing room - should only have writer
         configured = get_configured_agents_for_room("#writing:localhost", self.config)
-        assert configured == ["writer"]
-        assert "calculator" not in configured
-        assert "research" not in configured
+        configured_names = [mid.agent_name(self.config) for mid in configured]
+        assert configured_names == ["writer"]
+        assert "calculator" not in configured_names
+        assert "research" not in configured_names
 
         # Test non-existent room - should have no agents
         configured = get_configured_agents_for_room("#unknown:localhost", self.config)
@@ -68,9 +72,10 @@ class TestRouterAgentSelection:
 
         # Should return ALL agents in the room (for individual response logic)
         available = get_available_agents_in_room(room, self.config)
-        assert "calculator" in available
-        assert "research" in available
-        assert "writer" in available  # Present but not configured
+        available_names = [mid.agent_name(self.config) for mid in available]
+        assert "calculator" in available_names
+        assert "research" in available_names
+        assert "writer" in available_names  # Present but not configured
 
     def test_router_should_use_configured_agents_only(self) -> None:
         """Test that router should only consider configured agents."""
@@ -84,8 +89,9 @@ class TestRouterAgentSelection:
 
         # For routing decisions, use configured agents only
         configured = get_configured_agents_for_room(room.room_id, self.config)
-        assert configured == ["calculator", "research"]
-        assert "writer" not in configured
+        configured_names = [mid.agent_name(self.config) for mid in configured]
+        assert configured_names == ["calculator", "research"]
+        assert "writer" not in configured_names
 
         # But for individual response decisions, consider all agents
         available = get_available_agents_in_room(room, self.config)
@@ -93,16 +99,16 @@ class TestRouterAgentSelection:
 
     def test_router_excludes_itself(self) -> None:
         """Test that router agent is excluded from available agents."""
-        # Add router to config
+        # Get the domain first to ensure consistency
+        domain = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+
+        # Note: Don't add "router" to config.agents as it's automatically handled
+        # The router agent is always present via ROUTER_AGENT_NAME constant
         config_with_router = Config(
             agents={
                 "calculator": AgentConfig(
                     display_name="Calculator",
-                    rooms=["#general:localhost"],
-                ),
-                "router": AgentConfig(
-                    display_name="Router",
-                    rooms=["#general:localhost"],
+                    rooms=[f"#general:{domain}"],  # Use the actual domain
                 ),
             },
             teams={},
@@ -111,17 +117,20 @@ class TestRouterAgentSelection:
         )
 
         room = MagicMock()
-        room.room_id = "#general:localhost"
+        room.room_id = f"#general:{domain}"
         room.users = {
-            "@mindroom_calculator:localhost": None,
-            "@mindroom_router:localhost": None,
+            f"@mindroom_calculator:{domain}": None,
+            f"@mindroom_router:{domain}": None,  # Router is present in the room
         }
 
-        # Router should be excluded from both functions
+        # Router should be excluded from configured agents (it's not in config.agents)
         configured = get_configured_agents_for_room(room.room_id, config_with_router)
-        assert configured == ["calculator"]
-        assert "router" not in configured
+        configured_names = [mid.agent_name(config_with_router) for mid in configured]
+        assert configured_names == ["calculator"]
+        assert "router" not in configured_names
 
+        # Router should be excluded from available agents in room
         available = get_available_agents_in_room(room, config_with_router)
-        assert available == ["calculator"]
-        assert "router" not in available
+        available_names = [mid.agent_name(config_with_router) for mid in available]
+        assert available_names == ["calculator"]
+        assert "router" not in available_names

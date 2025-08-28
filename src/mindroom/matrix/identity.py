@@ -43,7 +43,7 @@ class MatrixID:
         return f"@{self.username}:{self.domain}"
 
     def agent_name(self, config: Config) -> str | None:
-        """Extract agent name if this is an agent ID."""
+        """Extract agent name if this is a configured agent ID."""
         if not self.username.startswith(self.AGENT_PREFIX):
             return None
 

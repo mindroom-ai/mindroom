@@ -40,15 +40,16 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
     """
     agents: list[MatrixID] = []
     seen_ids: set[str] = set()
-    router_id = config.ids[ROUTER_AGENT_NAME].full_id
 
     for msg in thread_history:
         sender: str = msg.get("sender", "")
-        if sender == router_id:
+        agent_name = extract_agent_name(sender, config)
+
+        # Skip router agent and invalid senders
+        if not agent_name or agent_name == ROUTER_AGENT_NAME:
             continue
 
-        agent_name = extract_agent_name(sender, config)
-        if agent_name and sender not in seen_ids:
+        if sender not in seen_ids:
             try:
                 matrix_id = MatrixID.parse(sender)
                 agents.append(matrix_id)
@@ -74,24 +75,23 @@ def get_agent_matrix_ids_in_thread(thread_history: list[dict[str, Any]], config:
     """
     agent_ids = []
     seen_ids = set()
-    router_id = config.ids[ROUTER_AGENT_NAME].full_id
 
     for msg in thread_history:
         sender = msg.get("sender", "")
-        # Skip router by comparing full Matrix IDs
-        if sender == router_id:
+        agent_name = extract_agent_name(sender, config)
+
+        # Skip router agent and invalid senders
+        if not agent_name or agent_name == ROUTER_AGENT_NAME:
             continue
 
-        agent_name = extract_agent_name(sender, config)
-        if agent_name:
-            try:
-                matrix_id = MatrixID.parse(sender)
-                if matrix_id.full_id not in seen_ids:
-                    agent_ids.append(matrix_id)
-                    seen_ids.add(matrix_id.full_id)
-            except ValueError:
-                # Skip invalid Matrix IDs
-                pass
+        try:
+            matrix_id = MatrixID.parse(sender)
+            if matrix_id.full_id not in seen_ids:
+                agent_ids.append(matrix_id)
+                seen_ids.add(matrix_id.full_id)
+        except ValueError:
+            # Skip invalid Matrix IDs
+            pass
 
     return agent_ids
 
@@ -137,15 +137,12 @@ def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[M
     Note: Router agent is excluded as it's not a regular conversation participant.
     """
     agents: list[MatrixID] = []
-    router_id = config.ids[ROUTER_AGENT_NAME].full_id
 
     for member_id in room.users:
-        # Exclude router by comparing full Matrix IDs
-        if member_id == router_id:
-            continue
         mid = MatrixID.parse(member_id)
         agent_name = mid.agent_name(config)
-        if agent_name:
+        # Exclude router agent
+        if agent_name and agent_name != ROUTER_AGENT_NAME:
             agents.append(mid)
 
     return sorted(agents, key=lambda x: x.full_id)
@@ -161,15 +158,11 @@ def get_available_agent_matrix_ids_in_room(room: nio.MatrixRoom, config: Config)
 
     """
     agent_ids = []
-    router_id = config.ids[ROUTER_AGENT_NAME].full_id
 
     for member_id in room.users:
-        # Skip router by comparing full Matrix IDs
-        if member_id == router_id:
-            continue
-
         agent_name = extract_agent_name(member_id, config)
-        if agent_name:
+        # Exclude router agent
+        if agent_name and agent_name != ROUTER_AGENT_NAME:
             try:
                 matrix_id = MatrixID.parse(member_id)
                 agent_ids.append(matrix_id)

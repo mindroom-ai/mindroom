@@ -255,27 +255,34 @@ class TestRoutingRegression:
         )
         mock_from_yaml.return_value = mock_config
 
+        # Get the actual domain from config
+        domain = mock_config.domain
+
+        # Update mock agents to use the correct domain
+        mock_research_agent.user_id = f"@mindroom_research:{domain}"
+        mock_news_agent.user_id = f"@mindroom_news:{domain}"
+
         # Mock get_model_instance to return a mock model
         mock_model = MagicMock()
         mock_get_model_instance.return_value = mock_model
 
         test_room_id = "!research:localhost"
 
-        # Set up both bots
-        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
+        # Set up both bots with the same config
+        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id, config=mock_config)
+        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id, config=mock_config)
 
-        # Mock orchestrator for research bot
+        # Create a shared orchestrator with both bots properly configured
         mock_orchestrator = MagicMock()
-        mock_agent_bot = MagicMock()
-        mock_agent_bot.agent = MagicMock()
-        mock_orchestrator.agent_bots = {"research": mock_agent_bot, "news": mock_agent_bot}
-        mock_orchestrator.current_config = research_bot.config
-        mock_orchestrator.config = research_bot.config  # This is what teams.py uses
+        mock_orchestrator.agent_bots = {
+            "research": research_bot,
+            "news": news_bot,
+        }
+        mock_orchestrator.current_config = mock_config
+        mock_orchestrator.config = mock_config  # This is what teams.py uses
+
+        # Set the orchestrator on both bots
         research_bot.orchestrator = mock_orchestrator
-
-        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)
-
-        # Mock orchestrator for news bot
         news_bot.orchestrator = mock_orchestrator
 
         # Mock AI responses and team response
@@ -295,13 +302,13 @@ class TestRoutingRegression:
 
         # User mentions BOTH agents
         message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@user:localhost"
-        message_event.body = "@mindroom_research:localhost and @mindroom_news:localhost, what do you think?"
+        message_event.sender = f"@user:{domain}"
+        message_event.body = f"@mindroom_research:{domain} and @mindroom_news:{domain}, what do you think?"
         message_event.event_id = "$user_msg_789"
         message_event.source = {
             "content": {
-                "body": "@mindroom_research:localhost and @mindroom_news:localhost, what do you think?",
-                "m.mentions": {"user_ids": ["@mindroom_research:localhost", "@mindroom_news:localhost"]},
+                "body": f"@mindroom_research:{domain} and @mindroom_news:{domain}, what do you think?",
+                "m.mentions": {"user_ids": [f"@mindroom_research:{domain}", f"@mindroom_news:{domain}"]},
             },
         }
 

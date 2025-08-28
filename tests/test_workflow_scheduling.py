@@ -368,10 +368,11 @@ class TestIntegrationWithScheduling:
             router=RouterConfig(model="default"),
         )
 
-        # Create a mock room with research agent
+        # Create a mock room with research agent using the correct MatrixID
         room = nio.MatrixRoom("!room:server", "@bot:server")
-        room.users["@mindroom_research:server"] = nio.RoomMember(
-            user_id="@mindroom_research:server",
+        research_matrix_id = config.ids["research"].full_id
+        room.users[research_matrix_id] = nio.RoomMember(
+            user_id=research_matrix_id,
             display_name="Research",
             avatar_url=None,
         )

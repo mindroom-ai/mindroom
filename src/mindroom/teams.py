@@ -474,8 +474,10 @@ async def handle_team_formation(
     # Convert MatrixID objects to agent names for comparison and team response
     agent_names = [mid.agent_name(config) or mid.username for mid in form_team_agents]
     first_agent = min(agent_names)
+    logger.debug(f"Team formation: agent_names={agent_names}, first_agent={first_agent}, current_agent={agent_name}")
     if agent_name != first_agent:
         # Other agents in the team don't respond individually
+        logger.debug(f"Agent {agent_name} is not first agent {first_agent}, returning None")
         return None
 
     # Create and execute team response

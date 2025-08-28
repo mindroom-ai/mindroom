@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config, ModelConfig
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 
@@ -72,8 +73,6 @@ class TestAgentBot:
 
     def create_mock_config(self) -> MagicMock:
         """Create a mock config for testing."""
-        from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
-
         mock_config = MagicMock()
         mock_config.agents = {
             "calculator": MagicMock(display_name="CalculatorAgent", rooms=["!test:localhost"]),
