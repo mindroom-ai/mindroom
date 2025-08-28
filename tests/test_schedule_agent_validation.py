@@ -9,8 +9,7 @@ import nio
 import pytest
 
 from mindroom.config import AgentConfig, Config, RouterConfig
-from mindroom.scheduling import schedule_task
-from mindroom.workflow_scheduling import ScheduledWorkflow
+from mindroom.scheduling import ScheduledWorkflow, schedule_task
 
 
 def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.MatrixRoom:

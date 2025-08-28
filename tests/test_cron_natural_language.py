@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.workflow_scheduling import CronSchedule
+from mindroom.scheduling import CronSchedule
 
 
 class TestCronNaturalLanguage:
