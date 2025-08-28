@@ -33,10 +33,10 @@ def run(
         case_sensitive=False,
     ),
     storage_path: Path = typer.Option(  # noqa: B008
-        Path("tmp"),
+        Path("mindroom_data"),
         "--storage-path",
         "-s",
-        help="Base directory for storing agent data (response tracking, etc.)",
+        help="Base directory for persistent MindRoom data (state, sessions, tracking)",
     ),
 ) -> None:
     """Run the mindroom multi-agent system.

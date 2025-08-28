@@ -481,7 +481,19 @@ def _copy_config_to_instance(instance: Instance) -> None:
 def _create_instance_directories(instance: Instance) -> None:
     """Create all necessary directories for an instance with proper permissions."""
     # Base directories needed by all instances
-    base_dirs = ["config", "tmp", "logs", "mindroom", "mindroom/credentials", "mem0"]
+    base_dirs = [
+        "config",
+        "mindroom_data",  # Changed from 'tmp' to 'mindroom_data'
+        "mindroom_data/state",  # Create nested structure
+        "mindroom_data/state/matrix",
+        "mindroom_data/state/agents",
+        "mindroom_data/state/agents/sessions",
+        "mindroom_data/state/agents/tracking",
+        "logs",
+        "mindroom",
+        "mindroom/credentials",
+        "mem0",
+    ]
 
     for subdir in base_dirs:
         dir_path = Path(f"{instance.data_dir}/{subdir}")

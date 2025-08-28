@@ -14,9 +14,10 @@ ROUTER_AGENT_NAME = "router"
 # Default path to agents configuration file
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 
-# Use storage path if available, otherwise current directory
-STORAGE_PATH = os.getenv("STORAGE_PATH", ".")
-MATRIX_STATE_FILE = Path(STORAGE_PATH) / "matrix_state.yaml"
+# Use storage path if available, otherwise use mindroom_data directory
+STORAGE_PATH = os.getenv("STORAGE_PATH", "mindroom_data")
+# Organize state files under a state subdirectory
+MATRIX_STATE_FILE = Path(STORAGE_PATH) / "state" / "matrix" / "sync_state.yaml"
 
 # Other constants
 VOICE_PREFIX = "🎤 "

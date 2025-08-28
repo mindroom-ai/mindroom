@@ -11,13 +11,13 @@ services:
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
       - ${DATA_DIR}/config/config.yaml:/app/config.yaml
-      - ${DATA_DIR}/tmp:/app/tmp
+      - ${DATA_DIR}/mindroom_data:/app/mindroom_data
       - ${DATA_DIR}/logs:/app/logs
       - ${DATA_DIR}/mindroom:/app/.mindroom
       - ${DATA_DIR}/mem0:/app/.mem0
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - STORAGE_PATH=/app/tmp
+      - STORAGE_PATH=/app/mindroom_data
       - HOME=/app
       - GOOGLE_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/google/callback
     networks:

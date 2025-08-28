@@ -36,7 +36,8 @@ class ResponseTracker:
 
     def __post_init__(self) -> None:
         """Initialize paths and load existing responses."""
-        self._store_path = self.base_path / "response_tracking" / self.agent_name
+        # Organize under state/agents/tracking for better structure
+        self._store_path = self.base_path / "state" / "agents" / "tracking" / self.agent_name
         self._store_path.mkdir(parents=True, exist_ok=True)
         self._responses_file = self._store_path / "responded_events.json"
         self._responded_events = self._load_responded_events()
