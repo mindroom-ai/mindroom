@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .constants import ROUTER_AGENT_NAME
-from .matrix.identity import extract_agent_name
+from .matrix.identity import MatrixID, extract_agent_name
 
 if TYPE_CHECKING:
     import nio
@@ -149,6 +149,7 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
 
 def should_agent_respond(  # noqa: PLR0911, C901
     agent_name: str,
+    agent_matrix_id: MatrixID,
     am_i_mentioned: bool,
     is_thread: bool,
     room: nio.MatrixRoom,
@@ -164,6 +165,7 @@ def should_agent_respond(  # noqa: PLR0911, C901
 
     Args:
         agent_name: Name of the agent checking if it should respond
+        agent_matrix_id: MatrixID object for the agent
         am_i_mentioned: Whether this specific agent is mentioned
         is_thread: Whether the message is in a thread
         room: The Matrix room object
@@ -177,7 +179,8 @@ def should_agent_respond(  # noqa: PLR0911, C901
     # Check if agent has access (either configured for room or in DM)
     has_room_access = room.room_id in configured_rooms or is_dm_room
     # Also check if agent is actually in the room (joined it but not configured)
-    is_in_room = agent_name in [extract_agent_name(user_id, config) for user_id in room.users]
+    # Use the full Matrix ID to avoid confusion between agents on different servers
+    is_in_room = agent_matrix_id.full_id in room.users
     # has_access means either configured for room/DM or explicitly in the room
     has_access = has_room_access or is_in_room
 

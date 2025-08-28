@@ -32,6 +32,11 @@ class AgentMatrixUser:
     password: str
     access_token: str | None = None
 
+    @property
+    def matrix_id(self) -> MatrixID:
+        """MatrixID object from user_id."""
+        return MatrixID.parse(self.user_id)
+
 
 def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
     """Get credentials for a specific agent from matrix_state.yaml.
@@ -145,6 +150,7 @@ async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.
     return client
 
 
+# TODO: Check, this seems unused!
 async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, AgentMatrixUser]:
     """Ensure all configured agents and teams have Matrix user accounts.
 

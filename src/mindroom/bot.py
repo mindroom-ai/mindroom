@@ -473,6 +473,7 @@ class AgentBot:
 
         should_respond = should_agent_respond(
             agent_name=self.agent_name,
+            agent_matrix_id=self.matrix_id,
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
             room=room,

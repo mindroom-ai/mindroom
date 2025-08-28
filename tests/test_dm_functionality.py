@@ -11,6 +11,7 @@ from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import AgentConfig, Config
 from mindroom.matrix.client import create_dm_room
 from mindroom.matrix.event_info import EventInfo
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
 from tests.conftest import TEST_PASSWORD, TEST_TMP_DIR
@@ -81,6 +82,7 @@ class TestDMResponseLogic:
         # In DM mode, agent should respond when no one else has
         should_respond = should_agent_respond(
             agent_name="test_agent",
+            agent_matrix_id=MatrixID.parse("@mindroom_test_agent:example.org"),
             am_i_mentioned=False,  # Not mentioned
             is_thread=False,
             room=room,
@@ -106,6 +108,7 @@ class TestDMResponseLogic:
         # When mentioned, always respond
         should_respond = should_agent_respond(
             agent_name="test_agent",
+            agent_matrix_id=MatrixID.parse("@mindroom_test_agent:example.org"),
             am_i_mentioned=True,  # Mentioned
             is_thread=False,
             room=room,
@@ -134,6 +137,7 @@ class TestDMResponseLogic:
         # Another agent is mentioned, not this one
         should_respond = should_agent_respond(
             agent_name="test_agent",
+            agent_matrix_id=MatrixID.parse("@mindroom_test_agent:example.org"),
             am_i_mentioned=False,
             is_thread=False,
             room=room,
@@ -163,6 +167,7 @@ class TestDMResponseLogic:
         # No mentions - agents should not respond individually (team formation happens at a higher level)
         should_respond_test = should_agent_respond(
             agent_name="test_agent",
+            agent_matrix_id=MatrixID.parse("@mindroom_test_agent:example.org"),
             am_i_mentioned=False,
             is_thread=False,
             room=room,
@@ -175,6 +180,7 @@ class TestDMResponseLogic:
 
         should_respond_other = should_agent_respond(
             agent_name="other_agent",
+            agent_matrix_id=MatrixID.parse("@mindroom_other_agent:example.org"),
             am_i_mentioned=False,
             is_thread=False,
             room=room,
