@@ -391,9 +391,9 @@ class AgentBot:
         ):
             return
 
-        # Check if we should process messages in this room
+        # Check if we should process messages in this room (DM or configured rooms only)
         _is_dm_room = await is_dm_room(self.client, room.room_id)
-        if not await self._is_room_message_eligible(room, _is_dm_room):
+        if not (_is_dm_room or room.room_id in self.rooms):
             return
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
@@ -489,15 +489,6 @@ class AgentBot:
             user_id=event.sender,
         )
         self.response_tracker.mark_responded(event.event_id)
-
-    async def _is_room_message_eligible(self, room: nio.MatrixRoom, is_dm: bool) -> bool:
-        """Return True if this agent should process messages in the given room.
-
-        Thread invite system was removed; eligibility is DM or configured room.
-        """
-        if is_dm:
-            return True
-        return room.room_id in self.rooms
 
     def _is_from_other_agent_without_mention(
         self,
