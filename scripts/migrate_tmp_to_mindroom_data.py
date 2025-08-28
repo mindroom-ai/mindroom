@@ -15,7 +15,7 @@ New structure:
     mindroom_data/
     ├── state/
     │   ├── matrix/
-    │   │   └── sync_state.yaml
+    │   │   └── matrix_state.yaml
     │   └── agents/
     │       ├── sessions/
     │       │   └── {agent}.db
@@ -49,10 +49,10 @@ def migrate_data(old_base: Path = Path("tmp"), new_base: Path = Path("mindroom_d
 
     migrated_items = []
 
-    # Migrate matrix_state.yaml -> state/matrix/sync_state.yaml
+    # Migrate matrix_state.yaml -> state/matrix/matrix_state.yaml
     old_matrix_state = old_base / "matrix_state.yaml"
     if old_matrix_state.exists():
-        new_matrix_state = new_base / "state" / "matrix" / "sync_state.yaml"
+        new_matrix_state = new_base / "state" / "matrix" / "matrix_state.yaml"
         shutil.move(str(old_matrix_state), str(new_matrix_state))
         migrated_items.append(f"  ✓ Matrix state: {old_matrix_state} → {new_matrix_state}")
 
