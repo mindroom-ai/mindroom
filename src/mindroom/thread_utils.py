@@ -217,7 +217,6 @@ def should_agent_respond(  # noqa: PLR0911, C901
             sender = msg.get("sender", "")
             sender_agent = extract_agent_name(sender, config)
             if sender_agent == ROUTER_AGENT_NAME:
-                # Router has spoken, but check if agent is in room and mentioned
                 # Router has spoken, only respond if agent is in room and mentioned
                 return is_in_room and am_i_mentioned
 
