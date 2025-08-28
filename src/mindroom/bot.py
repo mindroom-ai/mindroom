@@ -371,7 +371,7 @@ class AgentBot:
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
-        if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
+        if event.body.endswith(IN_PROGRESS_MARKER):
             return
 
         # Skip edit events - they have m.relates_to with rel_type == "m.replace"
@@ -385,64 +385,49 @@ class AgentBot:
             self.logger.debug(f"Skipping edit event {event.event_id}")
             return
 
-        # Compare sender as MatrixID for more robust comparison
-        if (
-            event.sender == self.matrix_id.full_id
-            # Allow processing of voice transcriptions the router sent on behalf of users
-            and not event.body.startswith(VOICE_PREFIX)
-        ):
+        # Skip our own messages (unless voice transcription from router)
+        if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
             return
 
-        # Check if we should process messages in this room
-        # Process if: configured for room OR in the room OR in a DM room
+        # We only receive events from rooms we're in - no need to check access
         _is_dm_room = await is_dm_room(self.client, room.room_id)
-        if not _is_dm_room and room.room_id not in self.rooms:
-            # Not configured for this room - check if we're actually in it
-            if not room.users or self.matrix_id.full_id not in room.users:
-                # Not configured and not in the room - skip
-                self.logger.debug("Skipping message - not configured and not in room")
-                return
-            # We're in the room, process messages when mentioned
-            self.logger.debug("Processing message - agent is in room (invited)")
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
-        # Try to parse as command
+        # Router handles commands exclusively
         command = command_parser.parse(event.body)
-        if command:  # ONLY router handles the command
-            if self.agent_name != ROUTER_AGENT_NAME:
-                return
-            await self._handle_command(room, event, command)
+        if command:
+            if self.agent_name == ROUTER_AGENT_NAME:
+                await self._handle_command(room, event, command)
             return
 
         context = await self._extract_message_context(room, event)
 
         # Check if the sender is an agent
-        assert self.config is not None
         sender_agent_name = extract_agent_name(event.sender, self.config)
 
-        # Ignore messages from other agents unless we are mentioned,
-        # except when the router is posting a voice transcription (VOICE_PREFIX),
-        # which should be treated as a user-originated message.
-        is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
-        is_from_other_agent_without_mention = (
-            sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription
-        )
-        if is_from_other_agent_without_mention:
+        # Skip messages from agents unless:
+        # 1. We're mentioned
+        # 2. It's a voice transcription from router (treated as user message)
+        is_router_voice = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
+        if sender_agent_name and not context.am_i_mentioned and not is_router_voice:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
-        # Router agent has one simple job: route messages when no specific agent is mentioned
-        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)  # Excludes router
+        # Get agents in thread (excludes router)
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
+
+        # Router: Route when no specific agent mentioned and no agents in thread
         if self.agent_name == ROUTER_AGENT_NAME:
-            # Only route if no agents have participated in the thread yet
             if not context.mentioned_agents and not agents_in_thread:
                 await self._handle_ai_routing(room, event, context.thread_history)
             return
 
+        # Skip duplicate responses
         if self._should_skip_duplicate_response(event):
             return
 
+        # Check for team formation
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = await should_form_team(
             context.mentioned_agents,
@@ -454,8 +439,7 @@ class AgentBot:
             is_dm_room=_is_dm_room,
         )
 
-        # Dynamic team formation: only the first agent (alphabetically) handles team formation
-        # Check if this agent's MatrixID is in the team agents list
+        # Handle team formation (only first agent alphabetically)
         if form_team.should_form_team and self.matrix_id in form_team.agents:
             team_response = await handle_team_formation(
                 agent_name=self.agent_name,
@@ -468,14 +452,13 @@ class AgentBot:
                 config=self.config,
             )
 
-            if team_response is None:  # Another agent in the team will handle the response
-                return
-
-            await self._send_response(room, event.event_id, team_response, context.thread_id)
-            self.response_tracker.mark_responded(event.event_id)
+            if team_response:  # We handle the response
+                await self._send_response(room, event.event_id, team_response, context.thread_id)
+                self.response_tracker.mark_responded(event.event_id)
             return
 
-        should_respond = should_agent_respond(
+        # Check if we should respond individually
+        if not should_agent_respond(
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
@@ -484,14 +467,14 @@ class AgentBot:
             thread_history=context.thread_history,
             config=self.config,
             mentioned_agents=context.mentioned_agents,
-        )
-
-        if should_respond and not context.am_i_mentioned:
-            self.logger.info("Will respond: only agent in thread")
-
-        if not should_respond:
+        ):
             return
 
+        # Log if responding without mention
+        if not context.am_i_mentioned:
+            self.logger.info("Will respond: only agent in thread")
+
+        # Generate and send response
         self.logger.info("Processing", event_id=event.event_id)
         await self._generate_response(
             room_id=room.room_id,
