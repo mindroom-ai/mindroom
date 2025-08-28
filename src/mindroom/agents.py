@@ -69,7 +69,6 @@ def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
         except ValueError as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
-    # Create storage - use consistent path structure
     sessions_path = storage_path / "state" / "agents" / "sessions"
     sessions_path.mkdir(parents=True, exist_ok=True)
     storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(sessions_path / f"{agent_name}.db"))

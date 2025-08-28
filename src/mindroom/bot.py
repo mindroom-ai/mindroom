@@ -193,7 +193,6 @@ class AgentBot:
     @cached_property
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        # Create agent with base storage path
         return create_agent(
             agent_name=self.agent_name,
             storage_path=self.storage_path,
