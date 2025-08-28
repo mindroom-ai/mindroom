@@ -238,7 +238,6 @@ def should_agent_respond(
     is_dm_room: bool,
     thread_history: list[dict],
     config: Config,
-    mentioned_agents: list[MatrixID] | None = None,
 ) -> bool:
     """Determine if an agent should respond to a message individually.
 
@@ -252,17 +251,11 @@ def should_agent_respond(
         is_dm_room: Whether this is a DM room
         thread_history: History of messages in the thread
         config: Application configuration
-        mentioned_agents: List of all agent MatrixIDs mentioned in the message
 
     """
     # Always respond if mentioned
     if am_i_mentioned:
         return True
-
-    # Never respond if other agents are mentioned but not this one
-    # (User explicitly wants a different agent)
-    if mentioned_agents:
-        return False
 
     # Regular rooms require mentions (no mention = no response)
     if not is_dm_room and not is_thread:

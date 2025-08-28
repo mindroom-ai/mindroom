@@ -437,7 +437,7 @@ class TestAgentResponseLogic:
             {"sender": self.agent_id("general"), "body": "Hello! How can I help?"},
         ]
 
-        # GeneralAgent should NOT respond because ResearchAgent is mentioned
+        # GeneralAgent should respond as it's the only agent in the thread
         should_respond = should_agent_respond(
             agent_name="general",
             am_i_mentioned=False,  # GeneralAgent is NOT mentioned
@@ -446,9 +446,8 @@ class TestAgentResponseLogic:
             is_dm_room=False,
             thread_history=thread_history,
             config=self.config,
-            mentioned_agents=[self.config.ids["research"]],  # ResearchAgent is mentioned
         )
-        assert should_respond is False  # Should NOT respond when another agent is mentioned
+        assert should_respond is True  # Should respond as the only agent in the thread
 
         # But if no agents are mentioned, general should continue the conversation
         should_respond = should_agent_respond(
@@ -459,6 +458,5 @@ class TestAgentResponseLogic:
             is_dm_room=False,
             thread_history=thread_history,
             config=self.config,
-            mentioned_agents=[],  # No agents mentioned
         )
         assert should_respond is True  # Should continue when no one is mentioned
