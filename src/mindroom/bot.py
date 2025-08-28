@@ -391,16 +391,12 @@ class AgentBot:
         ):
             return
 
-        # Check if we should process messages in this room
-        # Process if: configured for room OR joined the room OR in a DM room
+        # Quick check: if we're in a DM room or configured for this room, we process messages
         _is_dm_room = await is_dm_room(self.client, room.room_id)
-        if not _is_dm_room and room.room_id not in self.rooms:
-            # Not configured for this room - check if we're actually in it
-            joined_rooms = await get_joined_rooms(self.client)
-            if not joined_rooms or room.room_id not in joined_rooms:
-                # Not configured and not joined - skip
-                return
-            # We're in the room, process messages when mentioned
+        _is_configured = room.room_id in self.rooms
+
+        # If not DM and not configured, we need to check mentions before doing expensive operations
+        _needs_mention_check = not _is_dm_room and not _is_configured
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
@@ -413,6 +409,19 @@ class AgentBot:
             return
 
         context = await self._extract_message_context(room, event)
+
+        # Now check if we should skip based on room access
+        if _needs_mention_check:
+            # Not in DM and not configured - only process if mentioned AND in the room
+            if not context.am_i_mentioned:
+                # Not mentioned, definitely skip
+                return
+            # We're mentioned - check if we're actually in the room (expensive call)
+            joined_rooms = await get_joined_rooms(self.client)
+            if not joined_rooms or room.room_id not in joined_rooms:
+                # Not in the room, can't respond even if mentioned
+                return
+            # We're mentioned AND in the room, continue processing
 
         # Check if the sender is an agent
         assert self.config is not None
