@@ -192,7 +192,7 @@ class AgentBot:
     @cached_property
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        return create_agent(agent_name=self.agent_name, storage_path=self.storage_path / "agents", config=self.config)
+        return create_agent(agent_name=self.agent_name, config=self.config)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -289,7 +289,8 @@ class AgentBot:
         await self._set_avatar_if_available()
 
         # Initialize response tracker
-        self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
+        # Use storage_path for tests to ensure isolation
+        self.response_tracker = ResponseTracker(self.agent_name, base_path=self.storage_path)
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
@@ -368,6 +369,7 @@ class AgentBot:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
     async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
+        self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
             return
@@ -396,10 +398,20 @@ class AgentBot:
         if not _is_dm_room and room.room_id not in self.rooms:
             # Not configured for this room - check if we're actually in it
             agent_id = self.agent_user.user_id
+            self.logger.debug(
+                "Room check",
+                room_id=room.room_id,
+                configured_rooms=self.rooms,
+                room_users=list(room.users.keys()) if room.users else None,
+                agent_id=agent_id,
+                is_agent_in_room=agent_id in room.users if room.users else False,
+            )
             if not room.users or agent_id not in room.users:
                 # Not configured and not in the room - skip
+                self.logger.debug("Skipping message - not configured and not in room")
                 return
             # We're in the room, process messages when mentioned
+            self.logger.debug("Processing message - agent is in room (invited)")
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
@@ -918,7 +930,7 @@ class AgentBot:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
 
-        # Use configured agents only - not just any agent in the room
+        # Use configured agents only - router should not suggest random agents
         available_agents = get_configured_agents_for_room(room.room_id, self.config)
         if not available_agents:
             self.logger.debug("No configured agents to route to in this room")

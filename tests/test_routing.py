@@ -24,7 +24,14 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_for_message_basic(self) -> None:
         """Test basic agent suggestion functionality."""
-        config = Config(router=RouterConfig(model="default"))
+        # Create config with the agents we're testing
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+                "general": AgentConfig(display_name="General", rooms=[]),
+            },
+            router=RouterConfig(model="default"),
+        )
 
         with patch("mindroom.routing.get_model_instance"):
             # Mock the Agent and response
@@ -51,7 +58,15 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_with_thread_context(self) -> None:
         """Test agent suggestion with thread history."""
-        config = Config(router=RouterConfig(model="default"))
+        # Create config with the agents we're testing
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+                "finance": AgentConfig(display_name="Finance", rooms=[]),
+                "general": AgentConfig(display_name="General", rooms=[]),
+            },
+            router=RouterConfig(model="default"),
+        )
         thread_context = [
             {"sender": "@user:localhost", "body": "I need help with my taxes"},
             {"sender": "@mindroom_finance:localhost", "body": "I can help with that"},
@@ -86,7 +101,14 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_unavailable_returns_none(self) -> None:
         """Test that suggesting unavailable agent returns None."""
-        config = Config(router=RouterConfig(model="default"))
+        # Create config with the agents we're testing
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+                "general": AgentConfig(display_name="General", rooms=[]),
+            },
+            router=RouterConfig(model="default"),
+        )
 
         with patch("mindroom.routing.get_model_instance"):
             mock_agent = AsyncMock()
@@ -115,7 +137,13 @@ class TestAIRouting:
     @pytest.mark.asyncio
     async def test_suggest_agent_error_handling(self) -> None:
         """Test error handling in agent suggestion."""
-        config = Config(router=RouterConfig(model="default"))
+        # Create config with the agents we're testing
+        config = Config(
+            agents={
+                "general": AgentConfig(display_name="General", rooms=[]),
+            },
+            router=RouterConfig(model="default"),
+        )
 
         with patch("mindroom.routing.get_model_instance") as mock_model:
             mock_model.side_effect = ValueError("Model error")

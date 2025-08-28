@@ -682,7 +682,7 @@ def register_with_matrix(  # noqa: PLR0915
     # Get Matrix credentials from matrix_state.yaml
     instances = load_instances()
     instance_data = instances[instance]
-    matrix_state_file = Path(instance_data["data_dir"]) / "tmp" / "matrix_state.yaml"
+    matrix_state_file = Path(instance_data["data_dir"]) / "mindroom_data" / "matrix_state.yaml"
 
     username = None
     password = None

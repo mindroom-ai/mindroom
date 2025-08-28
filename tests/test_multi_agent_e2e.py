@@ -76,7 +76,7 @@ async def test_agent_processes_direct_mention(
 
         config = Config.from_yaml()
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
         await bot.start()
 
         # Create a message mentioning the calculator agent
@@ -160,7 +160,7 @@ async def test_agent_ignores_other_agents(
 
         config = Config.from_yaml()
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
         await bot.start()
 
         # Create a message from another agent
@@ -232,7 +232,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         config = Config.from_yaml()
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False, config=config)
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id], enable_streaming=False)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -510,7 +510,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
 
         config = Config.from_yaml()
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[initial_room], config=config)
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[initial_room])
         await bot.start()
 
         # Create invite event for a different room

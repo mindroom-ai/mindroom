@@ -83,7 +83,7 @@ class TestRoutingIntegration:
             config=config,
         )
 
-        news_bot = AgentBot(news_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True, config=config)
+        news_bot = AgentBot(news_agent, tmp_path, config, rooms=["!research:localhost"], enable_streaming=True)
 
         # Mock clients
         for bot in [research_bot, news_bot]:

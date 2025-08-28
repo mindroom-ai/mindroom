@@ -12,6 +12,7 @@ from rich.console import Console
 
 from mindroom import __version__
 from mindroom.bot import main as bot_main
+from mindroom.constants import STORAGE_PATH
 
 app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
 console = Console()
@@ -35,10 +36,10 @@ def run(
         case_sensitive=False,
     ),
     storage_path: Path = typer.Option(  # noqa: B008
-        Path("tmp"),
+        Path(STORAGE_PATH),
         "--storage-path",
         "-s",
-        help="Base directory for storing agent data (response tracking, etc.)",
+        help="Base directory for persistent MindRoom data (state, sessions, tracking)",
     ),
 ) -> None:
     """Run the mindroom multi-agent system.

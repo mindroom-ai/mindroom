@@ -181,30 +181,11 @@ def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixI
 
     Note: Router agent is excluded as it's not a regular conversation participant.
     """
-    configured_agents = []
-    for agent_name, agent_config in config.agents.items():
-        if agent_name != ROUTER_AGENT_NAME and room_id in agent_config.rooms:
-            configured_agents.append(config.ids[agent_name])
-    return sorted(configured_agents, key=lambda x: x.full_id)
+    return config.get_configured_agents_for_room(room_id)
 
 
-def get_configured_agent_matrix_ids_for_room(room_id: str, config: Config) -> list[MatrixID]:
-    """Get list of agent Matrix IDs configured for a specific room.
-
-    This returns only agents that have the room in their configuration,
-    not just agents that happen to be present in the room.
-
-    Note: Router agent is excluded as it's not a regular conversation participant.
-
-    Returns:
-        List of MatrixID objects for agents configured for the room.
-
-    """
-    agent_ids = []
-    for agent_name, agent_config in config.agents.items():
-        if agent_name != ROUTER_AGENT_NAME and room_id in agent_config.rooms:
-            agent_ids.append(config.ids[agent_name])
-    return sorted(agent_ids, key=lambda x: x.full_id)
+# Deprecated: Use get_configured_agents_for_room instead
+get_configured_agent_matrix_ids_for_room = get_configured_agents_for_room
 
 
 def has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:

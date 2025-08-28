@@ -99,10 +99,10 @@ class TestTeamFormation:
         # Create bots
         config = Config(router=RouterConfig(model="default"))
 
-        research_bot = AgentBot(mock_research_agent, tmp_path, rooms=[team_room_id], config=config)
+        research_bot = AgentBot(mock_research_agent, tmp_path, config, rooms=[team_room_id])
         config = Config(router=RouterConfig(model="default"))
 
-        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, rooms=[team_room_id], config=config)
+        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, config, rooms=[team_room_id])
 
         # Setup bots
         research_bot.client = AsyncMock()

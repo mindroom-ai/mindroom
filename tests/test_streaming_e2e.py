@@ -383,7 +383,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             router=RouterConfig(model="default"),
         )
 
-        bot = AgentBot(calc_user, tmp_path, rooms=["!test:localhost"], enable_streaming=False, config=config)
+        bot = AgentBot(calc_user, tmp_path, config, rooms=["!test:localhost"], enable_streaming=False)
         await bot.start()
 
         test_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="", encrypted=False)

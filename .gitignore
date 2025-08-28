@@ -176,6 +176,9 @@ cython_debug/
 agent_storage/
 *.db
 
+# MindRoom data directory (persistent state)
+mindroom_data/
+
 # Temporary files
 tmp/
 temp/

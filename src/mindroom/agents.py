@@ -9,13 +9,11 @@ from agno.storage.sqlite import SqliteStorage
 
 from . import agent_prompts
 from . import tools as _tools_module  # noqa: F401
-from .constants import ROUTER_AGENT_NAME
+from .constants import ROUTER_AGENT_NAME, SESSIONS_DIR
 from .logging_config import get_logger
 from .tools_metadata import get_tool_by_name
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from .config import Config
 
 logger = get_logger(__name__)
@@ -37,12 +35,11 @@ RICH_PROMPTS = {
 }
 
 
-def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
+def create_agent(agent_name: str, config: Config) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
         agent_name: Name of the agent to create
-        storage_path: Base directory for storing agent data
         config: Application configuration
 
     Returns:
@@ -67,9 +64,8 @@ def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
         except ValueError as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
-    # Create storage
-    storage_path.mkdir(parents=True, exist_ok=True)
-    storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(SESSIONS_DIR / f"{agent_name}.db"))
 
     # Get model config for identity context
     model_name = agent_config.model or "default"
@@ -105,7 +101,6 @@ def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
     # Create agent with defaults applied
     model = get_model_instance(config, agent_config.model)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
-    logger.info(f"Storage path: {storage_path}, DB file: {storage_path / f'{agent_name}.db'}")
 
     instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
