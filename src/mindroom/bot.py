@@ -398,16 +398,7 @@ class AgentBot:
         _is_dm_room = await is_dm_room(self.client, room.room_id)
         if not _is_dm_room and room.room_id not in self.rooms:
             # Not configured for this room - check if we're actually in it
-            agent_id = self.matrix_id.full_id
-            self.logger.debug(
-                "Room check",
-                room_id=room.room_id,
-                configured_rooms=self.rooms,
-                room_users=list(room.users.keys()) if room.users else None,
-                agent_id=agent_id,
-                is_agent_in_room=agent_id in room.users if room.users else False,
-            )
-            if not room.users or agent_id not in room.users:
+            if not room.users or self.matrix_id.full_id not in room.users:
                 # Not configured and not in the room - skip
                 self.logger.debug("Skipping message - not configured and not in room")
                 return
