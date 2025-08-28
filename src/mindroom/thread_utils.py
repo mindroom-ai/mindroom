@@ -264,24 +264,20 @@ def should_agent_respond(
     if mentioned_agents:
         return False
 
+    # Regular rooms require mentions (no mention = no response)
+    if not is_dm_room and not is_thread:
+        return False
+
     agent_matrix_id = config.ids[agent_name]
 
-    # Non-thread messages
-    if not is_thread:
-        if not is_dm_room:
-            return False  # Regular room, no mention
-        # DM room - respond if we're the only agent
-        available_agents = get_available_agents_in_room(room, config)
-        return len(available_agents) == 1  # Must be us if we received the event
+    # For threads, check if agents have already participated
+    if is_thread:
+        agents_in_thread = get_agents_in_thread(thread_history, config)
+        if agents_in_thread:
+            # Continue only if we're the single agent
+            return len(agents_in_thread) == 1 and agents_in_thread[0].full_id == agent_matrix_id.full_id
 
-    # Thread messages (no mentions at this point)
-    agents_in_thread = get_agents_in_thread(thread_history, config)
-
-    # If agents have participated, continue only if we're the single agent
-    if agents_in_thread:
-        return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
-
-    # No agents in thread yet - should we take ownership?
-    # Only if we're the only agent available (let router decide if multiple)
+    # No agents in thread yet OR DM room without thread
+    # Respond if we're the only agent available
     available_agents = get_available_agents_in_room(room, config)
     return len(available_agents) == 1
