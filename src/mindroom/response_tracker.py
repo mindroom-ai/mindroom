@@ -30,13 +30,16 @@ class ResponseTracker:
     """Track which event IDs have been responded to by an agent."""
 
     agent_name: str
+    base_path: Path | None = None
     _responded_events: dict[str, float] = field(default_factory=dict, init=False)
     _responses_file: Path = field(init=False)
 
     def __post_init__(self) -> None:
         """Initialize paths and load existing responses."""
-        TRACKING_DIR.mkdir(parents=True, exist_ok=True)
-        self._responses_file = TRACKING_DIR / f"{self.agent_name}_responded.json"
+        # Use provided base_path or default to TRACKING_DIR
+        tracking_dir = self.base_path if self.base_path is not None else TRACKING_DIR
+        tracking_dir.mkdir(parents=True, exist_ok=True)
+        self._responses_file = tracking_dir / f"{self.agent_name}_responded.json"
         self._responded_events = self._load_responded_events()
         # Perform automatic cleanup on initialization
         self.cleanup_old_events()

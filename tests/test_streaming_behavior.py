@@ -93,7 +93,7 @@ class TestStreamingBehavior:
             config=config,
         )
         helper_bot.client = AsyncMock()
-        helper_bot.response_tracker = ResponseTracker(helper_bot.agent_name, base_path=tmp_path)
+        helper_bot.response_tracker = ResponseTracker(helper_bot.agent_name)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -111,7 +111,7 @@ class TestStreamingBehavior:
             config=config,
         )
         calc_bot.client = AsyncMock()
-        calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
+        calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -234,7 +234,7 @@ class TestStreamingBehavior:
             config=config,
         )
         calc_bot.client = AsyncMock()
-        calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
+        calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()

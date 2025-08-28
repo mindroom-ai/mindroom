@@ -193,10 +193,7 @@ class AgentBot:
     @cached_property
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        return create_agent(
-            agent_name=self.agent_name,
-            config=self.config,
-        )
+        return create_agent(agent_name=self.agent_name, config=self.config)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""

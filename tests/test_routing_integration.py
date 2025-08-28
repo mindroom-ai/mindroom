@@ -88,7 +88,7 @@ class TestRoutingIntegration:
         # Mock clients
         for bot in [research_bot, news_bot]:
             bot.client = AsyncMock()
-            bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
+            bot.response_tracker = ResponseTracker(bot.agent_name)
 
             # Mock orchestrator
             mock_orchestrator = MagicMock()
