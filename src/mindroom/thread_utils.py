@@ -279,7 +279,7 @@ def should_agent_respond(
 
     # If agents have participated, continue only if we're the single agent
     if agents_in_thread:
-        return len(agents_in_thread) == 1 and agents_in_thread[0].full_id == agent_matrix_id.full_id
+        return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 
     # No agents in thread yet - should we take ownership?
     # Only if we're the only agent available (let router decide if multiple)
