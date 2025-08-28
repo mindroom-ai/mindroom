@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from .constants import ROUTER_AGENT_NAME
 from .matrix.identity import MatrixID, extract_agent_name
+from .matrix.rooms import resolve_room_aliases
 
 if TYPE_CHECKING:
     import nio
@@ -185,7 +186,16 @@ def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixI
 
     Note: Router agent is excluded as it's not a regular conversation participant.
     """
-    return config.get_configured_agents_for_room(room_id)
+    configured_agents: list[MatrixID] = []
+
+    # Check which agents should be in this room
+    for agent_name, agent_config in config.agents.items():
+        if agent_name != ROUTER_AGENT_NAME:
+            resolved_rooms = set(resolve_room_aliases(agent_config.rooms))
+            if room_id in resolved_rooms:
+                configured_agents.append(config.ids[agent_name])
+
+    return sorted(configured_agents, key=lambda x: x.full_id)
 
 
 # Deprecated: Use get_configured_agents_for_room instead

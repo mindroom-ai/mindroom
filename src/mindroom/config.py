@@ -264,34 +264,6 @@ class Config(BaseModel):
 
         return configured_bots
 
-    def get_configured_agents_for_room(self, room_id: str) -> list[MatrixID]:
-        """Get list of agent MatrixIDs configured for a specific room.
-
-        This returns only agents that have the room in their configuration,
-        not just agents that happen to be present in the room.
-
-        Note: Router agent is excluded as it's not a regular conversation participant.
-
-        Args:
-            room_id: The Matrix room ID
-
-        Returns:
-            List of MatrixID objects for agents configured for the room
-
-        """
-        from .matrix.rooms import resolve_room_aliases  # noqa: PLC0415
-
-        configured_agents: list[MatrixID] = []
-
-        # Check which agents should be in this room
-        for agent_name, agent_config in self.agents.items():
-            if agent_name != ROUTER_AGENT_NAME:
-                resolved_rooms = set(resolve_room_aliases(agent_config.rooms))
-                if room_id in resolved_rooms:
-                    configured_agents.append(self.ids[agent_name])
-
-        return sorted(configured_agents, key=lambda x: x.full_id)
-
     def save_to_yaml(self, config_path: Path | None = None) -> None:
         """Save the config to a YAML file, excluding None values.
 
