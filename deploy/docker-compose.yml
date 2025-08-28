@@ -17,6 +17,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - STORAGE_PATH=/app/mindroom_data
       - HOME=/app
+      - MEM0_DIR=/app/mindroom_data/state/memory/mem0
       - GOOGLE_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/google/callback
     networks:
       - mindroom-network

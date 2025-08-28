@@ -136,8 +136,8 @@ class CredentialsManager:
         self.save_credentials(service, credentials)
 
 
-# Global instance for convenience
-_credentials_manager = CredentialsManager()
+# Global instance for convenience (lazy initialization)
+_credentials_manager: CredentialsManager | None = None
 
 
 def get_credentials_manager() -> CredentialsManager:
@@ -147,4 +147,7 @@ def get_credentials_manager() -> CredentialsManager:
         The global CredentialsManager instance
 
     """
+    global _credentials_manager
+    if _credentials_manager is None:
+        _credentials_manager = CredentialsManager()
     return _credentials_manager
