@@ -44,7 +44,7 @@ def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
 
     Args:
         agent_name: Name of the agent to create
-        storage_path: Base directory for storing agent data
+        storage_path: Base storage path (sessions will be stored in storage_path/state/agents/sessions)
         config: Application configuration
 
     Returns:
@@ -69,9 +69,10 @@ def create_agent(agent_name: str, storage_path: Path, config: Config) -> Agent:
         except ValueError as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
-    # Create storage
-    storage_path.mkdir(parents=True, exist_ok=True)
-    storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(storage_path / f"{agent_name}.db"))
+    # Create storage - use consistent path structure
+    sessions_path = storage_path / "state" / "agents" / "sessions"
+    sessions_path.mkdir(parents=True, exist_ok=True)
+    storage = SqliteStorage(table_name=f"{agent_name}_sessions", db_file=str(sessions_path / f"{agent_name}.db"))
 
     # Get model config for identity context
     model_name = agent_config.model or "default"

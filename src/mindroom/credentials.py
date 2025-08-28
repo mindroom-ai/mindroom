@@ -19,18 +19,11 @@ class CredentialsManager:
 
         Args:
             base_path: Base directory for storing credentials.
-                      Defaults to mindroom_data/credentials if STORAGE_PATH is set,
-                      otherwise ~/.mindroom/credentials/
+                      Defaults to STORAGE_PATH/credentials (usually mindroom_data/credentials)
 
         """
         if base_path is None:
-            # Check if we're in a container/deployment environment with STORAGE_PATH
-            if STORAGE_PATH:
-                # Use mindroom_data/credentials in deployment
-                self.base_path = Path(STORAGE_PATH) / "credentials"
-            else:
-                # Use a dedicated credentials directory in the user's home for local dev
-                self.base_path = Path.home() / ".mindroom" / "credentials"
+            self.base_path = Path(STORAGE_PATH) / "credentials"
         else:
             self.base_path = Path(base_path)
 

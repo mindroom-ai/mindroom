@@ -246,8 +246,8 @@ async def _prepare_agent_and_prompt(
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
-    # Ensure consistent path organization for agent sessions
-    agent = create_agent(agent_name, storage_path / "state" / "agents" / "sessions", config)
+    # Create agent with base storage path
+    agent = create_agent(agent_name, storage_path, config)
     return agent, full_prompt
 
 

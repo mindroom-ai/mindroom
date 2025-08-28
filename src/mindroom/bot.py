@@ -193,11 +193,10 @@ class AgentBot:
     @cached_property
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        # Use the storage_path parameter to maintain flexibility
-        # The path structure is: {storage_path}/state/agents/sessions
+        # Create agent with base storage path
         return create_agent(
             agent_name=self.agent_name,
-            storage_path=self.storage_path / "state" / "agents" / "sessions",
+            storage_path=self.storage_path,
             config=self.config,
         )
 
