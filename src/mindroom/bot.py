@@ -481,7 +481,6 @@ class AgentBot:
             is_thread=context.is_thread,
             room=room,
             is_dm_room=_is_dm_room,
-            configured_rooms=self.rooms,
             thread_history=context.thread_history,
             config=self.config,
             mentioned_agents=context.mentioned_agents,

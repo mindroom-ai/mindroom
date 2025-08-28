@@ -543,7 +543,6 @@ class TestCommandHandling:
             is_thread=True,
             room=create_mock_room("!test:localhost", ["finance", "router"]),
             is_dm_room=False,
-            configured_rooms=["!test:localhost"],
             thread_history=thread_history,  # Full history including router's error
             config=self.config,
         )
@@ -558,7 +557,6 @@ class TestCommandHandling:
             is_thread=True,
             room=create_mock_room("!test:localhost", ["finance", "router"]),
             is_dm_room=False,
-            configured_rooms=["!test:localhost"],
             thread_history=thread_history,  # Include router's error in history
             config=self.config,
         )
