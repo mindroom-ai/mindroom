@@ -412,17 +412,9 @@ class AgentBot:
             return
 
         # Check if we should process messages in this room
-        # Process if: configured for room OR invited to threads in room
-        # 1. Room is in configured rooms list
-        # 2. Agent has been invited to threads in this room
-        # 3. Currently in a DM room and not configured for it
         _is_dm_room = await is_dm_room(self.client, room.room_id)
-        if not _is_dm_room and room.room_id not in self.rooms:
-            assert self.thread_invite_manager is not None
-            agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
-            if not agent_threads:
-                # Not configured for room and no thread invitations
-                return
+        if not await self._is_room_message_eligible(room, _is_dm_room):
+            return
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
@@ -445,8 +437,7 @@ class AgentBot:
         # Ignore messages from other agents unless we are mentioned,
         # except when the router is posting a voice transcription (VOICE_PREFIX),
         # which should be treated as a user-originated message.
-        is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
-        if sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription:
+        if self._is_from_other_agent_without_mention(sender_agent_name, context, event):
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
@@ -521,6 +512,29 @@ class AgentBot:
             user_id=event.sender,
         )
         self.response_tracker.mark_responded(event.event_id)
+
+    async def _is_room_message_eligible(self, room: nio.MatrixRoom, is_dm: bool) -> bool:
+        """Return True if this agent should process messages in the given room."""
+        if is_dm:
+            return True
+        if room.room_id in self.rooms:
+            return True
+        assert self.thread_invite_manager is not None
+        agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
+        return bool(agent_threads)
+
+    def _is_from_other_agent_without_mention(
+        self,
+        sender_agent_name: str | None,
+        context: MessageContext,
+        event: nio.RoomMessageText,
+    ) -> bool:
+        """True if message is from another agent and we weren't mentioned explicitly.
+
+        Router voice transcriptions (VOICE_PREFIX) are treated as user-originated.
+        """
+        is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
+        return bool(sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
