@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
-import pytz
 from agno.agent import Agent
 from agno.storage.sqlite import SqliteStorage
 
@@ -34,7 +34,7 @@ def get_datetime_context(timezone_str: str) -> str:
         Formatted string with current date and time information
 
     """
-    tz = pytz.timezone(timezone_str)
+    tz = ZoneInfo(timezone_str)
     now = datetime.now(tz)
 
     # Format the datetime in a clear, readable way

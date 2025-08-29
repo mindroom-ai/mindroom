@@ -7,10 +7,10 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, NamedTuple
+from zoneinfo import ZoneInfo
 
 import humanize
 import nio
-import pytz
 from agno.agent import Agent
 from cron_descriptor import get_description  # type: ignore[import-untyped]
 from croniter import croniter  # type: ignore[import-untyped]
@@ -380,7 +380,7 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
 
     """
     # Convert UTC to target timezone
-    tz = pytz.timezone(timezone_str)
+    tz = ZoneInfo(timezone_str)
     local_dt = dt.astimezone(tz)
 
     # Get human-readable relative time using humanize
