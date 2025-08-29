@@ -585,10 +585,14 @@ async def create_team_event_stream(  # noqa: C901
         if name == ROUTER_AGENT_NAME:
             continue
         if name not in orchestrator.agent_bots:
+            logger.warning(f"Agent '{name}' not found in orchestrator.agent_bots")
             continue
         agent_bot = orchestrator.agent_bots[name]
         if agent_bot.agent is not None:
             agents.append(agent_bot.agent)
+            logger.debug(f"Added agent '{name}' with Agno name '{agent_bot.agent.name}' to team")
+        else:
+            logger.warning(f"Agent bot '{name}' has no agent instance")
 
     if not agents:
 
@@ -624,10 +628,14 @@ async def create_team_event_stream(  # noqa: C901
         debug_mode=False,
     )
 
+    logger.info(f"Created team with {len(agents)} agents in {mode.value} mode")
+    for agent in agents:
+        logger.debug(f"Team member: {agent.name}")
+
     return await team.arun(prompt, stream=True)
 
 
-async def structured_team_stream(  # noqa: C901, PLR0912
+async def structured_team_stream(  # noqa: C901, PLR0912, PLR0915
     agent_ids: list[MatrixID],
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -649,13 +657,26 @@ async def structured_team_stream(  # noqa: C901, PLR0912
     per_member: dict[str, str] = dict.fromkeys(agent_names, "")
     consensus: str = ""
 
-    # Stable display names
+    # Stable display names and agent name mapping
     display_names: dict[str, str] = {}
+    agno_to_short_name: dict[str, str] = {}  # Map from Agno agent names to our short names
+
     for _mid, name in zip(agent_ids, agent_names):
         if name in orchestrator.config.agents:
             display_names[name] = orchestrator.config.agents[name].display_name or name
+            # Get the actual agent from orchestrator to find its Agno name
+            if name in orchestrator.agent_bots:
+                agent_bot = orchestrator.agent_bots[name]
+                if agent_bot.agent and agent_bot.agent.name:
+                    agno_to_short_name[agent_bot.agent.name] = name
+                    logger.debug(f"Mapped Agno name '{agent_bot.agent.name}' to short name '{name}'")
+                else:
+                    logger.warning(f"Agent bot '{name}' has no agent or agent.name")
         else:
             display_names[name] = name
+            logger.debug(f"Agent '{name}' not in config.agents")
+
+    logger.info(f"Team streaming setup - agent_names: {agent_names}, agno_to_short_name: {agno_to_short_name}")
 
     # Acquire raw event stream
     stream = await create_team_event_stream(
@@ -684,11 +705,28 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             # Member content
             agent_name_evt = event.agent_name
             content = str(event.content or "")
-            if agent_name_evt and agent_name_evt in per_member:
+
+            logger.debug(f"RunResponseContentEvent - agent_name: '{agent_name_evt}', content: '{content[:50]}...'")
+
+            # Map Agno agent name to our short name
+            if agent_name_evt and agent_name_evt in agno_to_short_name:
+                short_name = agno_to_short_name[agent_name_evt]
+                per_member[short_name] += content
+                logger.debug(
+                    f"Mapped '{agent_name_evt}' to '{short_name}', accumulated: {len(per_member[short_name])} chars",
+                )
+            elif agent_name_evt and agent_name_evt in per_member:
+                # Already a short name
                 per_member[agent_name_evt] += content
+                logger.debug(
+                    f"Direct match for '{agent_name_evt}', accumulated: {len(per_member[agent_name_evt])} chars",
+                )
             else:
                 # No agent context — append to consensus
                 consensus += content
+                logger.warning(
+                    f"No mapping for agent_name '{agent_name_evt}', adding to consensus. Known names: {list(agno_to_short_name.keys())}, per_member keys: {list(per_member.keys())}",
+                )
         else:
             # Suppress tool noise for structured live; optional: add summaries later
             pass
