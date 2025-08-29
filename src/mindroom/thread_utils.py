@@ -235,7 +235,6 @@ def should_agent_respond(
     am_i_mentioned: bool,
     is_thread: bool,
     room: nio.MatrixRoom,
-    is_dm_room: bool,
     thread_history: list[dict],
     config: Config,
     mentioned_agents: list[MatrixID] | None = None,
@@ -249,7 +248,6 @@ def should_agent_respond(
         am_i_mentioned: Whether this specific agent is mentioned
         is_thread: Whether the message is in a thread
         room: The Matrix room object
-        is_dm_room: Whether this is a DM room
         thread_history: History of messages in the thread
         config: Application configuration
         mentioned_agents: List of all agent MatrixIDs mentioned in the message
@@ -264,9 +262,9 @@ def should_agent_respond(
     if mentioned_agents:
         return False
 
-    # Regular rooms require mentions (no mention = no response)
-    # Exception: if there's only one agent present in the room, allow them to respond
-    if not is_dm_room and not is_thread:
+    # Non-thread messages: allow a single available agent to respond automatically
+    # This applies to both DM and regular rooms. Router is excluded from availability.
+    if not is_thread:
         available_agents = get_available_agents_in_room(room, config)
         return len(available_agents) == 1
 

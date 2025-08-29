@@ -475,7 +475,6 @@ class AgentBot:
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
             room=room,
-            is_dm_room=_is_dm_room,
             thread_history=context.thread_history,
             config=self.config,
             mentioned_agents=context.mentioned_agents,
