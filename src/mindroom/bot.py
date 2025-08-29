@@ -61,7 +61,15 @@ from .scheduling import (
     schedule_task,
 )
 from .streaming import IN_PROGRESS_MARKER, StreamingResponse
-from .teams import TeamMode, create_team_response, get_team_model, handle_team_formation, should_form_team
+from .teams import (
+    TeamMode,
+    create_team_response,
+    create_team_response_streaming,
+    team_response_stream_or_text,
+    get_team_model,
+    handle_team_formation,
+    should_form_team,
+)
 from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
@@ -454,20 +462,76 @@ class AgentBot:
 
         # Handle team formation (only first agent alphabetically)
         if form_team.should_form_team and self.matrix_id in form_team.agents:
-            team_response = await handle_team_formation(
-                agent_name=self.agent_name,
-                form_team_agents=form_team.agents,
-                form_team_mode=form_team.mode,
-                event_body=event.body,
-                room_id=room.room_id,
-                orchestrator=self.orchestrator,
-                thread_history=context.thread_history,
-                config=self.config,
+            # Determine if this agent should lead the team response
+            agent_names = [mid.agent_name(self.config) or mid.username for mid in form_team.agents]
+            first_agent = min(agent_names)
+            if self.agent_name != first_agent:
+                return
+
+            # Decide streaming based on presence
+            use_streaming = self.enable_streaming and await should_use_streaming(
+                self.client,
+                room.room_id,
+                requester_user_id=event.sender,
             )
 
-            if team_response:  # We handle the response
-                await self._send_response(room, event.event_id, team_response, context.thread_id)
-                self.response_tracker.mark_responded(event.event_id)
+            if use_streaming:
+                # Try streaming; fall back to non-streaming if library doesn't support it
+                stream, final_text = await team_response_stream_or_text(
+                    agent_names=agent_names,
+                    mode=form_team.mode,
+                    message=event.body,
+                    orchestrator=self.orchestrator,
+                    thread_history=context.thread_history,
+                    model_name=get_team_model(self.agent_name, room.room_id, self.config),
+                )
+
+                if stream is not None:
+                    latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+                        self.client,
+                        room.room_id,
+                        context.thread_id,
+                        event.event_id,
+                    )
+
+                    streaming = StreamingResponse(
+                        room_id=room.room_id,
+                        reply_to_event_id=event.event_id,
+                        thread_id=context.thread_id,
+                        sender_domain=self.matrix_id.domain,
+                        config=self.config,
+                        latest_thread_event_id=latest_thread_event_id,
+                    )
+
+                    header = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
+                    await streaming.update_content(header, self.client)
+
+                    async for chunk in stream:
+                        await streaming.update_content(chunk, self.client)
+
+                    await streaming.finalize(self.client)
+                    if streaming.event_id:
+                        self.logger.info("Sent streaming team response", event_id=streaming.event_id)
+                    self.response_tracker.mark_responded(event.event_id)
+                else:
+                    team_response = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n{final_text or ''}"
+                    await self._send_response(room, event.event_id, team_response, context.thread_id)
+                    self.response_tracker.mark_responded(event.event_id)
+            else:
+                team_response = await handle_team_formation(
+                    agent_name=self.agent_name,
+                    form_team_agents=form_team.agents,
+                    form_team_mode=form_team.mode,
+                    event_body=event.body,
+                    room_id=room.room_id,
+                    orchestrator=self.orchestrator,
+                    thread_history=context.thread_history,
+                    config=self.config,
+                )
+
+                if team_response:  # We handle the response
+                    await self._send_response(room, event.event_id, team_response, context.thread_id)
+                    self.response_tracker.mark_responded(event.event_id)
             return
 
         # Check if we should respond individually
@@ -1125,16 +1189,6 @@ class TeamBot(AgentBot):
         # Convert team_mode string to TeamMode enum
         mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
 
-        # Create team response
-        response_text = await create_team_response(
-            agent_names=self.team_agents,
-            mode=mode,
-            message=prompt,
-            orchestrator=self.orchestrator,
-            thread_history=thread_history,
-            model_name=model_name,
-        )
-
         # Store memory once for the entire team (avoids duplicate LLM processing)
         session_id = create_session_id(room_id, thread_id)
         create_background_task(
@@ -1156,11 +1210,69 @@ class TeamBot(AgentBot):
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
-        if existing_event_id:
-            await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+        # Decide streaming based on presence
+        use_streaming = self.enable_streaming and await should_use_streaming(
+            self.client,
+            room_id,
+            requester_user_id=user_id,
+        )
+
+        if use_streaming and not existing_event_id:
+            # Attempt streaming; fall back if not supported
+            stream, final_text = await team_response_stream_or_text(
+                agent_names=self.team_agents,
+                mode=mode,
+                message=prompt,
+                orchestrator=self.orchestrator,
+                thread_history=thread_history,
+                model_name=model_name,
+            )
+
+            if stream is not None:
+                latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+                    self.client,
+                    room_id,
+                    thread_id,
+                    reply_to_event_id,
+                )
+
+                streaming = StreamingResponse(
+                    room_id=room_id,
+                    reply_to_event_id=reply_to_event_id,
+                    thread_id=thread_id,
+                    sender_domain=self.matrix_id.domain,
+                    config=self.config,
+                    latest_thread_event_id=latest_thread_event_id,
+                )
+
+                header = f"🤝 **Team Response** ({', '.join(self.team_agents)}):\n\n"
+                await streaming.update_content(header, self.client)
+                async for chunk in stream:
+                    await streaming.update_content(chunk, self.client)
+                await streaming.finalize(self.client)
+                if streaming.event_id:
+                    self.logger.info("Sent streaming team response", event_id=streaming.event_id)
+            else:
+                # Fallback: non-streaming single message
+                response_text = f"🤝 **Team Response** ({', '.join(self.team_agents)}):\n\n{final_text or ''}"
+                if existing_event_id:
+                    await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+                else:
+                    await self._send_response(room, reply_to_event_id, response_text, thread_id)
         else:
-            # Send as regular message (not streaming for teams)
-            await self._send_response(room, reply_to_event_id, response_text, thread_id)
+            # Fallback to non-streaming or editing existing message
+            response_text = await create_team_response(
+                agent_names=self.team_agents,
+                mode=mode,
+                message=prompt,
+                orchestrator=self.orchestrator,
+                thread_history=thread_history,
+                model_name=model_name,
+            )
+            if existing_event_id:
+                await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+            else:
+                await self._send_response(room, reply_to_event_id, response_text, thread_id)
 
 
 @dataclass
