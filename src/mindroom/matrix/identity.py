@@ -57,8 +57,12 @@ class MatrixID:
         if name == ROUTER_AGENT_NAME:
             return name
 
-        # Validate regular agents against config
-        return name if name in config.agents else None
+        # Validate against both regular agents and teams
+        if name in config.agents:
+            return name
+        if name in config.teams:
+            return name
+        return None
 
     def __str__(self) -> str:
         """Return the full Matrix ID string representation."""

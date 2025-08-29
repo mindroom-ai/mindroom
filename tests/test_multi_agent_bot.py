@@ -448,7 +448,18 @@ class TestAgentBot:
 
         mock_ai_response_streaming.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Thread response"
-        mock_team_arun.return_value = "Team response"
+
+        # Mock team arun to return either a string or async iterator based on stream parameter
+        async def mock_team_stream() -> AsyncGenerator[str, None]:
+            yield "Team response chunk 1"
+            yield "Team response chunk 2"
+
+        def mock_team_arun_side_effect(*args: Any, **kwargs: Any) -> Any:  # noqa: ARG001, ANN401
+            if kwargs.get("stream"):
+                return mock_team_stream()
+            return "Team response"
+
+        mock_team_arun.side_effect = mock_team_arun_side_effect
         # Mock the presence check to return same value as enable_streaming
         mock_should_use_streaming.return_value = enable_streaming
 
