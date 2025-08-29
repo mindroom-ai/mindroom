@@ -63,7 +63,6 @@ from .scheduling import (
 from .streaming import (
     IN_PROGRESS_MARKER,
     ReplacementStreamingResponse,
-    StreamingResponse,
     stream_chunks_to_room,
 )
 from .teams import (
@@ -73,7 +72,6 @@ from .teams import (
     handle_team_formation,
     should_form_team,
     structured_team_stream,
-    team_response_stream_or_text,
 )
 from .thread_utils import (
     check_agent_mentioned,
@@ -1185,36 +1183,27 @@ class TeamBot(AgentBot):
         )
 
         if use_streaming and not existing_event_id:
-            # Attempt streaming; fall back if not supported
-            stream, final_text = await team_response_stream_or_text(
+            # Use structured team streaming with live document rebuilding
+            stream = structured_team_stream(
                 agent_names=self.team_agents,
-                mode=mode,
                 message=prompt,
                 orchestrator=self.orchestrator,
+                mode=mode,
                 thread_history=thread_history,
                 model_name=model_name,
             )
 
-            if stream is not None:
-                header = f"🤝 **Team Response** ({', '.join(self.team_agents)}):\n\n"
-                await stream_chunks_to_room(
-                    self.client,
-                    room_id,
-                    reply_to_event_id,
-                    thread_id,
-                    self.matrix_id.domain,
-                    self.config,
-                    stream,
-                    header=header,
-                    streaming_cls=StreamingResponse,
-                )
-            else:
-                # Fallback: non-streaming single message
-                response_text = f"🤝 **Team Response** ({', '.join(self.team_agents)}):\n\n{final_text or ''}"
-                if existing_event_id:
-                    await self._edit_message(room_id, existing_event_id, response_text, thread_id)
-                else:
-                    await self._send_response(room, reply_to_event_id, response_text, thread_id)
+            await stream_chunks_to_room(
+                self.client,
+                room_id,
+                reply_to_event_id,
+                thread_id,
+                self.matrix_id.domain,
+                self.config,
+                stream,
+                header=None,  # structured_team_stream includes header
+                streaming_cls=ReplacementStreamingResponse,
+            )
         else:
             # Fallback to non-streaming or editing existing message
             response_text = await create_team_response(
