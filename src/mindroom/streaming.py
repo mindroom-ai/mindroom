@@ -41,9 +41,13 @@ class StreamingResponse:
     update_interval: float = 1.0
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
 
+    def _update(self, new_chunk: str) -> None:
+        """Append new chunk to accumulated text."""
+        self.accumulated_text += new_chunk
+
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
-        self.accumulated_text += new_chunk
+        self._update(new_chunk)
 
         current_time = time.time()
         if current_time - self.last_update >= self.update_interval:
@@ -108,13 +112,9 @@ class ReplacementStreamingResponse(StreamingResponse):
     not incremental concatenation.
     """
 
-    async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
-        """Replace accumulated text with the latest chunk and update display."""
+    def _update(self, new_chunk: str) -> None:
+        """Replace accumulated text with new chunk."""
         self.accumulated_text = new_chunk
-        current_time = time.time()
-        if current_time - self.last_update >= self.update_interval:
-            await self._send_or_edit_message(client)
-            self.last_update = current_time
 
 
 async def stream_chunks_to_room(
