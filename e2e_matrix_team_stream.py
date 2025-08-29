@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 from mindroom.agents import create_agent
-from mindroom.bot import StreamingResponse
 from mindroom.config import Config
 from mindroom.constants import MATRIX_HOMESERVER
 from mindroom.matrix.client import join_room, send_message
@@ -120,7 +119,6 @@ async def run(room_id: str, agents: list[str], message: str, sender: str | None)
         chunk_iter=stream,
         header=header,
         existing_event_id=None,
-        streaming_cls=StreamingResponse,
     )
     print(f"[matrix-e2e] Sent streaming team response event: {event_id}")
 
