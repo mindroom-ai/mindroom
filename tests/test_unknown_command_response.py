@@ -57,6 +57,11 @@ async def test_unknown_command_in_main_room() -> None:
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
     room.name = "Test Room"
+    room.users = {
+        "@mindroom_router:localhost": None,
+        "@mindroom_general:localhost": None,
+        "@user:localhost": None,
+    }
 
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = "$test_event"
@@ -146,6 +151,11 @@ async def test_unknown_command_in_thread() -> None:
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
     room.name = "Test Room"
+    room.users = {
+        "@mindroom_router:localhost": None,
+        "@mindroom_general:localhost": None,
+        "@user:localhost": None,
+    }
 
     # Create an event that's already in a thread
     event = MagicMock(spec=nio.RoomMessageText)
@@ -257,6 +267,11 @@ async def test_unknown_command_with_reply() -> None:
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
     room.name = "Test Room"
+    room.users = {
+        "@mindroom_router:localhost": None,
+        "@mindroom_general:localhost": None,
+        "@user:localhost": None,
+    }
 
     # Create an event that's a reply to another message
     event = MagicMock(spec=nio.RoomMessageText)

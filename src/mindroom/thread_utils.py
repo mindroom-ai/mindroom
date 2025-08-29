@@ -230,13 +230,11 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
     return mentioned_agents
 
 
-def should_agent_respond(  # noqa: PLR0911, C901
+def should_agent_respond(
     agent_name: str,
     am_i_mentioned: bool,
     is_thread: bool,
     room: nio.MatrixRoom,
-    is_dm_room: bool,
-    configured_rooms: list[str],
     thread_history: list[dict],
     config: Config,
     mentioned_agents: list[MatrixID] | None = None,
@@ -250,78 +248,36 @@ def should_agent_respond(  # noqa: PLR0911, C901
         am_i_mentioned: Whether this specific agent is mentioned
         is_thread: Whether the message is in a thread
         room: The Matrix room object
-        is_dm_room: Whether this is a DM room
-        configured_rooms: Rooms this agent is configured for
         thread_history: History of messages in the thread
         config: Application configuration
         mentioned_agents: List of all agent MatrixIDs mentioned in the message
 
     """
-    agent_matrix_id = config.ids[agent_name]
-
-    has_room_access = room.room_id in configured_rooms
-    is_in_room = agent_matrix_id.full_id in room.users
-    has_access = has_room_access or is_in_room
-
-    # For room messages (not in threads)
-    if not is_thread:
-        # In regular rooms, only respond if mentioned AND has access
-        if not is_dm_room:
-            return am_i_mentioned and has_access
-
-        # Special case: DM room without thread started yet
-        # If mentioned, respond
-        if am_i_mentioned:
-            return True
-
-        # If other agents mentioned but not this one, don't respond
-        if mentioned_agents and not am_i_mentioned:
-            return False
-
-        # No mentions - check how many agents are in the room
-        available_agents = get_available_agents_in_room(room, config)
-        # Single agent in DM should respond naturally
-        # Multiple agents or unable to determine - let team formation handle it
-        return len(available_agents) == 1 and any(a.full_id == agent_matrix_id.full_id for a in available_agents)
-
-    # If other agents are mentioned but not this one, don't respond
-    # This handles the case where a user explicitly redirects to another agent
-    if mentioned_agents and not am_i_mentioned:
-        return False
-
-    # Thread logic - agents respond if mentioned and have access
-    if am_i_mentioned and has_access:
+    # Always respond if mentioned
+    if am_i_mentioned:
         return True
 
-    # For threads, check agent participation (excluding router)
-    agents_in_thread = get_agents_in_thread(thread_history, config)
-
-    # Multiple agents in thread with no specific mention - team scenario
-    if len(agents_in_thread) > 1:
-        # Team will handle the response
+    # Never respond if other agents are mentioned but not this one
+    # (User explicitly wants a different agent)
+    if mentioned_agents:
         return False
 
-    # Special case: Check if ONLY the router has participated (router is excluded from agents_in_thread)
-    # If the router has sent messages but no other agents, agents should not take ownership
-    # However, if this agent is in the room (even if not configured), it can respond
-    if len(agents_in_thread) == 0 and has_access:
-        # Check if router has actually spoken in the thread
-        for msg in thread_history:
-            sender = msg.get("sender", "")
-            # Compare full Matrix IDs to check for router
-            if sender == config.ids[ROUTER_AGENT_NAME].full_id:
-                # Router has spoken, only respond if mentioned
-                return am_i_mentioned
-
-        # No agents (including router) have spoken
-        # Check if multiple agents could respond - if so, let router decide
+    # Non-thread messages: allow a single available agent to respond automatically
+    # This applies to both DM and regular rooms. Router is excluded from availability.
+    if not is_thread:
         available_agents = get_available_agents_in_room(room, config)
-        if len(available_agents) > 1:
-            # Multiple agents available - let router decide who responds
-            return False
+        return len(available_agents) == 1
 
-        # Single agent with access - take ownership
-        return any(a.full_id == agent_matrix_id.full_id for a in available_agents)
+    agent_matrix_id = config.ids[agent_name]
 
-    # Single agent continues conversation (only if has access)
-    return len(agents_in_thread) == 1 and agents_in_thread[0].full_id == agent_matrix_id.full_id and has_access
+    # For threads, check if agents have already participated
+    if is_thread:
+        agents_in_thread = get_agents_in_thread(thread_history, config)
+        if agents_in_thread:
+            # Continue only if we're the single agent
+            return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
+
+    # No agents in thread yet OR DM room without thread
+    # Respond if we're the only agent available
+    available_agents = get_available_agents_in_room(room, config)
+    return len(available_agents) == 1

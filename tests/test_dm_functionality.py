@@ -87,8 +87,6 @@ class TestDMResponseLogic:
             am_i_mentioned=False,  # Not mentioned
             is_thread=False,
             room=room,
-            is_dm_room=True,  # DM mode enabled
-            configured_rooms=[],  # Not configured for this room
             thread_history=[],  # No previous messages
             config=config,
             mentioned_agents=None,  # No agents mentioned
@@ -115,8 +113,6 @@ class TestDMResponseLogic:
             am_i_mentioned=True,  # Mentioned
             is_thread=False,
             room=room,
-            is_dm_room=True,  # DM mode enabled
-            configured_rooms=[],
             thread_history=[],
             config=config,
         )
@@ -145,8 +141,6 @@ class TestDMResponseLogic:
             am_i_mentioned=False,
             is_thread=False,
             room=room,
-            is_dm_room=True,  # DM mode enabled
-            configured_rooms=[],
             thread_history=[],
             config=config,
             mentioned_agents=[config.ids["other_agent"]],  # Other agent mentioned with correct domain
@@ -176,8 +170,6 @@ class TestDMResponseLogic:
             am_i_mentioned=False,
             is_thread=False,
             room=room,
-            is_dm_room=True,  # DM mode enabled
-            configured_rooms=[],
             thread_history=[],
             config=config,
             mentioned_agents=None,  # No agents mentioned
@@ -188,8 +180,6 @@ class TestDMResponseLogic:
             am_i_mentioned=False,
             is_thread=False,
             room=room,
-            is_dm_room=True,  # DM mode enabled
-            configured_rooms=[],
             thread_history=[],
             config=config,
             mentioned_agents=None,  # No agents mentioned

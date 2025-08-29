@@ -97,7 +97,9 @@ def _parse_matrix_id(matrix_id: str) -> MatrixID:
     if not matrix_id.startswith("@"):
         msg = f"Invalid Matrix ID: {matrix_id}"
         raise ValueError(msg)
-
+    if ":" not in matrix_id:
+        msg = f"Invalid Matrix ID, missing domain: {matrix_id}"
+        raise ValueError(msg)
     parts = matrix_id[1:].split(":", 1)
     if len(parts) != 2:
         msg = f"Invalid Matrix ID format: {matrix_id}"
@@ -108,10 +110,7 @@ def _parse_matrix_id(matrix_id: str) -> MatrixID:
 
 def is_agent_id(matrix_id: str, config: Config) -> bool:
     """Quick check if a Matrix ID is an agent."""
-    if not matrix_id.startswith("@") or ":" not in matrix_id:
-        return False
-    mid = MatrixID.parse(matrix_id)
-    return mid.agent_name(config) is not None
+    return extract_agent_name(matrix_id, config) is not None
 
 
 def extract_agent_name(sender_id: str, config: Config) -> str | None:

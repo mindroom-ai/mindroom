@@ -66,8 +66,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=True,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=[],
             config=self.config,
         )
@@ -85,8 +83,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=thread_history,
             config=self.config,
         )
@@ -100,8 +96,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],  # Has access to room
             thread_history=[],
             config=self.config,
         )
@@ -117,8 +111,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],  # Has access
             thread_history=thread_history,
             config=self.config,
         )
@@ -135,8 +127,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],  # Has access
             thread_history=thread_history,
             config=self.config,
         )
@@ -150,8 +140,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],  # Has access
             thread_history=[],  # No one has spoken
             config=self.config,
         )
@@ -164,8 +152,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=[],  # Not configured
             thread_history=[],  # No one has spoken
             config=self.config,
         )
@@ -177,8 +163,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=True,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=[],  # Not configured
             thread_history=[],  # No one has spoken
             config=self.config,
         )
@@ -191,8 +175,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=[],
             config=self.config,
         )
@@ -211,8 +193,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=thread_history,
             config=self.config,
         )
@@ -225,8 +205,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=False,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=[],
             config=self.config,
         )
@@ -239,8 +217,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!other_room:localhost"],  # Different room
             thread_history=[],
             config=self.config,
         )
@@ -253,8 +229,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=True,
             is_thread=False,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=[],
             config=self.config,
         )
@@ -279,8 +253,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=thread_history,
             config=self.config,
         )
@@ -294,8 +266,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=[],
             config=self.config,
         )
@@ -311,8 +281,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=thread_history,
             config=self.config,
         )
@@ -325,8 +293,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=False,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=[],  # No access to this room
             thread_history=[],
             config=self.config,
         )
@@ -340,8 +306,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=[],  # No native rooms
             thread_history=[],
             config=self.config,
         )
@@ -364,8 +328,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=thread_history,
             config=self.config,
         )
@@ -379,8 +341,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=False,
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!test:example.org"],
             thread_history=[],
             config=self.config,
         )
@@ -393,8 +353,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=False,
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!test:example.org"],
             thread_history=[],
             config=self.config,
             # No agents mentioned
@@ -408,8 +366,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=True,
             is_thread=True,
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!test:example.org"],
             thread_history=[],
             config=self.config,
         )
@@ -424,8 +380,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator"], self.config),  # Only calculator in room
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],  # Has access
             thread_history=[],  # Empty thread
             config=self.config,
         )
@@ -441,8 +395,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator"], self.config),  # Only calculator
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=thread_history,
             config=self.config,
         )
@@ -467,8 +419,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,  # GeneralAgent is NOT mentioned
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=thread_history,
             config=self.config,
             mentioned_agents=[self.config.ids["research"]],  # ResearchAgent is mentioned
@@ -481,8 +431,6 @@ class TestAgentResponseLogic:
             am_i_mentioned=False,
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            is_dm_room=False,
-            configured_rooms=["!room:localhost"],
             thread_history=thread_history,
             config=self.config,
             mentioned_agents=[],  # No agents mentioned
