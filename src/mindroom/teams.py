@@ -649,23 +649,25 @@ async def structured_team_stream(  # noqa: C901, PLR0912
     consensus if present. Rebuilds the entire document as new events
     arrive so the final shape matches the non-stream style.
     """
-    # Build mapping from display name (what Agno uses) to short name
-    # We use display names as keys since that's what we receive in events
+    # Extract short names and build display name mapping
     assert orchestrator.config is not None
-    display_to_short: dict[str, str] = {}
+    agent_names: list[str] = []
+    display_names: list[str] = []
 
     for mid in agent_ids:
         agent_name = mid.agent_name(orchestrator.config)
         assert agent_name is not None
+        agent_names.append(agent_name)
+
         agent_config = orchestrator.config.agents[agent_name]
         display_name = agent_config.display_name or agent_name
-        display_to_short[display_name] = agent_name
+        display_names.append(display_name)
 
-    # Buffers - keyed by display name for direct matching
-    per_member: dict[str, str] = dict.fromkeys(display_to_short.keys(), "")
+    # Buffers - keyed by display name for direct matching with Agno events
+    per_member: dict[str, str] = dict.fromkeys(display_names, "")
     consensus: str = ""
 
-    logger.info(f"Team streaming setup - agents: {list(display_to_short.values())}")
+    logger.info(f"Team streaming setup - agents: {agent_names}")
 
     # Acquire raw event stream
     stream = await create_team_event_stream(
@@ -683,7 +685,7 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             # On completion, yield the exact non-stream formatted output
             final_parts = extract_team_member_contributions(event)
             final_text = "\n\n".join(final_parts) if final_parts else ""
-            header = format_team_header(list(display_to_short.values()))
+            header = format_team_header(agent_names)
             yield header + final_text
             continue
         elif isinstance(event, RunResponse):
@@ -725,6 +727,6 @@ async def structured_team_stream(  # noqa: C901, PLR0912
         # Build complete document with header
         if parts:
             # Use short names for the header
-            header = format_team_header(list(display_to_short.values()))
+            header = format_team_header(agent_names)
             full_text = "\n\n".join(parts)
             yield header + full_text
