@@ -16,6 +16,7 @@ from agno.run.team import (
     RunResponseContentEvent as TeamRunResponseContentEvent,
 )
 from agno.run.team import (
+    TeamRunEvent,
     TeamRunResponse,
 )
 from agno.team import Team
@@ -651,10 +652,17 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 if agent_display_name:
                     logger.debug(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
         elif isinstance(event, TeamRunResponseContentEvent):
-            # Skip team-level streaming content - we'll use the final TeamRunResponse instead
-            # These intermediate events contain raw/unformatted content
-            logger.debug("Skipping TeamRunResponseContentEvent - will use final TeamRunResponse")
-            continue
+            # Team-level content events - check the event type to determine if it's final content
+            if hasattr(event, "event") and event.event == TeamRunEvent.run_response_content.value:
+                # This is final team consensus content
+                content = str(event.content or "")
+                if content:
+                    consensus += content
+            else:
+                # This might be intermediate content, log it for debugging
+                content = str(event.content or "")
+                if content:
+                    logger.debug(f"Skipping non-final team content: {content[:50]}...")
         else:
             # Skip unknown event types - don't rebuild document for these
             logger.debug(
