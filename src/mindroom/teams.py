@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from agno.agent import Agent
 from agno.models.message import Message
-from agno.run.response import RunResponse, RunResponseContentEvent
+from agno.run.response import (
+    RunResponse,
+    RunResponseContentEvent,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
 from agno.run.team import TeamRunResponse
 from agno.team import Team
 from pydantic import BaseModel, Field
@@ -498,7 +503,7 @@ async def handle_team_formation(
     )
 
 
-async def create_team_response_streaming(  # noqa: C901, PLR0912
+async def create_team_response_streaming(  # noqa: C901, PLR0912, PLR0915
     agent_names: list[str],
     mode: TeamMode,
     message: str,
@@ -576,6 +581,21 @@ async def create_team_response_streaming(  # noqa: C901, PLR0912
                 # Primary: explicit content events
                 if isinstance(event, RunResponseContentEvent) and event.content:
                     yield str(event.content)
+                    continue
+                # Tool call started/completed formatting for readability
+                if isinstance(event, ToolCallStartedEvent):
+                    from .ai import _format_tool_started_message  # noqa: PLC0415  # local import to avoid cycles
+
+                    tool_msg = _format_tool_started_message(event)
+                    if tool_msg:
+                        yield tool_msg
+                    continue
+                if isinstance(event, ToolCallCompletedEvent):
+                    from .ai import _format_tool_completed_message  # noqa: PLC0415  # local import to avoid cycles
+
+                    tool_msg = _format_tool_completed_message(event)
+                    if tool_msg:
+                        yield tool_msg
                     continue
                 # Fallback: any event with a non-empty 'content' attribute
                 content = getattr(event, "content", None)
