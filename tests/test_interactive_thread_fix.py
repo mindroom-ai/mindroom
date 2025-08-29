@@ -32,7 +32,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming() -> None
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
         patch("mindroom.bot.interactive.add_reaction_buttons"),
-        patch("mindroom.bot.StreamingResponse") as mock_streaming_class,
+        patch("mindroom.streaming.StreamingResponse") as mock_streaming_class,
     ):
         # Setup mock streaming response
         mock_streaming = MagicMock()
@@ -204,7 +204,7 @@ async def test_interactive_question_without_thread_streaming() -> None:
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
         patch("mindroom.bot.interactive.add_reaction_buttons"),
-        patch("mindroom.bot.StreamingResponse") as mock_streaming_class,
+        patch("mindroom.streaming.StreamingResponse") as mock_streaming_class,
     ):
         # Setup mock streaming response
         mock_streaming = MagicMock()

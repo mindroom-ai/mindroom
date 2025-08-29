@@ -752,7 +752,6 @@ class AgentBot:
                 self.config,
                 chunk_iter,
                 existing_event_id=existing_event_id,
-                streaming_cls=StreamingResponse,
             )
 
             # If the message contains an interactive question, register it and add reactions
