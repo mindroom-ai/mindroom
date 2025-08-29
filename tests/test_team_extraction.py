@@ -142,7 +142,7 @@ class TestExtractTeamMemberContributions:
         team.messages = []
 
         result = extract_team_member_contributions(team)
-        assert result == ["Team consensus only"]
+        assert result == ["\n**Team Consensus**:", "Team consensus only"]
 
     def test_nested_teams(self) -> None:
         """Test extraction from nested teams."""
