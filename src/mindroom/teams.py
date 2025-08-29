@@ -282,10 +282,10 @@ Return the mode and a one-sentence reason why."""
             logger.info(f"Team mode: {decision.mode} - {decision.reasoning}")
             return TeamMode.COORDINATE if decision.mode == "coordinate" else TeamMode.COLLABORATE
         # Fallback if response is unexpected
-        logger.warning("Unexpected response type from AI, defaulting to collaborate")
+        logger.debug(f"Unexpected response type from AI: {type(decision).__name__}, defaulting to collaborate")
         return TeamMode.COLLABORATE  # noqa: TRY300
     except Exception as e:
-        logger.warning(f"AI decision failed: {e}, defaulting to collaborate")
+        logger.debug(f"AI team mode decision failed (will use default): {e}")
         return TeamMode.COLLABORATE
 
 
@@ -659,10 +659,9 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 if content:
                     consensus += content
             else:
-                # This might be intermediate content, log it for debugging
-                content = str(event.content or "")
-                if content:
-                    logger.debug(f"Skipping non-final team content: {content[:50]}...")
+                # Skip intermediate content
+                logger.debug("Skipping non-final TeamRunResponseContentEvent")
+                continue
         else:
             # Skip unknown event types - don't rebuild document for these
             logger.debug(
