@@ -373,6 +373,107 @@ async def should_form_team(
     )
 
 
+def _build_prompt_with_context(
+    message: str,
+    thread_history: list[dict] | None = None,
+) -> str:
+    """Build a prompt with thread context if available.
+
+    Args:
+        message: The user's message
+        thread_history: Optional thread history for context
+
+    Returns:
+        Formatted prompt with context
+
+    """
+    if not thread_history:
+        return message
+
+    recent_messages = thread_history[-30:]  # Last 30 messages for context
+    context_parts = []
+    for msg in recent_messages:
+        sender = msg.get("sender", "Unknown")
+        body = msg.get("content", {}).get("body", "")
+        if body and len(body) < MAX_CONTEXT_MESSAGE_LENGTH:
+            context_parts.append(f"{sender}: {body}")
+
+    if context_parts:
+        context = "\n".join(context_parts)
+        return f"Thread Context:\n{context}\n\nUser: {message}"
+
+    return message
+
+
+def _get_agents_from_orchestrator(
+    agent_names: list[str],
+    orchestrator: MultiAgentOrchestrator,
+) -> list[Agent]:
+    """Get Agent instances from orchestrator for the given agent names.
+
+    Args:
+        agent_names: List of agent names to get
+        orchestrator: The orchestrator containing agent bots
+
+    Returns:
+        List of Agent instances (excluding router and missing agents)
+
+    """
+    agents: list[Agent] = []
+    for name in agent_names:
+        if name == ROUTER_AGENT_NAME:
+            continue
+
+        if name not in orchestrator.agent_bots:
+            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
+            continue
+
+        agent_bot = orchestrator.agent_bots[name]
+        if agent_bot.agent is not None:
+            agents.append(agent_bot.agent)
+        else:
+            logger.warning(f"Agent bot '{name}' has no agent instance")
+
+    return agents
+
+
+def _create_team_instance(
+    agents: list[Agent],
+    agent_names: list[str],
+    mode: TeamMode,
+    orchestrator: MultiAgentOrchestrator,
+    model_name: str | None = None,
+) -> Team:
+    """Create a configured Team instance.
+
+    Args:
+        agents: List of Agent instances for the team
+        agent_names: List of agent names (for team name)
+        mode: Team collaboration mode
+        orchestrator: The orchestrator containing configuration
+        model_name: Optional model name override
+
+    Returns:
+        Configured Team instance
+
+    """
+    assert orchestrator.config is not None
+    model = get_model_instance(orchestrator.config, model_name or "default")
+
+    return Team(
+        members=agents,  # type: ignore[arg-type]
+        mode=mode.value,
+        name=f"Team-{'-'.join(agent_names)}",
+        model=model,
+        # Enable features for better team collaboration visibility
+        show_members_responses=True,  # Show individual member responses
+        enable_agentic_context=True,  # Share context between team members
+        debug_mode=False,  # Set to True for debugging
+        # Agno will automatically list members with their names, roles, and tools
+        # No need for custom descriptions or instructions
+    )
+
+
 def get_team_model(team_name: str, room_id: str, config: Config) -> str:
     """Get the appropriate model for a team in a specific room.
 
@@ -411,7 +512,7 @@ def get_team_model(team_name: str, room_id: str, config: Config) -> str:
     return "default"
 
 
-async def create_team_response(  # noqa: C901, PLR0912
+async def create_team_response(
     agent_names: list[str],
     mode: TeamMode,
     message: str,
@@ -421,56 +522,16 @@ async def create_team_response(  # noqa: C901, PLR0912
 ) -> str:
     """Create a team and execute response."""
     # Get existing agent instances from the orchestrator
-    agents: list[Agent] = []
-    for name in agent_names:
-        if name == ROUTER_AGENT_NAME:
-            continue
-
-        # Check if agent exists in orchestrator
-        if name not in orchestrator.agent_bots:
-            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
-            continue
-
-        # Use the existing agent instance from the bot
-        agent_bot = orchestrator.agent_bots[name]
-        if agent_bot.agent is not None:
-            agents.append(agent_bot.agent)
+    agents = _get_agents_from_orchestrator(agent_names, orchestrator)
 
     if not agents:
         return "Sorry, no agents available for team collaboration."
 
     # Build the user message with thread context if available
-    prompt = message
-    if thread_history:
-        recent_messages = thread_history[-30:]  # Last 30 messages for context
-        context_parts = []
-        for msg in recent_messages:
-            sender = msg.get("sender", "Unknown")
-            body = msg.get("content", {}).get("body", "")
-            if body and len(body) < MAX_CONTEXT_MESSAGE_LENGTH:
-                context_parts.append(f"{sender}: {body}")
+    prompt = _build_prompt_with_context(message, thread_history)
 
-        if context_parts:
-            context = "\n".join(context_parts)
-            prompt = f"Thread Context:\n{context}\n\nUser: {message}"
-
-    # Use provided model or default
-    assert orchestrator.config is not None
-    model = get_model_instance(orchestrator.config, model_name or "default")
-
-    # Let Agno Team handle everything - it already knows how to describe members
-    team = Team(
-        members=agents,  # type: ignore[arg-type]
-        mode=mode.value,
-        name=f"Team-{'-'.join(agent_names)}",
-        model=model,
-        # Enable features for better team collaboration visibility
-        show_members_responses=True,  # Show individual member responses
-        enable_agentic_context=True,  # Share context between team members
-        debug_mode=False,  # Set to True for debugging
-        # Agno will automatically list members with their names, roles, and tools
-        # No need for custom descriptions or instructions
-    )
+    # Create the team instance
+    team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
 
     # Create agent list for logging
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
@@ -562,7 +623,7 @@ async def handle_team_formation(
     )
 
 
-async def create_team_event_stream(  # noqa: C901
+async def create_team_event_stream(
     agent_ids: list[MatrixID],
     mode: TeamMode,
     message: str,
@@ -579,20 +640,8 @@ async def create_team_event_stream(  # noqa: C901
     assert orchestrator.config is not None
     agent_names = [mid.agent_name(orchestrator.config) or mid.username for mid in agent_ids]
 
-    # Resolve member Agents from orchestrator
-    agents: list[Agent] = []
-    for name in agent_names:
-        if name == ROUTER_AGENT_NAME:
-            continue
-        if name not in orchestrator.agent_bots:
-            logger.warning(f"Agent '{name}' not found in orchestrator.agent_bots")
-            continue
-        agent_bot = orchestrator.agent_bots[name]
-        if agent_bot.agent is not None:
-            agents.append(agent_bot.agent)
-            logger.debug(f"Added agent '{name}' with Agno name '{agent_bot.agent.name}' to team")
-        else:
-            logger.warning(f"Agent bot '{name}' has no agent instance")
+    # Get agent instances from orchestrator
+    agents = _get_agents_from_orchestrator(agent_names, orchestrator)
 
     if not agents:
 
@@ -601,32 +650,11 @@ async def create_team_event_stream(  # noqa: C901
 
         return _empty()
 
-    # Build prompt with limited thread context
-    prompt = message
-    if thread_history:
-        recent_messages = thread_history[-30:]
-        context_parts: list[str] = []
-        for msg in recent_messages:
-            sender = msg.get("sender", "Unknown")
-            body = msg.get("content", {}).get("body", "")
-            if body and len(body) < MAX_CONTEXT_MESSAGE_LENGTH:
-                context_parts.append(f"{sender}: {body}")
-        if context_parts:
-            context = "\n".join(context_parts)
-            prompt = f"Thread Context:\n{context}\n\nUser: {message}"
+    # Build prompt with thread context if available
+    prompt = _build_prompt_with_context(message, thread_history)
 
-    assert orchestrator.config is not None
-    model = get_model_instance(orchestrator.config, model_name or "default")
-
-    team = Team(
-        members=agents,  # type: ignore[arg-type]
-        mode=mode.value,
-        name=f"Team-{'-'.join(agent_names)}",
-        model=model,
-        show_members_responses=True,
-        enable_agentic_context=True,
-        debug_mode=False,
-    )
+    # Create the team instance
+    team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
 
     logger.info(f"Created team with {len(agents)} agents in {mode.value} mode")
     for agent in agents:
