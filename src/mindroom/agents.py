@@ -34,14 +34,8 @@ def get_datetime_context(timezone_str: str) -> str:
         Formatted string with current date and time information
 
     """
-    try:
-        tz = pytz.timezone(timezone_str)
-        now = datetime.now(tz)
-    except pytz.exceptions.UnknownTimeZoneError:
-        # Fall back to UTC if timezone is invalid
-        logger.warning(f"Unknown timezone '{timezone_str}', falling back to UTC")
-        tz = pytz.UTC
-        now = datetime.now(tz)
+    tz = pytz.timezone(timezone_str)
+    now = datetime.now(tz)
 
     # Format the datetime in a clear, readable way
     date_str = now.strftime("%A, %B %d, %Y")
