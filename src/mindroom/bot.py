@@ -478,34 +478,31 @@ class AgentBot:
             )
 
             if use_streaming:
-                # Try streaming; fall back to non-streaming if library doesn't support it
-                stream, final_text = await team_response_stream_or_text(
+                # Structured live rendering: rebuild full doc on each tick
+                from .streaming import ReplacementStreamingResponse
+                from .teams import structured_team_stream
+
+                stream = structured_team_stream(
                     agent_names=agent_names,
-                    mode=form_team.mode,
                     message=event.body,
                     orchestrator=self.orchestrator,
+                    mode=form_team.mode,
                     thread_history=context.thread_history,
                     model_name=get_team_model(self.agent_name, room.room_id, self.config),
                 )
 
-                if stream is not None:
-                    header = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
-                    await stream_chunks_to_room(
-                        self.client,
-                        room.room_id,
-                        event.event_id,
-                        context.thread_id,
-                        self.matrix_id.domain,
-                        self.config,
-                        stream,
-                        header=header,
-                        streaming_cls=StreamingResponse,
-                    )
-                    self.response_tracker.mark_responded(event.event_id)
-                else:
-                    team_text = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n{final_text or ''}"
-                    await self._send_response(room, event.event_id, team_text, context.thread_id)
-                    self.response_tracker.mark_responded(event.event_id)
+                await stream_chunks_to_room(
+                    self.client,
+                    room.room_id,
+                    event.event_id,
+                    context.thread_id,
+                    self.matrix_id.domain,
+                    self.config,
+                    stream,
+                    header=None,
+                    streaming_cls=ReplacementStreamingResponse,
+                )
+                self.response_tracker.mark_responded(event.event_id)
             else:
                 team_response = await handle_team_formation(
                     agent_name=self.agent_name,

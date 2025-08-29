@@ -101,6 +101,22 @@ class StreamingResponse:
                 logger.error("Failed to edit streaming message")
 
 
+class ReplacementStreamingResponse(StreamingResponse):
+    """StreamingResponse variant that replaces content instead of appending.
+
+    Useful for structured live rendering where the full document is rebuilt
+    on each tick and we want the message to reflect the latest full view,
+    not incremental concatenation.
+    """
+
+    async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:  # type: ignore[override]
+        self.accumulated_text = new_chunk
+        current_time = time.time()
+        if current_time - self.last_update >= self.update_interval:
+            await self._send_or_edit_message(client)
+            self.last_update = current_time
+
+
 async def stream_chunks_to_room(
     client: nio.AsyncClient,
     room_id: str,

@@ -612,7 +612,155 @@ async def create_team_response_streaming(  # noqa: C901, PLR0912, PLR0915
         yield f"Sorry, the team encountered an error: {e}"
 
 
-async def team_response_stream_or_text(  # noqa: C901
+async def create_team_event_stream(
+    agent_names: list[str],
+    mode: TeamMode,
+    message: str,
+    orchestrator: MultiAgentOrchestrator,
+    thread_history: list[dict] | None = None,
+    model_name: str | None = None,
+):
+    """Yield raw team events (for structured live rendering). Falls back to a final response.
+
+    Returns an async iterator of Agno events when supported; otherwise yields a
+    single TeamRunResponse for non-streaming providers.
+    """
+    # Resolve member Agents from orchestrator
+    agents: list[Agent] = []
+    for name in agent_names:
+        if name == ROUTER_AGENT_NAME:
+            continue
+        if name not in orchestrator.agent_bots:
+            continue
+        agent_bot = orchestrator.agent_bots[name]
+        if agent_bot.agent is not None:
+            agents.append(agent_bot.agent)
+
+    if not agents:
+
+        async def _empty():  # type: ignore[no-untyped-def]
+            yield RunResponse(content="Sorry, no agents available for team collaboration.")
+
+        return _empty()
+
+    # Build prompt with limited thread context
+    prompt = message
+    if thread_history:
+        recent_messages = thread_history[-30:]
+        context_parts: list[str] = []
+        for msg in recent_messages:
+            sender = msg.get("sender", "Unknown")
+            body = msg.get("content", {}).get("body", "")
+            if body and len(body) < MAX_CONTEXT_MESSAGE_LENGTH:
+                context_parts.append(f"{sender}: {body}")
+        if context_parts:
+            context = "\n".join(context_parts)
+            prompt = f"Thread Context:\n{context}\n\nUser: {message}"
+
+    assert orchestrator.config is not None
+    model = get_model_instance(orchestrator.config, model_name or "default")
+
+    team = Team(
+        members=agents,  # type: ignore[arg-type]
+        mode=mode.value,
+        name=f"Team-{'-'.join(agent_names)}",
+        model=model,
+        show_members_responses=True,
+        enable_agentic_context=True,
+        debug_mode=False,
+    )
+
+    result = await team.arun(prompt, stream=True)
+    if hasattr(result, "__aiter__"):
+        return result
+
+    # Fallback to a generator that yields the final response once
+    async def _one():  # type: ignore[no-untyped-def]
+        yield result
+
+    return _one()
+
+
+async def structured_team_stream(
+    agent_names: list[str],
+    message: str,
+    orchestrator: MultiAgentOrchestrator,
+    mode: TeamMode = TeamMode.COORDINATE,
+    thread_history: list[dict] | None = None,
+    model_name: str | None = None,
+) -> AsyncIterator[str]:
+    """Aggregate team streaming into a non-stream-style document, live.
+
+    Renders a header and per-member sections, optionally adding a team
+    consensus if present. Rebuilds the entire document as new events
+    arrive so the final shape matches the non-stream style.
+    """
+    # Buffers
+    per_member: dict[str, str] = dict.fromkeys(agent_names, "")
+    consensus: str = ""
+
+    # Stable display names (fallback to raw name if missing)
+    display_names: dict[str, str] = {}
+    if orchestrator.config:
+        for name in agent_names:
+            if name in orchestrator.config.agents:
+                display_names[name] = orchestrator.config.agents[name].display_name or name
+            else:
+                display_names[name] = name
+    else:
+        display_names = {name: name for name in agent_names}
+
+    # Acquire raw event stream
+    stream = await create_team_event_stream(
+        agent_names=agent_names,
+        mode=mode,
+        message=message,
+        orchestrator=orchestrator,
+        thread_history=thread_history,
+        model_name=model_name,
+    )
+
+    async for event in stream:
+        # Team consensus chunk from final response
+        if isinstance(event, TeamRunResponse):
+            # On completion, yield the exact non-stream formatted output
+            final_parts = extract_team_member_contributions(event)
+            final_text = "\n\n".join(final_parts) if final_parts else ""
+            header = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
+            yield header + final_text
+            continue
+        elif isinstance(event, RunResponse):
+            # Single-agent fallback — treat as consensus
+            content = _extract_content(event)
+            consensus += ("\n" if consensus else "") + content
+        elif isinstance(event, RunResponseContentEvent):
+            # Member content
+            name = getattr(event, "agent_name", None)
+            content = str(event.content or "")
+            if name and name in per_member:
+                per_member[name] += content
+            else:
+                # No agent context — append to consensus
+                consensus += content
+        else:
+            # Suppress tool noise for structured live; optional: add summaries later
+            pass
+
+        # Re-render full document
+        header = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
+        doc_parts: list[str] = [header]
+        for name in agent_names:
+            body = per_member.get(name, "").strip()
+            if not body:
+                continue
+            doc_parts.append(f"## {display_names[name]}\n{body}\n")
+        if consensus.strip():
+            doc_parts.append(f"\n**Team Consensus:**\n{consensus.strip()}\n")
+
+        yield "\n".join(doc_parts)
+
+
+async def team_response_stream_or_text(
     agent_names: list[str],
     mode: TeamMode,
     message: str,

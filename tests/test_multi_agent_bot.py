@@ -515,11 +515,12 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event_2)
 
-        # Should form team and send team response when multiple agents in thread
+        # Should form team and send a structured streaming team response
         mock_ai_response_streaming.assert_not_called()
         mock_ai_response.assert_not_called()
         mock_team_arun.assert_called_once()
-        bot.client.room_send.assert_called_once()  # Team response sent
+        # Structured streaming sends an initial message and one or more edits
+        assert bot.client.room_send.call_count >= 1
 
         # Reset mocks
         mock_ai_response_streaming.reset_mock()
