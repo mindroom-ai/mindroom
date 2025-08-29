@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import time
-from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from inspect import iscoroutinefunction
+from typing import TYPE_CHECKING, Any, cast
 
 from . import interactive
 from .logging_config import get_logger
@@ -167,18 +167,17 @@ async def stream_chunks_to_room(
     )
 
     # Ensure the first chunk triggers an initial send immediately
-    with suppress(Exception):
-        streaming.last_update = float("-inf")
+    streaming.last_update = float("-inf")
 
     if existing_event_id:
         streaming.event_id = existing_event_id
         streaming.accumulated_text = ""
 
     if header:
-        # Some tests may patch the class with sync methods; support both
-        res = streaming.update_content(header, client)
-        if hasattr(res, "__await__"):
-            await res
+        if iscoroutinefunction(streaming.update_content):
+            await streaming.update_content(header, client)
+        else:
+            cast("Any", streaming).update_content(header, client)
 
     async for chunk in chunk_iter:
         # Normalize non-string chunks (e.g., Agno events) to text
@@ -187,13 +186,14 @@ async def stream_chunks_to_room(
         else:
             content = getattr(chunk, "content", None)
             text_chunk = str(content) if content is not None else str(chunk)
-        res = streaming.update_content(text_chunk, client)
-        if hasattr(res, "__await__"):
-            await res
+        if iscoroutinefunction(streaming.update_content):
+            await streaming.update_content(text_chunk, client)
+        else:
+            cast("Any", streaming).update_content(text_chunk, client)
 
-    fin = streaming.finalize
-    resf = fin(client)
-    if hasattr(resf, "__await__"):
-        await resf
+    if iscoroutinefunction(streaming.finalize):
+        await streaming.finalize(client)
+    else:
+        cast("Any", streaming).finalize(client)
 
     return streaming.event_id, streaming.accumulated_text

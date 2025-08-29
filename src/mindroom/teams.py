@@ -735,7 +735,7 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             consensus += ("\n" if consensus else "") + content
         elif isinstance(event, RunResponseContentEvent):
             # Member content
-            agent_name_evt = getattr(event, "agent_name", None)
+            agent_name_evt = event.agent_name
             content = str(event.content or "")
             if agent_name_evt and agent_name_evt in per_member:
                 per_member[agent_name_evt] += content
