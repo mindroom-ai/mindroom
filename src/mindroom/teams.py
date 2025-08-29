@@ -563,7 +563,7 @@ async def handle_team_formation(
 
 
 async def create_team_event_stream(  # noqa: C901
-    agent_names: list[str],
+    agent_ids: list[MatrixID],
     mode: TeamMode,
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -575,6 +575,10 @@ async def create_team_event_stream(  # noqa: C901
     Returns an async iterator of Agno events when supported; otherwise yields a
     single TeamRunResponse for non-streaming providers.
     """
+    # Extract agent names from MatrixID objects
+    assert orchestrator.config is not None
+    agent_names = [mid.agent_name(orchestrator.config) or mid.username for mid in agent_ids]
+
     # Resolve member Agents from orchestrator
     agents: list[Agent] = []
     for name in agent_names:
@@ -624,7 +628,7 @@ async def create_team_event_stream(  # noqa: C901
 
 
 async def structured_team_stream(  # noqa: C901, PLR0912
-    agent_names: list[str],
+    agent_ids: list[MatrixID],
     message: str,
     orchestrator: MultiAgentOrchestrator,
     mode: TeamMode = TeamMode.COORDINATE,
@@ -637,19 +641,25 @@ async def structured_team_stream(  # noqa: C901, PLR0912
     consensus if present. Rebuilds the entire document as new events
     arrive so the final shape matches the non-stream style.
     """
+    # Extract agent names from MatrixID objects
+    assert orchestrator.config is not None
+    agent_names = [mid.agent_name(orchestrator.config) or mid.username for mid in agent_ids]
+
     # Buffers
     per_member: dict[str, str] = dict.fromkeys(agent_names, "")
     consensus: str = ""
 
     # Stable display names
     display_names: dict[str, str] = {}
-    assert orchestrator.config is not None
-    for name in agent_names:
-        display_names[name] = orchestrator.config.agents[name].display_name or name
+    for _mid, name in zip(agent_ids, agent_names):
+        if name in orchestrator.config.agents:
+            display_names[name] = orchestrator.config.agents[name].display_name or name
+        else:
+            display_names[name] = name
 
     # Acquire raw event stream
     stream = await create_team_event_stream(
-        agent_names=agent_names,
+        agent_ids=agent_ids,
         mode=mode,
         message=message,
         orchestrator=orchestrator,

@@ -125,6 +125,7 @@ async def stream_chunks_to_room(
     sender_domain: str,
     config: Config,
     chunk_iter: AsyncIterator[object],
+    streaming_cls: type[StreamingResponse] = StreamingResponse,
     header: str | None = None,
     existing_event_id: str | None = None,
 ) -> tuple[str | None, str]:
@@ -138,6 +139,7 @@ async def stream_chunks_to_room(
         sender_domain: Sender's homeserver domain for mention formatting
         config: App config for mention formatting
         chunk_iter: Async iterator yielding text chunks
+        streaming_cls: StreamingResponse class to use (default: StreamingResponse, alternative: ReplacementStreamingResponse)
         header: Optional text prefix to send before chunks
         existing_event_id: If editing an existing message, pass its ID
 
@@ -153,7 +155,7 @@ async def stream_chunks_to_room(
         existing_event_id,
     )
 
-    streaming = ReplacementStreamingResponse(
+    streaming = streaming_cls(
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
         thread_id=thread_id,

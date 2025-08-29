@@ -62,6 +62,8 @@ from .scheduling import (
 )
 from .streaming import (
     IN_PROGRESS_MARKER,
+    ReplacementStreamingResponse,
+    StreamingResponse,
     stream_chunks_to_room,
 )
 from .teams import (
@@ -465,9 +467,8 @@ class AgentBot:
         # Handle team formation (only first agent alphabetically)
         if form_team.should_form_team and self.matrix_id in form_team.agents:
             # Determine if this agent should lead the team response
-            agent_names = [mid.agent_name(self.config) or mid.username for mid in form_team.agents]
-            first_agent = min(agent_names)
-            if self.agent_name != first_agent:
+            first_agent = min(form_team.agents, key=lambda x: x.username)
+            if self.matrix_id != first_agent:
                 return
 
             # Decide streaming based on presence
@@ -480,7 +481,7 @@ class AgentBot:
             if use_streaming:
                 # Structured live rendering: rebuild full doc on each tick
                 stream = structured_team_stream(
-                    agent_names=agent_names,
+                    agent_ids=form_team.agents,
                     message=event.body,
                     orchestrator=self.orchestrator,
                     mode=form_team.mode,
@@ -496,6 +497,7 @@ class AgentBot:
                     self.matrix_id.domain,
                     self.config,
                     stream,
+                    streaming_cls=ReplacementStreamingResponse,
                     header=None,
                 )
                 self.response_tracker.mark_responded(event.event_id)
@@ -744,6 +746,7 @@ class AgentBot:
                 self.matrix_id.domain,
                 self.config,
                 chunk_iter,
+                streaming_cls=StreamingResponse,
                 existing_event_id=existing_event_id,
             )
 
@@ -1182,8 +1185,12 @@ class TeamBot(AgentBot):
 
         if use_streaming and not existing_event_id:
             # Use structured team streaming with live document rebuilding
+            # Convert team agent names to MatrixID objects
+            team_matrix_ids = [
+                MatrixID.from_username(agent_name, self.matrix_id.domain) for agent_name in self.team_agents
+            ]
             stream = structured_team_stream(
-                agent_names=self.team_agents,
+                agent_ids=team_matrix_ids,
                 message=prompt,
                 orchestrator=self.orchestrator,
                 mode=mode,
@@ -1199,6 +1206,7 @@ class TeamBot(AgentBot):
                 self.matrix_id.domain,
                 self.config,
                 stream,
+                streaming_cls=ReplacementStreamingResponse,
                 header=None,  # structured_team_stream includes header
             )
         else:

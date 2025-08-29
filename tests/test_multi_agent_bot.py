@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.run.response import RunResponseContentEvent
+from agno.run.team import TeamRunResponse
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config, ModelConfig
@@ -450,9 +452,25 @@ class TestAgentBot:
         mock_ai_response.return_value = "Thread response"
 
         # Mock team arun to return either a string or async iterator based on stream parameter
-        async def mock_team_stream() -> AsyncGenerator[str, None]:
-            yield "Team response chunk 1"
-            yield "Team response chunk 2"
+
+        async def mock_team_stream() -> AsyncGenerator[Any, None]:
+            # Yield member content events
+            event1 = MagicMock(spec=RunResponseContentEvent)
+            event1.agent_name = "calculator"
+            event1.content = "Team response chunk 1"
+            yield event1
+
+            event2 = MagicMock(spec=RunResponseContentEvent)
+            event2.agent_name = "general"
+            event2.content = "Team response chunk 2"
+            yield event2
+
+            # Yield final team response
+            team_response = MagicMock(spec=TeamRunResponse)
+            team_response.content = "Team consensus"
+            team_response.member_responses = []
+            team_response.messages = []
+            yield team_response
 
         def mock_team_arun_side_effect(*args: Any, **kwargs: Any) -> Any:  # noqa: ARG001, ANN401
             if kwargs.get("stream"):
