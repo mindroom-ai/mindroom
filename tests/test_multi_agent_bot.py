@@ -454,14 +454,14 @@ class TestAgentBot:
         # Mock team arun to return either a string or async iterator based on stream parameter
 
         async def mock_team_stream() -> AsyncGenerator[Any, None]:
-            # Yield member content events
+            # Yield member content events (using display names as Agno would)
             event1 = MagicMock(spec=RunResponseContentEvent)
-            event1.agent_name = "calculator"
+            event1.agent_name = "CalculatorAgent"  # Display name, not short name
             event1.content = "Team response chunk 1"
             yield event1
 
             event2 = MagicMock(spec=RunResponseContentEvent)
-            event2.agent_name = "general"
+            event2.agent_name = "GeneralAgent"  # Display name, not short name
             event2.content = "Team response chunk 2"
             yield event2
 

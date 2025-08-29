@@ -635,7 +635,7 @@ async def create_team_event_stream(  # noqa: C901
     return await team.arun(prompt, stream=True)
 
 
-async def structured_team_stream(  # noqa: C901, PLR0912, PLR0915
+async def structured_team_stream(  # noqa: C901, PLR0912
     agent_ids: list[MatrixID],
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -657,24 +657,17 @@ async def structured_team_stream(  # noqa: C901, PLR0912, PLR0915
     per_member: dict[str, str] = dict.fromkeys(agent_names, "")
     consensus: str = ""
 
-    # Stable display names and agent name mapping
+    # Build mapping from Agno agent names (display_name) to short names
+    agno_to_short_name: dict[str, str] = {}
     display_names: dict[str, str] = {}
-    agno_to_short_name: dict[str, str] = {}  # Map from Agno agent names to our short names
 
-    for _mid, name in zip(agent_ids, agent_names):
-        if name in orchestrator.config.agents:
-            display_names[name] = orchestrator.config.agents[name].display_name or name
-            # Get the actual agent from orchestrator to find its Agno name
-            if name in orchestrator.agent_bots:
-                agent_bot = orchestrator.agent_bots[name]
-                if agent_bot.agent and agent_bot.agent.name:
-                    agno_to_short_name[agent_bot.agent.name] = name
-                    logger.debug(f"Mapped Agno name '{agent_bot.agent.name}' to short name '{name}'")
-                else:
-                    logger.warning(f"Agent bot '{name}' has no agent or agent.name")
-        else:
-            display_names[name] = name
-            logger.debug(f"Agent '{name}' not in config.agents")
+    for name in agent_names:
+        agent_config = orchestrator.config.agents[name]
+        # The Agno agent name is the display_name from config
+        agno_name = agent_config.display_name or name
+        agno_to_short_name[agno_name] = name
+        display_names[name] = agno_name
+        logger.debug(f"Mapped Agno name '{agno_name}' to short name '{name}'")
 
     logger.info(f"Team streaming setup - agent_names: {agent_names}, agno_to_short_name: {agno_to_short_name}")
 
@@ -709,27 +702,23 @@ async def structured_team_stream(  # noqa: C901, PLR0912, PLR0915
             logger.debug(f"RunResponseContentEvent - agent_name: '{agent_name_evt}', content: '{content[:50]}...'")
 
             # Map Agno agent name to our short name
-            if agent_name_evt and agent_name_evt in agno_to_short_name:
+            if agent_name_evt in agno_to_short_name:
                 short_name = agno_to_short_name[agent_name_evt]
                 per_member[short_name] += content
                 logger.debug(
                     f"Mapped '{agent_name_evt}' to '{short_name}', accumulated: {len(per_member[short_name])} chars",
                 )
-            elif agent_name_evt and agent_name_evt in per_member:
-                # Already a short name
-                per_member[agent_name_evt] += content
-                logger.debug(
-                    f"Direct match for '{agent_name_evt}', accumulated: {len(per_member[agent_name_evt])} chars",
-                )
             else:
                 # No agent context — append to consensus
                 consensus += content
-                logger.warning(
-                    f"No mapping for agent_name '{agent_name_evt}', adding to consensus. Known names: {list(agno_to_short_name.keys())}, per_member keys: {list(per_member.keys())}",
-                )
+                if agent_name_evt:
+                    logger.warning(
+                        f"No mapping for agent_name '{agent_name_evt}', adding to consensus. "
+                        f"Known Agno names: {list(agno_to_short_name.keys())}",
+                    )
         else:
             # Suppress tool noise for structured live; optional: add summaries later
-            pass
+            logger.debug(f"Ignoring non-content event: {type(event).__name__}")
 
         # Re-render full document using consistent formatting
         parts: list[str] = []
