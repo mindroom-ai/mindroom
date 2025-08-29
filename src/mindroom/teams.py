@@ -116,8 +116,8 @@ def format_no_consensus_note(indent: int = 0) -> str:
     return f"\n{indent_str}*No team consensus - showing individual responses only*"
 
 
-def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -> list[str]:
-    """Extract and format member contributions from a team response.
+def format_team_response(response: TeamRunResponse | RunResponse) -> list[str]:
+    """Format a complete team response with member contributions.
 
     Handles nested teams recursively with proper indentation.
 
@@ -128,15 +128,15 @@ def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -
         List of formatted contribution strings
 
     """
-    return _extract_contributions_recursive(response, indent=0, include_consensus=True)
+    return _format_contributions_recursive(response, indent=0, include_consensus=True)
 
 
-def _extract_contributions_recursive(  # noqa: C901
+def _format_contributions_recursive(  # noqa: C901
     response: TeamRunResponse | RunResponse,
     indent: int,
     include_consensus: bool,
 ) -> list[str]:
-    """Internal recursive function for extracting contributions.
+    """Internal recursive function for formatting contributions.
 
     Args:
         response: The response to extract from
@@ -156,7 +156,7 @@ def _extract_contributions_recursive(  # noqa: C901
                 if isinstance(member_resp, TeamRunResponse):
                     team_name = member_resp.team_name or "Nested Team"
                     parts.append(f"{indent_str}**{team_name}** (Team):")
-                    nested_parts = _extract_contributions_recursive(
+                    nested_parts = _format_contributions_recursive(
                         member_resp,
                         indent=indent + 1,
                         include_consensus=False,  # No consensus for nested teams
@@ -164,7 +164,7 @@ def _extract_contributions_recursive(  # noqa: C901
                     parts.extend(nested_parts)
                 elif isinstance(member_resp, RunResponse):
                     agent_name = member_resp.agent_name or "Team Member"
-                    content = _extract_content(member_resp)
+                    content = _get_response_content(member_resp)
                     if content:
                         parts.append(format_member_contribution(agent_name, content, indent))
 
@@ -176,15 +176,15 @@ def _extract_contributions_recursive(  # noqa: C901
 
     elif isinstance(response, RunResponse):
         agent_name = response.agent_name or "Agent"
-        content = _extract_content(response)
+        content = _get_response_content(response)
         if content:
             parts.append(format_member_contribution(agent_name, content, indent))
 
     return parts
 
 
-def _extract_content(response: TeamRunResponse | RunResponse) -> str:
-    """Extract content from a response object.
+def _get_response_content(response: TeamRunResponse | RunResponse) -> str:
+    """Get content from a response object.
 
     Args:
         response: The response to extract content from
@@ -212,15 +212,15 @@ def _extract_content(response: TeamRunResponse | RunResponse) -> str:
     return ""
 
 
-class ShouldFormTeamResult(NamedTuple):
-    """Result of should_form_team."""
+class TeamFormationDecision(NamedTuple):
+    """Result of decide_team_formation."""
 
     should_form_team: bool
     agents: list[MatrixID]
     mode: TeamMode
 
 
-async def determine_team_mode(
+async def select_team_mode(
     message: str,
     agent_names: list[str],
     config: Config,
@@ -282,7 +282,7 @@ Return the mode and a one-sentence reason why."""
         return TeamMode.COLLABORATE
 
 
-async def should_form_team(
+async def decide_team_formation(
     tagged_agents: list[MatrixID],
     agents_in_thread: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
@@ -292,7 +292,7 @@ async def should_form_team(
     use_ai_decision: bool = True,
     is_dm_room: bool = False,
     is_thread: bool = False,
-) -> ShouldFormTeamResult:
+) -> TeamFormationDecision:
     """Determine if a team should form and with which mode.
 
     Args:
@@ -307,7 +307,7 @@ async def should_form_team(
         is_thread: Whether the current message is in a thread
 
     Returns:
-        ShouldFormTeamResult with team formation decision
+        TeamFormationDecision with team formation decision
 
     """
     team_agents: list[MatrixID] = []
@@ -337,7 +337,7 @@ async def should_form_team(
             team_agents = available_agents
 
     if not team_agents:
-        return ShouldFormTeamResult(
+        return TeamFormationDecision(
             should_form_team=False,
             agents=[],
             mode=TeamMode.COLLABORATE,
@@ -345,7 +345,7 @@ async def should_form_team(
 
     if use_ai_decision and message and config:
         agent_names = [mid.agent_name(config) or mid.username for mid in team_agents]
-        mode = await determine_team_mode(message, agent_names, config)
+        mode = await select_team_mode(message, agent_names, config)
     else:
         # Fallback to hardcoded logic when AI decision is disabled or unavailable
         # Use COORDINATE when agents are explicitly tagged (they likely have different roles)
@@ -353,7 +353,7 @@ async def should_form_team(
         mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
         logger.info(f"Using hardcoded mode selection: {mode.value}")
 
-    return ShouldFormTeamResult(
+    return TeamFormationDecision(
         should_form_team=True,
         agents=team_agents,
         mode=mode,
@@ -459,7 +459,7 @@ def _create_team_instance(
     )
 
 
-def get_team_model(team_name: str, room_id: str, config: Config) -> str:
+def select_model_for_team(team_name: str, room_id: str, config: Config) -> str:
     """Get the appropriate model for a team in a specific room.
 
     Priority:
@@ -493,7 +493,7 @@ def get_team_model(team_name: str, room_id: str, config: Config) -> str:
     return "default"
 
 
-async def create_team_response(
+async def team_response(
     agent_names: list[str],
     mode: TeamMode,
     message: str,
@@ -522,7 +522,7 @@ async def create_team_response(
 
         logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
 
-        parts = extract_team_member_contributions(response)
+        parts = format_team_response(response)
         team_response = "\n\n".join(parts) if parts else "No team response generated."
     else:
         logger.warning(f"Unexpected response type: {type(response)}", response=response)
@@ -539,7 +539,7 @@ async def create_team_response(
     return team_header + team_response
 
 
-async def create_team_event_stream(
+async def team_response_stream_raw(
     agent_ids: list[MatrixID],
     mode: TeamMode,
     message: str,
@@ -573,7 +573,7 @@ async def create_team_event_stream(
     return await team.arun(prompt, stream=True)
 
 
-async def structured_team_stream(  # noqa: C901, PLR0912
+async def team_response_stream(  # noqa: C901, PLR0912
     agent_ids: list[MatrixID],
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -607,7 +607,7 @@ async def structured_team_stream(  # noqa: C901, PLR0912
     logger.info(f"Team streaming setup - agents: {agent_names}")
 
     # Acquire raw event stream
-    stream = await create_team_event_stream(
+    raw_stream = await team_response_stream_raw(
         agent_ids=agent_ids,
         mode=mode,
         message=message,
@@ -616,18 +616,18 @@ async def structured_team_stream(  # noqa: C901, PLR0912
         model_name=model_name,
     )
 
-    async for event in stream:
+    async for event in raw_stream:
         # Team consensus chunk from final response
         if isinstance(event, TeamRunResponse):
             # On completion, yield the exact non-stream formatted output
-            final_parts = extract_team_member_contributions(event)
+            final_parts = format_team_response(event)
             final_text = "\n\n".join(final_parts) if final_parts else ""
             header = format_team_header(agent_names)
             yield header + final_text
             continue
         elif isinstance(event, RunResponse):
             # Error case - no agents available, just return the error message
-            content = _extract_content(event)
+            content = _get_response_content(event)
             if "no agents available" in content.lower():
                 yield content
                 return

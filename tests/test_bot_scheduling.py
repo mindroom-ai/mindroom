@@ -700,7 +700,7 @@ class TestCommandHandling:
         with (
             patch("mindroom.bot.interactive") as mock_interactive,
             patch("mindroom.bot.extract_agent_name") as mock_extract,
-            patch("mindroom.bot.create_team_response") as mock_team,
+            patch("mindroom.bot.team_response") as mock_team,
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (

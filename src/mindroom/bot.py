@@ -13,7 +13,7 @@ import nio
 
 from . import interactive, voice_handler
 from .agents import create_agent, get_rooms_for_entity
-from .ai import ai_response, ai_response_streaming
+from .ai import ai_response, stream_agent_response
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import (
     Command,
@@ -44,7 +44,7 @@ from .matrix.identity import (
     extract_agent_name,
     extract_server_name_from_homeserver,
 )
-from .matrix.mentions import create_mention_content_from_text
+from .matrix.mentions import format_message_with_mentions
 from .matrix.presence import should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
@@ -64,14 +64,14 @@ from .streaming import (
     IN_PROGRESS_MARKER,
     ReplacementStreamingResponse,
     StreamingResponse,
-    stream_chunks_to_room,
+    send_streaming_response,
 )
 from .teams import (
     TeamMode,
-    create_team_response,
-    get_team_model,
-    should_form_team,
-    structured_team_stream,
+    decide_team_formation,
+    select_model_for_team,
+    team_response,
+    team_response_stream,
 )
 from .thread_utils import (
     check_agent_mentioned,
@@ -452,7 +452,7 @@ class AgentBot:
 
         # Check for team formation
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
-        form_team = await should_form_team(
+        form_team = await decide_team_formation(
             context.mentioned_agents,
             agents_in_thread,
             all_mentioned_in_thread,
@@ -471,7 +471,7 @@ class AgentBot:
                 return
 
             # Get model for this team in this room
-            model_name = get_team_model(self.agent_name, room.room_id, self.config)
+            model_name = select_model_for_team(self.agent_name, room.room_id, self.config)
 
             # Convert MatrixID to agent names for the team
             agent_names = [mid.agent_name(self.config) or mid.username for mid in form_team.agents]
@@ -484,8 +484,8 @@ class AgentBot:
             )
 
             if use_streaming:
-                # Structured live rendering: rebuild full doc on each tick
-                stream = structured_team_stream(
+                # Streaming: returns formatted text chunks for live rendering
+                response_stream = team_response_stream(
                     agent_ids=form_team.agents,
                     message=event.body,
                     orchestrator=self.orchestrator,
@@ -494,21 +494,21 @@ class AgentBot:
                     model_name=model_name,
                 )
 
-                await stream_chunks_to_room(
+                await send_streaming_response(
                     self.client,
                     room.room_id,
                     event.event_id,
                     context.thread_id,
                     self.matrix_id.domain,
                     self.config,
-                    stream,
+                    response_stream,
                     streaming_cls=ReplacementStreamingResponse,
                     header=None,
                 )
                 self.response_tracker.mark_responded(event.event_id)
             else:
-                # Non-streaming: create team response directly
-                team_response = await create_team_response(
+                # Non-streaming: returns complete formatted response
+                response_text = await team_response(
                     agent_names=agent_names,
                     mode=form_team.mode,
                     message=event.body,
@@ -517,7 +517,7 @@ class AgentBot:
                     model_name=model_name,
                 )
 
-                await self._send_response(room, event.event_id, team_response, context.thread_id)
+                await self._send_response(room, event.event_id, response_text, context.thread_id)
                 self.response_tracker.mark_responded(event.event_id)
             return
 
@@ -731,7 +731,7 @@ class AgentBot:
         session_id = create_session_id(room.room_id, thread_id)
 
         try:
-            chunk_iter = ai_response_streaming(
+            response_stream = stream_agent_response(
                 agent_name=self.agent_name,
                 prompt=prompt,
                 session_id=session_id,
@@ -741,14 +741,14 @@ class AgentBot:
                 room_id=room.room_id,
             )
 
-            event_id, accumulated = await stream_chunks_to_room(
+            event_id, accumulated = await send_streaming_response(
                 self.client,
                 room.room_id,
                 reply_to_event_id,
                 thread_id,
                 self.matrix_id.domain,
                 self.config,
-                chunk_iter,
+                response_stream,
                 streaming_cls=StreamingResponse,
                 existing_event_id=existing_event_id,
             )
@@ -894,7 +894,7 @@ class AgentBot:
             reply_to_event_id,
         )
 
-        content = create_mention_content_from_text(
+        content = format_message_with_mentions(
             self.config,
             response_text,
             sender_domain=sender_domain,
@@ -926,7 +926,7 @@ class AgentBot:
         sender_domain = sender_id.domain
 
         # For edits in threads, we don't need latest_thread_event_id as this is not creating a new message
-        content = create_mention_content_from_text(
+        content = format_message_with_mentions(
             self.config,
             new_text,
             sender_domain=sender_domain,
@@ -989,7 +989,7 @@ class AgentBot:
             event.event_id,
         )
 
-        content = create_mention_content_from_text(
+        content = format_message_with_mentions(
             self.config,
             response_text,
             sender_domain=sender_domain,
@@ -1153,7 +1153,7 @@ class TeamBot(AgentBot):
             return
 
         # Get the appropriate model for this team and room
-        model_name = get_team_model(self.agent_name, room_id, self.config)
+        model_name = select_model_for_team(self.agent_name, room_id, self.config)
 
         # Convert team_mode string to TeamMode enum
         mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
@@ -1192,7 +1192,7 @@ class TeamBot(AgentBot):
             team_matrix_ids = [
                 MatrixID.from_username(agent_name, self.matrix_id.domain) for agent_name in self.team_agents
             ]
-            stream = structured_team_stream(
+            response_stream = team_response_stream(
                 agent_ids=team_matrix_ids,
                 message=prompt,
                 orchestrator=self.orchestrator,
@@ -1201,20 +1201,20 @@ class TeamBot(AgentBot):
                 model_name=model_name,
             )
 
-            await stream_chunks_to_room(
+            await send_streaming_response(
                 self.client,
                 room_id,
                 reply_to_event_id,
                 thread_id,
                 self.matrix_id.domain,
                 self.config,
-                stream,
+                response_stream,
                 streaming_cls=ReplacementStreamingResponse,
-                header=None,  # structured_team_stream includes header
+                header=None,  # team_response_stream includes header
             )
         else:
             # Fallback to non-streaming or editing existing message
-            response_text = await create_team_response(
+            response_text = await team_response(
                 agent_names=self.team_agents,
                 mode=mode,
                 message=prompt,

@@ -181,14 +181,14 @@ class TestBotIntegration:
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     @patch("mindroom.bot.fetch_thread_history")
     @patch("mindroom.matrix.presence.is_user_online")
     async def test_bot_uses_streaming_when_user_online(
         self,
         mock_is_user_online: AsyncMock,
         mock_fetch_history: AsyncMock,
-        mock_ai_response_streaming: AsyncMock,
+        mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         tmp_path: Path,
     ) -> None:
@@ -202,7 +202,7 @@ class TestBotIntegration:
             yield " streaming"
             yield " response"
 
-        mock_ai_response_streaming.return_value = mock_streaming_response()
+        mock_stream_agent_response.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Test response"
 
         # Create bot with streaming enabled
@@ -245,19 +245,19 @@ class TestBotIntegration:
             )
 
         # Should have used streaming since user is online
-        mock_ai_response_streaming.assert_called_once()
+        mock_stream_agent_response.assert_called_once()
         mock_ai_response.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     @patch("mindroom.bot.fetch_thread_history")
     @patch("mindroom.matrix.presence.is_user_online")
     async def test_bot_uses_non_streaming_when_user_offline(
         self,
         mock_is_user_online: AsyncMock,
         mock_fetch_history: AsyncMock,
-        mock_ai_response_streaming: AsyncMock,
+        mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         tmp_path: Path,
     ) -> None:
@@ -308,4 +308,4 @@ class TestBotIntegration:
 
         # Should have used non-streaming since user is offline
         mock_ai_response.assert_called_once()
-        mock_ai_response_streaming.assert_not_called()
+        mock_stream_agent_response.assert_not_called()

@@ -12,8 +12,8 @@ from mindroom.config import AgentConfig, Config, DefaultsConfig
 from mindroom.teams import (
     TeamMode,
     TeamModeDecision,
-    determine_team_mode,
-    should_form_team,
+    decide_team_formation,
+    select_team_mode,
 )
 
 
@@ -86,7 +86,7 @@ class TestDetermineTeamMode:
     """Test the AI-powered team mode determination."""
 
     @pytest.mark.asyncio
-    async def test_determine_team_mode_coordinate(self, mock_config):
+    async def test_select_team_mode_coordinate(self, mock_config):
         """Test AI correctly identifies coordination tasks (different subtasks)."""
         with patch("mindroom.teams.get_model_instance") as mock_get_model:
             # Mock the AI agent response
@@ -99,7 +99,7 @@ class TestDetermineTeamMode:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await determine_team_mode(
+                result = await select_team_mode(
                     "Send me an email then call me",
                     ["email", "phone"],
                     mock_config,
@@ -109,7 +109,7 @@ class TestDetermineTeamMode:
                 mock_agent.arun.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_determine_team_mode_collaborate(self, mock_config):
+    async def test_select_team_mode_collaborate(self, mock_config):
         """Test AI correctly identifies collaboration tasks (same task for all)."""
         with patch("mindroom.teams.get_model_instance") as mock_get_model:
             # Mock the AI agent response
@@ -122,7 +122,7 @@ class TestDetermineTeamMode:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await determine_team_mode(
+                result = await select_team_mode(
                     "What do you think about this idea?",
                     ["research", "analyst"],
                     mock_config,
@@ -132,7 +132,7 @@ class TestDetermineTeamMode:
                 mock_agent.arun.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_determine_team_mode_fallback_on_error(self, mock_config):
+    async def test_select_team_mode_fallback_on_error(self, mock_config):
         """Test fallback to collaborate mode on AI error."""
         with patch("mindroom.teams.get_model_instance") as mock_get_model:
             # Mock the AI agent to raise an error
@@ -140,7 +140,7 @@ class TestDetermineTeamMode:
             mock_agent.arun.side_effect = Exception("AI service unavailable")
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await determine_team_mode(
+                result = await select_team_mode(
                     "Do something",
                     ["email", "phone"],
                     mock_config,
@@ -150,7 +150,7 @@ class TestDetermineTeamMode:
                 assert result == TeamMode.COLLABORATE
 
     @pytest.mark.asyncio
-    async def test_determine_team_mode_unexpected_response(self, mock_config):
+    async def test_select_team_mode_unexpected_response(self, mock_config):
         """Test fallback when AI returns unexpected response type."""
         with patch("mindroom.teams.get_model_instance") as mock_get_model:
             # Mock the AI agent response with wrong type
@@ -160,7 +160,7 @@ class TestDetermineTeamMode:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await determine_team_mode(
+                result = await select_team_mode(
                     "Do something",
                     ["email", "phone"],
                     mock_config,
@@ -171,15 +171,15 @@ class TestDetermineTeamMode:
 
 
 class TestShouldFormTeam:
-    """Test the enhanced should_form_team function."""
+    """Test the enhanced decide_team_formation function."""
 
     @pytest.mark.asyncio
-    async def test_should_form_team_with_ai_decision(self, mock_config):
+    async def test_decide_team_formation_with_ai_decision(self, mock_config):
         """Test team formation with AI mode decision."""
-        with patch("mindroom.teams.determine_team_mode") as mock_determine:
+        with patch("mindroom.teams.select_team_mode") as mock_determine:
             mock_determine.return_value = TeamMode.COORDINATE
 
-            result = await should_form_team(
+            result = await decide_team_formation(
                 tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
                 agents_in_thread=[],
                 all_mentioned_in_thread=[],
@@ -199,9 +199,9 @@ class TestShouldFormTeam:
             )
 
     @pytest.mark.asyncio
-    async def test_should_form_team_without_ai_decision(self, mock_config):
+    async def test_decide_team_formation_without_ai_decision(self, mock_config):
         """Test team formation with hardcoded mode selection."""
-        result = await should_form_team(
+        result = await decide_team_formation(
             tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -217,9 +217,9 @@ class TestShouldFormTeam:
         assert result.mode == TeamMode.COORDINATE
 
     @pytest.mark.asyncio
-    async def test_should_form_team_no_message_fallback(self, mock_config):
+    async def test_decide_team_formation_no_message_fallback(self, mock_config):
         """Test fallback to hardcoded logic when message is None."""
-        result = await should_form_team(
+        result = await decide_team_formation(
             tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -235,9 +235,9 @@ class TestShouldFormTeam:
         assert result.mode == TeamMode.COORDINATE
 
     @pytest.mark.asyncio
-    async def test_should_form_team_no_config_fallback(self, mock_config):
+    async def test_decide_team_formation_no_config_fallback(self, mock_config):
         """Test fallback to hardcoded logic when config is None."""
-        result = await should_form_team(
+        result = await decide_team_formation(
             tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -253,9 +253,9 @@ class TestShouldFormTeam:
         assert result.mode == TeamMode.COORDINATE
 
     @pytest.mark.asyncio
-    async def test_should_form_team_no_team_needed(self, mock_config):
+    async def test_decide_team_formation_no_team_needed(self, mock_config):
         """Test when no team formation is needed."""
-        result = await should_form_team(
+        result = await decide_team_formation(
             tagged_agents=[mock_config.ids["email"]],  # Only one agent
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -270,12 +270,12 @@ class TestShouldFormTeam:
         assert result.mode == TeamMode.COLLABORATE
 
     @pytest.mark.asyncio
-    async def test_should_form_team_thread_agents(self, mock_config):
+    async def test_decide_team_formation_thread_agents(self, mock_config):
         """Test team formation with agents from thread history."""
-        with patch("mindroom.teams.determine_team_mode") as mock_determine:
+        with patch("mindroom.teams.select_team_mode") as mock_determine:
             mock_determine.return_value = TeamMode.COLLABORATE
 
-            result = await should_form_team(
+            result = await decide_team_formation(
                 tagged_agents=[],
                 agents_in_thread=[mock_config.ids["research"], mock_config.ids["analyst"]],
                 all_mentioned_in_thread=[],
@@ -290,12 +290,12 @@ class TestShouldFormTeam:
             assert result.mode == TeamMode.COLLABORATE
 
     @pytest.mark.asyncio
-    async def test_should_form_team_mentioned_agents(self, mock_config):
+    async def test_decide_team_formation_mentioned_agents(self, mock_config):
         """Test team formation with previously mentioned agents."""
-        with patch("mindroom.teams.determine_team_mode") as mock_determine:
+        with patch("mindroom.teams.select_team_mode") as mock_determine:
             mock_determine.return_value = TeamMode.COLLABORATE
 
-            result = await should_form_team(
+            result = await decide_team_formation(
                 tagged_agents=[],
                 agents_in_thread=[],
                 all_mentioned_in_thread=[
@@ -331,7 +331,7 @@ class TestIntegrationScenarios:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await should_form_team(
+                result = await decide_team_formation(
                     tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
@@ -359,7 +359,7 @@ class TestIntegrationScenarios:
             mock_agent.arun.return_value = mock_response
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
-                result = await should_form_team(
+                result = await decide_team_formation(
                     tagged_agents=[mock_config.ids["research"], mock_config.ids["analyst"]],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
@@ -377,7 +377,7 @@ class TestIntegrationScenarios:
     async def test_backwards_compatibility(self, mock_config):
         """Test that the function still works with old call signature."""
         # Old code might call without message and config
-        result = await should_form_team(
+        result = await decide_team_formation(
             tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],

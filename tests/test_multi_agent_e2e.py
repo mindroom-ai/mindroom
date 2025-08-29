@@ -112,7 +112,7 @@ async def test_agent_processes_direct_mention(
 
             # Mock the AI response and presence check
             with (
-                patch("mindroom.bot.ai_response_streaming") as mock_ai,
+                patch("mindroom.bot.stream_agent_response") as mock_ai,
                 patch("mindroom.bot.should_use_streaming", return_value=True),
             ):
 
@@ -180,7 +180,7 @@ async def test_agent_ignores_other_agents(
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
-        with patch("mindroom.bot.ai_response_streaming") as mock_ai:
+        with patch("mindroom.bot.stream_agent_response") as mock_ai:
             await bot._on_message(room, message_event)
 
             # Should not process the message

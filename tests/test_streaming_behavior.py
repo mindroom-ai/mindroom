@@ -62,12 +62,12 @@ class TestStreamingBehavior:
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     @patch("mindroom.bot.should_use_streaming")
     async def test_streaming_agent_mentions_another_agent(  # noqa: PLR0915
         self,
         mock_should_use_streaming: AsyncMock,
-        mock_ai_response_streaming: AsyncMock,
+        mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         mock_helper_agent: AgentMatrixUser,
         mock_calculator_agent: AgentMatrixUser,
@@ -133,7 +133,7 @@ class TestStreamingBehavior:
             yield "Let me help with that calculation. "
             yield "@mindroom_calculator:localhost what's 2+2?"
 
-        mock_ai_response_streaming.return_value = streaming_generator()
+        mock_stream_agent_response.return_value = streaming_generator()
 
         # Set up room
         mock_room = MagicMock()

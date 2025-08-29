@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from . import interactive
 from .logging_config import get_logger
 from .matrix.client import edit_message, send_message
-from .matrix.mentions import create_mention_content_from_text
+from .matrix.mentions import format_message_with_mentions
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -78,7 +78,7 @@ class StreamingResponse:
         # Only use latest_thread_event_id for the initial message (not edits)
         latest_for_message = self.latest_thread_event_id if self.event_id is None else None
 
-        content = create_mention_content_from_text(
+        content = format_message_with_mentions(
             config=self.config,
             text=display_text,
             sender_domain=self.sender_domain,
@@ -117,14 +117,14 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.accumulated_text = new_chunk
 
 
-async def stream_chunks_to_room(
+async def send_streaming_response(
     client: nio.AsyncClient,
     room_id: str,
     reply_to_event_id: str | None,
     thread_id: str | None,
     sender_domain: str,
     config: Config,
-    chunk_iter: AsyncIterator[object],
+    response_stream: AsyncIterator[object],
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     header: str | None = None,
     existing_event_id: str | None = None,
@@ -138,7 +138,7 @@ async def stream_chunks_to_room(
         thread_id: Thread root if already in a thread
         sender_domain: Sender's homeserver domain for mention formatting
         config: App config for mention formatting
-        chunk_iter: Async iterator yielding text chunks
+        response_stream: Async iterator yielding text chunks or response events
         streaming_cls: StreamingResponse class to use (default: StreamingResponse, alternative: ReplacementStreamingResponse)
         header: Optional text prefix to send before chunks
         existing_event_id: If editing an existing message, pass its ID
@@ -174,7 +174,7 @@ async def stream_chunks_to_room(
     if header:
         await streaming.update_content(header, client)
 
-    async for chunk in chunk_iter:
+    async for chunk in response_stream:
         # Normalize non-string chunks (e.g., Agno events) to text
         if isinstance(chunk, str):
             text_chunk = chunk

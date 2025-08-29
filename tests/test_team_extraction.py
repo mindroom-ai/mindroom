@@ -8,22 +8,22 @@ from agno.models.message import Message
 from agno.run.response import RunResponse
 from agno.run.team import TeamRunResponse
 
-from mindroom.teams import _extract_content, extract_team_member_contributions
+from mindroom.teams import _get_response_content, format_team_response
 
 
 class TestExtractContent:
-    """Tests for _extract_content function."""
+    """Tests for _get_response_content function."""
 
-    def test_extract_content_from_response_with_content(self) -> None:
+    def test_get_response_content_from_response_with_content(self) -> None:
         """Test extracting content when response.content is present."""
         response = MagicMock()
         response.content = "Direct content"
         response.messages = []
 
-        result = _extract_content(response)
+        result = _get_response_content(response)
         assert result == "Direct content"
 
-    def test_extract_content_from_messages(self) -> None:
+    def test_get_response_content_from_messages(self) -> None:
         """Test extracting content from messages when no direct content."""
         msg1 = MagicMock(spec=Message)
         msg1.role = "assistant"
@@ -41,19 +41,19 @@ class TestExtractContent:
         response.content = None
         response.messages = [msg1, msg2, msg3]
 
-        result = _extract_content(response)
+        result = _get_response_content(response)
         assert result == "First message\n\n Second message"
 
-    def test_extract_content_empty(self) -> None:
+    def test_get_response_content_empty(self) -> None:
         """Test extracting content when no content available."""
         response = MagicMock()
         response.content = None
         response.messages = []
 
-        result = _extract_content(response)
+        result = _get_response_content(response)
         assert result == ""
 
-    def test_extract_content_prefers_direct_content(self) -> None:
+    def test_get_response_content_prefers_direct_content(self) -> None:
         """Test that direct content is preferred over messages."""
         msg = MagicMock(spec=Message)
         msg.role = "assistant"
@@ -63,12 +63,12 @@ class TestExtractContent:
         response.content = "Direct content"
         response.messages = [msg]
 
-        result = _extract_content(response)
+        result = _get_response_content(response)
         assert result == "Direct content"
 
 
 class TestExtractTeamMemberContributions:
-    """Tests for extract_team_member_contributions function."""
+    """Tests for format_team_response function."""
 
     def test_single_agent_response(self) -> None:
         """Test extraction from a single agent response."""
@@ -77,7 +77,7 @@ class TestExtractTeamMemberContributions:
         response.content = "Agent response"
         response.messages = []
 
-        result = extract_team_member_contributions(response)
+        result = format_team_response(response)
         assert result == ["**test_agent**: Agent response"]
 
     def test_single_agent_no_name(self) -> None:
@@ -87,7 +87,7 @@ class TestExtractTeamMemberContributions:
         response.content = "Agent response"
         response.messages = []
 
-        result = extract_team_member_contributions(response)
+        result = format_team_response(response)
         assert result == ["**Agent**: Agent response"]
 
     def test_simple_team_response(self) -> None:
@@ -108,7 +108,7 @@ class TestExtractTeamMemberContributions:
         team.member_responses = [agent1, agent2]
         team.messages = []
 
-        result = extract_team_member_contributions(team)
+        result = format_team_response(team)
         expected = [
             "**analyzer**: Analysis complete",
             "**writer**: Report written",
@@ -130,7 +130,7 @@ class TestExtractTeamMemberContributions:
         team.member_responses = [agent1]
         team.messages = []
 
-        result = extract_team_member_contributions(team)
+        result = format_team_response(team)
         assert result == ["**agent1**: Response 1", "\n*No team consensus - showing individual responses only*"]
 
     def test_team_with_only_consensus(self) -> None:
@@ -141,7 +141,7 @@ class TestExtractTeamMemberContributions:
         team.member_responses = []
         team.messages = []
 
-        result = extract_team_member_contributions(team)
+        result = format_team_response(team)
         assert result == ["\n**Team Consensus**:", "Team consensus only"]
 
     def test_nested_teams(self) -> None:
@@ -177,7 +177,7 @@ class TestExtractTeamMemberContributions:
         outer_team.member_responses = [inner_team, outer_agent]
         outer_team.messages = []
 
-        result = extract_team_member_contributions(outer_team)
+        result = format_team_response(outer_team)
         expected = [
             "**Research Team** (Team):",
             "  **researcher**: Research done",
@@ -223,7 +223,7 @@ class TestExtractTeamMemberContributions:
         top_team.member_responses = [mid_team]
         top_team.messages = []
 
-        result = extract_team_member_contributions(top_team)
+        result = format_team_response(top_team)
         expected = [
             "**Mid Team** (Team):",
             "  **Deep Team** (Team):",
@@ -253,7 +253,7 @@ class TestExtractTeamMemberContributions:
         outer_team.member_responses = [inner_team]
         outer_team.messages = []
 
-        result = extract_team_member_contributions(outer_team)
+        result = format_team_response(outer_team)
         expected = [
             "**Nested Team** (Team):",  # Default name
             "  **agent**: Content",
@@ -269,7 +269,7 @@ class TestExtractTeamMemberContributions:
         response.content = None
         response.messages = []
 
-        result = extract_team_member_contributions(response)
+        result = format_team_response(response)
         assert result == []
 
     def test_mixed_content_sources(self) -> None:
@@ -296,7 +296,7 @@ class TestExtractTeamMemberContributions:
         team.member_responses = [agent1, agent2]
         team.messages = []
 
-        result = extract_team_member_contributions(team)
+        result = format_team_response(team)
         expected = [
             "**direct_agent**: Direct content",
             "**message_agent**: Message content",

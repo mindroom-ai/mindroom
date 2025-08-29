@@ -297,7 +297,7 @@ async def ai_response(
         return response_text
 
 
-async def ai_response_streaming(  # noqa: C901
+async def stream_agent_response(  # noqa: C901
     agent_name: str,
     prompt: str,
     session_id: str,
