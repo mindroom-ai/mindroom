@@ -38,6 +38,9 @@ async def test_interactive_question_preserves_thread_root_in_streaming() -> None
         mock_streaming = MagicMock()
         mock_streaming.event_id = "$agent_message_id"
         mock_streaming.accumulated_text = "Test interactive response"
+        # Make methods awaitable to match production async API
+        mock_streaming.update_content = AsyncMock()
+        mock_streaming.finalize = AsyncMock()
         mock_streaming_class.return_value = mock_streaming
 
         # Setup mocks
@@ -210,6 +213,9 @@ async def test_interactive_question_without_thread_streaming() -> None:
         mock_streaming = MagicMock()
         mock_streaming.event_id = "$standalone_message"
         mock_streaming.accumulated_text = "Test interactive response"
+        # Make methods awaitable to match production async API
+        mock_streaming.update_content = AsyncMock()
+        mock_streaming.finalize = AsyncMock()
         mock_streaming_class.return_value = mock_streaming
 
         # Setup mocks

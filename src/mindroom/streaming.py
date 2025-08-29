@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from inspect import iscoroutinefunction
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from . import interactive
 from .logging_config import get_logger
@@ -174,10 +173,7 @@ async def stream_chunks_to_room(
         streaming.accumulated_text = ""
 
     if header:
-        if iscoroutinefunction(streaming.update_content):
-            await streaming.update_content(header, client)
-        else:
-            cast("Any", streaming).update_content(header, client)
+        await streaming.update_content(header, client)
 
     async for chunk in chunk_iter:
         # Normalize non-string chunks (e.g., Agno events) to text
@@ -186,14 +182,8 @@ async def stream_chunks_to_room(
         else:
             content = getattr(chunk, "content", None)
             text_chunk = str(content) if content is not None else str(chunk)
-        if iscoroutinefunction(streaming.update_content):
-            await streaming.update_content(text_chunk, client)
-        else:
-            cast("Any", streaming).update_content(text_chunk, client)
+        await streaming.update_content(text_chunk, client)
 
-    if iscoroutinefunction(streaming.finalize):
-        await streaming.finalize(client)
-    else:
-        cast("Any", streaming).finalize(client)
+    await streaming.finalize(client)
 
     return streaming.event_id, streaming.accumulated_text
