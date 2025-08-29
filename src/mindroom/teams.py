@@ -151,11 +151,9 @@ def _extract_contributions_recursive(  # noqa: C901
     indent_str = "  " * indent
 
     if isinstance(response, TeamRunResponse):
-        # Extract member contributions
         if response.member_responses:
             for member_resp in response.member_responses:
                 if isinstance(member_resp, TeamRunResponse):
-                    # Nested team
                     team_name = member_resp.team_name or "Nested Team"
                     parts.append(f"{indent_str}**{team_name}** (Team):")
                     nested_parts = _extract_contributions_recursive(
@@ -165,22 +163,18 @@ def _extract_contributions_recursive(  # noqa: C901
                     )
                     parts.extend(nested_parts)
                 elif isinstance(member_resp, RunResponse):
-                    # Regular agent
                     agent_name = member_resp.agent_name or "Team Member"
                     content = _extract_content(member_resp)
                     if content:
                         parts.append(format_member_contribution(agent_name, content, indent))
 
-        # Add team consensus if requested
         if include_consensus:
             if response.content:
                 parts.extend(format_team_consensus(response.content, indent))
             elif parts:
-                # If no consensus but we have member responses, note that
                 parts.append(format_no_consensus_note(indent))
 
     elif isinstance(response, RunResponse):
-        # Single agent response
         agent_name = response.agent_name or "Agent"
         content = _extract_content(response)
         if content:
@@ -199,11 +193,9 @@ def _extract_content(response: TeamRunResponse | RunResponse) -> str:
         The extracted content as a string
 
     """
-    # Direct content takes priority
     if response.content:
         return str(response.content)
 
-    # Fall back to extracting from messages
     # Note: This concatenates ALL assistant messages, which might include
     # multiple turns in a conversation. Consider if you want just the
     # last message or all of them.
@@ -215,7 +207,6 @@ def _extract_content(response: TeamRunResponse | RunResponse) -> str:
             if isinstance(msg, Message) and msg.role == "assistant" and msg.content
         ]
 
-        # Join with newlines to preserve message boundaries
         return "\n\n".join(content_parts) if content_parts else ""
 
     return ""
@@ -319,7 +310,6 @@ async def should_form_team(
         ShouldFormTeamResult with team formation decision
 
     """
-    # Determine which agents will form the team
     team_agents: list[MatrixID] = []
 
     # Case 1: Multiple agents explicitly tagged
@@ -346,7 +336,6 @@ async def should_form_team(
             logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")
             team_agents = available_agents
 
-    # No team needed
     if not team_agents:
         return ShouldFormTeamResult(
             should_form_team=False,
@@ -354,9 +343,7 @@ async def should_form_team(
             mode=TeamMode.COLLABORATE,
         )
 
-    # Determine the mode - use AI if enabled and we have the necessary context
     if use_ai_decision and message and config:
-        # Convert MatrixID to agent names for the AI prompt
         agent_names = [mid.agent_name(config) or mid.username for mid in team_agents]
         mode = await determine_team_mode(message, agent_names, config)
     else:
@@ -465,12 +452,10 @@ def _create_team_instance(
         mode=mode.value,
         name=f"Team-{'-'.join(agent_names)}",
         model=model,
-        # Enable features for better team collaboration visibility
-        show_members_responses=True,  # Show individual member responses
-        enable_agentic_context=True,  # Share context between team members
-        debug_mode=False,  # Set to True for debugging
+        show_members_responses=True,
+        enable_agentic_context=True,
+        debug_mode=False,
         # Agno will automatically list members with their names, roles, and tools
-        # No need for custom descriptions or instructions
     )
 
 
@@ -491,23 +476,19 @@ def get_team_model(team_name: str, room_id: str, config: Config) -> str:
         Model name to use
 
     """
-    # Find room alias from room ID
     room_alias = get_room_alias_from_id(room_id)
 
-    # Check room-specific model first
     if room_alias and room_alias in config.room_models:
         model = config.room_models[room_alias]
         logger.info(f"Using room-specific model for {team_name} in {room_alias}: {model}")
         return model
 
-    # Check team's configured model
     if team_name in config.teams:
         team_config = config.teams[team_name]
         if team_config.model:
             logger.info(f"Using team-specific model for {team_name}: {team_config.model}")
             return team_config.model
 
-    # Fall back to default
     logger.info(f"Using default model for {team_name}")
     return "default"
 
@@ -521,50 +502,36 @@ async def create_team_response(
     model_name: str | None = None,
 ) -> str:
     """Create a team and execute response."""
-    # Get existing agent instances from the orchestrator
     agents = _get_agents_from_orchestrator(agent_names, orchestrator)
 
     if not agents:
         return "Sorry, no agents available for team collaboration."
 
-    # Build the user message with thread context if available
     prompt = _build_prompt_with_context(message, thread_history)
-
-    # Create the team instance
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
-
-    # Create agent list for logging
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
 
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
-    logger.info(f"TEAM PROMPT: {prompt[:500]}")  # Log first 500 chars of prompt
+    logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
     response = await team.arun(prompt)
 
-    # Extract response content using our universal extraction function
     if isinstance(response, TeamRunResponse):
-        # Log member responses for debugging
         if response.member_responses:
             logger.debug(f"Team had {len(response.member_responses)} member responses")
 
-        # Log the team consensus content for debugging
         logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
 
-        # Extract all contributions (including nested teams if any)
         parts = extract_team_member_contributions(response)
-
-        # Combine all parts
         team_response = "\n\n".join(parts) if parts else "No team response generated."
     else:
         logger.warning(f"Unexpected response type: {type(response)}", response=response)
         team_response = str(response)
 
-    # Log the team response
     logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:MAX_LOG_MESSAGE_LENGTH]}")
     if len(team_response) > MAX_LOG_MESSAGE_LENGTH:
         logger.debug(f"TEAM RESPONSE (full): {team_response}")
 
-    # Prepend team information to the response
     # Don't use @ mentions as that would trigger the agents again
     agent_names = [str(a.name) for a in agents if a.name]
     team_header = format_team_header(agent_names)
@@ -601,17 +568,14 @@ async def handle_team_formation(
         Team response text if this agent handles it, None if another agent should handle it
 
     """
-    # Let the first agent alphabetically handle the team
-    # Convert MatrixID objects to agent names for comparison and team response
+    # Only the first agent alphabetically handles the team to avoid duplicates
     agent_names = [mid.agent_name(config) or mid.username for mid in form_team_agents]
     first_agent = min(agent_names)
     logger.debug("Team formation", agent_names=agent_names, first_agent=first_agent, current_agent=agent_name)
     if agent_name != first_agent:
-        # Other agents in the team don't respond individually
         logger.debug(f"Agent {agent_name} is not first agent {first_agent}, returning None")
         return None
 
-    # Create and execute team response
     model_name = get_team_model(agent_name, room_id, config)
     return await create_team_response(
         agent_names=agent_names,
@@ -636,11 +600,8 @@ async def create_team_event_stream(
     Returns an async iterator of Agno events when supported; otherwise yields a
     single TeamRunResponse for non-streaming providers.
     """
-    # Extract agent names from MatrixID objects
     assert orchestrator.config is not None
     agent_names = [mid.agent_name(orchestrator.config) or mid.username for mid in agent_ids]
-
-    # Get agent instances from orchestrator
     agents = _get_agents_from_orchestrator(agent_names, orchestrator)
 
     if not agents:
@@ -650,10 +611,7 @@ async def create_team_event_stream(
 
         return _empty()
 
-    # Build prompt with thread context if available
     prompt = _build_prompt_with_context(message, thread_history)
-
-    # Create the team instance
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
 
     logger.info(f"Created team with {len(agents)} agents in {mode.value} mode")
@@ -677,7 +635,6 @@ async def structured_team_stream(  # noqa: C901, PLR0912
     consensus if present. Rebuilds the entire document as new events
     arrive so the final shape matches the non-stream style.
     """
-    # Extract short names and build display name mapping
     assert orchestrator.config is not None
     agent_names: list[str] = []
     display_names: list[str] = []
@@ -720,21 +677,17 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             # Error case - no agents available, just return the error message
             content = _extract_content(event)
             if "no agents available" in content.lower():
-                yield content  # Return error message directly
+                yield content
                 return
-            # Unexpected RunResponse - log warning but continue
             logger.warning(f"Unexpected RunResponse in team stream: {content[:100]}")
             consensus += content
         elif isinstance(event, RunResponseContentEvent):
-            # Member content - agent_name is the display name from Agno
             agent_display_name = event.agent_name
             content = str(event.content or "")
 
             if agent_display_name in per_member:
-                # Direct match - accumulate content
                 per_member[agent_display_name] += content
             else:
-                # No agent context — append to consensus
                 consensus += content
                 if agent_display_name:
                     logger.warning(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
@@ -742,24 +695,18 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             # Suppress tool noise for structured live; optional: add summaries later
             logger.debug(f"Ignoring non-content event: {type(event).__name__}")
 
-        # Re-render full document using consistent formatting
         parts: list[str] = []
 
-        # Add member contributions (iterate over display names directly)
         for display_name, body in per_member.items():
             if body.strip():
                 parts.append(format_member_contribution(display_name, body.strip()))
 
-        # Add consensus if available
         if consensus.strip():
             parts.extend(format_team_consensus(consensus.strip()))
         elif parts:
-            # No consensus but we have member responses
             parts.append(format_no_consensus_note())
 
-        # Build complete document with header
         if parts:
-            # Use short names for the header
             header = format_team_header(agent_names)
             full_text = "\n\n".join(parts)
             yield header + full_text
