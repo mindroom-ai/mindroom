@@ -620,59 +620,18 @@ async def team_response_stream_or_text(  # noqa: C901
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
 ) -> tuple[AsyncIterator[str] | None, str | None]:
-    """Return a streaming iterator if supported; otherwise, final text.
+    """Return a formatted streaming iterator for teams (always), no final text.
 
-    This provides a compatibility bridge while Agno Team streaming rolls out.
-
-    Returns:
-        (stream, None) when streaming is available
-        (None, text) when only non-streaming response is available
-
+    Uses create_team_response_streaming() which internally falls back to a
+    single-chunk non-streaming response when the provider doesn't support
+    streaming, ensuring consistent formatting and avoiding raw event dumps.
     """
-    # Resolve member Agents
-    agents: list[Agent] = []
-    for name in agent_names:
-        if name == ROUTER_AGENT_NAME:
-            continue
-        if name not in orchestrator.agent_bots:
-            continue
-        agent_bot = orchestrator.agent_bots[name]
-        if agent_bot.agent is not None:
-            agents.append(agent_bot.agent)
-
-    # Build prompt
-    prompt = message
-    if thread_history:
-        recent_messages = thread_history[-30:]
-        context_parts: list[str] = []
-        for msg in recent_messages:
-            sender = msg.get("sender", "Unknown")
-            body = msg.get("content", {}).get("body", "")
-            if body and len(body) < MAX_CONTEXT_MESSAGE_LENGTH:
-                context_parts.append(f"{sender}: {body}")
-        if context_parts:
-            context = "\n".join(context_parts)
-            prompt = f"Thread Context:\n{context}\n\nUser: {message}"
-
-    # Model + team
-    assert orchestrator.config is not None
-    model = get_model_instance(orchestrator.config, model_name or "default")
-    team = Team(
-        members=agents,  # type: ignore[arg-type]
-        mode=mode.value,
-        name=f"Team-{'-'.join(agent_names)}",
-        model=model,
-        show_members_responses=True,
-        enable_agentic_context=True,
-        debug_mode=False,
+    stream = create_team_response_streaming(
+        agent_names=agent_names,
+        mode=mode,
+        message=message,
+        orchestrator=orchestrator,
+        thread_history=thread_history,
+        model_name=model_name,
     )
-
-    result = await team.arun(prompt, stream=True)
-    if hasattr(result, "__aiter__"):
-        return result, None  # type: ignore[return-value]
-
-    # Fallback to non-streaming
-    if isinstance(result, (TeamRunResponse, RunResponse)):
-        parts = extract_team_member_contributions(result)
-        return None, ("\n\n".join(parts) if parts else "")
-    return None, str(result)
+    return stream, None
