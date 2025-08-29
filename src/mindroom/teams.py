@@ -56,6 +56,68 @@ class TeamModeDecision(BaseModel):
     reasoning: str = Field(description="Brief explanation of why this mode was chosen")
 
 
+def format_team_header(agent_names: list[str]) -> str:
+    """Format the team response header.
+
+    Args:
+        agent_names: List of agent names in the team
+
+    Returns:
+        Formatted header string
+
+    """
+    return f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
+
+
+def format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
+    """Format a single team member's contribution.
+
+    Args:
+        agent_name: Name of the agent
+        content: The agent's response content
+        indent: Indentation level
+
+    Returns:
+        Formatted contribution string
+
+    """
+    indent_str = "  " * indent
+    return f"{indent_str}**{agent_name}**: {content}"
+
+
+def format_team_consensus(consensus: str, indent: int = 0) -> list[str]:
+    """Format the team consensus section.
+
+    Args:
+        consensus: The consensus content
+        indent: Indentation level
+
+    Returns:
+        List of formatted lines for the consensus
+
+    """
+    indent_str = "  " * indent
+    parts = []
+    if consensus:
+        parts.append(f"\n{indent_str}**Team Consensus**:")
+        parts.append(f"{indent_str}{consensus}")
+    return parts
+
+
+def format_no_consensus_note(indent: int = 0) -> str:
+    """Format the note when there's no team consensus.
+
+    Args:
+        indent: Indentation level
+
+    Returns:
+        Formatted note string
+
+    """
+    indent_str = "  " * indent
+    return f"\n{indent_str}*No team consensus - showing individual responses only*"
+
+
 def extract_team_member_contributions(response: TeamRunResponse | RunResponse) -> list[str]:
     """Extract and format member contributions from a team response.
 
@@ -109,24 +171,22 @@ def _extract_contributions_recursive(  # noqa: C901
                     agent_name = member_resp.agent_name or "Team Member"
                     content = _extract_content(member_resp)
                     if content:
-                        parts.append(f"{indent_str}**{agent_name}**: {content}")
+                        parts.append(format_member_contribution(agent_name, content, indent))
 
         # Add team consensus if requested
         if include_consensus:
             if response.content:
-                if parts:  # Separator only if we have member contributions
-                    parts.append(f"\n{indent_str}**Team Consensus**:")
-                parts.append(f"{indent_str}{response.content}")
+                parts.extend(format_team_consensus(response.content, indent))
             elif parts:
                 # If no consensus but we have member responses, note that
-                parts.append(f"\n{indent_str}*No team consensus - showing individual responses only*")
+                parts.append(format_no_consensus_note(indent))
 
     elif isinstance(response, RunResponse):
         # Single agent response
         agent_name = response.agent_name or "Agent"
         content = _extract_content(response)
         if content:
-            parts.append(f"{indent_str}**{agent_name}**: {content}")
+            parts.append(format_member_contribution(agent_name, content, indent))
 
     return parts
 
@@ -447,7 +507,8 @@ async def create_team_response(  # noqa: C901, PLR0912
 
     # Prepend team information to the response
     # Don't use @ mentions as that would trigger the agents again
-    team_header = f"🤝 **Team Response** ({agent_list}):\n\n"
+    agent_names = [str(a.name) for a in agents if a.name]
+    team_header = format_team_header(agent_names)
 
     return team_header + team_response
 
@@ -726,7 +787,7 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             # On completion, yield the exact non-stream formatted output
             final_parts = extract_team_member_contributions(event)
             final_text = "\n\n".join(final_parts) if final_parts else ""
-            header = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
+            header = format_team_header(agent_names)
             yield header + final_text
             continue
         elif isinstance(event, RunResponse):
@@ -746,18 +807,28 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             # Suppress tool noise for structured live; optional: add summaries later
             pass
 
-        # Re-render full document
-        header = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
-        doc_parts: list[str] = [header]
+        # Re-render full document using consistent formatting
+        parts: list[str] = []
+
+        # Add member contributions
         for name in agent_names:
             body = per_member.get(name, "").strip()
-            if not body:
-                continue
-            doc_parts.append(f"## {display_names[name]}\n{body}\n")
-        if consensus.strip():
-            doc_parts.append(f"\n**Team Consensus:**\n{consensus.strip()}\n")
+            if body:
+                display_name = display_names.get(name, name)
+                parts.append(format_member_contribution(display_name, body))
 
-        yield "\n".join(doc_parts)
+        # Add consensus if available
+        if consensus.strip():
+            parts.extend(format_team_consensus(consensus.strip()))
+        elif parts:
+            # No consensus but we have member responses
+            parts.append(format_no_consensus_note())
+
+        # Build complete document with header
+        if parts:
+            header = format_team_header(agent_names)
+            full_text = "\n\n".join(parts)
+            yield header + full_text
 
 
 async def team_response_stream_or_text(
