@@ -612,14 +612,14 @@ async def create_team_response_streaming(  # noqa: C901, PLR0912, PLR0915
         yield f"Sorry, the team encountered an error: {e}"
 
 
-async def create_team_event_stream(
+async def create_team_event_stream(  # noqa: C901
     agent_names: list[str],
     mode: TeamMode,
     message: str,
     orchestrator: MultiAgentOrchestrator,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
-):
+) -> AsyncIterator[Any]:
     """Yield raw team events (for structured live rendering). Falls back to a final response.
 
     Returns an async iterator of Agno events when supported; otherwise yields a
@@ -638,7 +638,7 @@ async def create_team_event_stream(
 
     if not agents:
 
-        async def _empty():  # type: ignore[no-untyped-def]
+        async def _empty() -> AsyncIterator[RunResponse]:
             yield RunResponse(content="Sorry, no agents available for team collaboration.")
 
         return _empty()
@@ -675,13 +675,13 @@ async def create_team_event_stream(
         return result
 
     # Fallback to a generator that yields the final response once
-    async def _one():  # type: ignore[no-untyped-def]
+    async def _one() -> AsyncIterator[Any]:
         yield result
 
     return _one()
 
 
-async def structured_team_stream(
+async def structured_team_stream(  # noqa: C901, PLR0912
     agent_names: list[str],
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -735,10 +735,10 @@ async def structured_team_stream(
             consensus += ("\n" if consensus else "") + content
         elif isinstance(event, RunResponseContentEvent):
             # Member content
-            name = getattr(event, "agent_name", None)
+            agent_name_evt = getattr(event, "agent_name", None)
             content = str(event.content or "")
-            if name and name in per_member:
-                per_member[name] += content
+            if agent_name_evt and agent_name_evt in per_member:
+                per_member[agent_name_evt] += content
             else:
                 # No agent context — append to consensus
                 consensus += content

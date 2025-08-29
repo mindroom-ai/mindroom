@@ -61,13 +61,19 @@ from .scheduling import (
     restore_scheduled_tasks,
     schedule_task,
 )
-from .streaming import IN_PROGRESS_MARKER, StreamingResponse, stream_chunks_to_room
+from .streaming import (
+    IN_PROGRESS_MARKER,
+    ReplacementStreamingResponse,
+    StreamingResponse,
+    stream_chunks_to_room,
+)
 from .teams import (
     TeamMode,
     create_team_response,
     get_team_model,
     handle_team_formation,
     should_form_team,
+    structured_team_stream,
     team_response_stream_or_text,
 )
 from .thread_utils import (
@@ -479,9 +485,6 @@ class AgentBot:
 
             if use_streaming:
                 # Structured live rendering: rebuild full doc on each tick
-                from .streaming import ReplacementStreamingResponse
-                from .teams import structured_team_stream
-
                 stream = structured_team_stream(
                     agent_names=agent_names,
                     message=event.body,

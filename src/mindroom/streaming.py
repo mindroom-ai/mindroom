@@ -109,7 +109,8 @@ class ReplacementStreamingResponse(StreamingResponse):
     not incremental concatenation.
     """
 
-    async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:  # type: ignore[override]
+    async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
+        """Replace accumulated text with the latest chunk and update display."""
         self.accumulated_text = new_chunk
         current_time = time.time()
         if current_time - self.last_update >= self.update_interval:
