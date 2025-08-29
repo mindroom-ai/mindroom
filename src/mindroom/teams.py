@@ -653,23 +653,22 @@ async def structured_team_stream(  # noqa: C901, PLR0912
     assert orchestrator.config is not None
     agent_names = [mid.agent_name(orchestrator.config) or mid.username for mid in agent_ids]
 
-    # Buffers
-    per_member: dict[str, str] = dict.fromkeys(agent_names, "")
-    consensus: str = ""
-
-    # Build mapping from Agno agent names (display_name) to short names
-    agno_to_short_name: dict[str, str] = {}
-    display_names: dict[str, str] = {}
+    # Build mapping from display name (what Agno uses) to short name
+    # We use display names as keys since that's what we receive in events
+    display_to_short: dict[str, str] = {}
+    short_to_display: dict[str, str] = {}
 
     for name in agent_names:
         agent_config = orchestrator.config.agents[name]
-        # The Agno agent name is the display_name from config
-        agno_name = agent_config.display_name or name
-        agno_to_short_name[agno_name] = name
-        display_names[name] = agno_name
-        logger.debug(f"Mapped Agno name '{agno_name}' to short name '{name}'")
+        display_name = agent_config.display_name or name
+        display_to_short[display_name] = name
+        short_to_display[name] = display_name
 
-    logger.info(f"Team streaming setup - agent_names: {agent_names}, agno_to_short_name: {agno_to_short_name}")
+    # Buffers - keyed by display name for direct matching
+    per_member: dict[str, str] = dict.fromkeys(display_to_short.keys(), "")
+    consensus: str = ""
+
+    logger.info(f"Team streaming setup - agents: {list(display_to_short.values())}")
 
     # Acquire raw event stream
     stream = await create_team_event_stream(
@@ -687,7 +686,7 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             # On completion, yield the exact non-stream formatted output
             final_parts = extract_team_member_contributions(event)
             final_text = "\n\n".join(final_parts) if final_parts else ""
-            header = format_team_header(agent_names)
+            header = format_team_header(list(display_to_short.values()))
             yield header + final_text
             continue
         elif isinstance(event, RunResponse):
@@ -695,27 +694,18 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             content = _extract_content(event)
             consensus += ("\n" if consensus else "") + content
         elif isinstance(event, RunResponseContentEvent):
-            # Member content
-            agent_name_evt = event.agent_name
+            # Member content - agent_name is the display name from Agno
+            agent_display_name = event.agent_name
             content = str(event.content or "")
 
-            logger.debug(f"RunResponseContentEvent - agent_name: '{agent_name_evt}', content: '{content[:50]}...'")
-
-            # Map Agno agent name to our short name
-            if agent_name_evt in agno_to_short_name:
-                short_name = agno_to_short_name[agent_name_evt]
-                per_member[short_name] += content
-                logger.debug(
-                    f"Mapped '{agent_name_evt}' to '{short_name}', accumulated: {len(per_member[short_name])} chars",
-                )
+            if agent_display_name in per_member:
+                # Direct match - accumulate content
+                per_member[agent_display_name] += content
             else:
                 # No agent context — append to consensus
                 consensus += content
-                if agent_name_evt:
-                    logger.warning(
-                        f"No mapping for agent_name '{agent_name_evt}', adding to consensus. "
-                        f"Known Agno names: {list(agno_to_short_name.keys())}",
-                    )
+                if agent_display_name:
+                    logger.warning(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
         else:
             # Suppress tool noise for structured live; optional: add summaries later
             logger.debug(f"Ignoring non-content event: {type(event).__name__}")
@@ -723,12 +713,10 @@ async def structured_team_stream(  # noqa: C901, PLR0912
         # Re-render full document using consistent formatting
         parts: list[str] = []
 
-        # Add member contributions
-        for name in agent_names:
-            body = per_member.get(name, "").strip()
-            if body:
-                display_name = display_names.get(name, name)
-                parts.append(format_member_contribution(display_name, body))
+        # Add member contributions (iterate over display names directly)
+        for display_name, body in per_member.items():
+            if body.strip():
+                parts.append(format_member_contribution(display_name, body.strip()))
 
         # Add consensus if available
         if consensus.strip():
@@ -739,6 +727,7 @@ async def structured_team_stream(  # noqa: C901, PLR0912
 
         # Build complete document with header
         if parts:
-            header = format_team_header(agent_names)
+            # Use short names for the header
+            header = format_team_header(list(display_to_short.values()))
             full_text = "\n\n".join(parts)
             yield header + full_text
