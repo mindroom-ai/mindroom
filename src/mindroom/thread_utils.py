@@ -265,8 +265,10 @@ def should_agent_respond(
         return False
 
     # Regular rooms require mentions (no mention = no response)
+    # Exception: if there's only one agent present in the room, allow them to respond
     if not is_dm_room and not is_thread:
-        return False
+        available_agents = get_available_agents_in_room(room, config)
+        return len(available_agents) == 1
 
     agent_matrix_id = config.ids[agent_name]
 

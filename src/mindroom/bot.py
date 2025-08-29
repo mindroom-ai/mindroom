@@ -67,6 +67,7 @@ from .thread_utils import (
     create_session_id,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
+    get_available_agents_in_room,
     get_configured_agents_for_room,
     has_user_responded_after_message,
     should_agent_respond,
@@ -398,7 +399,13 @@ class AgentBot:
         command = command_parser.parse(event.body)
         if command:
             if self.agent_name == ROUTER_AGENT_NAME:
-                await self._handle_command(room, event, command)
+                # If there's only one agent present in the room, skip command handling
+                # so the single agent can handle the conversation naturally.
+                available_agents = get_available_agents_in_room(room, self.config)
+                if len(available_agents) == 1:
+                    self.logger.info("Skipping command handling: only one agent present")
+                else:
+                    await self._handle_command(room, event, command)
             return
 
         context = await self._extract_message_context(room, event)
@@ -420,7 +427,12 @@ class AgentBot:
         # Router: Route when no specific agent mentioned and no agents in thread
         if self.agent_name == ROUTER_AGENT_NAME:
             if not context.mentioned_agents and not agents_in_thread:
-                await self._handle_ai_routing(room, event, context.thread_history)
+                # If there's only one agent present in the room, skip routing entirely
+                available_agents = get_available_agents_in_room(room, self.config)
+                if len(available_agents) == 1:
+                    self.logger.info("Skipping routing: only one agent present")
+                else:
+                    await self._handle_ai_routing(room, event, context.thread_history)
             return
 
         # Skip duplicate responses
@@ -458,7 +470,7 @@ class AgentBot:
             return
 
         # Check if we should respond individually
-        if not should_agent_respond(
+        should_respond = should_agent_respond(
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
@@ -467,7 +479,9 @@ class AgentBot:
             thread_history=context.thread_history,
             config=self.config,
             mentioned_agents=context.mentioned_agents,
-        ):
+        )
+
+        if not should_respond:
             return
 
         # Log if responding without mention
