@@ -539,54 +539,6 @@ async def create_team_response(
     return team_header + team_response
 
 
-async def handle_team_formation(
-    agent_name: str,
-    form_team_agents: list[MatrixID],
-    form_team_mode: TeamMode,
-    event_body: str,
-    room_id: str,
-    orchestrator: MultiAgentOrchestrator,
-    thread_history: list[dict],
-    config: Config,
-) -> str | None:
-    """Handle team formation and response generation.
-
-    Returns the team response text if this agent should handle it, None otherwise.
-    Only the first agent alphabetically handles the team response to avoid duplicates.
-
-    Args:
-        agent_name: Name of the current agent
-        form_team_agents: List of agents that should form a team
-        form_team_mode: Mode for team collaboration
-        event_body: The message body to respond to
-        room_id: The room ID where the message was sent
-        orchestrator: The orchestrator instance for team coordination
-        thread_history: History of messages in the thread
-        config: Application configuration
-
-    Returns:
-        Team response text if this agent handles it, None if another agent should handle it
-
-    """
-    # Only the first agent alphabetically handles the team to avoid duplicates
-    agent_names = [mid.agent_name(config) or mid.username for mid in form_team_agents]
-    first_agent = min(agent_names)
-    logger.debug("Team formation", agent_names=agent_names, first_agent=first_agent, current_agent=agent_name)
-    if agent_name != first_agent:
-        logger.debug(f"Agent {agent_name} is not first agent {first_agent}, returning None")
-        return None
-
-    model_name = get_team_model(agent_name, room_id, config)
-    return await create_team_response(
-        agent_names=agent_names,
-        mode=form_team_mode,
-        message=event_body,
-        orchestrator=orchestrator,
-        thread_history=thread_history,
-        model_name=model_name,
-    )
-
-
 async def create_team_event_stream(
     agent_ids: list[MatrixID],
     mode: TeamMode,

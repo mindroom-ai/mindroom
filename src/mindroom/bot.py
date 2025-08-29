@@ -70,7 +70,6 @@ from .teams import (
     TeamMode,
     create_team_response,
     get_team_model,
-    handle_team_formation,
     should_form_team,
     structured_team_stream,
 )
@@ -471,6 +470,12 @@ class AgentBot:
             if self.matrix_id != first_agent:
                 return
 
+            # Get model for this team in this room
+            model_name = get_team_model(self.agent_name, room.room_id, self.config)
+
+            # Convert MatrixID to agent names for the team
+            agent_names = [mid.agent_name(self.config) or mid.username for mid in form_team.agents]
+
             # Decide streaming based on presence
             use_streaming = self.enable_streaming and await should_use_streaming(
                 self.client,
@@ -486,7 +491,7 @@ class AgentBot:
                     orchestrator=self.orchestrator,
                     mode=form_team.mode,
                     thread_history=context.thread_history,
-                    model_name=get_team_model(self.agent_name, room.room_id, self.config),
+                    model_name=model_name,
                 )
 
                 await stream_chunks_to_room(
@@ -502,20 +507,18 @@ class AgentBot:
                 )
                 self.response_tracker.mark_responded(event.event_id)
             else:
-                team_response = await handle_team_formation(
-                    agent_name=self.agent_name,
-                    form_team_agents=form_team.agents,
-                    form_team_mode=form_team.mode,
-                    event_body=event.body,
-                    room_id=room.room_id,
+                # Non-streaming: create team response directly
+                team_response = await create_team_response(
+                    agent_names=agent_names,
+                    mode=form_team.mode,
+                    message=event.body,
                     orchestrator=self.orchestrator,
                     thread_history=context.thread_history,
-                    config=self.config,
+                    model_name=model_name,
                 )
 
-                if team_response:  # We handle the response
-                    await self._send_response(room, event.event_id, team_response, context.thread_id)
-                    self.response_tracker.mark_responded(event.event_id)
+                await self._send_response(room, event.event_id, team_response, context.thread_id)
+                self.response_tracker.mark_responded(event.event_id)
             return
 
         # Check if we should respond individually
