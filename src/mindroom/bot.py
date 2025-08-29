@@ -6,8 +6,9 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
+from inspect import iscoroutinefunction
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import nio
 
@@ -64,11 +65,10 @@ from .streaming import IN_PROGRESS_MARKER, StreamingResponse
 from .teams import (
     TeamMode,
     create_team_response,
-    create_team_response_streaming,
-    team_response_stream_or_text,
     get_team_model,
     handle_team_formation,
     should_form_team,
+    team_response_stream_or_text,
 )
 from .thread_utils import (
     check_agent_mentioned,
@@ -82,6 +82,8 @@ from .thread_utils import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     import structlog
     from agno.agent import Agent
 
@@ -377,7 +379,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         if event.body.endswith(IN_PROGRESS_MARKER):
@@ -487,35 +489,18 @@ class AgentBot:
                 )
 
                 if stream is not None:
-                    latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-                        self.client,
-                        room.room_id,
-                        context.thread_id,
-                        event.event_id,
-                    )
-
-                    streaming = StreamingResponse(
-                        room_id=room.room_id,
-                        reply_to_event_id=event.event_id,
-                        thread_id=context.thread_id,
-                        sender_domain=self.matrix_id.domain,
-                        config=self.config,
-                        latest_thread_event_id=latest_thread_event_id,
-                    )
-
                     header = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
-                    await streaming.update_content(header, self.client)
-
-                    async for chunk in stream:
-                        await streaming.update_content(chunk, self.client)
-
-                    await streaming.finalize(self.client)
-                    if streaming.event_id:
-                        self.logger.info("Sent streaming team response", event_id=streaming.event_id)
+                    await self._stream_chunks_to_room(
+                        room,
+                        event.event_id,
+                        context.thread_id,
+                        stream,
+                        header=header,
+                    )
                     self.response_tracker.mark_responded(event.event_id)
                 else:
-                    team_response = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n{final_text or ''}"
-                    await self._send_response(room, event.event_id, team_response, context.thread_id)
+                    team_text = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n{final_text or ''}"
+                    await self._send_response(room, event.event_id, team_text, context.thread_id)
                     self.response_tracker.mark_responded(event.event_id)
             else:
                 team_response = await handle_team_formation(
@@ -742,9 +727,62 @@ class AgentBot:
             return
 
         session_id = create_session_id(room.room_id, thread_id)
-        sender_id = self.matrix_id
 
-        # Get latest thread event for MSC3440 compliance (only for new messages)
+        try:
+            chunk_iter = ai_response_streaming(
+                agent_name=self.agent_name,
+                prompt=prompt,
+                session_id=session_id,
+                storage_path=self.storage_path,
+                config=self.config,
+                thread_history=thread_history,
+                room_id=room.room_id,
+            )
+
+            event_id, accumulated = await self._stream_chunks_to_room(
+                room,
+                reply_to_event_id,
+                thread_id,
+                chunk_iter,
+                existing_event_id=existing_event_id,
+            )
+
+            # If the message contains an interactive question, register it and add reactions
+            if event_id and interactive.should_create_interactive_question(accumulated):
+                response = interactive.parse_and_format_interactive(accumulated, extract_mapping=True)
+                if response.option_map and response.options_list:
+                    thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+                    interactive.register_interactive_question(
+                        event_id,
+                        room.room_id,
+                        thread_root_for_registration,
+                        response.option_map,
+                        self.agent_name,
+                    )
+                    await interactive.add_reaction_buttons(
+                        self.client,
+                        room.room_id,
+                        event_id,
+                        response.options_list,
+                    )
+        except Exception as e:
+            self.logger.exception("Error in streaming response", error=str(e))
+            # Don't mark as responded if streaming failed
+
+    async def _stream_chunks_to_room(
+        self,
+        room: nio.MatrixRoom,
+        reply_to_event_id: str | None,
+        thread_id: str | None,
+        chunk_iter: AsyncIterator[str],
+        header: str | None = None,
+        existing_event_id: str | None = None,
+    ) -> tuple[str | None, str]:
+        """Stream chunks to a room using a single message that is updated.
+
+        Returns the final event_id and full accumulated text.
+        """
+        assert self.client is not None
         latest_thread_event_id = await get_latest_thread_event_id_if_needed(
             self.client,
             room.room_id,
@@ -755,9 +793,9 @@ class AgentBot:
 
         streaming = StreamingResponse(
             room_id=room.room_id,
-            reply_to_event_id=reply_to_event_id,
+            reply_to_event_id=cast("Any", reply_to_event_id),
             thread_id=thread_id,
-            sender_domain=sender_id.domain,
+            sender_domain=self.matrix_id.domain,
             config=self.config,
             latest_thread_event_id=latest_thread_event_id,
         )
@@ -767,49 +805,25 @@ class AgentBot:
             streaming.event_id = existing_event_id
             streaming.accumulated_text = ""  # Start fresh
 
-        try:
-            async for chunk in ai_response_streaming(
-                agent_name=self.agent_name,
-                prompt=prompt,
-                session_id=session_id,
-                storage_path=self.storage_path,
-                config=self.config,
-                thread_history=thread_history,
-                room_id=room.room_id,
-            ):
+        if header:
+            if iscoroutinefunction(streaming.update_content):
+                await streaming.update_content(header, self.client)
+            else:  # Graceful fallback for tests mocking StreamingResponse
+                cast("Any", streaming).update_content(header, self.client)
+
+        async for chunk in chunk_iter:
+            if iscoroutinefunction(streaming.update_content):
                 await streaming.update_content(chunk, self.client)
+            else:
+                cast("Any", streaming).update_content(chunk, self.client)
 
+        if iscoroutinefunction(streaming.finalize):
             await streaming.finalize(self.client)
-
-            if streaming.event_id:
-                self.logger.info("Sent streaming response", event_id=streaming.event_id)
-
-        except Exception as e:
-            self.logger.exception("Error in streaming response", error=str(e))
-            # Don't mark as responded if streaming failed
-
-        # If the message contains an interactive question, register it and add reactions
-        if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
-            response = interactive.parse_and_format_interactive(streaming.accumulated_text, extract_mapping=True)
-            if response.option_map and response.options_list:
-                # For interactive questions, use the same thread root that _send_response uses:
-                # - If already in a thread, use that thread_id
-                # - If not in a thread, use reply_to_event_id (the user's message) as thread root
-                # This ensures consistency with how the bot creates threads
-                thread_root_for_registration = thread_id if thread_id else reply_to_event_id
-                interactive.register_interactive_question(
-                    streaming.event_id,
-                    room.room_id,
-                    thread_root_for_registration,
-                    response.option_map,
-                    self.agent_name,
-                )
-                await interactive.add_reaction_buttons(
-                    self.client,
-                    room.room_id,
-                    streaming.event_id,
-                    response.options_list,
-                )
+        else:
+            cast("Any", streaming).finalize(self.client)
+        if streaming.event_id:
+            self.logger.info("Sent streaming response", event_id=streaming.event_id)
+        return streaming.event_id, streaming.accumulated_text
 
     async def _generate_response(
         self,
@@ -1229,29 +1243,14 @@ class TeamBot(AgentBot):
             )
 
             if stream is not None:
-                latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-                    self.client,
-                    room_id,
-                    thread_id,
-                    reply_to_event_id,
-                )
-
-                streaming = StreamingResponse(
-                    room_id=room_id,
-                    reply_to_event_id=reply_to_event_id,
-                    thread_id=thread_id,
-                    sender_domain=self.matrix_id.domain,
-                    config=self.config,
-                    latest_thread_event_id=latest_thread_event_id,
-                )
-
                 header = f"🤝 **Team Response** ({', '.join(self.team_agents)}):\n\n"
-                await streaming.update_content(header, self.client)
-                async for chunk in stream:
-                    await streaming.update_content(chunk, self.client)
-                await streaming.finalize(self.client)
-                if streaming.event_id:
-                    self.logger.info("Sent streaming team response", event_id=streaming.event_id)
+                await self._stream_chunks_to_room(
+                    room,
+                    reply_to_event_id,
+                    thread_id,
+                    stream,
+                    header=header,
+                )
             else:
                 # Fallback: non-streaming single message
                 response_text = f"🤝 **Team Response** ({', '.join(self.team_agents)}):\n\n{final_text or ''}"

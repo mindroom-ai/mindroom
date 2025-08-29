@@ -1,272 +1,100 @@
-#!/usr/bin/env python
-"""Clean end-to-end test for Mindroom with memory system."""
+#!/usr/bin/env python3
+"""Simple E2E script to exercise team streaming without Matrix.
 
+Usage examples:
+  - Stream a team response using agents from your config.yaml:
+      python e2e_test.py team-stream --agents calculator,general --message "Summarize the repo in 5 bullets"
+
+  - Override model (must be configured in config models):
+      python e2e_test.py team-stream --agents general,calculator --message "hello" --model default
+
+Requirements:
+  - Valid model credentials in your environment (e.g., OPENAI_API_KEY, OPENROUTER_API_KEY, etc.)
+  - Agents defined in your Mindroom config (config.yaml)
+
+This does not require a Matrix server; it directly exercises Agno Team streaming.
+"""
+
+from __future__ import annotations
+
+import argparse
 import asyncio
-import contextlib
-import shutil
-import sys
-import tempfile
-import time
-import traceback
-from pathlib import Path
+from dataclasses import dataclass
+from typing import Any
 
-import nio
-import yaml
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
-from mindroom.cli import _run
+from mindroom.agents import create_agent
 from mindroom.config import Config
-from mindroom.matrix import MATRIX_HOMESERVER
-from mindroom.matrix.mentions import create_mention_content_from_text
+from mindroom.teams import TeamMode, team_response_stream_or_text
 
 
-class LoginError(Exception):
-    """Exception raised when login fails."""
-
-    def __init__(self, response: object) -> None:
-        super().__init__(f"Failed to login: {response}")
+@dataclass
+class _DummyAgentBot:
+    agent: Any
 
 
-class MessageSendError(Exception):
-    """Exception raised when sending a message fails."""
-
-    def __init__(self, response: object) -> None:
-        super().__init__(f"Failed to send message: {response}")
-
-
-class MessageFetchError(Exception):
-    """Exception raised when fetching messages fails."""
-
-    def __init__(self, response: object) -> None:
-        super().__init__(f"Failed to fetch messages: {response}")
+@dataclass
+class _DummyOrchestrator:
+    config: Config
+    agent_bots: dict[str, _DummyAgentBot]
 
 
-class MindRoomE2ETest:
-    """End-to-end test runner for Mindroom."""
+async def run_team_stream(agents: list[str], message: str, model_name: str | None) -> None:
+    """Stream a team response to stdout.
 
-    def __init__(self) -> None:
-        self.client = None
-        self.room_id = None
-        self.username = None
-        self.password = None
+    Creates Agents from config.yaml, builds a temporary orchestrator-like
+    object, and streams the team response using Agno's streaming API.
 
-    async def setup(self) -> None:
-        """Load credentials and setup client."""
-        # Load user credentials
-        with Path("matrix_state.yaml").open() as f:  # noqa: ASYNC230
-            users_data = yaml.safe_load(f)
+    Args:
+        agents: List of agent names to include in the team
+        message: User message to send
+        model_name: Optional model override name
 
-        # Use the agent_user account
-        self.username = users_data["accounts"]["agent_user"]["username"]
-        self.password = users_data["accounts"]["agent_user"]["password"]
-        self.room_id = users_data["rooms"]["lobby"]["room_id"]
+    """
+    config = Config.from_yaml()
 
-        # Create client
-        # Extract domain from homeserver URL
-        domain = "m-test.mindroom.chat"  # Use the actual server domain
-        config = nio.AsyncClientConfig(encryption_enabled=False)
-        self.client = nio.AsyncClient(
-            MATRIX_HOMESERVER,
-            f"@{self.username}:{domain}",
-            config=config,
-            ssl=False,  # Disable SSL verification for test server
-        )
+    # Build orchestrator-like wrapper with real Agent objects
+    agent_bots: dict[str, _DummyAgentBot] = {}
+    for name in agents:
+        agent_bots[name] = _DummyAgentBot(agent=create_agent(name, config))
 
-    async def login(self) -> None:
-        """Login to Matrix."""
-        print(f"🔑 Logging in as {self.username}...")
-        response = await self.client.login(self.password, device_name="e2e_test")
-        if not isinstance(response, nio.LoginResponse):
-            raise LoginError(response)
-        print("✓ Logged in successfully")
+    orchestrator = _DummyOrchestrator(config=config, agent_bots=agent_bots)
 
-    async def send_mention(self, agent_name: str, message: str) -> str:
-        """Send a message with proper Matrix mention."""
-        # Extract domain from the logged-in user's ID
-        user_domain = "m-test.mindroom.chat"  # Use the actual server domain
-        if self.client.user_id and ":" in self.client.user_id:
-            user_domain = self.client.user_id.split(":", 1)[1]
-
-        # Start with the primary agent mention
-        full_message = f"@{agent_name} {message}"
-
-        # Load config to use the helper function
-        config = Config.from_yaml()
-
-        # Create content using the proper helper function
-        content = create_mention_content_from_text(
-            config=config,
-            text=full_message,
-            sender_domain=user_domain,
-        )
-
-        response = await self.client.room_send(room_id=self.room_id, message_type="m.room.message", content=content)
-
-        if isinstance(response, nio.RoomSendResponse):
-            return response.event_id
-        raise MessageSendError(response)
-
-    async def get_recent_messages(self, limit: int = 20) -> list[dict[str, str | int]]:
-        """Fetch recent messages from the room."""
-        response = await self.client.room_messages(self.room_id, limit=limit)
-
-        if not isinstance(response, nio.RoomMessagesResponse):
-            raise MessageFetchError(response)
-
-        messages = []
-        for event in reversed(response.chunk):
-            if isinstance(event, nio.RoomMessageText):
-                sender = event.sender.split(":")[0].replace("@", "")
-                messages.append({"sender": sender, "body": event.body, "timestamp": event.server_timestamp})
-        return messages
-
-    async def cleanup(self) -> None:
-        """Close client connection."""
-        if self.client:
-            await self.client.close()
-
-    def check_memory_storage(self, storage_path: Path) -> tuple[bool, int]:
-        """Check if memory storage was created."""
-        chroma_path = storage_path / "chroma"
-        if chroma_path.exists():
-            files = list(chroma_path.rglob("*"))
-            return True, len([f for f in files if f.is_file()])
-        return False, 0
-
-
-async def run_test_sequence(storage_path: Path) -> None:
-    """Run a complete test sequence."""
-    test = MindRoomE2ETest()
-
-    try:
-        # Setup
-        await test.setup()
-        await test.login()
-
-        print(f"\n📍 Testing in room: {test.room_id}")
-
-        # Test cases
-        test_cases = [
-            {"agent": "calculator", "message": "what is 25 * 4?", "wait": 3, "description": "Basic calculation"},
-            {
-                "agent": "calculator",
-                "message": "now add 50 to that result",
-                "wait": 3,
-                "description": "Follow-up using context",
-            },
-            {
-                "agent": "general",
-                "message": "what calculations were just performed?",
-                "wait": 3,
-                "description": "Cross-agent memory recall",
-            },
-            {
-                "agent": "dev_team",
-                "message": "write a simple hello world Python script",
-                "wait": 8,
-                "description": "Testing team coordination (DevTeam)",
-            },
-        ]
-
-        # Run tests
-        for i, test_case in enumerate(test_cases, 1):
-            print(f"\n🧪 Test {i}: {test_case['description']}")
-            print(f"   Agent: @{test_case['agent']}")
-            print(f"   Message: {test_case['message']}")
-
-            event_id = await test.send_mention(test_case["agent"], test_case["message"])
-            print(f"   ✓ Sent (event_id: {event_id})")
-
-            print(f"   ⏳ Waiting {test_case['wait']}s for response...")
-            await asyncio.sleep(test_case["wait"])
-
-        # Get results
-        print("\n📊 Results:")
-        messages = await test.get_recent_messages(limit=30)
-
-        # Filter to show only recent relevant messages
-        start_time = time.time() - 60  # Last minute
-        recent = [m for m in messages if m["timestamp"] > start_time * 1000]
-
-        print(f"\nLast {len(recent)} messages:")
-        for msg in recent[-10:]:  # Show last 10
-            sender = msg["sender"]
-            body = msg["body"][:150] + "..." if len(msg["body"]) > 150 else msg["body"]
-
-            # Format by sender type
-            if sender.startswith("mindroom_"):
-                print(f"  🤖 {sender}: {body}")
-            else:
-                print(f"  👤 {sender}: {body}")
-
-        # Check memory
-        print("\n💾 Memory System:")
-        exists, file_count = test.check_memory_storage(storage_path)
-        if exists:
-            print(f"  ✓ ChromaDB storage created with {file_count} files")
-        else:
-            print("  ✗ No memory storage found")
-
-    finally:
-        await test.cleanup()
-
-
-async def main() -> None:
-    """Main entry point."""
-    print("=" * 60)
-    print("MINDROOM END-TO-END TEST")
-    print("=" * 60)
-
-    # Kill any existing mindroom processes
-    print("\n🧹 Cleaning up old processes...")
-    process = await asyncio.create_subprocess_exec(
-        "pkill",
-        "-f",
-        "mindroom run",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    stream, text = await team_response_stream_or_text(
+        agent_names=agents,
+        mode=TeamMode.COORDINATE,
+        message=message,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+        thread_history=None,
+        model_name=model_name,
     )
-    await process.wait()
-    await asyncio.sleep(2)
 
-    # Start mindroom
-    print("🚀 Starting Mindroom...")
-    temp_dir = tempfile.mkdtemp(prefix="mindroom_test_")
-    bot_task = asyncio.create_task(_run(log_level="INFO", storage_path=Path(temp_dir)))
+    header = f"\n🤝 Team: {', '.join(agents)}\n---\n"
+    print(header, end="", flush=True)
 
-    # Wait for startup
-    print("⏳ Waiting 15s for bot to start and sync...")
-    await asyncio.sleep(15)
+    if stream is not None:
+        async for chunk in stream:
+            print(chunk, end="", flush=True)
+        print("\n\n[done]")
+    else:
+        print(text or "(no content)")
 
-    # Run tests
-    try:
-        await run_test_sequence(Path(temp_dir))
-        print("\n✅ Test completed successfully!")
-    except Exception as e:
-        print(f"\n❌ Test failed: {e}")
-        traceback.print_exc()
-    finally:
-        # Cleanup
-        print("\n🛑 Stopping bot...")
-        bot_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await bot_task
 
-        process = await asyncio.create_subprocess_exec(
-            "pkill",
-            "-f",
-            "mindroom run",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await process.wait()
+def main() -> None:
+    """CLI entry point."""
+    parser = argparse.ArgumentParser(description="Mindroom E2E utilities")
+    sub = parser.add_subparsers(dest="cmd", required=True)
 
-        # Clean up temp directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    p_team = sub.add_parser("team-stream", help="Stream a team response without Matrix")
+    p_team.add_argument("--agents", required=True, help="Comma-separated agent names, e.g. general,calculator")
+    p_team.add_argument("--message", required=True, help="User message to send to the team")
+    p_team.add_argument("--model", default=None, help="Optional model override (must exist in config.models)")
+
+    args = parser.parse_args()
+
+    if args.cmd == "team-stream":
+        agents = [x.strip() for x in args.agents.split(",") if x.strip()]
+        asyncio.run(run_team_stream(agents, args.message, args.model))
 
 
 if __name__ == "__main__":
-    # Run with: python e2e_test.py
-    asyncio.run(main())
+    main()
