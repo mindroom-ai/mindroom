@@ -651,9 +651,10 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 if agent_display_name:
                     logger.debug(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
         elif isinstance(event, TeamRunResponseContentEvent):
-            # Team-level content (consensus or team synthesis)
-            content = str(event.content or "")
-            consensus += content
+            # Skip team-level streaming content - we'll use the final TeamRunResponse instead
+            # These intermediate events contain raw/unformatted content
+            logger.debug("Skipping TeamRunResponseContentEvent - will use final TeamRunResponse")
+            continue
         else:
             # Skip unknown event types - don't rebuild document for these
             logger.debug(
