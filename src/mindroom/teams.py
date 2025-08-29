@@ -235,6 +235,7 @@ async def should_form_team(
     config: Config | None = None,
     use_ai_decision: bool = True,
     is_dm_room: bool = False,
+    is_thread: bool = False,
 ) -> ShouldFormTeamResult:
     """Determine if a team should form and with which mode.
 
@@ -247,6 +248,7 @@ async def should_form_team(
         config: Application configuration (for AI model access)
         use_ai_decision: Whether to use AI for mode selection
         is_dm_room: Whether this is a DM room
+        is_thread: Whether the current message is in a thread
 
     Returns:
         ShouldFormTeamResult with team formation decision
@@ -270,8 +272,10 @@ async def should_form_team(
         logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
         team_agents = agents_in_thread
 
-    # Case 4: DM room with multiple agents and no mentions
-    elif is_dm_room and not tagged_agents and room and config:
+    # Case 4: DM room with multiple agents and no mentions (main timeline only)
+    # We avoid forming a team inside an existing thread to preserve
+    # single-agent ownership unless the thread itself involves multiple agents
+    elif is_dm_room and not is_thread and not tagged_agents and room and config:
         available_agents = get_available_agents_in_room(room, config)
         if len(available_agents) > 1:
             logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")

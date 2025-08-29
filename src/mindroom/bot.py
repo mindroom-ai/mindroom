@@ -449,6 +449,7 @@ class AgentBot:
             message=event.body,
             config=self.config,
             is_dm_room=_is_dm_room,
+            is_thread=context.is_thread,
         )
 
         # Handle team formation (only first agent alphabetically)

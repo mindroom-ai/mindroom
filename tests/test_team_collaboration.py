@@ -508,3 +508,47 @@ class TestRouterTeamFormation:
 
         # Should not form a team with single agent
         assert result.should_form_team is False
+
+    @pytest.mark.asyncio
+    async def test_dm_room_thread_single_agent_no_team(self) -> None:
+        """In a DM with multiple agents, a thread with a single agent should not form a team."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.config import AgentConfig, Config, ModelConfig  # noqa: PLC0415
+        from mindroom.teams import should_form_team  # noqa: PLC0415
+
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                "general": AgentConfig(display_name="General", role="General"),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+
+        # DM room with multiple agents
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!dm:localhost"
+        room.users = {
+            config.ids["calculator"].full_id: None,
+            config.ids["general"].full_id: None,
+        }
+
+        # Thread has only calculator participating so far
+        agents_in_thread = [config.ids["calculator"]]
+
+        # Should NOT form a team inside a thread with a single agent
+        result = await should_form_team(
+            tagged_agents=[],
+            agents_in_thread=agents_in_thread,
+            all_mentioned_in_thread=[],
+            message="Follow-up without mentions",
+            config=config,
+            is_dm_room=True,
+            is_thread=True,
+            room=room,
+            use_ai_decision=False,
+        )
+
+        assert result.should_form_team is False
