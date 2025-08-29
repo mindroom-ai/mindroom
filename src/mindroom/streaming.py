@@ -108,7 +108,7 @@ async def stream_chunks_to_room(
     thread_id: str | None,
     sender_domain: str,
     config: Config,
-    chunk_iter: AsyncIterator[str],
+    chunk_iter: AsyncIterator[object],
     header: str | None = None,
     existing_event_id: str | None = None,
     streaming_cls: type[StreamingResponse] | None = None,
@@ -159,15 +159,18 @@ async def stream_chunks_to_room(
 
     if header:
         # Some tests may patch the class with sync methods; support both
-        upd = streaming.update_content
-        if callable(upd):
-            res = upd(header, client)
-            if hasattr(res, "__await__"):
-                await res
+        res = streaming.update_content(header, client)
+        if hasattr(res, "__await__"):
+            await res
 
     async for chunk in chunk_iter:
-        upd = streaming.update_content
-        res = upd(chunk, client)
+        # Normalize non-string chunks (e.g., Agno events) to text
+        if isinstance(chunk, str):
+            text_chunk = chunk
+        else:
+            content = getattr(chunk, "content", None)
+            text_chunk = str(content) if content is not None else str(chunk)
+        res = streaming.update_content(text_chunk, client)
         if hasattr(res, "__await__"):
             await res
 
