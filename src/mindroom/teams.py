@@ -649,20 +649,17 @@ async def structured_team_stream(  # noqa: C901, PLR0912
     consensus if present. Rebuilds the entire document as new events
     arrive so the final shape matches the non-stream style.
     """
-    # Extract agent names from MatrixID objects
-    assert orchestrator.config is not None
-    agent_names = [mid.agent_name(orchestrator.config) or mid.username for mid in agent_ids]
-
     # Build mapping from display name (what Agno uses) to short name
     # We use display names as keys since that's what we receive in events
+    assert orchestrator.config is not None
     display_to_short: dict[str, str] = {}
-    short_to_display: dict[str, str] = {}
 
-    for name in agent_names:
-        agent_config = orchestrator.config.agents[name]
-        display_name = agent_config.display_name or name
-        display_to_short[display_name] = name
-        short_to_display[name] = display_name
+    for mid in agent_ids:
+        agent_name = mid.agent_name(orchestrator.config)
+        assert agent_name is not None
+        agent_config = orchestrator.config.agents[agent_name]
+        display_name = agent_config.display_name or agent_name
+        display_to_short[display_name] = agent_name
 
     # Buffers - keyed by display name for direct matching
     per_member: dict[str, str] = dict.fromkeys(display_to_short.keys(), "")
