@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from agno.agent import Agent
 from agno.models.message import Message
@@ -19,6 +19,8 @@ from .matrix.rooms import get_room_alias_from_id
 from .thread_utils import get_available_agents_in_room
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     import nio
 
     from .bot import MultiAgentOrchestrator
@@ -496,11 +498,11 @@ async def handle_team_formation(
     )
 
 
-async def create_team_response_streaming(
+async def create_team_response_streaming(  # noqa: C901, PLR0912
     agent_names: list[str],
     mode: TeamMode,
     message: str,
-    orchestrator: "MultiAgentOrchestrator",
+    orchestrator: MultiAgentOrchestrator,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
 ) -> AsyncIterator[str]:
@@ -568,31 +570,33 @@ async def create_team_response_streaming(
     # Stream content events
     try:
         stream = await team.arun(prompt, stream=True)
-        # If the underlying library doesn't support streaming, fall back gracefully
+        # If the underlying library supports streaming (async iterator)
         if hasattr(stream, "__aiter__"):
             async for event in stream:
+                # Primary: explicit content events
                 if isinstance(event, RunResponseContentEvent) and event.content:
                     yield str(event.content)
-                else:
-                    # Ignore non-content events for now
                     continue
+                # Fallback: any event with a non-empty 'content' attribute
+                content = getattr(event, "content", None)
+                if content:
+                    yield str(content)
+        # Non-streaming fallback path
+        elif isinstance(stream, (TeamRunResponse, RunResponse)):
+            parts = extract_team_member_contributions(stream)
+            yield "\n\n".join(parts) if parts else ""
         else:
-            # Non-streaming fallback path
-            if isinstance(stream, (TeamRunResponse, RunResponse)):
-                parts = extract_team_member_contributions(stream)
-                yield "\n\n".join(parts) if parts else ""
-            else:
-                yield str(stream)
+            yield str(stream)
     except Exception as e:
         logger.exception("Team streaming failed", error=str(e))
         yield f"Sorry, the team encountered an error: {e}"
 
 
-async def team_response_stream_or_text(
+async def team_response_stream_or_text(  # noqa: C901
     agent_names: list[str],
     mode: TeamMode,
     message: str,
-    orchestrator: "MultiAgentOrchestrator",
+    orchestrator: MultiAgentOrchestrator,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
 ) -> tuple[AsyncIterator[str] | None, str | None]:
@@ -603,6 +607,7 @@ async def team_response_stream_or_text(
     Returns:
         (stream, None) when streaming is available
         (None, text) when only non-streaming response is available
+
     """
     # Resolve member Agents
     agents: list[Agent] = []

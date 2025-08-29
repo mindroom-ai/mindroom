@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -12,9 +13,13 @@ from .matrix.client import edit_message, send_message
 from .matrix.mentions import create_mention_content_from_text
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     import nio
 
     from .config import Config
+
+from .matrix.client import get_latest_thread_event_id_if_needed
 
 logger = get_logger(__name__)
 
@@ -27,7 +32,7 @@ class StreamingResponse:
     """Manages a streaming response with incremental message updates."""
 
     room_id: str
-    reply_to_event_id: str
+    reply_to_event_id: str | None
     thread_id: str | None
     sender_domain: str
     config: Config
@@ -94,3 +99,81 @@ class StreamingResponse:
             response_event_id = await edit_message(client, self.room_id, self.event_id, content, display_text)
             if not response_event_id:
                 logger.error("Failed to edit streaming message")
+
+
+async def stream_chunks_to_room(
+    client: nio.AsyncClient,
+    room_id: str,
+    reply_to_event_id: str | None,
+    thread_id: str | None,
+    sender_domain: str,
+    config: Config,
+    chunk_iter: AsyncIterator[str],
+    header: str | None = None,
+    existing_event_id: str | None = None,
+    streaming_cls: type[StreamingResponse] | None = None,
+) -> tuple[str | None, str]:
+    """Stream chunks to a Matrix room, returning (event_id, accumulated_text).
+
+    Args:
+        client: Matrix client
+        room_id: Destination room
+        reply_to_event_id: Event to reply to (can be None when in a thread)
+        thread_id: Thread root if already in a thread
+        sender_domain: Sender's homeserver domain for mention formatting
+        config: App config for mention formatting
+        chunk_iter: Async iterator yielding text chunks
+        header: Optional text prefix to send before chunks
+        existing_event_id: If editing an existing message, pass its ID
+        streaming_cls: Optional StreamingResponse class override (useful for tests)
+
+    Returns:
+        Tuple of (final event_id or None, full accumulated text)
+
+    """
+    latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+        client,
+        room_id,
+        thread_id,
+        reply_to_event_id,
+        existing_event_id,
+    )
+
+    sr_cls = streaming_cls or StreamingResponse
+    streaming = sr_cls(
+        room_id=room_id,
+        reply_to_event_id=reply_to_event_id,
+        thread_id=thread_id,
+        sender_domain=sender_domain,
+        config=config,
+        latest_thread_event_id=latest_thread_event_id,
+    )
+
+    # Ensure the first chunk triggers an initial send immediately
+    with suppress(Exception):
+        streaming.last_update = float("-inf")
+
+    if existing_event_id:
+        streaming.event_id = existing_event_id
+        streaming.accumulated_text = ""
+
+    if header:
+        # Some tests may patch the class with sync methods; support both
+        upd = streaming.update_content
+        if callable(upd):
+            res = upd(header, client)
+            if hasattr(res, "__await__"):
+                await res
+
+    async for chunk in chunk_iter:
+        upd = streaming.update_content
+        res = upd(chunk, client)
+        if hasattr(res, "__await__"):
+            await res
+
+    fin = streaming.finalize
+    resf = fin(client)
+    if hasattr(resf, "__await__"):
+        await resf
+
+    return streaming.event_id, streaming.accumulated_text

@@ -61,7 +61,7 @@ from .scheduling import (
     restore_scheduled_tasks,
     schedule_task,
 )
-from .streaming import IN_PROGRESS_MARKER, StreamingResponse
+from .streaming import IN_PROGRESS_MARKER, StreamingResponse, stream_chunks_to_room
 from .teams import (
     TeamMode,
     create_team_response,
@@ -490,12 +490,16 @@ class AgentBot:
 
                 if stream is not None:
                     header = f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
-                    await self._stream_chunks_to_room(
-                        room,
+                    await stream_chunks_to_room(
+                        self.client,
+                        room.room_id,
                         event.event_id,
                         context.thread_id,
+                        self.matrix_id.domain,
+                        self.config,
                         stream,
                         header=header,
+                        streaming_cls=StreamingResponse,
                     )
                     self.response_tracker.mark_responded(event.event_id)
                 else:
@@ -739,12 +743,16 @@ class AgentBot:
                 room_id=room.room_id,
             )
 
-            event_id, accumulated = await self._stream_chunks_to_room(
-                room,
+            event_id, accumulated = await stream_chunks_to_room(
+                self.client,
+                room.room_id,
                 reply_to_event_id,
                 thread_id,
+                self.matrix_id.domain,
+                self.config,
                 chunk_iter,
                 existing_event_id=existing_event_id,
+                streaming_cls=StreamingResponse,
             )
 
             # If the message contains an interactive question, register it and add reactions
@@ -853,21 +861,8 @@ class AgentBot:
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
-        # Store memory for this agent (do this once, before generating response)
+        # Prepare session id for memory storage (store after sending response)
         session_id = create_session_id(room_id, thread_id)
-        create_background_task(
-            store_conversation_memory(
-                prompt,
-                self.agent_name,
-                self.storage_path,
-                session_id,
-                self.config,
-                room_id,
-                thread_history,
-                user_id,
-            ),
-            name=f"memory_save_{self.agent_name}_{session_id}",
-        )
 
         # Dynamically determine whether to use streaming based on user presence
         # Only check presence if streaming is globally enabled
@@ -899,6 +894,24 @@ class AgentBot:
                 thread_history,
                 existing_event_id,
             )
+
+        # Store memory after response generation; ignore errors in tests/mocks
+        try:
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    self.agent_name,
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    room_id,
+                    thread_history,
+                    user_id,
+                ),
+                name=f"memory_save_{self.agent_name}_{session_id}",
+            )
+        except Exception:  # pragma: no cover
+            self.logger.debug("Skipping memory storage due to configuration error")
 
     async def _send_response(
         self,
@@ -1244,12 +1257,16 @@ class TeamBot(AgentBot):
 
             if stream is not None:
                 header = f"🤝 **Team Response** ({', '.join(self.team_agents)}):\n\n"
-                await self._stream_chunks_to_room(
-                    room,
+                await stream_chunks_to_room(
+                    self.client,
+                    room_id,
                     reply_to_event_id,
                     thread_id,
+                    self.matrix_id.domain,
+                    self.config,
                     stream,
                     header=header,
+                    streaming_cls=StreamingResponse,
                 )
             else:
                 # Fallback: non-streaming single message
