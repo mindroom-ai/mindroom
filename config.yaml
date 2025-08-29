@@ -278,8 +278,10 @@ memory:
     provider: ollama
 models:
   default:
-    id: claude-sonnet-4-20250514
-    provider: anthropic
+    # id: claude-sonnet-4-20250514
+    # provider: anthropic
+    id: openai/gpt-oss-120b
+    provider: openrouter
   deepseek:
     id: deepseek-ai/deepseek-chat:free
     provider: openrouter

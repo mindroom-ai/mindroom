@@ -8,10 +8,16 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from agno.agent import Agent
 from agno.models.message import Message
 from agno.run.response import (
+    IntermediateRunResponseContentEvent,
     RunResponse,
     RunResponseContentEvent,
 )
-from agno.run.team import TeamRunResponse
+from agno.run.team import (
+    RunResponseContentEvent as TeamRunResponseContentEvent,
+)
+from agno.run.team import (
+    TeamRunResponse,
+)
 from agno.team import Team
 from pydantic import BaseModel, Field
 
@@ -573,7 +579,7 @@ async def team_response_stream_raw(
     return await team.arun(prompt, stream=True)
 
 
-async def team_response_stream(  # noqa: C901, PLR0912
+async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     agent_ids: list[MatrixID],
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -633,19 +639,27 @@ async def team_response_stream(  # noqa: C901, PLR0912
                 return
             logger.warning(f"Unexpected RunResponse in team stream: {content[:100]}")
             consensus += content
-        elif isinstance(event, RunResponseContentEvent):
-            agent_display_name = event.agent_name
+        elif isinstance(event, (RunResponseContentEvent, IntermediateRunResponseContentEvent)):
+            # Individual agent responses within the team
+            agent_display_name = getattr(event, "agent_name", None)
             content = str(event.content or "")
 
-            if agent_display_name in per_member:
+            if agent_display_name and agent_display_name in per_member:
                 per_member[agent_display_name] += content
             else:
                 consensus += content
                 if agent_display_name:
-                    logger.warning(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
+                    logger.debug(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
+        elif isinstance(event, TeamRunResponseContentEvent):
+            # Team-level content (consensus or team synthesis)
+            content = str(event.content or "")
+            consensus += content
         else:
-            # Suppress tool noise for structured live; optional: add summaries later
-            logger.debug(f"Ignoring non-content event: {type(event).__name__}")
+            # Skip unknown event types - don't rebuild document for these
+            logger.debug(
+                f"Ignoring event: {type(event).__name__} (type: {type(event)}, module: {type(event).__module__})",
+            )
+            continue
 
         parts: list[str] = []
 
