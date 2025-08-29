@@ -564,7 +564,7 @@ async def handle_team_formation(
     )
 
 
-async def create_team_response_streaming(  # noqa: C901, PLR0912, PLR0915
+async def create_team_response_streaming(  # noqa: C901, PLR0912
     agent_names: list[str],
     mode: TeamMode,
     message: str,
@@ -636,38 +636,30 @@ async def create_team_response_streaming(  # noqa: C901, PLR0912, PLR0915
     # Stream content events
     try:
         stream = await team.arun(prompt, stream=True)
-        # If the underlying library supports streaming (async iterator)
-        if hasattr(stream, "__aiter__"):
-            async for event in stream:
-                # Primary: explicit content events
-                if isinstance(event, RunResponseContentEvent) and event.content:
-                    yield str(event.content)
-                    continue
-                # Tool call started/completed formatting for readability
-                if isinstance(event, ToolCallStartedEvent):
-                    from .ai import _format_tool_started_message  # noqa: PLC0415  # local import to avoid cycles
+        async for event in stream:
+            # Primary: explicit content events
+            if isinstance(event, RunResponseContentEvent) and event.content:
+                yield str(event.content)
+                continue
+            # Tool call started/completed formatting for readability
+            if isinstance(event, ToolCallStartedEvent):
+                from .ai import _format_tool_started_message  # noqa: PLC0415  # local import to avoid cycles
 
-                    tool_msg = _format_tool_started_message(event)
-                    if tool_msg:
-                        yield tool_msg
-                    continue
-                if isinstance(event, ToolCallCompletedEvent):
-                    from .ai import _format_tool_completed_message  # noqa: PLC0415  # local import to avoid cycles
+                tool_msg = _format_tool_started_message(event)
+                if tool_msg:
+                    yield tool_msg
+                continue
+            if isinstance(event, ToolCallCompletedEvent):
+                from .ai import _format_tool_completed_message  # noqa: PLC0415  # local import to avoid cycles
 
-                    tool_msg = _format_tool_completed_message(event)
-                    if tool_msg:
-                        yield tool_msg
-                    continue
-                # Fallback: any event with a non-empty 'content' attribute
-                content = getattr(event, "content", None)
-                if content:
-                    yield str(content)
-        # Non-streaming fallback path
-        elif isinstance(stream, (TeamRunResponse, RunResponse)):
-            parts = extract_team_member_contributions(stream)
-            yield "\n\n".join(parts) if parts else ""
-        else:
-            yield str(stream)
+                tool_msg = _format_tool_completed_message(event)
+                if tool_msg:
+                    yield tool_msg
+                continue
+            # Fallback: any event with a non-empty 'content' attribute
+            content = getattr(event, "content", None)
+            if content:
+                yield str(content)
     except Exception as e:
         logger.exception("Team streaming failed", error=str(e))
         yield f"Sorry, the team encountered an error: {e}"
@@ -731,15 +723,7 @@ async def create_team_event_stream(  # noqa: C901
         debug_mode=False,
     )
 
-    result = await team.arun(prompt, stream=True)
-    if hasattr(result, "__aiter__"):
-        return result
-
-    # Fallback to a generator that yields the final response once
-    async def _one() -> AsyncIterator[Any]:
-        yield result
-
-    return _one()
+    return await team.arun(prompt, stream=True)
 
 
 async def structured_team_stream(  # noqa: C901, PLR0912
