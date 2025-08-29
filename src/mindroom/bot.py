@@ -6,9 +6,8 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
-from inspect import iscoroutinefunction
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import nio
 
@@ -88,8 +87,6 @@ from .thread_utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
     import structlog
     from agno.agent import Agent
 
@@ -775,62 +772,6 @@ class AgentBot:
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
             # Don't mark as responded if streaming failed
-
-    async def _stream_chunks_to_room(
-        self,
-        room: nio.MatrixRoom,
-        reply_to_event_id: str | None,
-        thread_id: str | None,
-        chunk_iter: AsyncIterator[str],
-        header: str | None = None,
-        existing_event_id: str | None = None,
-    ) -> tuple[str | None, str]:
-        """Stream chunks to a room using a single message that is updated.
-
-        Returns the final event_id and full accumulated text.
-        """
-        assert self.client is not None
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            self.client,
-            room.room_id,
-            thread_id,
-            reply_to_event_id,
-            existing_event_id,
-        )
-
-        streaming = StreamingResponse(
-            room_id=room.room_id,
-            reply_to_event_id=cast("Any", reply_to_event_id),
-            thread_id=thread_id,
-            sender_domain=self.matrix_id.domain,
-            config=self.config,
-            latest_thread_event_id=latest_thread_event_id,
-        )
-
-        # If we're editing an existing message, set the event_id
-        if existing_event_id:
-            streaming.event_id = existing_event_id
-            streaming.accumulated_text = ""  # Start fresh
-
-        if header:
-            if iscoroutinefunction(streaming.update_content):
-                await streaming.update_content(header, self.client)
-            else:  # Graceful fallback for tests mocking StreamingResponse
-                cast("Any", streaming).update_content(header, self.client)
-
-        async for chunk in chunk_iter:
-            if iscoroutinefunction(streaming.update_content):
-                await streaming.update_content(chunk, self.client)
-            else:
-                cast("Any", streaming).update_content(chunk, self.client)
-
-        if iscoroutinefunction(streaming.finalize):
-            await streaming.finalize(self.client)
-        else:
-            cast("Any", streaming).finalize(self.client)
-        if streaming.event_id:
-            self.logger.info("Sent streaming response", event_id=streaming.event_id)
-        return streaming.event_id, streaming.accumulated_text
 
     async def _generate_response(
         self,
