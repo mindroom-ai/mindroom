@@ -494,7 +494,7 @@ class AgentBot:
                     model_name=model_name,
                 )
 
-                await send_streaming_response(
+                event_id, accumulated = await send_streaming_response(
                     self.client,
                     room.room_id,
                     event.event_id,
@@ -505,6 +505,17 @@ class AgentBot:
                     streaming_cls=ReplacementStreamingResponse,
                     header=None,
                 )
+
+                # Handle interactive questions in team responses
+                await self._handle_interactive_question(
+                    event_id,
+                    accumulated,
+                    room.room_id,
+                    context.thread_id,
+                    event.event_id,
+                    agent_name="team",  # Or could use team name
+                )
+
                 self.response_tracker.mark_responded(event.event_id)
             else:
                 # Non-streaming: returns complete formatted response
@@ -517,7 +528,19 @@ class AgentBot:
                     model_name=model_name,
                 )
 
-                await self._send_response(room, event.event_id, response_text, context.thread_id)
+                event_id = await self._send_response(room, event.event_id, response_text, context.thread_id)
+
+                # Handle interactive questions in non-streaming team responses
+                if event_id:
+                    await self._handle_interactive_question(
+                        event_id,
+                        response_text,
+                        room.room_id,
+                        context.thread_id,
+                        event.event_id,
+                        agent_name="team",
+                    )
+
                 self.response_tracker.mark_responded(event.event_id)
             return
 
@@ -714,6 +737,47 @@ class AgentBot:
             )
             await interactive.add_reaction_buttons(self.client, room.room_id, event_id, response.options_list)
 
+    async def _handle_interactive_question(
+        self,
+        event_id: str | None,
+        content: str,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str,
+        agent_name: str | None = None,
+    ) -> None:
+        """Handle interactive question registration and reactions if present.
+
+        Args:
+            event_id: The message event ID
+            content: The message content to check for interactive questions
+            room_id: The Matrix room ID
+            thread_id: Thread ID if in a thread
+            reply_to_event_id: Event being replied to
+            agent_name: Name of agent (for registration)
+
+        """
+        if not event_id or not self.client:
+            return
+
+        if interactive.should_create_interactive_question(content):
+            response = interactive.parse_and_format_interactive(content, extract_mapping=True)
+            if response.option_map and response.options_list:
+                thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+                interactive.register_interactive_question(
+                    event_id,
+                    room_id,
+                    thread_root_for_registration,
+                    response.option_map,
+                    agent_name or self.agent_name,
+                )
+                await interactive.add_reaction_buttons(
+                    self.client,
+                    room_id,
+                    event_id,
+                    response.options_list,
+                )
+
     async def _process_and_respond_streaming(
         self,
         room: nio.MatrixRoom,
@@ -753,24 +817,14 @@ class AgentBot:
                 existing_event_id=existing_event_id,
             )
 
-            # If the message contains an interactive question, register it and add reactions
-            if event_id and interactive.should_create_interactive_question(accumulated):
-                response = interactive.parse_and_format_interactive(accumulated, extract_mapping=True)
-                if response.option_map and response.options_list:
-                    thread_root_for_registration = thread_id if thread_id else reply_to_event_id
-                    interactive.register_interactive_question(
-                        event_id,
-                        room.room_id,
-                        thread_root_for_registration,
-                        response.option_map,
-                        self.agent_name,
-                    )
-                    await interactive.add_reaction_buttons(
-                        self.client,
-                        room.room_id,
-                        event_id,
-                        response.options_list,
-                    )
+            # Handle interactive questions if present
+            await self._handle_interactive_question(
+                event_id,
+                accumulated,
+                room.room_id,
+                thread_id,
+                reply_to_event_id,
+            )
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
             # Don't mark as responded if streaming failed
@@ -1201,7 +1255,7 @@ class TeamBot(AgentBot):
                 model_name=model_name,
             )
 
-            await send_streaming_response(
+            event_id, accumulated = await send_streaming_response(
                 self.client,
                 room_id,
                 reply_to_event_id,
@@ -1211,6 +1265,16 @@ class TeamBot(AgentBot):
                 response_stream,
                 streaming_cls=ReplacementStreamingResponse,
                 header=None,  # team_response_stream includes header
+            )
+
+            # Handle interactive questions in team leader responses
+            await self._handle_interactive_question(
+                event_id,
+                accumulated,
+                room_id,
+                thread_id,
+                reply_to_event_id,
+                agent_name=self.agent_name,  # Team leader's name
             )
         else:
             # Fallback to non-streaming or editing existing message
@@ -1225,7 +1289,18 @@ class TeamBot(AgentBot):
             if existing_event_id:
                 await self._edit_message(room_id, existing_event_id, response_text, thread_id)
             else:
-                await self._send_response(room, reply_to_event_id, response_text, thread_id)
+                event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
+
+                # Handle interactive questions in non-streaming team leader responses
+                if event_id:
+                    await self._handle_interactive_question(
+                        event_id,
+                        response_text,
+                        room_id,
+                        thread_id,
+                        reply_to_event_id,
+                        agent_name=self.agent_name,
+                    )
 
 
 @dataclass
