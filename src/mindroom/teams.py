@@ -10,8 +10,6 @@ from agno.models.message import Message
 from agno.run.response import (
     RunResponse,
     RunResponseContentEvent,
-    ToolCallCompletedEvent,
-    ToolCallStartedEvent,
 )
 from agno.run.team import TeamRunResponse
 from agno.team import Team
@@ -564,107 +562,6 @@ async def handle_team_formation(
     )
 
 
-async def create_team_response_streaming(  # noqa: C901, PLR0912
-    agent_names: list[str],
-    mode: TeamMode,
-    message: str,
-    orchestrator: MultiAgentOrchestrator,
-    thread_history: list[dict] | None = None,
-    model_name: str | None = None,
-) -> AsyncIterator[str]:
-    """Stream a team response incrementally using Agno's streaming API.
-
-    Yields chunks of the final response text. The caller is responsible for
-    adding any headers or formatting around the streamed content.
-
-    Args:
-        agent_names: Names of agents to include in the team
-        mode: Collaboration mode
-        message: User message to respond to
-        orchestrator: Orchestrator with initialized agent instances
-        thread_history: Optional thread history for context
-        model_name: Optional model override
-
-    Yields:
-        Text chunks as they become available
-
-    """
-    # Resolve member Agents from orchestrator
-    agents: list[Agent] = []
-    for name in agent_names:
-        if name == ROUTER_AGENT_NAME:
-            continue
-        if name not in orchestrator.agent_bots:
-            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
-            continue
-        agent_bot = orchestrator.agent_bots[name]
-        if agent_bot.agent is not None:
-            agents.append(agent_bot.agent)
-
-    if not agents:
-        yield "Sorry, no agents available for team collaboration."
-        return
-
-    # Build prompt with limited thread context
-    prompt = message
-    if thread_history:
-        recent_messages = thread_history[-30:]
-        context_parts: list[str] = []
-        for msg in recent_messages:
-            sender = msg.get("sender", "Unknown")
-            body = msg.get("content", {}).get("body", "")
-            if body and len(body) < MAX_CONTEXT_MESSAGE_LENGTH:
-                context_parts.append(f"{sender}: {body}")
-        if context_parts:
-            context = "\n".join(context_parts)
-            prompt = f"Thread Context:\n{context}\n\nUser: {message}"
-
-    # Model
-    assert orchestrator.config is not None
-    model = get_model_instance(orchestrator.config, model_name or "default")
-
-    team = Team(
-        members=agents,  # type: ignore[arg-type]
-        mode=mode.value,
-        name=f"Team-{'-'.join(agent_names)}",
-        model=model,
-        show_members_responses=True,
-        enable_agentic_context=True,
-        debug_mode=False,
-    )
-
-    # Stream content events
-    try:
-        stream = await team.arun(prompt, stream=True)
-        async for event in stream:
-            # Primary: explicit content events
-            if isinstance(event, RunResponseContentEvent) and event.content:
-                yield str(event.content)
-                continue
-            # Tool call started/completed formatting for readability
-            if isinstance(event, ToolCallStartedEvent):
-                from .ai import _format_tool_started_message  # noqa: PLC0415  # local import to avoid cycles
-
-                tool_msg = _format_tool_started_message(event)
-                if tool_msg:
-                    yield tool_msg
-                continue
-            if isinstance(event, ToolCallCompletedEvent):
-                from .ai import _format_tool_completed_message  # noqa: PLC0415  # local import to avoid cycles
-
-                tool_msg = _format_tool_completed_message(event)
-                if tool_msg:
-                    yield tool_msg
-                continue
-            # Fallback: any event with a non-empty 'content' attribute
-            content = getattr(event, "content", None)
-            if content:
-                yield str(content)
-    except Exception as e:
-        logger.exception("Team streaming failed", error=str(e))
-        yield f"Sorry, the team encountered an error: {e}"
-
-
 async def create_team_event_stream(  # noqa: C901
     agent_names: list[str],
     mode: TeamMode,
@@ -744,16 +641,11 @@ async def structured_team_stream(  # noqa: C901, PLR0912
     per_member: dict[str, str] = dict.fromkeys(agent_names, "")
     consensus: str = ""
 
-    # Stable display names (fallback to raw name if missing)
+    # Stable display names
     display_names: dict[str, str] = {}
-    if orchestrator.config:
-        for name in agent_names:
-            if name in orchestrator.config.agents:
-                display_names[name] = orchestrator.config.agents[name].display_name or name
-            else:
-                display_names[name] = name
-    else:
-        display_names = {name: name for name in agent_names}
+    assert orchestrator.config is not None
+    for name in agent_names:
+        display_names[name] = orchestrator.config.agents[name].display_name or name
 
     # Acquire raw event stream
     stream = await create_team_event_stream(
@@ -813,28 +705,3 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             header = format_team_header(agent_names)
             full_text = "\n\n".join(parts)
             yield header + full_text
-
-
-async def team_response_stream_or_text(
-    agent_names: list[str],
-    mode: TeamMode,
-    message: str,
-    orchestrator: MultiAgentOrchestrator,
-    thread_history: list[dict] | None = None,
-    model_name: str | None = None,
-) -> tuple[AsyncIterator[str] | None, str | None]:
-    """Return a formatted streaming iterator for teams (always), no final text.
-
-    Uses create_team_response_streaming() which internally falls back to a
-    single-chunk non-streaming response when the provider doesn't support
-    streaming, ensuring consistent formatting and avoiding raw event dumps.
-    """
-    stream = create_team_response_streaming(
-        agent_names=agent_names,
-        mode=mode,
-        message=message,
-        orchestrator=orchestrator,
-        thread_history=thread_history,
-        model_name=model_name,
-    )
-    return stream, None

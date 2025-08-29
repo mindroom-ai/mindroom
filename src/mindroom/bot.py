@@ -62,7 +62,6 @@ from .scheduling import (
 )
 from .streaming import (
     IN_PROGRESS_MARKER,
-    ReplacementStreamingResponse,
     stream_chunks_to_room,
 )
 from .teams import (
@@ -498,7 +497,6 @@ class AgentBot:
                     self.config,
                     stream,
                     header=None,
-                    streaming_cls=ReplacementStreamingResponse,
                 )
                 self.response_tracker.mark_responded(event.event_id)
             else:
@@ -1202,7 +1200,6 @@ class TeamBot(AgentBot):
                 self.config,
                 stream,
                 header=None,  # structured_team_stream includes header
-                streaming_cls=ReplacementStreamingResponse,
             )
         else:
             # Fallback to non-streaming or editing existing message

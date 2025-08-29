@@ -127,7 +127,6 @@ async def stream_chunks_to_room(
     chunk_iter: AsyncIterator[object],
     header: str | None = None,
     existing_event_id: str | None = None,
-    streaming_cls: type[StreamingResponse] | None = None,
 ) -> tuple[str | None, str]:
     """Stream chunks to a Matrix room, returning (event_id, accumulated_text).
 
@@ -141,7 +140,6 @@ async def stream_chunks_to_room(
         chunk_iter: Async iterator yielding text chunks
         header: Optional text prefix to send before chunks
         existing_event_id: If editing an existing message, pass its ID
-        streaming_cls: Optional StreamingResponse class override (useful for tests)
 
     Returns:
         Tuple of (final event_id or None, full accumulated text)
@@ -155,8 +153,7 @@ async def stream_chunks_to_room(
         existing_event_id,
     )
 
-    sr_cls = streaming_cls or StreamingResponse
-    streaming = sr_cls(
+    streaming = ReplacementStreamingResponse(
         room_id=room_id,
         reply_to_event_id=reply_to_event_id,
         thread_id=thread_id,
