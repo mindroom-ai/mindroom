@@ -6,7 +6,10 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from agno.run.response import RunResponseContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+
 from . import interactive
+from .ai import _format_tool_completed_message, _format_tool_started_message
 from .logging_config import get_logger
 from .matrix.client import edit_message, send_message
 from .matrix.mentions import format_message_with_mentions
@@ -175,13 +178,25 @@ async def send_streaming_response(
         await streaming.update_content(header, client)
 
     async for chunk in response_stream:
-        # Normalize non-string chunks (e.g., Agno events) to text
+        # Handle different types of chunks from the stream
         if isinstance(chunk, str):
             text_chunk = chunk
+        elif isinstance(chunk, RunResponseContentEvent) and chunk.content:
+            text_chunk = str(chunk.content)
+        elif isinstance(chunk, ToolCallStartedEvent):
+            text_chunk = _format_tool_started_message(chunk)
+        elif isinstance(chunk, ToolCallCompletedEvent):
+            text_chunk = _format_tool_completed_message(chunk)
         else:
+            # Fallback for other event types - try to extract content
             content = getattr(chunk, "content", None)
-            text_chunk = str(content) if content is not None else str(chunk)
-        await streaming.update_content(text_chunk, client)
+            text_chunk = str(content) if content is not None else ""
+            if not text_chunk:
+                logger.debug(f"Unhandled streaming event type: {type(chunk).__name__}")
+                continue
+
+        if text_chunk:
+            await streaming.update_content(text_chunk, client)
 
     await streaming.finalize(client)
 
