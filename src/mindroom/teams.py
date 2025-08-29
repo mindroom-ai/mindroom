@@ -689,9 +689,14 @@ async def structured_team_stream(  # noqa: C901, PLR0912
             yield header + final_text
             continue
         elif isinstance(event, RunResponse):
-            # Single-agent fallback — treat as consensus
+            # Error case - no agents available, just return the error message
             content = _extract_content(event)
-            consensus += ("\n" if consensus else "") + content
+            if "no agents available" in content.lower():
+                yield content  # Return error message directly
+                return
+            # Unexpected RunResponse - log warning but continue
+            logger.warning(f"Unexpected RunResponse in team stream: {content[:100]}")
+            consensus += content
         elif isinstance(event, RunResponseContentEvent):
             # Member content - agent_name is the display name from Agno
             agent_display_name = event.agent_name
