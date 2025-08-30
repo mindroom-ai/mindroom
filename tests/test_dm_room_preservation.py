@@ -13,14 +13,14 @@ from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
-from tests.conftest import TEST_PASSWORD, TEST_TMP_DIR
+from tests.conftest import TEST_PASSWORD
 
 
 @pytest.mark.asyncio
 class TestDMPreservationDuringCleanup:
     """Test that DM rooms are preserved during various cleanup operations."""
 
-    async def test_agent_cleanup_preserves_dm_rooms(self) -> None:
+    async def test_agent_cleanup_preserves_dm_rooms(self, tmp_path: Path) -> None:
         """Test that AgentBot.cleanup() preserves DM rooms when DMs are enabled."""
         # Create config with DMs enabled
         config = Config(
@@ -43,7 +43,7 @@ class TestDMPreservationDuringCleanup:
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=["!regular:server", "!another:server"],
         )
@@ -77,7 +77,7 @@ class TestDMPreservationDuringCleanup:
             bot.logger.debug.assert_any_call("Preserving DM room !dm:server during cleanup")
             bot.logger.debug.assert_any_call("Preserving DM room !otherdm:server during cleanup")
 
-    async def test_agent_cleanup_leaves_all_rooms(self) -> None:
+    async def test_agent_cleanup_leaves_all_rooms(self, tmp_path: Path) -> None:
         """Test that AgentBot.cleanup() leaves all non-DM rooms."""
         # Create config
         config = Config(
@@ -100,7 +100,7 @@ class TestDMPreservationDuringCleanup:
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=["!configured:server"],  # Only one configured room
         )
@@ -128,7 +128,7 @@ class TestDMPreservationDuringCleanup:
             assert "!unconfigured1:server" in leave_calls
             assert "!unconfigured2:server" in leave_calls
 
-    async def test_orphaned_bot_cleanup_skips_dm_rooms(self) -> None:
+    async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path) -> None:
         """Test that orphaned bot cleanup skips DM rooms (unconfigured rooms) when DM mode is enabled."""
         client = AsyncMock()
         config = Config(
@@ -155,7 +155,7 @@ class TestDMPreservationDuringCleanup:
             # Should not even try to kick
             assert not client.room_kick.called
 
-    async def test_orphaned_bot_cleanup_processes_regular_rooms(self) -> None:
+    async def test_orphaned_bot_cleanup_processes_regular_rooms(self, tmp_path: Path) -> None:
         """Test that orphaned bot cleanup processes rooms when DM mode is disabled."""
         client = AsyncMock()
         config = Config(
@@ -199,7 +199,7 @@ class TestDMPreservationDuringCleanup:
                 reason="Bot no longer configured for this room",
             )
 
-    async def test_cleanup_all_orphaned_bots_respects_dm_rooms(self) -> None:
+    async def test_cleanup_all_orphaned_bots_respects_dm_rooms(self, tmp_path: Path) -> None:
         """Test that cleanup_all_orphaned_bots respects DM rooms when DM mode is enabled."""
         client = AsyncMock()
         config = Config(

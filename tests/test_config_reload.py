@@ -13,7 +13,7 @@ from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 
-from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+from .conftest import TEST_PASSWORD
 
 
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
@@ -177,7 +177,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     config = Config(router=RouterConfig(model="default"))
     agent1_bot = AgentBot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         config=config,
         rooms=["room1", "room2"],  # Initial rooms
     )
@@ -252,7 +252,7 @@ async def test_router_updates_rooms_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     router_bot = AgentBot(
         agent_user=mock_agent_users[ROUTER_AGENT_NAME],
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         config=config,
         rooms=list(updated_router_rooms),
     )
@@ -320,7 +320,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     agent3_bot = AgentBot(
         agent_user=mock_agent_users["agent3"],
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         config=config,
         rooms=["room5"],
     )
@@ -389,7 +389,7 @@ async def test_team_room_changes_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     team1_bot = AgentBot(
         agent_user=mock_agent_users["team1"],
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         config=config,
         rooms=["room3", "room6"],
     )
@@ -452,7 +452,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
 
-    orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
+    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
     # Initialize with initial config
     await orchestrator.initialize()
@@ -611,7 +611,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=bot_config["new"],
         )

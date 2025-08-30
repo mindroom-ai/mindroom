@@ -6,7 +6,6 @@ memberships just like agents do.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -16,7 +15,7 @@ from mindroom.bot import TeamBot
 from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
 from mindroom.matrix.users import AgentMatrixUser
 
-from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+from .conftest import TEST_PASSWORD
 
 
 @pytest.fixture
@@ -59,7 +58,7 @@ class TestTeamRoomMembership:
         config = Config(router=RouterConfig(model="default"))
         bot = TeamBot(
             agent_user=team_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=["!test_room:localhost"],
             team_agents=["agent1"],
@@ -109,7 +108,7 @@ class TestTeamRoomMembership:
         config = Config(router=RouterConfig(model="default"))
         bot = TeamBot(
             agent_user=team_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=[],  # No configured rooms
             team_agents=["agent1"],

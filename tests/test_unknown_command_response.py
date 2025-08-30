@@ -12,11 +12,11 @@ from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 
-from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+from .conftest import TEST_PASSWORD
 
 
 @pytest.mark.asyncio
-async def test_unknown_command_in_main_room() -> None:
+async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     """Test that unknown commands get a helpful error response in main room."""
     # Create config
     config = Config(
@@ -42,7 +42,7 @@ async def test_unknown_command_in_main_room() -> None:
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -109,7 +109,7 @@ async def test_unknown_command_in_main_room() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_command_in_thread() -> None:
+async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     """Test that unknown commands get a helpful error response when in a thread."""
     # Create config
     config = Config(
@@ -135,7 +135,7 @@ async def test_unknown_command_in_thread() -> None:
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -224,7 +224,7 @@ async def test_unknown_command_in_thread() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_command_with_reply() -> None:
+async def test_unknown_command_with_reply(tmp_path: Path) -> None:
     """Test that unknown commands work when replying to another message."""
     # Create config
     config = Config(
@@ -250,7 +250,7 @@ async def test_unknown_command_with_reply() -> None:
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )

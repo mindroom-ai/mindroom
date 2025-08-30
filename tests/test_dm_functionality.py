@@ -15,7 +15,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import TEST_PASSWORD, TEST_TMP_DIR
+from tests.conftest import TEST_PASSWORD
 
 
 @pytest.mark.asyncio
@@ -195,7 +195,7 @@ class TestDMResponseLogic:
 class TestDMMessageContext:
     """Test message context extraction for DMs."""
 
-    async def test_extract_dm_context(self) -> None:
+    async def test_extract_dm_context(self, tmp_path: Path) -> None:
         """Test extracting message context in DM mode."""
         config = Config()
 
@@ -212,7 +212,7 @@ class TestDMMessageContext:
         )
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=[],  # Not configured for any rooms
         )
@@ -250,7 +250,7 @@ class TestDMMessageContext:
 class TestDMIntegration:
     """Integration tests for DM functionality."""
 
-    async def test_agent_accepts_dm_invites(self) -> None:
+    async def test_agent_accepts_dm_invites(self, tmp_path: Path) -> None:
         """Test that agents accept DM invitations when configured."""
         config = Config()
 
@@ -267,7 +267,7 @@ class TestDMIntegration:
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=[],
         )
@@ -287,10 +287,10 @@ class TestDMIntegration:
             mock_join.assert_called_once()
             bot.logger.info.assert_any_call("Joined room", room_id="!dm:localhost")
 
-    async def test_dm_response_flow(self) -> None:
+    async def test_dm_response_flow(self, tmp_path: Path) -> None:
         """Test the complete flow of responding in a DM."""
         # This is a more complex integration test
-        orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
         config = Config()
         config.agents = {"researcher": MagicMock()}
@@ -310,7 +310,7 @@ class TestDMIntegration:
         # Important: bot is NOT configured for the DM room
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=[],  # Empty rooms list - not configured for any room
         )
@@ -385,7 +385,7 @@ class TestDMIntegration:
             assert call_args.kwargs["room_id"] == "!dm:localhost"
             assert call_args.kwargs["prompt"] == "Hello researcher, can you help?"
 
-    async def test_agent_processes_dm_messages_when_not_configured_for_room(self) -> None:
+    async def test_agent_processes_dm_messages_when_not_configured_for_room(self, tmp_path: Path) -> None:
         """Test that agents process messages in DM rooms even when not configured for them."""
         config = Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
@@ -403,7 +403,7 @@ class TestDMIntegration:
         # Agent is NOT configured for any rooms
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=[],  # Empty - not configured for any room
         )
