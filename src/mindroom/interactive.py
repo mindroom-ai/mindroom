@@ -201,13 +201,14 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         InteractiveResponse with formatted_text, option_map, and options_list
 
     """
-    match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
+    # Find the first interactive block for processing
+    first_match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
 
-    if not match:
+    if not first_match:
         return InteractiveResponse(response_text, None, None)
 
     try:
-        interactive_data = json.loads(match.group(1))
+        interactive_data = json.loads(first_match.group(1))
     except json.JSONDecodeError:
         return InteractiveResponse(response_text, None, None)
 
@@ -218,7 +219,9 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         return InteractiveResponse(response_text, None, None)
 
     options = options[:MAX_OPTIONS]
-    clean_response = response_text.replace(match.group(0), "").strip()
+
+    # Remove ALL interactive blocks from the response to avoid emoji conflicts
+    clean_response = re.sub(INTERACTIVE_PATTERN, "", response_text, flags=re.DOTALL).strip()
 
     option_lines = []
     option_map: dict[str, str] | None = {} if extract_mapping else None
