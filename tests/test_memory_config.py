@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from unittest.mock import patch
 
 from mindroom.config import (
@@ -16,13 +16,11 @@ from mindroom.config import (
 )
 from mindroom.memory.config import get_memory_config
 
-from .conftest import TEST_MEMORY_DIR
-
 
 class TestMemoryConfig:
     """Test memory configuration."""
 
-    def test_get_memory_config_with_ollama(self) -> None:
+    def test_get_memory_config_with_ollama(self, tmp_path: Path) -> None:
         """Test memory config creation with Ollama embedder."""
         # Create config with Ollama embedder
         embedder_config = MemoryEmbedderConfig(
@@ -45,7 +43,7 @@ class TestMemoryConfig:
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Test config generation
-        storage_path = Path(TEST_MEMORY_DIR)
+        storage_path = tmp_path / "memory"
         result = get_memory_config(storage_path, config)
 
         # Verify embedder config
@@ -64,7 +62,7 @@ class TestMemoryConfig:
         assert str(storage_path / "chroma") in result["vector_store"]["config"]["path"]
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
-    def test_get_memory_config_with_openai(self) -> None:
+    def test_get_memory_config_with_openai(self, tmp_path: Path) -> None:
         """Test memory config creation with OpenAI embedder."""
         # Create config with OpenAI embedder
         embedder_config = MemoryEmbedderConfig(
@@ -79,7 +77,7 @@ class TestMemoryConfig:
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Test config generation
-        storage_path = Path(TEST_MEMORY_DIR)
+        storage_path = tmp_path / "memory"
         result = get_memory_config(storage_path, config)
 
         # Verify embedder config
@@ -96,7 +94,7 @@ class TestMemoryConfig:
         assert os.environ.get("OPENAI_API_KEY") == "test-key"
 
     @patch.dict("os.environ", {}, clear=True)
-    def test_get_memory_config_no_model_fallback(self) -> None:
+    def test_get_memory_config_no_model_fallback(self, tmp_path: Path) -> None:
         """Test memory config falls back to Ollama when no model configured."""
         # Create config with no models
         embedder_config = MemoryEmbedderConfig(
@@ -108,7 +106,7 @@ class TestMemoryConfig:
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Test config generation
-        storage_path = Path(TEST_MEMORY_DIR)
+        storage_path = tmp_path / "memory"
         result = get_memory_config(storage_path, config)
 
         # Verify LLM fallback config

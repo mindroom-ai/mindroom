@@ -1,3 +1,5 @@
+"""Test that cancellation during wait periods (not during tool calls) propagates correctly."""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +13,7 @@ from mindroom.scheduling import CronSchedule, ScheduledWorkflow, run_cron_task
 
 @pytest.mark.asyncio
 async def test_cancel_mid_wait_cron_task() -> None:
+    """Test that cancellation during wait periods propagates correctly."""
     client = AsyncMock()
     config = AsyncMock()
 
@@ -25,7 +28,7 @@ async def test_cancel_mid_wait_cron_task() -> None:
 
     # Patch croniter to return next run far in the future to guarantee sleep
     class DummyCron:
-        def get_next(self, _):  # noqa: ANN001
+        def get_next(self, _) -> datetime:  # noqa: ANN001
             return datetime.now(UTC) + timedelta(hours=1)
 
     with patch("mindroom.scheduling.croniter", return_value=DummyCron()):

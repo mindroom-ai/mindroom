@@ -1,5 +1,6 @@
 """Tests for the credentials API endpoints."""
 
+from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,7 +24,7 @@ def mock_credentials_manager(temp_credentials_dir: Path) -> CredentialsManager:
 
 
 @pytest.fixture
-def test_client(mock_credentials_manager: CredentialsManager) -> TestClient:
+def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestClient, None, None]:
     """Create a test client with mocked credentials manager."""
     # Import here to avoid circular dependencies
     from mindroom.api.credentials import router  # noqa: PLC0415

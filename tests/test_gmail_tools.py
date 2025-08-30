@@ -191,6 +191,7 @@ class TestGmailTools:
 
             # Verify new token was saved
             saved_creds = mock_credentials_manager.load_credentials("google")
+            assert saved_creds is not None
             assert saved_creds["token"] == "new_access_token"  # noqa: S105
 
     @patch("mindroom.custom_tools.gmail.get_credentials_manager")

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,7 +13,7 @@ from mindroom.config import AgentConfig, Config, TeamConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 
-from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+from .conftest import TEST_PASSWORD
 
 
 @pytest.fixture
@@ -44,7 +44,11 @@ def config_with_rooms() -> Config:
 
 
 @pytest.mark.asyncio
-async def test_router_gets_all_configured_rooms(config_with_rooms: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_router_gets_all_configured_rooms(
+    config_with_rooms: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Test that the router agent is configured to join all rooms from agents and teams."""
 
     # Mock resolve_room_aliases to return the same aliases (no resolution)
@@ -62,7 +66,7 @@ async def test_router_gets_all_configured_rooms(config_with_rooms: Config, monke
     )
 
     # Create the router bot
-    router_bot = create_bot_for_entity(ROUTER_AGENT_NAME, router_user, config_with_rooms, Path(TEST_TMP_DIR))
+    router_bot = create_bot_for_entity(ROUTER_AGENT_NAME, router_user, config_with_rooms, tmp_path)
 
     # Check that the router has all rooms
     expected_rooms = {"room1", "room2", "room3", "room4"}
@@ -71,7 +75,11 @@ async def test_router_gets_all_configured_rooms(config_with_rooms: Config, monke
 
 
 @pytest.mark.asyncio
-async def test_router_joins_rooms_on_start(config_with_rooms: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_router_joins_rooms_on_start(
+    config_with_rooms: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Test that the router actually joins all configured rooms when started."""
     # Track which rooms were joined
     joined_rooms: list[str] = []
@@ -103,7 +111,7 @@ async def test_router_joins_rooms_on_start(config_with_rooms: Config, monkeypatc
     )
 
     # Create and configure the router bot
-    router_bot = create_bot_for_entity(ROUTER_AGENT_NAME, router_user, config_with_rooms, Path(TEST_TMP_DIR))
+    router_bot = create_bot_for_entity(ROUTER_AGENT_NAME, router_user, config_with_rooms, tmp_path)
 
     # Mock the client
     mock_client = AsyncMock()
@@ -124,6 +132,7 @@ async def test_router_joins_rooms_on_start(config_with_rooms: Config, monkeypatc
 async def test_orchestrator_creates_router_with_all_rooms(
     config_with_rooms: Config,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that the orchestrator properly initializes the router with all rooms."""
 
@@ -171,7 +180,7 @@ async def test_orchestrator_creates_router_with_all_rooms(
     monkeypatch.setattr("mindroom.config.Config.from_yaml", mock_load_config)
 
     # Create orchestrator
-    orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
+    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
     # Initialize (creates all bots)
     await orchestrator.initialize()
@@ -187,7 +196,7 @@ async def test_orchestrator_creates_router_with_all_rooms(
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for router room updates
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Test that the router updates its room list when config changes."""
     # Initial config with some rooms
     initial_config = Config(
@@ -262,7 +271,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("mindroom.bot.TeamBot.join_configured_rooms", AsyncMock())
     monkeypatch.setattr("mindroom.bot.TeamBot.leave_unconfigured_rooms", AsyncMock())
 
-    orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
+    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
     await orchestrator.initialize()
 
