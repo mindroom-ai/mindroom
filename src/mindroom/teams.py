@@ -10,7 +10,9 @@ from agno.models.message import Message
 from agno.run.response import (
     IntermediateRunResponseContentEvent,
     RunResponse,
-    RunResponseContentEvent,
+)
+from agno.run.response import (
+    RunResponseContentEvent as AgentRunResponseContentEvent,
 )
 from agno.run.team import (
     RunResponseContentEvent as TeamRunResponseContentEvent,
@@ -625,11 +627,11 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
     async for event in raw_stream:
         # Log all events to understand what we're receiving
-        if isinstance(event, (RunResponseContentEvent, IntermediateRunResponseContentEvent)):
+        if isinstance(event, (AgentRunResponseContentEvent, IntermediateRunResponseContentEvent)):
             # Log all attributes of the event to see what we have
             attrs = [attr for attr in dir(event) if not attr.startswith("_")]
             logger.debug(
-                f"RunResponseContentEvent attributes: {attrs}, "
+                f"AgentRunResponseContentEvent attributes: {attrs}, "
                 f"agent_id={getattr(event, 'agent_id', 'N/A')}, "
                 f"agent_name={getattr(event, 'agent_name', 'N/A')}, "
                 f"content={str(getattr(event, 'content', ''))[:50]}...",
@@ -651,7 +653,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 return
             logger.warning(f"Unexpected RunResponse in team stream: {content[:100]}")
             consensus += content
-        elif isinstance(event, (RunResponseContentEvent, IntermediateRunResponseContentEvent)):
+        elif isinstance(event, (AgentRunResponseContentEvent, IntermediateRunResponseContentEvent)):
             # Individual agent responses within the team
             agent_display_name = getattr(event, "agent_name", None)
             content = str(event.content or "")
