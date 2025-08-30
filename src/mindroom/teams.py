@@ -625,12 +625,15 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
     async for event in raw_stream:
         # Log all events to understand what we're receiving
-        logger.debug(
-            f"Team stream event: type={type(event).__name__}, "
-            f"has_agent_name={hasattr(event, 'agent_name')}, "
-            f"agent_name={getattr(event, 'agent_name', 'N/A')}, "
-            f"has_content={hasattr(event, 'content')}",
-        )
+        if isinstance(event, (RunResponseContentEvent, IntermediateRunResponseContentEvent)):
+            # Log all attributes of the event to see what we have
+            attrs = [attr for attr in dir(event) if not attr.startswith("_")]
+            logger.debug(
+                f"RunResponseContentEvent attributes: {attrs}, "
+                f"agent_id={getattr(event, 'agent_id', 'N/A')}, "
+                f"agent_name={getattr(event, 'agent_name', 'N/A')}, "
+                f"content={str(getattr(event, 'content', ''))[:50]}...",
+            )
 
         # Team consensus chunk from final response
         if isinstance(event, TeamRunResponse):
