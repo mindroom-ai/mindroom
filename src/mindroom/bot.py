@@ -1032,6 +1032,30 @@ class AgentBot:
             thread_history,
         )
         if not suggested_agent:
+            # Send error message when routing fails
+            error_text = "⚠️ I couldn't determine which agent should help with this. Please try mentioning an agent directly with @ or rephrase your request."
+
+            event_info = EventInfo.from_event(event.source)
+            thread_event_id = event_info.thread_id or event_info.safe_thread_root or event.event_id
+
+            latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+                self.client,
+                room.room_id,
+                thread_event_id,
+                event.event_id,
+            )
+
+            content = format_message_with_mentions(
+                self.config,
+                error_text,
+                sender_domain=self.matrix_id.domain,
+                thread_event_id=thread_event_id,
+                reply_to_event_id=event.event_id,
+                latest_thread_event_id=latest_thread_event_id,
+            )
+
+            await send_message(self.client, room.room_id, content)
+            self.logger.warning("Router failed to determine agent, sent error message")
             return
 
         # Router mentions the suggested agent and asks them to help
