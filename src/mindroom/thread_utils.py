@@ -230,6 +230,36 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
     return mentioned_agents
 
 
+def is_authorized_sender(sender_id: str, config: Config) -> bool:
+    """Check if a sender is authorized to interact with agents.
+
+    Args:
+        sender_id: Matrix ID of the message sender
+        config: Application configuration
+
+    Returns:
+        True if the sender is authorized, False otherwise
+
+    """
+    # Always allow mindroom_user on the current domain
+    mindroom_user_id = f"@mindroom_user:{config.domain}"
+    if sender_id == mindroom_user_id:
+        return True
+
+    # Check if sender is an agent or team
+    agent_name = extract_agent_name(sender_id, config)
+    if agent_name:
+        # Agent is either in config.agents, config.teams, or is the router
+        return agent_name in config.agents or agent_name in config.teams or agent_name == ROUTER_AGENT_NAME
+
+    # If no authorized_users configured, only mindroom_user is allowed (already checked above)
+    if not config.authorized_users:
+        return False
+
+    # Check if sender is in the authorized users list
+    return sender_id in config.authorized_users
+
+
 def should_agent_respond(
     agent_name: str,
     am_i_mentioned: bool,

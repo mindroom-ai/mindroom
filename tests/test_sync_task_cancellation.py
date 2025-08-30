@@ -169,6 +169,7 @@ async def test_orchestrator_update_config_cancels_old_tasks() -> None:
         new_config = MagicMock(spec=Config)
         new_config.agents = {"agent1": MagicMock()}
         new_config.teams = {}
+        new_config.authorized_users = []  # Add this for the logging
         mock_from_yaml.return_value = new_config
 
         # Agent1 needs to be restarted

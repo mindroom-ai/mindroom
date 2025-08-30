@@ -358,3 +358,5 @@ voice:
   intelligence:
     model: default  # Model for command recognition
     confidence_threshold: 0.7
+
+authorized_users: []

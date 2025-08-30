@@ -84,6 +84,7 @@ from .thread_utils import (
     get_available_agents_in_room,
     get_configured_agents_for_room,
     has_user_responded_after_message,
+    is_authorized_sender,
     should_agent_respond,
 )
 
@@ -531,6 +532,16 @@ class AgentBot:
         if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
             return
 
+        # Check if sender is authorized to interact with agents
+        is_authorized = is_authorized_sender(event.sender, self.config)
+        self.logger.debug(
+            f"Authorization check for {event.sender}: authorized={is_authorized}, "
+            f"authorized_users={self.config.authorized_users}",
+        )
+        if not is_authorized:
+            self.logger.debug(f"Ignoring message from unauthorized sender: {event.sender}")
+            return
+
         # We only receive events from rooms we're in - no need to check access
         _is_dm_room = await is_dm_room(self.client, room.room_id)
 
@@ -715,6 +726,12 @@ class AgentBot:
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
         assert self.client is not None
+
+        # Check if sender is authorized to interact with agents
+        if not is_authorized_sender(event.sender, self.config):
+            self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
+            return
+
         result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
 
         if result:
@@ -775,6 +792,11 @@ class AgentBot:
 
         # Don't process our own voice messages
         if event.sender == self.matrix_id.full_id:
+            return
+
+        # Check if sender is authorized to interact with agents
+        if not is_authorized_sender(event.sender, self.config):
+            self.logger.debug(f"Ignoring voice message from unauthorized sender: {event.sender}")
             return
 
         # Check if we've already responded to this voice message (e.g., after restart)
@@ -1590,21 +1612,25 @@ class MultiAgentOrchestrator:
         existing_entities = set(self.agent_bots.keys())
         new_entities = all_new_entities - existing_entities
 
+        # Always update the orchestrator's config first
+        self.config = new_config
+
+        # Always update config for ALL existing bots (even those being restarted will get new config when recreated)
+        logger.info(
+            f"Updating config. New authorized_users: {new_config.authorized_users}",
+        )
+        for entity_name, bot in self.agent_bots.items():
+            if entity_name not in entities_to_restart:
+                bot.config = new_config
+                logger.debug(f"Updated config for {entity_name}")
+
         if not entities_to_restart and not new_entities:
-            self.config = new_config
+            # No entities to restart or create, we're done
             return False
 
         # Stop entities that need restarting
         if entities_to_restart:
             await _stop_entities(entities_to_restart, self.agent_bots, self._sync_tasks)
-
-        # Update config
-        self.config = new_config
-
-        # Update config for all existing bots that aren't being restarted
-        for entity_name, bot in self.agent_bots.items():
-            if entity_name not in entities_to_restart:
-                bot.config = new_config
 
         # Recreate entities that need restarting using self-management
         for entity_name in entities_to_restart:
