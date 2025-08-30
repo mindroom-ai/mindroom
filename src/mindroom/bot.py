@@ -82,6 +82,7 @@ from .thread_utils import (
     get_available_agents_in_room,
     get_configured_agents_for_room,
     has_user_responded_after_message,
+    is_authorized_sender,
     should_agent_respond,
 )
 
@@ -402,6 +403,11 @@ class AgentBot:
         if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
             return
 
+        # Check if sender is authorized to interact with agents
+        if not is_authorized_sender(event.sender, self.config):
+            self.logger.debug(f"Ignoring message from unauthorized sender: {event.sender}")
+            return
+
         # We only receive events from rooms we're in - no need to check access
         _is_dm_room = await is_dm_room(self.client, room.room_id)
 
@@ -584,6 +590,12 @@ class AgentBot:
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
         assert self.client is not None
+
+        # Check if sender is authorized to interact with agents
+        if not is_authorized_sender(event.sender, self.config):
+            self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
+            return
+
         result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
 
         if result:
@@ -644,6 +656,11 @@ class AgentBot:
 
         # Don't process our own voice messages
         if event.sender == self.matrix_id.full_id:
+            return
+
+        # Check if sender is authorized to interact with agents
+        if not is_authorized_sender(event.sender, self.config):
+            self.logger.debug(f"Ignoring voice message from unauthorized sender: {event.sender}")
             return
 
         # Check if we've already responded to this voice message (e.g., after restart)

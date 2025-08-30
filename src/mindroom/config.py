@@ -144,6 +144,10 @@ class Config(BaseModel):
         default="UTC",
         description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
     )
+    authorized_users: list[str] = Field(
+        default_factory=list,
+        description="List of authorized Matrix user IDs that agents will respond to (e.g., '@user:example.com'). If empty, agents respond to everyone.",
+    )
 
     @cached_property
     def domain(self) -> str:

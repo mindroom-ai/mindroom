@@ -1,0 +1,35 @@
+# Example configuration showing how to restrict agents to only respond to authorized users
+#
+# Add this 'authorized_users' section to your config.yaml to enable authorization
+
+# List of Matrix user IDs that agents will respond to
+# If this list is empty or not provided, agents will respond to everyone (backward compatible)
+authorized_users:
+  - "@alice:example.com"       # Main user
+  - "@bob:example.com"         # Another authorized user
+  - "@admin:matrix.org"        # An admin from another server
+
+# Notes:
+# - Agents and teams from the config are always allowed to interact with each other
+# - The router agent is always allowed
+# - User IDs must be full Matrix IDs in the format @username:domain
+# - This restriction applies to all message types (text, voice, reactions)
+
+# The rest of your config.yaml remains the same
+agents:
+  general:
+    display_name: GeneralAgent
+    role: General purpose assistant
+    rooms:
+      - lobby
+    # ... etc
+
+teams:
+  code_team:
+    display_name: Code Team
+    agents:
+      - code
+      - analyst
+    rooms:
+      - dev
+    # ... etc
