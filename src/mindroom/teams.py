@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from .ai import get_model_instance
 from .constants import ROUTER_AGENT_NAME
+from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
 from .thread_utils import get_available_agents_in_room
@@ -541,29 +542,35 @@ async def team_response(
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
-    response = await team.arun(prompt)
+    try:
+        response = await team.arun(prompt)
 
-    if isinstance(response, TeamRunResponse):
-        if response.member_responses:
-            logger.debug(f"Team had {len(response.member_responses)} member responses")
+        if isinstance(response, TeamRunResponse):
+            if response.member_responses:
+                logger.debug(f"Team had {len(response.member_responses)} member responses")
 
-        logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
+            logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
 
-        parts = format_team_response(response)
-        team_response = "\n\n".join(parts) if parts else "No team response generated."
-    else:
-        logger.warning(f"Unexpected response type: {type(response)}", response=response)
-        team_response = str(response)
+            parts = format_team_response(response)
+            team_response = "\n\n".join(parts) if parts else "No team response generated."
+        else:
+            logger.warning(f"Unexpected response type: {type(response)}", response=response)
+            team_response = str(response)
 
-    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:MAX_LOG_MESSAGE_LENGTH]}")
-    if len(team_response) > MAX_LOG_MESSAGE_LENGTH:
-        logger.debug(f"TEAM RESPONSE (full): {team_response}")
+        logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:MAX_LOG_MESSAGE_LENGTH]}")
+        if len(team_response) > MAX_LOG_MESSAGE_LENGTH:
+            logger.debug(f"TEAM RESPONSE (full): {team_response}")
 
-    # Don't use @ mentions as that would trigger the agents again
-    agent_names = [str(a.name) for a in agents if a.name]
-    team_header = format_team_header(agent_names)
+        # Don't use @ mentions as that would trigger the agents again
+        agent_names = [str(a.name) for a in agents if a.name]
+        team_header = format_team_header(agent_names)
 
-    return team_header + team_response
+        return team_header + team_response
+    except Exception as e:
+        logger.exception(f"Error in team response with agents {agent_list}")
+        # Return user-friendly error message
+        team_name = f"Team ({agent_list})"
+        return get_user_friendly_error_message(e, team_name)
 
 
 async def team_response_stream_raw(
@@ -597,7 +604,17 @@ async def team_response_stream_raw(
     for agent in agents:
         logger.debug(f"Team member: {agent.name}")
 
-    return await team.arun(prompt, stream=True)
+    try:
+        return await team.arun(prompt, stream=True)
+    except Exception as e:
+        logger.exception(f"Error in team streaming with agents {agent_names}")
+        team_name = f"Team ({', '.join(agent_names)})"
+        error_message = get_user_friendly_error_message(e, team_name)
+
+        async def _error() -> AsyncIterator[RunResponse]:
+            yield RunResponse(content=error_message)
+
+        return _error()
 
 
 async def team_response_stream(  # noqa: C901, PLR0912, PLR0915

@@ -24,6 +24,7 @@ from agno.run.response import (
 from .agents import create_agent
 from .constants import ENABLE_AI_CACHE
 from .credentials import get_credentials_manager
+from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .memory import build_memory_enhanced_prompt
 
@@ -292,7 +293,8 @@ async def ai_response(
             f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}",
         )
         logger.exception(f"Traceback:\n{traceback.format_exc()}")
-        return f"Sorry, I encountered an error trying to generate a response: {e}"
+        # Return user-friendly error message that will be sent to the user
+        return get_user_friendly_error_message(e, agent_name)
     else:
         return response_text
 
@@ -371,7 +373,7 @@ async def stream_agent_response(  # noqa: C901
 
     except Exception as e:
         logger.exception("Error generating streaming AI response")
-        error_message = f"Sorry, I encountered an error trying to generate a response: {e}"
+        error_message = get_user_friendly_error_message(e, agent_name)
         yield error_message
         return
 

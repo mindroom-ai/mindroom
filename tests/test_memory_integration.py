@@ -125,9 +125,10 @@ class TestMemoryIntegration:
                 config=config,
             )
 
-            # Should return error message
-            assert "Sorry, I encountered an error" in response
-            assert "Model error" in response
+            # Should return user-friendly error message
+            assert "Unexpected Error" in response or "Configuration Error" in response
+            # The error has been improved to be more user-friendly,
+            # so we don't expose the raw error details anymore
 
     @pytest.mark.asyncio
     async def test_memory_persistence_across_calls(self, tmp_path: Path, config: Config) -> None:
