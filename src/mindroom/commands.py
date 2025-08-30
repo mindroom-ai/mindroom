@@ -40,6 +40,27 @@ COMMAND_DOCS = {
 }
 
 
+def _get_command_entries(format_code: bool = False) -> list[str]:
+    """Get command entries as a list of formatted strings.
+
+    Args:
+        format_code: If True, wrap commands in backticks for markdown
+
+    Returns:
+        List of formatted command strings
+
+    """
+    entries = []
+    for cmd_type in CommandType:
+        if cmd_type in COMMAND_DOCS and cmd_type != CommandType.UNKNOWN:
+            syntax, description = COMMAND_DOCS[cmd_type]
+            if format_code:
+                entries.append(f"- `{syntax}` - {description}")
+            else:
+                entries.append(f"- {syntax} - {description}")
+    return entries
+
+
 def get_command_list() -> str:
     """Get a formatted list of all available commands.
 
@@ -47,11 +68,7 @@ def get_command_list() -> str:
         Formatted string with all commands and their descriptions
 
     """
-    lines = ["Available commands:"]
-    for cmd_type in CommandType:
-        if cmd_type in COMMAND_DOCS:
-            syntax, description = COMMAND_DOCS[cmd_type]
-            lines.append(f"- {syntax} - {description}")
+    lines = ["Available commands:", *_get_command_entries(format_code=False)]
     return "\n".join(lines)
 
 
@@ -278,17 +295,15 @@ Pin it to keep it visible in the room.
 
 Note: Widget support requires Element Desktop or self-hosted Element Web."""
 
-    # General help
-    return """**Available Commands**
+    # General help - dynamically generated from COMMAND_DOCS
+    commands_text = "\n".join(_get_command_entries(format_code=True))
 
-- `!schedule <time|condition> <message>` - Schedule time-based or event-driven workflows
-- `!list_schedules` - List scheduled tasks
-- `!cancel_schedule <id|all>` - Cancel a scheduled task or all tasks
-- `!config <operation>` - View and modify MindRoom configuration
-- `!widget [url]` - Add configuration widget to the room
-- `!help [topic]` - Show this help or help for a specific command
+    return f"""**Available Commands**
 
-**New Scheduling Features:**
+{commands_text}
+
+**Scheduling Features:**
+- Time-based and event-driven workflows
 - Recurring tasks with cron-style scheduling (daily, weekly, hourly)
 - Agent workflows - mention agents to have them collaborate on scheduled tasks
 - Natural language time parsing - "tomorrow", "in 5 minutes", "every Monday"

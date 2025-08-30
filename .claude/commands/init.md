@@ -73,7 +73,7 @@ Read and understand the MindRoom project structure:
 4. **Architecture**
    - Multi-agent system with separate Matrix accounts
    - Agents respond in threads, not main room
-   - Mindroom's custom commands in chat are prefixed with "!" (e.g., "!invite")
+   - Mindroom's custom commands in chat are prefixed with "!" (e.g., "!help", "!schedule")
    - Asyncio for concurrent operations
    - Per-thread memory and conversation tracking
    - Dual memory system: agent memory + room memory

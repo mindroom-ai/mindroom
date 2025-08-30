@@ -2953,6 +2953,15 @@ wheels = [
 ]
 
 [[package]]
+name = "markdown-code-runner"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/34/91/6b7030f873b0c49f38131c7a5ac9432238cf1e1cd47104c05b07cf5c32ed/markdown_code_runner-2.4.0.tar.gz", hash = "sha256:7d6229c437f0c71e5c0442585663af4bfe4beacddf884a64ea8c09fd5dbc31dd", size = 19072, upload-time = "2025-08-23T19:07:41.78Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/98/3c/8857763070aa0f39591b012f92ab40bd5fe906914085e925eb117e28f306/markdown_code_runner-2.4.0-py3-none-any.whl", hash = "sha256:5be62e75ab35188b37f2d440c19b6683df68615ea24bed4955d95a745e56b483", size = 12292, upload-time = "2025-08-23T19:07:40.972Z" },
+]
+
+[[package]]
 name = "markdown-it-py"
 version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3263,6 +3272,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "aioresponses" },
+    { name = "markdown-code-runner" },
     { name = "matty" },
     { name = "mypy" },
     { name = "pre-commit" },
@@ -3386,6 +3396,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aioresponses", specifier = ">=0.7.8" },
+    { name = "markdown-code-runner", specifier = ">=2.4.0" },
     { name = "matty", specifier = ">=0.3" },
     { name = "mypy", specifier = ">=1.17" },
     { name = "pre-commit", specifier = ">=4.2" },
