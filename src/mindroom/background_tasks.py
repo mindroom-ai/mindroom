@@ -50,12 +50,12 @@ def create_background_task(
             pass
         except Exception as e:
             task_name = task.get_name() if hasattr(task, "get_name") else "unknown"
-            logger.exception("Background task '%s' failed", task_name, error=str(e))
+            logger.exception("Background task failed", task_name=task_name, error=str(e))
             if error_handler:
                 try:
                     error_handler(e)
                 except Exception as handler_error:
-                    logger.exception(f"Error handler for task '{task_name}' failed", error=str(handler_error))
+                    logger.exception("Error handler for task failed", task_name=task_name, error=str(handler_error))
 
     task.add_done_callback(_task_done_callback)
     return task

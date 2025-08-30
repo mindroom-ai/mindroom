@@ -1159,11 +1159,14 @@ class AgentBot:
             self.config,
             thread_history,
         )
-        if not suggested_agent:
-            return
 
-        # Router mentions the suggested agent and asks them to help
-        response_text = f"@{suggested_agent} could you help with this?"
+        if not suggested_agent:
+            # Send error message when routing fails
+            response_text = "⚠️ I couldn't determine which agent should help with this. Please try mentioning an agent directly with @ or rephrase your request."
+            self.logger.warning("Router failed to determine agent")
+        else:
+            # Router mentions the suggested agent and asks them to help
+            response_text = f"@{suggested_agent} could you help with this?"
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
