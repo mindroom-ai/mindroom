@@ -185,8 +185,8 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
         config_path_str = args[0]
         try:
             value = get_nested_value(config_dict, config_path_str)
-        except KeyError as e:
-            return f"❌ {e}"
+        except (KeyError, IndexError) as e:
+            return f"❌ Configuration path not found: `{config_path_str}`\nError: {e}"
         else:
             formatted = format_value(value)
             return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{formatted}\n```"
@@ -209,8 +209,8 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
 
             # Save to file
             new_config.save_to_yaml(path)
-        except KeyError as e:
-            return f"❌ {e}"
+        except (KeyError, IndexError) as e:
+            return f"❌ Configuration path error: `{config_path_str}`\nError: {e}"
         except ValidationError as e:
             # Validation failed - explain why
             errors = []

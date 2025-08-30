@@ -273,6 +273,30 @@ class TestConfigCommandHandling:
         try:
             response = await handle_config_command("get agents.nonexistent", config_path)
             assert "❌" in response
+            assert "not found" in response
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_get_index_out_of_range(self) -> None:
+        """Test handling config get with out of range array index."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "agents": {
+                    "test_agent": {
+                        "display_name": "Test Agent",
+                        "role": "Testing",
+                        "tools": ["tool1"],
+                    },
+                },
+                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response = await handle_config_command("get agents.test_agent.tools.5", config_path)
+            assert "❌" in response
+            assert "not found" in response
         finally:
             config_path.unlink()
 
