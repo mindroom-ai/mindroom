@@ -358,3 +358,6 @@ voice:
   intelligence:
     model: default  # Model for command recognition
     confidence_threshold: 0.7
+
+authorized_users:
+- '@test:m-test-4.mindroom.chat'
