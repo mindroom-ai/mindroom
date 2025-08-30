@@ -12,7 +12,6 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
 from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse
 
 from .conftest import TEST_PASSWORD
@@ -93,7 +92,6 @@ class TestStreamingBehavior:
             config=config,
         )
         helper_bot.client = AsyncMock()
-        helper_bot.response_tracker = ResponseTracker(helper_bot.agent_name, base_path=tmp_path)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -111,7 +109,6 @@ class TestStreamingBehavior:
             config=config,
         )
         calc_bot.client = AsyncMock()
-        calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -234,7 +231,6 @@ class TestStreamingBehavior:
             config=config,
         )
         calc_bot.client = AsyncMock()
-        calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()

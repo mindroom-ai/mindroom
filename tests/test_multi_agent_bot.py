@@ -16,7 +16,6 @@ from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config, ModelConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
 
 from .conftest import TEST_PASSWORD
 
@@ -301,9 +300,6 @@ class TestAgentBot:
         mock_send_response.__class__ = nio.RoomSendResponse
         bot.client.room_send.return_value = mock_send_response
 
-        # Initialize response tracker with isolated path
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
 
@@ -356,8 +352,6 @@ class TestAgentBot:
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
-
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
         mock_room = MagicMock()
         mock_event = MagicMock()
@@ -423,9 +417,6 @@ class TestAgentBot:
         mock_send_response = MagicMock()
         mock_send_response.__class__ = nio.RoomSendResponse
         bot.client.room_send.return_value = mock_send_response
-
-        # Initialize response tracker with isolated path
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
@@ -608,8 +599,6 @@ class TestAgentBot:
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
-        # Initialize response tracker with isolated path
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
         # Mark an event as already responded
         bot.response_tracker.mark_responded("event123")

@@ -13,7 +13,6 @@ from aioresponses import aioresponses
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
 
 from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
@@ -245,10 +244,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         mock_team_arun.return_value = "Team response"
 
         await bot.start()
-
-        # Initialize response tracker
-
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
         # Test 1: Thread with only this agent - should respond without mention
         message_event = nio.RoomMessageText(

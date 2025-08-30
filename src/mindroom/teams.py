@@ -307,6 +307,7 @@ Return the mode and a one-sentence reason why."""
 
 
 async def decide_team_formation(
+    agent: MatrixID,
     tagged_agents: list[MatrixID],
     agents_in_thread: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
@@ -320,6 +321,7 @@ async def decide_team_formation(
     """Determine if a team should form and with which mode.
 
     Args:
+        agent: The agent calling this function
         tagged_agents: Agents explicitly mentioned in the current message
         agents_in_thread: Agents that have participated in the thread
         all_mentioned_in_thread: All agents ever mentioned in the thread
@@ -367,7 +369,9 @@ async def decide_team_formation(
             mode=TeamMode.COLLABORATE,
         )
 
-    if use_ai_decision and message and config:
+    is_first_agent = min(team_agents, key=lambda x: x.username) == agent
+    # Only do this AI call for the first agent to avoid duplication
+    if use_ai_decision and message and config and is_first_agent:
         agent_names = [mid.agent_name(config) or mid.username for mid in team_agents]
         mode = await select_team_mode(message, agent_names, config)
     else:
@@ -377,11 +381,7 @@ async def decide_team_formation(
         mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
         logger.info(f"Using hardcoded mode selection: {mode.value}")
 
-    return TeamFormationDecision(
-        should_form_team=True,
-        agents=team_agents,
-        mode=mode,
-    )
+    return TeamFormationDecision(should_form_team=True, agents=team_agents, mode=mode)
 
 
 def _build_prompt_with_context(

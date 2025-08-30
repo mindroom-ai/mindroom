@@ -15,7 +15,6 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
 
 from .conftest import TEST_PASSWORD
 
@@ -88,7 +87,6 @@ class TestRoutingIntegration:
         # Mock clients
         for bot in [research_bot, news_bot]:
             bot.client = AsyncMock()
-            bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
 
             # Mock orchestrator
             mock_orchestrator = MagicMock()

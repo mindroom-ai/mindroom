@@ -11,7 +11,6 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
 
 from .conftest import TEST_PASSWORD, TEST_TMP_DIR
 
@@ -51,7 +50,6 @@ async def test_unknown_command_in_main_room() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
@@ -145,7 +143,6 @@ async def test_unknown_command_in_thread() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
@@ -261,7 +258,6 @@ async def test_unknown_command_with_reply() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
