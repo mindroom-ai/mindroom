@@ -60,14 +60,20 @@ def mock_config_with_restrictions() -> Config:
     )
 
 
-def test_no_restrictions_allows_everyone(mock_config_no_restrictions: Config) -> None:
+def test_no_restrictions_allows_everyone(mock_config_no_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that empty authorized_users list allows everyone (backward compatibility)."""
+    # Mock the domain property
+    monkeypatch.setattr(mock_config_no_restrictions.__class__, "domain", property(lambda _: "example.com"))
+
     # Random users should be allowed
     assert is_authorized_sender("@random_user:example.com", mock_config_no_restrictions)
     assert is_authorized_sender("@another_user:different.com", mock_config_no_restrictions)
 
     # Agents should also be allowed
     assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_no_restrictions)
+
+    # mindroom_user should always be allowed
+    assert is_authorized_sender("@mindroom_user:example.com", mock_config_no_restrictions)
 
 
 def test_authorized_users_allowed(mock_config_with_restrictions: Config) -> None:
@@ -112,6 +118,18 @@ def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:
 
     # Router should always be allowed
     assert is_authorized_sender(f"@mindroom_{ROUTER_AGENT_NAME}:example.com", mock_config_with_restrictions)
+
+
+def test_mindroom_user_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that mindroom_user on the current domain is always allowed."""
+    # Mock the domain property
+    monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
+
+    # mindroom_user should always be allowed, even with restrictions
+    assert is_authorized_sender("@mindroom_user:example.com", mock_config_with_restrictions)
+
+    # mindroom_user from a different domain should NOT be allowed
+    assert not is_authorized_sender("@mindroom_user:different.com", mock_config_with_restrictions)
 
 
 def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config) -> None:

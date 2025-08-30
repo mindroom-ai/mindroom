@@ -241,6 +241,11 @@ def is_authorized_sender(sender_id: str, config: Config) -> bool:
         True if the sender is authorized, False otherwise
 
     """
+    # Always allow mindroom_user on the current domain
+    mindroom_user_id = f"@mindroom_user:{config.domain}"
+    if sender_id == mindroom_user_id:
+        return True
+
     # If no authorized_users configured, allow everyone (backward compatibility)
     if not config.authorized_users:
         return True
