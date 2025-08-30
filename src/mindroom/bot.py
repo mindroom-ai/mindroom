@@ -101,21 +101,16 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
         agent_config = config.agents[agent_name]
-        desc_parts = []
+        # Just return the role if available, skip tools in description
         if agent_config.role:
-            desc_parts.append(agent_config.role)
-        if agent_config.tools:
-            tools_str = ", ".join(agent_config.tools[:3])
-            if len(agent_config.tools) > 3:
-                tools_str += f" +{len(agent_config.tools) - 3} more"
-            desc_parts.append(f"Tools: {tools_str}")
-        return " | ".join(desc_parts) if desc_parts else ""
+            return agent_config.role
+        return ""
 
     if agent_name in config.teams:
         team_config = config.teams[agent_name]
         team_desc = f"Team of {len(team_config.agents)} agents"
         if team_config.role:
-            return f"{team_config.role} | {team_desc}"
+            return f"{team_config.role} (team)"
         return team_desc
 
     return ""
@@ -143,25 +138,27 @@ def _generate_welcome_message(room_id: str, config: Config) -> str:
     # Create welcome message
     welcome_msg = (
         "🎉 **Welcome to MindRoom!**\n\n"
-        "I'm your routing assistant, here to help coordinate our team of specialized AI agents.\n\n"
+        "I'm your routing assistant, here to help coordinate our team of specialized AI agents. 🤖\n\n"
     )
 
     if agent_list:
-        welcome_msg += "**Available agents in this room:**\n"
+        welcome_msg += "🧠 **Available agents in this room:**\n"
         welcome_msg += "\n".join(agent_list)
         welcome_msg += "\n\n"
 
     welcome_msg += (
-        "**How to interact:**\n"
+        "💬 **How to interact:**\n"
         "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
         "• Use `!help` to see available commands\n"
         "• Agents respond in threads to keep conversations organized\n"
-        "• Multiple agents can collaborate when you mention them together\n\n"
-        "**Quick commands:**\n"
+        "• Multiple agents can collaborate when you mention them together\n"
+        "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
+        "⚡ **Quick commands:**\n"
+        "• `!hi` - Show this welcome message again\n"
         "• `!widget` - Add configuration widget to this room\n"
         "• `!schedule <time> <message>` - Schedule tasks and reminders\n"
         "• `!help [topic]` - Get detailed help\n\n"
-        "Feel free to ask any agent for help or start a conversation!"
+        "✨ Feel free to ask any agent for help or start a conversation!"
     )
 
     return welcome_msg
