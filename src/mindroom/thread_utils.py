@@ -246,21 +246,18 @@ def is_authorized_sender(sender_id: str, config: Config) -> bool:
     if sender_id == mindroom_user_id:
         return True
 
-    # If no authorized_users configured, allow everyone (backward compatibility)
-    if not config.authorized_users:
-        return True
-
-    # Check if sender is in the authorized users list
-    if sender_id in config.authorized_users:
-        return True
-
     # Check if sender is an agent or team
     agent_name = extract_agent_name(sender_id, config)
     if agent_name:
         # Agent is either in config.agents, config.teams, or is the router
         return agent_name in config.agents or agent_name in config.teams or agent_name == ROUTER_AGENT_NAME
 
-    return False
+    # If no authorized_users configured, only mindroom_user is allowed (already checked above)
+    if not config.authorized_users:
+        return False
+
+    # Check if sender is in the authorized users list
+    return sender_id in config.authorized_users
 
 
 def should_agent_respond(

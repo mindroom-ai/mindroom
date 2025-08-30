@@ -11,7 +11,7 @@ from mindroom.thread_utils import is_authorized_sender
 
 @pytest.fixture
 def mock_config_no_restrictions() -> Config:
-    """Config with no authorization restrictions (backward compatible)."""
+    """Config with no authorized_users list (defaults to only mindroom_user)."""
     return Config(
         agents={
             "assistant": {
@@ -60,16 +60,19 @@ def mock_config_with_restrictions() -> Config:
     )
 
 
-def test_no_restrictions_allows_everyone(mock_config_no_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that empty authorized_users list allows everyone (backward compatibility)."""
+def test_no_restrictions_only_allows_mindroom_user(
+    mock_config_no_restrictions: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test that empty authorized_users list only allows mindroom_user and agents."""
     # Mock the domain property
     monkeypatch.setattr(mock_config_no_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
-    # Random users should be allowed
-    assert is_authorized_sender("@random_user:example.com", mock_config_no_restrictions)
-    assert is_authorized_sender("@another_user:different.com", mock_config_no_restrictions)
+    # Random users should NOT be allowed
+    assert not is_authorized_sender("@random_user:example.com", mock_config_no_restrictions)
+    assert not is_authorized_sender("@another_user:different.com", mock_config_no_restrictions)
 
-    # Agents should also be allowed
+    # Agents should still be allowed
     assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_no_restrictions)
 
     # mindroom_user should always be allowed

@@ -146,7 +146,7 @@ class Config(BaseModel):
     )
     authorized_users: list[str] = Field(
         default_factory=list,
-        description="List of authorized Matrix user IDs that agents will respond to (e.g., '@user:example.com'). If empty, agents respond to everyone.",
+        description="List of authorized Matrix user IDs that agents will respond to (e.g., '@user:example.com'). If empty, only @mindroom_user:{domain} can interact with agents.",
     )
 
     @cached_property

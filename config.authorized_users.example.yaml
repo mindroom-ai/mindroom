@@ -1,18 +1,19 @@
-# Example configuration showing how to restrict agents to only respond to authorized users
+# Example configuration showing how to control who can interact with agents
 #
-# Add this 'authorized_users' section to your config.yaml to enable authorization
+# Add this 'authorized_users' section to your config.yaml to allow additional users
 
 # List of Matrix user IDs that agents will respond to
-# If this list is empty or not provided, agents will respond to everyone (backward compatible)
+# If this list is empty or not provided, ONLY @mindroom_user:{current_domain} can interact with agents
 authorized_users:
-  - "@alice:example.com"       # Main user
+  - "@alice:example.com"       # Additional authorized user
   - "@bob:example.com"         # Another authorized user
   - "@admin:matrix.org"        # An admin from another server
 
 # Notes:
-# - @mindroom_user:{current_domain} is always allowed (the main MindRoom user account)
+# - @mindroom_user:{current_domain} is ALWAYS allowed (the main MindRoom user account)
 # - Agents and teams from the config are always allowed to interact with each other
 # - The router agent is always allowed
+# - If authorized_users is empty/not provided, ONLY mindroom_user can interact with agents
 # - User IDs must be full Matrix IDs in the format @username:domain
 # - This restriction applies to all message types (text, voice, reactions)
 
