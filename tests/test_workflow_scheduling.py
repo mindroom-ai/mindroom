@@ -205,6 +205,49 @@ class TestParseWorkflowSchedule:
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
 
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
+    async def test_parse_missing_fields_fallbacks(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
+        """Missing execute_at/cron_schedule fields get sensible defaults."""
+        mock_agent = AsyncMock()
+
+        # once without execute_at
+        resp_once = MagicMock()
+        resp_once.content = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=None,
+            message="Check",
+            description="Check later",
+        )
+
+        # cron without cron_schedule
+        resp_cron = MagicMock()
+        resp_cron.content = ScheduledWorkflow(
+            schedule_type="cron",
+            cron_schedule=None,
+            message="Daily",
+            description="Daily task",
+        )
+
+        # Alternate responses
+        mock_agent.arun.side_effect = [resp_once, resp_cron]
+        mock_agent_class.return_value = mock_agent
+
+        result_once = await parse_workflow_schedule("remind me later", mock_config, ["general"])
+        assert isinstance(result_once, ScheduledWorkflow)
+        assert result_once.schedule_type == "once"
+        assert result_once.execute_at is not None
+
+        result_cron = await parse_workflow_schedule("every day", mock_config, ["general"])
+        assert isinstance(result_cron, ScheduledWorkflow)
+        assert result_cron.schedule_type == "cron"
+        assert result_cron.cron_schedule is not None
+
 
 @pytest.mark.asyncio
 class TestExecuteScheduledWorkflow:
