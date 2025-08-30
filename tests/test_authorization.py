@@ -28,7 +28,7 @@ def mock_config_no_restrictions() -> Config:
                 "rooms": ["test_room"],
             },
         },
-        authorized_users=[],  # Empty list means allow everyone
+        authorized_users=[],  # Empty list means only mindroom_user allowed
     )
 
 
@@ -91,10 +91,10 @@ def test_unauthorized_users_blocked(mock_config_with_restrictions: Config) -> No
     assert not is_authorized_sender("@random_user:example.com", mock_config_with_restrictions)
 
 
-def test_agents_always_allowed(mock_config_with_restrictions: Config) -> None:
+def test_agents_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that configured agents are always allowed regardless of authorized_users."""
-    # Assuming the domain is example.com based on config
-    mock_config_with_restrictions._domain = "example.com"  # Set domain for testing
+    # Mock the domain property
+    monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
     # Configured agents should be allowed
     assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_with_restrictions)
@@ -104,9 +104,9 @@ def test_agents_always_allowed(mock_config_with_restrictions: Config) -> None:
     assert not is_authorized_sender("@mindroom_unknown:example.com", mock_config_with_restrictions)
 
 
-def test_teams_always_allowed(mock_config_with_restrictions: Config) -> None:
+def test_teams_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that configured teams are always allowed regardless of authorized_users."""
-    mock_config_with_restrictions._domain = "example.com"  # Set domain for testing
+    monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
     # Configured team should be allowed
     assert is_authorized_sender("@mindroom_test_team:example.com", mock_config_with_restrictions)
@@ -115,9 +115,9 @@ def test_teams_always_allowed(mock_config_with_restrictions: Config) -> None:
     assert not is_authorized_sender("@mindroom_unknown_team:example.com", mock_config_with_restrictions)
 
 
-def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:
+def test_router_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that the router agent is always allowed."""
-    mock_config_with_restrictions._domain = "example.com"  # Set domain for testing
+    monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
     # Router should always be allowed
     assert is_authorized_sender(f"@mindroom_{ROUTER_AGENT_NAME}:example.com", mock_config_with_restrictions)
@@ -135,9 +135,9 @@ def test_mindroom_user_always_allowed(mock_config_with_restrictions: Config, mon
     assert not is_authorized_sender("@mindroom_user:different.com", mock_config_with_restrictions)
 
 
-def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config) -> None:
+def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test various mixed authorization scenarios."""
-    mock_config_with_restrictions._domain = "example.com"
+    monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
     # Authorized users - allowed
     assert is_authorized_sender("@alice:example.com", mock_config_with_restrictions)
