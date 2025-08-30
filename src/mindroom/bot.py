@@ -101,16 +101,26 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
         agent_config = config.agents[agent_name]
-        # Just return the role if available, skip tools in description
+        desc_parts = []
+
+        # Add role first
         if agent_config.role:
-            return agent_config.role
-        return ""
+            desc_parts.append(agent_config.role)
+
+        # Add tools with better formatting
+        if agent_config.tools:
+            tools_str = ", ".join(agent_config.tools[:3])
+            if len(agent_config.tools) > 3:
+                tools_str += f" +{len(agent_config.tools) - 3} more"
+            desc_parts.append(f"(🔧 {tools_str})")
+
+        return " ".join(desc_parts) if desc_parts else ""
 
     if agent_name in config.teams:
         team_config = config.teams[agent_name]
         team_desc = f"Team of {len(team_config.agents)} agents"
         if team_config.role:
-            return f"{team_config.role} (team)"
+            return f"{team_config.role} ({team_desc})"
         return team_desc
 
     return ""
@@ -448,7 +458,7 @@ class AgentBot:
         # Check if room has any messages
         response = await self.client.room_messages(
             room_id,
-            limit=1,
+            limit=2,  # Get 2 messages to check if we already sent welcome
             message_filter={"types": ["m.room.message"]},
         )
 
@@ -457,17 +467,29 @@ class AgentBot:
             self.logger.error("Failed to check room messages", room_id=room_id, error=str(response))
             return
 
-        # Only send welcome message if room is empty
-        if response.chunk:
-            return
+        # Only send welcome message if room is empty or only has our own welcome message
+        if not response.chunk:
+            # Room is completely empty
+            self.logger.info("Room is empty, sending welcome message", room_id=room_id)
 
-        self.logger.info("Room is empty, sending welcome message", room_id=room_id)
-
-        # Generate and send the welcome message
-        welcome_msg = _generate_welcome_message(room_id, self.config)
-        message_content = build_message_content(welcome_msg)
-        await send_message(self.client, room_id, message_content)
-        self.logger.info("Welcome message sent", room_id=room_id)
+            # Generate and send the welcome message
+            welcome_msg = _generate_welcome_message(room_id, self.config)
+            message_content = build_message_content(welcome_msg)
+            await send_message(self.client, room_id, message_content)
+            self.logger.info("Welcome message sent", room_id=room_id)
+        elif len(response.chunk) == 1:
+            # Check if the only message is our welcome message
+            msg = response.chunk[0]
+            if (
+                hasattr(msg, "sender")
+                and msg.sender == self.agent_user.user_id
+                and hasattr(msg, "body")
+                and "Welcome to MindRoom" in msg.body
+            ):
+                self.logger.debug("Welcome message already sent", room_id=room_id)
+                return
+            # Otherwise, room has a different message, don't send welcome
+        # Room has other messages, don't send welcome
 
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
@@ -1175,8 +1197,13 @@ class AgentBot:
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
+    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901
         self.logger.info("Handling command", command_type=command.type.value)
+
+        # Check if we've already responded to this command to prevent duplicate responses on restart
+        if self.response_tracker.has_responded(event.event_id):
+            self.logger.debug("Already responded to command", event_id=event.event_id, command_type=command.type.value)
+            return
 
         event_info = EventInfo.from_event(event.source)
 
