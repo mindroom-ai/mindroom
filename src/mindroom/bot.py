@@ -109,7 +109,9 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
 
         # Add tools with better formatting
         if agent_config.tools:
-            tools_str = ", ".join(agent_config.tools[:3])
+            # Wrap each tool name in backticks
+            formatted_tools = [f"`{tool}`" for tool in agent_config.tools[:3]]
+            tools_str = ", ".join(formatted_tools)
             if len(agent_config.tools) > 3:
                 tools_str += f" +{len(agent_config.tools) - 3} more"
             desc_parts.append(f"(🔧 {tools_str})")
