@@ -48,6 +48,7 @@ from .matrix.mentions import format_message_with_mentions
 from .matrix.presence import should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
+from .matrix.typing import typing_indicator
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
 from .memory import store_conversation_memory
 from .response_tracker import ResponseTracker
@@ -486,27 +487,29 @@ class AgentBot:
             )
 
             if use_streaming:
-                # Streaming: returns formatted text chunks for live rendering
-                response_stream = team_response_stream(
-                    agent_ids=form_team.agents,
-                    message=event.body,
-                    orchestrator=self.orchestrator,
-                    mode=form_team.mode,
-                    thread_history=context.thread_history,
-                    model_name=model_name,
-                )
+                # Show typing indicator while team generates response
+                async with typing_indicator(self.client, room.room_id):
+                    # Streaming: returns formatted text chunks for live rendering
+                    response_stream = team_response_stream(
+                        agent_ids=form_team.agents,
+                        message=event.body,
+                        orchestrator=self.orchestrator,
+                        mode=form_team.mode,
+                        thread_history=context.thread_history,
+                        model_name=model_name,
+                    )
 
-                event_id, accumulated = await send_streaming_response(
-                    self.client,
-                    room.room_id,
-                    event.event_id,
-                    context.thread_id,
-                    self.matrix_id.domain,
-                    self.config,
-                    response_stream,
-                    streaming_cls=ReplacementStreamingResponse,
-                    header=None,
-                )
+                    event_id, accumulated = await send_streaming_response(
+                        self.client,
+                        room.room_id,
+                        event.event_id,
+                        context.thread_id,
+                        self.matrix_id.domain,
+                        self.config,
+                        response_stream,
+                        streaming_cls=ReplacementStreamingResponse,
+                        header=None,
+                    )
 
                 # Handle interactive questions in team responses
                 await self._handle_interactive_question(
@@ -520,15 +523,17 @@ class AgentBot:
 
                 self.response_tracker.mark_responded(event.event_id)
             else:
-                # Non-streaming: returns complete formatted response
-                response_text = await team_response(
-                    agent_names=agent_names,
-                    mode=form_team.mode,
-                    message=event.body,
-                    orchestrator=self.orchestrator,
-                    thread_history=context.thread_history,
-                    model_name=model_name,
-                )
+                # Show typing indicator while team generates response
+                async with typing_indicator(self.client, room.room_id):
+                    # Non-streaming: returns complete formatted response
+                    response_text = await team_response(
+                        agent_names=agent_names,
+                        mode=form_team.mode,
+                        message=event.body,
+                        orchestrator=self.orchestrator,
+                        thread_history=context.thread_history,
+                        model_name=model_name,
+                    )
 
                 event_id = await self._send_response(room, event.event_id, response_text, context.thread_id)
 
@@ -707,15 +712,17 @@ class AgentBot:
 
         session_id = create_session_id(room.room_id, thread_id)
 
-        response_text = await ai_response(
-            agent_name=self.agent_name,
-            prompt=prompt,
-            session_id=session_id,
-            storage_path=self.storage_path,
-            config=self.config,
-            thread_history=thread_history,
-            room_id=room.room_id,
-        )
+        # Show typing indicator while generating response
+        async with typing_indicator(self.client, room.room_id):
+            response_text = await ai_response(
+                agent_name=self.agent_name,
+                prompt=prompt,
+                session_id=session_id,
+                storage_path=self.storage_path,
+                config=self.config,
+                thread_history=thread_history,
+                room_id=room.room_id,
+            )
 
         if existing_event_id:
             # Edit the existing message
@@ -797,27 +804,29 @@ class AgentBot:
         session_id = create_session_id(room.room_id, thread_id)
 
         try:
-            response_stream = stream_agent_response(
-                agent_name=self.agent_name,
-                prompt=prompt,
-                session_id=session_id,
-                storage_path=self.storage_path,
-                config=self.config,
-                thread_history=thread_history,
-                room_id=room.room_id,
-            )
+            # Show typing indicator while generating response
+            async with typing_indicator(self.client, room.room_id):
+                response_stream = stream_agent_response(
+                    agent_name=self.agent_name,
+                    prompt=prompt,
+                    session_id=session_id,
+                    storage_path=self.storage_path,
+                    config=self.config,
+                    thread_history=thread_history,
+                    room_id=room.room_id,
+                )
 
-            event_id, accumulated = await send_streaming_response(
-                self.client,
-                room.room_id,
-                reply_to_event_id,
-                thread_id,
-                self.matrix_id.domain,
-                self.config,
-                response_stream,
-                streaming_cls=StreamingResponse,
-                existing_event_id=existing_event_id,
-            )
+                event_id, accumulated = await send_streaming_response(
+                    self.client,
+                    room.room_id,
+                    reply_to_event_id,
+                    thread_id,
+                    self.matrix_id.domain,
+                    self.config,
+                    response_stream,
+                    streaming_cls=StreamingResponse,
+                    existing_event_id=existing_event_id,
+                )
 
             # Handle interactive questions if present
             await self._handle_interactive_question(
