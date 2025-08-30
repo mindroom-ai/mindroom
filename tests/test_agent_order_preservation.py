@@ -1,5 +1,4 @@
 """Tests for agent order preservation in team formation."""
-# ruff: noqa: ANN001, ANN201
 
 from __future__ import annotations
 
@@ -16,7 +15,7 @@ from mindroom.thread_utils import (
 
 
 @pytest.fixture
-def mock_config():
+def mock_config() -> Config:
     """Create a mock config for testing."""
     return Config(
         defaults=DefaultsConfig(),
@@ -60,7 +59,7 @@ def mock_config():
 class TestAgentOrderPreservation:
     """Test that agent order is preserved in various functions."""
 
-    def test_get_mentioned_agents_preserves_order(self, mock_config):
+    def test_get_mentioned_agents_preserves_order(self, mock_config: Config) -> None:
         """Test that get_mentioned_agents preserves the order from user_ids."""
         mentions = {
             "user_ids": [
@@ -77,7 +76,7 @@ class TestAgentOrderPreservation:
         agent_names = [mid.agent_name(mock_config) for mid in agents]
         assert agent_names == ["phone", "email", "research"]
 
-    def test_get_agents_in_thread_preserves_order(self, mock_config):
+    def test_get_agents_in_thread_preserves_order(self, mock_config: Config) -> None:
         """Test that get_agents_in_thread preserves order of first participation."""
         thread_history = [
             {"sender": "@mindroom_research:localhost", "content": {"body": "Starting research"}},
@@ -94,7 +93,7 @@ class TestAgentOrderPreservation:
         agent_names = [mid.agent_name(mock_config) for mid in agents]
         assert agent_names == ["research", "email", "phone", "analyst"]
 
-    def test_get_agents_in_thread_excludes_router(self, mock_config):
+    def test_get_agents_in_thread_excludes_router(self, mock_config: Config) -> None:
         """Test that router agent is excluded from thread participants."""
         thread_history = [
             {"sender": "@mindroom_email:localhost", "content": {"body": "Email"}},
@@ -110,7 +109,7 @@ class TestAgentOrderPreservation:
         assert agent_names == ["email", "phone"]
         assert ROUTER_AGENT_NAME not in agent_names
 
-    def test_get_all_mentioned_agents_preserves_order(self, mock_config):
+    def test_get_all_mentioned_agents_preserves_order(self, mock_config: Config) -> None:
         """Test that get_all_mentioned_agents_in_thread preserves order of first mention."""
         thread_history = [
             {
@@ -146,7 +145,7 @@ class TestAgentOrderPreservation:
         agent_names = [mid.agent_name(mock_config) for mid in agents]
         assert agent_names == ["phone", "email", "research", "analyst"]
 
-    def test_no_duplicates_in_mentioned_agents(self, mock_config):
+    def test_no_duplicates_in_mentioned_agents(self, mock_config: Config) -> None:
         """Test that duplicates are removed while preserving order."""
         thread_history = [
             {
@@ -183,12 +182,12 @@ class TestAgentOrderPreservation:
         assert agent_names == ["email", "phone", "research"]
         assert len(agent_names) == len(set(agent_names))  # No duplicates
 
-    def test_empty_thread_returns_empty_list(self, mock_config):
+    def test_empty_thread_returns_empty_list(self, mock_config: Config) -> None:
         """Test that empty thread returns empty list."""
         assert get_agents_in_thread([], mock_config) == []
         assert get_all_mentioned_agents_in_thread([], mock_config) == []
 
-    def test_order_matters_for_coordinate_mode(self, mock_config):
+    def test_order_matters_for_coordinate_mode(self, mock_config: Config) -> None:
         """Test that order preservation is important for sequential execution."""
         # Simulate a user message: "@email @phone Send details then call"
         mentions_order1 = {
@@ -216,7 +215,7 @@ class TestIntegrationWithTeamFormation:
     """Test integration with team formation to ensure order flows through."""
 
     @pytest.mark.asyncio
-    async def test_coordinate_mode_respects_order(self, mock_config) -> None:
+    async def test_coordinate_mode_respects_order(self, mock_config: Config) -> None:
         """Test that coordinate mode will execute agents in the preserved order."""
         # When agents are tagged in specific order - use MatrixID objects
         tagged_agents = [
@@ -230,7 +229,7 @@ class TestIntegrationWithTeamFormation:
             tagged_agents=tagged_agents,
             agents_in_thread=[],
             all_mentioned_in_thread=[],
-            room=None,  # type: ignore[assignment]
+            room=None,
             message="Call me, then email the details, then research more info",
             config=mock_config,
             use_ai_decision=False,  # Use hardcoded logic for predictable test

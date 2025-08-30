@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -30,7 +31,7 @@ async def test_bot_ignores_edit_events() -> None:
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=None,  # Will be mocked
+        storage_path=Path("/tmp/test"),  # noqa: S108  # Temporary path for testing
         config=MagicMock(),
         rooms=["!test:example.com"],
     )
@@ -140,7 +141,7 @@ async def test_bot_ignores_multiple_edits() -> None:
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=None,
+        storage_path=Path("/tmp/test"),  # noqa: S108
         config=MagicMock(),
         rooms=["!test:example.com"],
     )
@@ -223,7 +224,7 @@ async def test_regular_agent_ignores_edits() -> None:
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=None,
+        storage_path=Path("/tmp/test"),  # noqa: S108
         config=MagicMock(),
         rooms=["!test:example.com"],
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -42,7 +43,7 @@ class TestDMPreservationDuringCleanup:
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=TEST_TMP_DIR,
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=["!regular:server", "!another:server"],
         )
@@ -99,7 +100,7 @@ class TestDMPreservationDuringCleanup:
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=TEST_TMP_DIR,
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=["!configured:server"],  # Only one configured room
         )

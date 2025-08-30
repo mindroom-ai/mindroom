@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -211,7 +212,7 @@ class TestDMMessageContext:
         )
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=TEST_TMP_DIR,
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=[],  # Not configured for any rooms
         )
@@ -266,7 +267,7 @@ class TestDMIntegration:
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=TEST_TMP_DIR,
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=[],
         )
@@ -289,7 +290,7 @@ class TestDMIntegration:
     async def test_dm_response_flow(self) -> None:
         """Test the complete flow of responding in a DM."""
         # This is a more complex integration test
-        orchestrator = MultiAgentOrchestrator(storage_path=TEST_TMP_DIR)
+        orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
 
         config = Config()
         config.agents = {"researcher": MagicMock()}
@@ -309,7 +310,7 @@ class TestDMIntegration:
         # Important: bot is NOT configured for the DM room
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=TEST_TMP_DIR,
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=[],  # Empty rooms list - not configured for any room
         )
@@ -402,7 +403,7 @@ class TestDMIntegration:
         # Agent is NOT configured for any rooms
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=TEST_TMP_DIR,
+            storage_path=Path(TEST_TMP_DIR),
             config=config,
             rooms=[],  # Empty - not configured for any room
         )

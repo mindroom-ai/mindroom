@@ -9,6 +9,7 @@ message ID instead of the original user message ID), causing reactions to create
 threads instead of continuing the existing conversation.
 """
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -44,7 +45,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming() -> None
         mock_streaming_class.return_value = mock_streaming
 
         # Setup mocks
-        async def mock_stream():  # type: ignore[no-untyped-def]  # noqa: ANN202
+        async def mock_stream() -> AsyncIterator[str]:
             yield "Test interactive response"
 
         mock_ai_response.return_value = mock_stream()
@@ -223,7 +224,7 @@ async def test_interactive_question_without_thread_streaming() -> None:
         mock_streaming_class.return_value = mock_streaming
 
         # Setup mocks
-        async def mock_stream():  # type: ignore[no-untyped-def]  # noqa: ANN202
+        async def mock_stream() -> AsyncIterator[str]:
             yield "Test interactive response"
 
         mock_ai_response.return_value = mock_stream()
