@@ -149,7 +149,7 @@ def create_bot_for_entity(
             team_agents=team_config.agents,
             team_mode=team_config.mode,
             team_model=team_config.model,
-            enable_streaming=False,
+            enable_streaming=True,
         )
 
     if entity_name in config.agents:
@@ -201,7 +201,7 @@ class AgentBot:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
 
-    @cached_property
+    @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
         return create_agent(agent_name=self.agent_name, config=self.config)
@@ -1252,31 +1252,33 @@ class TeamBot(AgentBot):
         )
 
         if use_streaming and not existing_event_id:
-            # Use structured team streaming with live document rebuilding
-            # Convert team agent names to MatrixID objects
-            team_matrix_ids = [
-                MatrixID.from_username(agent_name, self.matrix_id.domain) for agent_name in self.team_agents
-            ]
-            response_stream = team_response_stream(
-                agent_ids=team_matrix_ids,
-                message=prompt,
-                orchestrator=self.orchestrator,
-                mode=mode,
-                thread_history=thread_history,
-                model_name=model_name,
-            )
+            # Show typing indicator while team generates streaming response
+            async with typing_indicator(self.client, room_id):
+                # Use structured team streaming with live document rebuilding
+                # Convert team agent names to MatrixID objects
+                team_matrix_ids = [
+                    MatrixID.from_username(agent_name, self.matrix_id.domain) for agent_name in self.team_agents
+                ]
+                response_stream = team_response_stream(
+                    agent_ids=team_matrix_ids,
+                    message=prompt,
+                    orchestrator=self.orchestrator,
+                    mode=mode,
+                    thread_history=thread_history,
+                    model_name=model_name,
+                )
 
-            event_id, accumulated = await send_streaming_response(
-                self.client,
-                room_id,
-                reply_to_event_id,
-                thread_id,
-                self.matrix_id.domain,
-                self.config,
-                response_stream,
-                streaming_cls=ReplacementStreamingResponse,
-                header=None,  # team_response_stream includes header
-            )
+                event_id, accumulated = await send_streaming_response(
+                    self.client,
+                    room_id,
+                    reply_to_event_id,
+                    thread_id,
+                    self.matrix_id.domain,
+                    self.config,
+                    response_stream,
+                    streaming_cls=ReplacementStreamingResponse,
+                    header=None,  # team_response_stream includes header
+                )
 
             # Handle interactive questions in team leader responses
             await self._handle_interactive_question(
@@ -1288,15 +1290,17 @@ class TeamBot(AgentBot):
                 agent_name=self.agent_name,  # Team leader's name
             )
         else:
-            # Fallback to non-streaming or editing existing message
-            response_text = await team_response(
-                agent_names=self.team_agents,
-                mode=mode,
-                message=prompt,
-                orchestrator=self.orchestrator,
-                thread_history=thread_history,
-                model_name=model_name,
-            )
+            # Show typing indicator while team generates non-streaming response
+            async with typing_indicator(self.client, room_id):
+                # Fallback to non-streaming or editing existing message
+                response_text = await team_response(
+                    agent_names=self.team_agents,
+                    mode=mode,
+                    message=prompt,
+                    orchestrator=self.orchestrator,
+                    thread_history=thread_history,
+                    model_name=model_name,
+                )
             if existing_event_id:
                 await self._edit_message(room_id, existing_event_id, response_text, thread_id)
             else:

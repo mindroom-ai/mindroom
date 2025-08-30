@@ -18,6 +18,7 @@ from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
 from pydantic import BaseModel, Field
 
+from . import agent_prompts
 from .ai import get_model_instance
 from .constants import ROUTER_AGENT_NAME
 from .error_handling import get_user_friendly_error_message
@@ -442,7 +443,13 @@ def _get_agents_from_orchestrator(
 
         agent_bot = orchestrator.agent_bots[name]
         if agent_bot.agent is not None:
-            agents.append(agent_bot.agent)
+            agent = agent_bot.agent
+            # Remove interactive question prompts to prevent emoji conflicts in team responses
+            if isinstance(agent.instructions, list):
+                agent.instructions = [
+                    instr for instr in agent.instructions if instr != agent_prompts.INTERACTIVE_QUESTION_PROMPT
+                ]
+            agents.append(agent)
         else:
             logger.warning(f"Agent bot '{name}' has no agent instance")
 
