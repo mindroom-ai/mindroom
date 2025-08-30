@@ -22,7 +22,7 @@ from mindroom.matrix.users import AgentMatrixUser
 
 
 @pytest.mark.asyncio
-async def test_interactive_question_preserves_thread_root_in_streaming() -> None:
+async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path: Path) -> None:
     """Test that streaming responses register interactive questions with correct thread root."""
     # This test verifies that when the bot sends an interactive message in a thread,
     # it registers the interactive question with the original thread_id, not the agent's message ID
@@ -68,7 +68,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming() -> None
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path("/tmp/test"),  # noqa: S108
+            storage_path=tmp_path,
             config=config,
             rooms=["!test:localhost"],
         )
@@ -117,7 +117,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming() -> None
 
 
 @pytest.mark.asyncio
-async def test_interactive_question_preserves_thread_root_in_non_streaming() -> None:
+async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_path: Path) -> None:
     """Test that non-streaming responses register interactive questions with correct thread root."""
     with (
         patch("mindroom.bot.ai_response") as mock_ai_response,
@@ -151,7 +151,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming() -> 
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path("/tmp/test"),  # noqa: S108
+            storage_path=tmp_path,
             config=config,
             rooms=["!test:localhost"],
         )
@@ -204,7 +204,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming() -> 
 
 
 @pytest.mark.asyncio
-async def test_interactive_question_without_thread_streaming() -> None:
+async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> None:
     """Test that interactive questions work correctly when not in a thread (streaming)."""
     with (
         patch("mindroom.bot.stream_agent_response") as mock_ai_response,
@@ -247,7 +247,7 @@ async def test_interactive_question_without_thread_streaming() -> None:
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path("/tmp/test"),  # noqa: S108
+            storage_path=tmp_path,
             config=config,
             rooms=["!test:localhost"],
         )

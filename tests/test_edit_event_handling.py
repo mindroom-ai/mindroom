@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -14,7 +14,7 @@ from mindroom.matrix.users import AgentMatrixUser
 
 
 @pytest.mark.asyncio
-async def test_bot_ignores_edit_events() -> None:
+async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
     """Test that the bot does not process edit events as new messages.
 
     This is a regression test for the bug where edit events (with m.relates_to.rel_type == "m.replace")
@@ -31,7 +31,7 @@ async def test_bot_ignores_edit_events() -> None:
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),  # noqa: S108  # Temporary path for testing
+        storage_path=tmp_path,
         config=MagicMock(),
         rooms=["!test:example.com"],
     )
@@ -128,7 +128,7 @@ async def test_bot_ignores_edit_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bot_ignores_multiple_edits() -> None:
+async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
     """Test that the bot ignores multiple consecutive edits."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -141,7 +141,7 @@ async def test_bot_ignores_multiple_edits() -> None:
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),  # noqa: S108
+        storage_path=tmp_path,
         config=MagicMock(),
         rooms=["!test:example.com"],
     )
@@ -211,7 +211,7 @@ async def test_bot_ignores_multiple_edits() -> None:
 
 
 @pytest.mark.asyncio
-async def test_regular_agent_ignores_edits() -> None:
+async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     """Test that regular agents also ignore edit events."""
     # Create a mock agent user for a regular agent
     agent_user = AgentMatrixUser(
@@ -224,7 +224,7 @@ async def test_regular_agent_ignores_edits() -> None:
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
-        storage_path=Path("/tmp/test"),  # noqa: S108
+        storage_path=tmp_path,
         config=MagicMock(),
         rooms=["!test:example.com"],
     )
