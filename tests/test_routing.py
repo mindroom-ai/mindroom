@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,7 +15,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.routing import AgentSuggestion, suggest_agent_for_message
 from mindroom.thread_utils import extract_agent_name, has_any_agent_mentions_in_thread
 
-from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, TEST_TMP_DIR
+from .conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 
 
 class TestAIRouting:
@@ -154,7 +154,7 @@ class TestAIRouting:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_only_router_agent_routes(self) -> None:
+    async def test_only_router_agent_routes(self, tmp_path: Path) -> None:
         """Test that only the router agent handles routing."""
         # Create general agent (not router)
         agent = AgentMatrixUser(
@@ -167,7 +167,7 @@ class TestAIRouting:
 
         config = Config(router=RouterConfig(model="default"))
 
-        bot = AgentBot(agent, Path(TEST_TMP_DIR), config=config)
+        bot = AgentBot(agent, tmp_path, config=config)
 
         mock_room = MagicMock()
         mock_room.users = MagicMock()
