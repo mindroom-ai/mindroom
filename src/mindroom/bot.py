@@ -1464,32 +1464,25 @@ class MultiAgentOrchestrator:
         existing_entities = set(self.agent_bots.keys())
         new_entities = all_new_entities - existing_entities
 
-        if not entities_to_restart and not new_entities:
-            self.config = new_config
-            # Still need to update config for all existing bots even if none are restarting
-            logger.info(
-                f"Config updated (no restarts needed). New authorized_users: {new_config.authorized_users}",
-            )
-            for entity_name, bot in self.agent_bots.items():
-                bot.config = new_config
-                logger.debug(f"Updated config for {entity_name}")
-            return False
-
-        # Stop entities that need restarting
-        if entities_to_restart:
-            await _stop_entities(entities_to_restart, self.agent_bots, self._sync_tasks)
-
-        # Update config
+        # Always update the orchestrator's config first
         self.config = new_config
 
-        # Update config for all existing bots that aren't being restarted
+        # Always update config for ALL existing bots (even those being restarted will get new config when recreated)
         logger.info(
-            f"Updating config for existing bots. New authorized_users: {new_config.authorized_users}",
+            f"Updating config. New authorized_users: {new_config.authorized_users}",
         )
         for entity_name, bot in self.agent_bots.items():
             if entity_name not in entities_to_restart:
                 bot.config = new_config
                 logger.debug(f"Updated config for {entity_name}")
+
+        if not entities_to_restart and not new_entities:
+            # No entities to restart or create, we're done
+            return False
+
+        # Stop entities that need restarting
+        if entities_to_restart:
+            await _stop_entities(entities_to_restart, self.agent_bots, self._sync_tasks)
 
         # Recreate entities that need restarting using self-management
         for entity_name in entities_to_restart:
