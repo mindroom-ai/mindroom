@@ -219,9 +219,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         return InteractiveResponse(response_text, None, None)
 
     options = options[:MAX_OPTIONS]
-
-    # Remove ALL interactive blocks from the response to avoid emoji conflicts
-    clean_response = re.sub(INTERACTIVE_PATTERN, "", response_text, flags=re.DOTALL).strip()
+    clean_response = response_text.replace(first_match.group(0), "").strip()
 
     option_lines = []
     option_map: dict[str, str] | None = {} if extract_mapping else None
