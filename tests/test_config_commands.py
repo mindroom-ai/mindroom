@@ -1,5 +1,4 @@
 """Tests for configuration commands."""
-# ruff: noqa: ANN201
 
 from __future__ import annotations
 
@@ -32,7 +31,7 @@ class TestCommandParser:
         assert command.type == CommandType.CONFIG
         assert command.args["args_text"] == ""
 
-    def test_parse_config_show(self):
+    def test_parse_config_show(self) -> None:
         """Test parsing !config show command."""
         parser = CommandParser()
         command = parser.parse("!config show")
@@ -40,7 +39,7 @@ class TestCommandParser:
         assert command.type == CommandType.CONFIG
         assert command.args["args_text"] == "show"
 
-    def test_parse_config_get(self):
+    def test_parse_config_get(self) -> None:
         """Test parsing !config get command."""
         parser = CommandParser()
         command = parser.parse("!config get agents.analyst.display_name")
@@ -48,7 +47,7 @@ class TestCommandParser:
         assert command.type == CommandType.CONFIG
         assert command.args["args_text"] == "get agents.analyst.display_name"
 
-    def test_parse_config_set(self):
+    def test_parse_config_set(self) -> None:
         """Test parsing !config set command."""
         parser = CommandParser()
         command = parser.parse('!config set agents.analyst.display_name "New Name"')
@@ -60,31 +59,31 @@ class TestCommandParser:
 class TestConfigArgsParsing:
     """Test config command argument parsing."""
 
-    def test_parse_empty_args(self):
+    def test_parse_empty_args(self) -> None:
         """Test parsing empty config args defaults to show."""
         operation, args = parse_config_args("")
         assert operation == "show"
         assert args == []
 
-    def test_parse_show_operation(self):
+    def test_parse_show_operation(self) -> None:
         """Test parsing show operation."""
         operation, args = parse_config_args("show")
         assert operation == "show"
         assert args == []
 
-    def test_parse_get_operation(self):
+    def test_parse_get_operation(self) -> None:
         """Test parsing get operation with path."""
         operation, args = parse_config_args("get agents.analyst")
         assert operation == "get"
         assert args == ["agents.analyst"]
 
-    def test_parse_set_operation_simple(self):
+    def test_parse_set_operation_simple(self) -> None:
         """Test parsing set operation with simple value."""
         operation, args = parse_config_args("set defaults.markdown false")
         assert operation == "set"
         assert args == ["defaults.markdown", "false"]
 
-    def test_parse_set_operation_quoted(self):
+    def test_parse_set_operation_quoted(self) -> None:
         """Test parsing set operation with quoted string."""
         operation, args = parse_config_args('set agents.analyst.display_name "Research Expert"')
         assert operation == "set"
@@ -94,37 +93,37 @@ class TestConfigArgsParsing:
 class TestNestedValueOperations:
     """Test nested value get/set operations."""
 
-    def test_get_nested_simple(self):
+    def test_get_nested_simple(self) -> None:
         """Test getting simple nested value."""
         data = {"agents": {"analyst": {"display_name": "Analyst"}}}
         value = get_nested_value(data, "agents.analyst.display_name")
         assert value == "Analyst"
 
-    def test_get_nested_list(self):
+    def test_get_nested_list(self) -> None:
         """Test getting value from list."""
         data = {"tools": ["tool1", "tool2", "tool3"]}
         value = get_nested_value(data, "tools.1")
         assert value == "tool2"
 
-    def test_get_nested_nonexistent(self):
+    def test_get_nested_nonexistent(self) -> None:
         """Test getting nonexistent path raises KeyError."""
         data = {"agents": {}}
         with pytest.raises(KeyError, match="Key 'agents.analyst' not found"):
             get_nested_value(data, "agents.analyst.display_name")
 
-    def test_set_nested_simple(self):
+    def test_set_nested_simple(self) -> None:
         """Test setting simple nested value."""
         data = {"agents": {"analyst": {"display_name": "Old"}}}
         set_nested_value(data, "agents.analyst.display_name", "New")
         assert data["agents"]["analyst"]["display_name"] == "New"
 
-    def test_set_nested_create_intermediate(self):
+    def test_set_nested_create_intermediate(self) -> None:
         """Test setting creates intermediate dicts."""
         data = {"agents": {}}
         set_nested_value(data, "agents.analyst.display_name", "Analyst")
         assert data["agents"]["analyst"]["display_name"] == "Analyst"
 
-    def test_set_nested_list(self):
+    def test_set_nested_list(self) -> None:
         """Test setting value in list."""
         data = {"tools": ["tool1", "tool2", "tool3"]}
         set_nested_value(data, "tools.1", "new_tool")
@@ -134,42 +133,42 @@ class TestNestedValueOperations:
 class TestValueParsing:
     """Test value parsing from strings."""
 
-    def test_parse_boolean_true(self):
+    def test_parse_boolean_true(self) -> None:
         """Test parsing true boolean."""
         assert parse_value("true") is True
         assert parse_value("True") is True
 
-    def test_parse_boolean_false(self):
+    def test_parse_boolean_false(self) -> None:
         """Test parsing false boolean."""
         assert parse_value("false") is False
         assert parse_value("False") is False
 
-    def test_parse_none(self):
+    def test_parse_none(self) -> None:
         """Test parsing None/null."""
         assert parse_value("none") is None
         assert parse_value("null") is None
 
-    def test_parse_integer(self):
+    def test_parse_integer(self) -> None:
         """Test parsing integer."""
         assert parse_value("42") == 42
         assert parse_value("-10") == -10
 
-    def test_parse_float(self):
+    def test_parse_float(self) -> None:
         """Test parsing float."""
         assert parse_value("3.14") == 3.14
         assert parse_value("-0.5") == -0.5
 
-    def test_parse_string(self):
+    def test_parse_string(self) -> None:
         """Test parsing string."""
         assert parse_value("hello") == "hello"
         assert parse_value("hello world") == "hello world"
 
-    def test_parse_json_list(self):
+    def test_parse_json_list(self) -> None:
         """Test parsing JSON list."""
         assert parse_value('["a", "b", "c"]') == ["a", "b", "c"]
         assert parse_value("[1, 2, 3]") == [1, 2, 3]
 
-    def test_parse_json_dict(self):
+    def test_parse_json_dict(self) -> None:
         """Test parsing JSON dict."""
         assert parse_value('{"key": "value"}') == {"key": "value"}
 
@@ -177,7 +176,7 @@ class TestValueParsing:
 class TestValueFormatting:
     """Test value formatting for display."""
 
-    def test_format_simple_values(self):
+    def test_format_simple_values(self) -> None:
         """Test formatting simple values."""
         assert format_value("string") == '"string"'
         assert format_value(42) == "42"
@@ -185,17 +184,17 @@ class TestValueFormatting:
         assert format_value(False) == "false"
         assert format_value(None) == "null"
 
-    def test_format_list(self):
+    def test_format_list(self) -> None:
         """Test formatting list."""
         assert format_value([1, 2, 3]) == "[1, 2, 3]"
         assert format_value(["a", "b"]) == '["a", "b"]'
 
-    def test_format_dict(self):
+    def test_format_dict(self) -> None:
         """Test formatting dict."""
         result = format_value({"key": "value"})
         assert 'key: "value"' in result
 
-    def test_format_empty_collections(self):
+    def test_format_empty_collections(self) -> None:
         """Test formatting empty collections."""
         assert format_value({}) == "{}"
         assert format_value([]) == "[]"
@@ -205,7 +204,7 @@ class TestValueFormatting:
 class TestConfigCommandHandling:
     """Test the config command handler."""
 
-    async def test_handle_config_show(self):
+    async def test_handle_config_show(self) -> None:
         """Test handling config show command."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
@@ -223,7 +222,7 @@ class TestConfigCommandHandling:
         finally:
             config_path.unlink()
 
-    async def test_handle_config_get(self):
+    async def test_handle_config_get(self) -> None:
         """Test handling config get command."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
@@ -239,7 +238,7 @@ class TestConfigCommandHandling:
         finally:
             config_path.unlink()
 
-    async def test_handle_config_set(self):
+    async def test_handle_config_set(self) -> None:
         """Test handling config set command."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
@@ -260,7 +259,7 @@ class TestConfigCommandHandling:
         finally:
             config_path.unlink()
 
-    async def test_handle_config_get_nonexistent(self):
+    async def test_handle_config_get_nonexistent(self) -> None:
         """Test handling config get with nonexistent path."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {"agents": {}}
@@ -274,7 +273,7 @@ class TestConfigCommandHandling:
         finally:
             config_path.unlink()
 
-    async def test_handle_config_set_invalid(self):
+    async def test_handle_config_set_invalid(self) -> None:
         """Test handling config set with invalid value."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
@@ -292,7 +291,7 @@ class TestConfigCommandHandling:
         finally:
             config_path.unlink()
 
-    async def test_handle_config_unknown_operation(self):
+    async def test_handle_config_unknown_operation(self) -> None:
         """Test handling unknown config operation."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             yaml.dump({}, f)
