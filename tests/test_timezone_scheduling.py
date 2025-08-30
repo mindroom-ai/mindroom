@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfoNotFoundError
 
 import pytest
-import pytz
 
 from mindroom.config import Config
 from mindroom.scheduling import _format_scheduled_time
@@ -67,7 +67,7 @@ def test_format_scheduled_time_invalid_timezone() -> None:
     dt = datetime.now(UTC) + timedelta(hours=2)
 
     # Should raise an exception for invalid timezone
-    with pytest.raises(pytz.exceptions.UnknownTimeZoneError):
+    with pytest.raises(ZoneInfoNotFoundError):
         _format_scheduled_time(dt, "Invalid/Timezone")
 
 
