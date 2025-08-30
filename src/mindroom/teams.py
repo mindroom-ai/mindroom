@@ -8,11 +8,13 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from agno.agent import Agent
 from agno.models.message import Message
 from agno.run.response import RunResponse
-from agno.run.response import (
-    RunResponseContentEvent as AgentRunResponseContentEvent,
-)
+from agno.run.response import RunResponseContentEvent as AgentRunResponseContentEvent
+from agno.run.response import ToolCallCompletedEvent as AgentToolCallCompletedEvent
+from agno.run.response import ToolCallStartedEvent as AgentToolCallStartedEvent
 from agno.run.team import RunResponseContentEvent as TeamRunResponseContentEvent
 from agno.run.team import TeamRunResponse
+from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
+from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
 from pydantic import BaseModel, Field
 
@@ -37,6 +39,27 @@ logger = get_logger(__name__)
 # Message length limits for team context and logging
 MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
 MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
+
+
+def _fmt_tool_started(event: AgentToolCallStartedEvent | TeamToolCallStartedEvent) -> str:
+    tool = getattr(event, "tool", None)
+    if not tool:
+        return ""
+    tool_name = getattr(tool, "tool_name", None) or "tool"
+    tool_args = getattr(tool, "tool_args", None) or {}
+    if tool_args:
+        args_str = ", ".join(f"{k}={v}" for k, v in tool_args.items())
+        return f"\n\n🔧 **Tool Call:** `{tool_name}({args_str})`\n"
+    return f"\n\n🔧 **Tool Call:** `{tool_name}()`\n"
+
+
+def _fmt_tool_completed(event: AgentToolCallCompletedEvent | TeamToolCallCompletedEvent) -> str:
+    tool = getattr(event, "tool", None)
+    tool_name = getattr(tool, "tool_name", None) or "tool"
+    result = getattr(event, "content", None) or (getattr(tool, "result", None) if tool else None)
+    if result:
+        return f"✅ **`{tool_name}` result:**\n{result}\n\n"
+    return f"✅ **`{tool_name}`** completed\n\n"
 
 
 class TeamMode(str, Enum):
@@ -577,7 +600,7 @@ async def team_response_stream_raw(
     return await team.arun(prompt, stream=True)
 
 
-async def team_response_stream(  # noqa: C901, PLR0912
+async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     agent_ids: list[MatrixID],
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -604,7 +627,7 @@ async def team_response_stream(  # noqa: C901, PLR0912
         display_name = agent_config.display_name or agent_name
         display_names.append(display_name)
 
-    # Buffers - keyed by display name for direct matching with Agno events
+    # Buffers keyed by display names (Agno emits display name as agent_name)
     per_member: dict[str, str] = dict.fromkeys(display_names, "")
     consensus: str = ""
 
@@ -632,14 +655,30 @@ async def team_response_stream(  # noqa: C901, PLR0912
 
         # Individual agent response event
         elif isinstance(event, AgentRunResponseContentEvent):
-            agent_display_name = event.agent_name
-            if agent_display_name:
+            agent_name = event.agent_name
+            if agent_name:
                 content = str(event.content or "")
-                if agent_display_name in per_member:
-                    per_member[agent_display_name] += content
-                else:
-                    logger.debug(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
-                    consensus += content
+                if agent_name not in per_member:
+                    per_member[agent_name] = ""
+                per_member[agent_name] += content
+
+        # Agent tool call started
+        elif isinstance(event, AgentToolCallStartedEvent):
+            agent_name = event.agent_name
+            tool_msg = _fmt_tool_started(event)
+            if agent_name and tool_msg:
+                if agent_name not in per_member:
+                    per_member[agent_name] = ""
+                per_member[agent_name] += tool_msg
+
+        # Agent tool call completed
+        elif isinstance(event, AgentToolCallCompletedEvent):
+            agent_name = event.agent_name
+            tool_msg = _fmt_tool_completed(event)
+            if agent_name and tool_msg:
+                if agent_name not in per_member:
+                    per_member[agent_name] = ""
+                per_member[agent_name] += tool_msg
 
         # Team consensus content event
         elif isinstance(event, TeamRunResponseContentEvent):
@@ -648,6 +687,16 @@ async def team_response_stream(  # noqa: C901, PLR0912
             else:
                 logger.debug("Empty team consensus event received")
 
+        # Team-level tool call events (no specific agent context)
+        elif isinstance(event, (TeamToolCallStartedEvent, TeamToolCallCompletedEvent)):
+            # Format with the same helper, both carry .tool/.content
+            if isinstance(event, TeamToolCallStartedEvent):
+                tool_msg = _fmt_tool_started(event)
+            else:
+                tool_msg = _fmt_tool_completed(event)
+            if tool_msg:
+                consensus += tool_msg
+
         # Skip other event types
         else:
             logger.debug(f"Ignoring event type: {type(event).__name__}")
@@ -655,9 +704,15 @@ async def team_response_stream(  # noqa: C901, PLR0912
 
         parts: list[str] = []
 
-        for display_name, body in per_member.items():
-            if body.strip():
-                parts.append(format_member_contribution(display_name, body.strip()))
+        # First render configured agents (display names) in order
+        for display in display_names:
+            body = per_member.get(display, "").strip()
+            if body:
+                parts.append(format_member_contribution(display, body))
+        # Then render any late/unknown agents that appeared during stream
+        for display, body in per_member.items():
+            if display not in display_names and body.strip():
+                parts.append(format_member_contribution(display, body.strip()))
 
         if consensus.strip():
             parts.extend(format_team_consensus(consensus.strip()))
