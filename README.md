@@ -192,11 +192,13 @@ Agents ONLY respond in threads (not main room). Within threads:
 4. **Smart routing** - System picks the best agent for new threads
 
 ### Available Commands
-- `!widget [url]` - Add configuration widget to room
-- `!schedule <time> <message>` - Schedule tasks and reminders
-- `!list_schedules` - List all scheduled tasks
-- `!cancel_schedule <id|all>` - Cancel scheduled tasks
 - `!help [topic]` - Get help
+- `!schedule <task>` - Schedule a task
+- `!list_schedules` - List scheduled tasks
+- `!cancel_schedule <id>` - Cancel a scheduled task
+- `!widget [url]` - Add configuration widget
+- `!config <operation>` - Manage configuration
+- `!hi` - Show welcome message
 
 ## Configuration
 

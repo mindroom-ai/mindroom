@@ -281,14 +281,16 @@ Note: Widget support requires Element Desktop or self-hosted Element Web."""
     # General help
     return """**Available Commands**
 
-- `!schedule <time|condition> <message>` - Schedule time-based or event-driven workflows
+- `!help [topic]` - Get help
+- `!schedule <task>` - Schedule a task
 - `!list_schedules` - List scheduled tasks
-- `!cancel_schedule <id|all>` - Cancel a scheduled task or all tasks
-- `!config <operation>` - View and modify MindRoom configuration
-- `!widget [url]` - Add configuration widget to the room
-- `!help [topic]` - Show this help or help for a specific command
+- `!cancel_schedule <id>` - Cancel a scheduled task
+- `!widget [url]` - Add configuration widget
+- `!config <operation>` - Manage configuration
+- `!hi` - Show welcome message
 
-**New Scheduling Features:**
+**Scheduling Features:**
+- Time-based and event-driven workflows
 - Recurring tasks with cron-style scheduling (daily, weekly, hourly)
 - Agent workflows - mention agents to have them collaborate on scheduled tasks
 - Natural language time parsing - "tomorrow", "in 5 minutes", "every Monday"
