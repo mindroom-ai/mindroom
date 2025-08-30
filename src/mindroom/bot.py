@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from . import interactive, voice_handler
-from .agents import create_agent, describe_agent, get_rooms_for_entity
+from .agents import create_agent, get_rooms_for_entity
 from .ai import ai_response, stream_agent_response
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import (
@@ -371,6 +371,71 @@ class AgentBot:
         await self.client.close()
         self.logger.info("Stopped agent bot")
 
+    def _format_agent_description(self, agent_name: str) -> str | None:
+        """Format a concise agent description for the welcome message."""
+        if agent_name in self.config.agents:
+            agent_config = self.config.agents[agent_name]
+            desc_parts = []
+            if agent_config.role:
+                desc_parts.append(agent_config.role)
+            if agent_config.tools:
+                tools_str = ", ".join(agent_config.tools[:3])
+                if len(agent_config.tools) > 3:
+                    tools_str += f" +{len(agent_config.tools) - 3} more"
+                desc_parts.append(f"Tools: {tools_str}")
+            return " | ".join(desc_parts) if desc_parts else None
+        if agent_name in self.config.teams:
+            team_config = self.config.teams[agent_name]
+            team_desc = f"Team of {len(team_config.agents)} agents"
+            if team_config.role:
+                team_desc = f"{team_config.role} | {team_desc}"
+            return team_desc
+        return None
+
+    def _generate_welcome_message(self, room_id: str) -> str:
+        """Generate the welcome message text for a room."""
+        # Get list of configured agents for this room
+        configured_agents = get_configured_agents_for_room(room_id, self.config)
+
+        # Build agent list for the welcome message
+        agent_list = []
+        for agent_id in configured_agents:
+            agent_name = agent_id.agent_name(self.config)
+            if not agent_name or agent_name == ROUTER_AGENT_NAME:
+                continue
+
+            description = self._format_agent_description(agent_name)
+            if description:
+                agent_list.append(f"• **@{agent_name}**: {description}")
+            else:
+                agent_list.append(f"• **@{agent_name}**")
+
+        # Create welcome message
+        welcome_msg = (
+            "🎉 **Welcome to MindRoom!**\n\n"
+            "I'm your routing assistant, here to help coordinate our team of specialized AI agents.\n\n"
+        )
+
+        if agent_list:
+            welcome_msg += "**Available agents in this room:**\n"
+            welcome_msg += "\n".join(agent_list)
+            welcome_msg += "\n\n"
+
+        welcome_msg += (
+            "**How to interact:**\n"
+            "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
+            "• Use `!help` to see available commands\n"
+            "• Agents respond in threads to keep conversations organized\n"
+            "• Multiple agents can collaborate when you mention them together\n\n"
+            "**Quick commands:**\n"
+            "• `!widget` - Add configuration widget to this room\n"
+            "• `!schedule <time> <message>` - Schedule tasks and reminders\n"
+            "• `!help [topic]` - Get detailed help\n\n"
+            "Feel free to ask any agent for help or start a conversation!"
+        )
+
+        return welcome_msg
+
     async def _send_welcome_message_if_empty(self, room_id: str) -> None:
         """Send a welcome message if the room has no messages yet.
 
@@ -390,51 +455,17 @@ class AgentBot:
                 self.logger.error("Failed to check room messages", room_id=room_id, error=str(response))
                 return
 
-            # If there are no messages in the room, send welcome message
-            if not response.chunk:
-                self.logger.info("Room is empty, sending welcome message", room_id=room_id)
+            # Only send welcome message if room is empty
+            if response.chunk:
+                return
 
-                # Get list of configured agents for this room
-                configured_agents = get_configured_agents_for_room(room_id, self.config)
+            self.logger.info("Room is empty, sending welcome message", room_id=room_id)
 
-                # Build agent list for the welcome message
-                agent_list = []
-                for agent_id in configured_agents:
-                    agent_name = agent_id.agent_name(self.config)
-                    if agent_name and agent_name != ROUTER_AGENT_NAME:
-                        # Get agent description
-                        description = describe_agent(agent_name, self.config)
-                        # Format as a bullet point
-                        agent_list.append(f"• **@{agent_name}**: {description}")
-
-                # Create welcome message
-                welcome_msg = (
-                    "🎉 **Welcome to MindRoom!**\n\n"
-                    "I'm your routing assistant, here to help coordinate our team of specialized AI agents.\n\n"
-                )
-
-                if agent_list:
-                    welcome_msg += "**Available agents in this room:**\n"
-                    welcome_msg += "\n".join(agent_list)
-                    welcome_msg += "\n\n"
-
-                welcome_msg += (
-                    "**How to interact:**\n"
-                    "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
-                    "• Use `!help` to see available commands\n"
-                    "• Agents respond in threads to keep conversations organized\n"
-                    "• Multiple agents can collaborate when you mention them together\n\n"
-                    "**Quick commands:**\n"
-                    "• `!widget` - Add configuration widget to this room\n"
-                    "• `!schedule <time> <message>` - Schedule tasks and reminders\n"
-                    "• `!help [topic]` - Get detailed help\n\n"
-                    "Feel free to ask any agent for help or start a conversation!"
-                )
-
-                # Send the welcome message
-                message_content = build_message_content(welcome_msg)
-                await send_message(self.client, room_id, message_content)
-                self.logger.info("Welcome message sent", room_id=room_id)
+            # Generate and send the welcome message
+            welcome_msg = self._generate_welcome_message(room_id)
+            message_content = build_message_content(welcome_msg)
+            await send_message(self.client, room_id, message_content)
+            self.logger.info("Welcome message sent", room_id=room_id)
 
         except Exception:
             self.logger.exception("Failed to send welcome message", room_id=room_id)
@@ -1168,6 +1199,10 @@ class AgentBot:
         if command.type == CommandType.HELP:
             topic = command.args.get("topic")
             response_text = get_command_help(topic)
+
+        elif command.type == CommandType.HI:
+            # Generate the welcome message for this room
+            response_text = self._generate_welcome_message(room.room_id)
 
         elif command.type == CommandType.SCHEDULE:
             full_text = command.args["full_text"]

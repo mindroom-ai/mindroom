@@ -23,6 +23,7 @@ class CommandType(Enum):
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
     WIDGET = "widget"
+    HI = "hi"  # Welcome message command
     UNKNOWN = "unknown"  # Special type for unrecognized commands
 
 
@@ -33,6 +34,7 @@ COMMAND_DOCS = {
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
     CommandType.HELP: ("!help [topic]", "Get help"),
     CommandType.WIDGET: ("!widget [url]", "Add configuration widget"),
+    CommandType.HI: ("!hi", "Show welcome message"),
 }
 
 
@@ -69,6 +71,7 @@ class CommandParser:
     LIST_SCHEDULES_PATTERN = re.compile(r"^!list[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
+    HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
 
     def parse(self, message: str) -> Command | None:  # noqa: PLR0911
         """Parse a message for commands.
@@ -88,6 +91,14 @@ class CommandParser:
             return None
 
         # Try to match each command pattern
+
+        # !hi command (check this early as it's simple)
+        if self.HI_PATTERN.match(message):
+            return Command(
+                type=CommandType.HI,
+                args={},
+                raw_text=message,
+            )
 
         # !help command
         match = self.HELP_PATTERN.match(message)
