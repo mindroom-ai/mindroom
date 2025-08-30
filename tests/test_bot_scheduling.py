@@ -12,7 +12,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
@@ -1102,6 +1102,136 @@ class TestRouterSkipsSingleAgent:
         bot._handle_command.assert_called_once()
         # Router should not send a response for unknown commands (handled by _handle_command)
         bot._send_response.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_router_handles_schedule_command_in_single_agent_room(self) -> None:
+        """Router should handle schedule commands even in single-agent rooms."""
+        # Create router agent
+        agent_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
+        )
+
+        # Config with only general agent
+        config = Config(
+            router=RouterConfig(model="default"),
+            agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+        )
+        config.ids = {
+            "general": MatrixID.from_username("mindroom_general", "localhost"),
+            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
+        }
+
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._handle_command = AsyncMock()  # type: ignore[method-assign]
+        bot._send_response = AsyncMock()  # type: ignore[method-assign]
+
+        # Room with router + one agent + a human
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
+        room.users = {
+            "@mindroom_router:localhost": None,
+            "@mindroom_general:localhost": None,
+            "@user:localhost": None,
+        }
+
+        # Schedule command from human
+        event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event_schedule",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": "!schedule in 5 minutes remind me to check email"},
+            },
+        )
+
+        with (
+            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.bot.get_available_agents_in_room") as mock_get_available,
+        ):
+            mock_get_available.return_value = [config.ids["general"]]
+            await bot._on_message(room, event)
+
+        # Router MUST handle schedule commands even with a single agent
+        # This is a regression test to ensure commands work in single-agent rooms
+        bot._handle_command.assert_called_once()
+        args = bot._handle_command.call_args[0]
+        assert args[2].type.value == "schedule", "Router should handle schedule command"
+
+    @pytest.mark.asyncio
+    async def test_router_handles_voice_transcription_in_single_agent_room(self) -> None:
+        """Router voice transcriptions should work in single-agent rooms."""
+        # Create router agent
+        agent_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id="@mindroom_router:localhost",
+            display_name="Router Agent",
+            password=TEST_PASSWORD,
+            access_token=TEST_ACCESS_TOKEN,
+        )
+
+        # Config with only general agent
+        config = Config(
+            router=RouterConfig(model="default"),
+            agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+        )
+        config.ids = {
+            "general": MatrixID.from_username("mindroom_general", "localhost"),
+            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
+        }
+
+        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        bot.client = AsyncMock()
+        bot.logger = MagicMock()
+        bot._handle_ai_routing = AsyncMock()  # type: ignore[method-assign]
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+
+        # Room with router + one agent + a human
+        room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
+        room.users = {
+            "@mindroom_router:localhost": None,
+            "@mindroom_general:localhost": None,
+            "@user:localhost": None,
+        }
+
+        # Voice transcription from router (self-message with VOICE_PREFIX)
+        voice_event = nio.RoomMessageText.from_dict(
+            {
+                "event_id": "$event_voice",
+                "sender": "@mindroom_router:localhost",
+                "origin_server_ts": 1234567890,
+                "content": {"msgtype": "m.text", "body": f"{VOICE_PREFIX}What's the weather today?"},
+            },
+        )
+
+        # Create context for voice message
+        mock_context = MagicMock()
+        mock_context.am_i_mentioned = False
+        mock_context.mentioned_agents = []
+        mock_context.is_thread = False
+        mock_context.thread_id = None
+        mock_context.thread_history = []
+        bot._extract_message_context = AsyncMock(return_value=mock_context)  # type: ignore[method-assign]
+
+        with (
+            patch("mindroom.bot.interactive.handle_text_response"),
+            patch("mindroom.bot.get_available_agents_in_room") as mock_get_available,
+            patch("mindroom.bot.get_agents_in_thread") as mock_agents_in_thread,
+        ):
+            mock_get_available.return_value = [config.ids["general"]]
+            mock_agents_in_thread.return_value = []
+            await bot._on_message(room, voice_event)
+
+        # Voice transcriptions should work: router skips routing but doesn't interfere
+        # This is a regression test to ensure voice works in single-agent rooms
+        assert not bot._handle_ai_routing.called, "Router should skip routing for voice in single-agent room"
+        info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
+        assert "Skipping routing: only one agent present" in info_calls
 
     @pytest.mark.asyncio
     async def test_router_handles_command_with_multiple_agents(self) -> None:
