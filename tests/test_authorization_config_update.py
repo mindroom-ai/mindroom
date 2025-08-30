@@ -43,18 +43,3 @@ def test_authorization_check_uses_updated_config() -> None:
 
         # mindroom_user should always be authorized
         assert is_authorized_sender("@mindroom_user:example.com", config)
-
-
-def test_config_update_mechanism() -> None:
-    """Document how the config update mechanism works.
-
-    When update_config() is called in MultiAgentOrchestrator:
-    1. Line 1471: self.config = new_config
-    2. Lines 1474-1476: For all existing bots not being restarted:
-       bot.config = new_config
-
-    This ensures all AgentBot instances get the updated authorized_users list
-    when the config.yaml file is modified and saved.
-    """
-    # This test documents the behavior rather than testing it
-    # The actual implementation is in src/mindroom/bot.py:1439-1476
