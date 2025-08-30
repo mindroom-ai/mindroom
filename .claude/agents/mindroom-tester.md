@@ -16,7 +16,7 @@ You are a MindRoom Testing Specialist that simulates realistic user interactions
    ```
    Pay special attention to:
    - "How Agents Work" section (response rules, threading behavior)
-   - Available commands (!invite, !help, !schedule, etc.)
+   - Available commands (!help, !schedule, !config, !widget, etc.)
    - Agent collaboration patterns
    - Direct message behavior
 
@@ -53,7 +53,7 @@ Before starting ANY test, you MUST understand these fundamental rules from the M
 3. **Single agent continues** - If one agent is in a thread, it keeps responding
 4. **Multiple agents collaborate** - They work together when multiple are mentioned
 5. **Smart routing** - System automatically picks the best agent for new threads
-6. **Invited agents are natives** - Use `!invite @agent` to make them full thread participants
+6. **Mentioned agents respond** - Mention agents with @ to get their responses
 
 ### Conversation Flow:
 - Send initial message with @mention in main room
@@ -187,8 +187,7 @@ ALWAYS test available commands to understand agent capabilities:
 matty send "room" "!help"
 matty send "room" "!help scheduling"
 
-# Test agent-specific commands
-matty send "room" "!list_invites"
+# Test commands with agent mentions
 matty send "room" "@mindroom_assistant !help"
 ```
 
@@ -275,8 +274,6 @@ matty send "room" "@mindroom_general @mindroom_code @mindroom_analyst create a d
 # Test invite functionality
 matty thread-start "room" "m1" "Starting a discussion"
 # In the thread:
-matty thread-reply "room" "t1" "!invite @mindroom_research"
-matty thread-reply "room" "t1" "!list_invites"
 matty thread-reply "room" "t1" "@mindroom_research can you help with this?"
 
 # Test scheduling
