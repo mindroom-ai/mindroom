@@ -1,0 +1,306 @@
+"""Tests for configuration commands."""
+# ruff: noqa: ANN201
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import pytest
+import yaml
+
+from mindroom.commands import CommandParser, CommandType
+from mindroom.config import Config
+from mindroom.config_commands import (
+    format_value,
+    get_nested_value,
+    handle_config_command,
+    parse_config_args,
+    parse_value,
+    set_nested_value,
+)
+
+
+class TestCommandParser:
+    """Test config command parsing."""
+
+    def test_parse_config_empty(self) -> None:
+        """Test parsing !config with no args."""
+        parser = CommandParser()
+        command = parser.parse("!config")
+        assert command is not None
+        assert command.type == CommandType.CONFIG
+        assert command.args["args_text"] == ""
+
+    def test_parse_config_show(self):
+        """Test parsing !config show command."""
+        parser = CommandParser()
+        command = parser.parse("!config show")
+        assert command is not None
+        assert command.type == CommandType.CONFIG
+        assert command.args["args_text"] == "show"
+
+    def test_parse_config_get(self):
+        """Test parsing !config get command."""
+        parser = CommandParser()
+        command = parser.parse("!config get agents.analyst.display_name")
+        assert command is not None
+        assert command.type == CommandType.CONFIG
+        assert command.args["args_text"] == "get agents.analyst.display_name"
+
+    def test_parse_config_set(self):
+        """Test parsing !config set command."""
+        parser = CommandParser()
+        command = parser.parse('!config set agents.analyst.display_name "New Name"')
+        assert command is not None
+        assert command.type == CommandType.CONFIG
+        assert command.args["args_text"] == 'set agents.analyst.display_name "New Name"'
+
+
+class TestConfigArgsParsing:
+    """Test config command argument parsing."""
+
+    def test_parse_empty_args(self):
+        """Test parsing empty config args defaults to show."""
+        operation, args = parse_config_args("")
+        assert operation == "show"
+        assert args == []
+
+    def test_parse_show_operation(self):
+        """Test parsing show operation."""
+        operation, args = parse_config_args("show")
+        assert operation == "show"
+        assert args == []
+
+    def test_parse_get_operation(self):
+        """Test parsing get operation with path."""
+        operation, args = parse_config_args("get agents.analyst")
+        assert operation == "get"
+        assert args == ["agents.analyst"]
+
+    def test_parse_set_operation_simple(self):
+        """Test parsing set operation with simple value."""
+        operation, args = parse_config_args("set defaults.markdown false")
+        assert operation == "set"
+        assert args == ["defaults.markdown", "false"]
+
+    def test_parse_set_operation_quoted(self):
+        """Test parsing set operation with quoted string."""
+        operation, args = parse_config_args('set agents.analyst.display_name "Research Expert"')
+        assert operation == "set"
+        assert args == ["agents.analyst.display_name", "Research Expert"]
+
+
+class TestNestedValueOperations:
+    """Test nested value get/set operations."""
+
+    def test_get_nested_simple(self):
+        """Test getting simple nested value."""
+        data = {"agents": {"analyst": {"display_name": "Analyst"}}}
+        value = get_nested_value(data, "agents.analyst.display_name")
+        assert value == "Analyst"
+
+    def test_get_nested_list(self):
+        """Test getting value from list."""
+        data = {"tools": ["tool1", "tool2", "tool3"]}
+        value = get_nested_value(data, "tools.1")
+        assert value == "tool2"
+
+    def test_get_nested_nonexistent(self):
+        """Test getting nonexistent path raises KeyError."""
+        data = {"agents": {}}
+        with pytest.raises(KeyError, match="Key 'agents.analyst' not found"):
+            get_nested_value(data, "agents.analyst.display_name")
+
+    def test_set_nested_simple(self):
+        """Test setting simple nested value."""
+        data = {"agents": {"analyst": {"display_name": "Old"}}}
+        set_nested_value(data, "agents.analyst.display_name", "New")
+        assert data["agents"]["analyst"]["display_name"] == "New"
+
+    def test_set_nested_create_intermediate(self):
+        """Test setting creates intermediate dicts."""
+        data = {"agents": {}}
+        set_nested_value(data, "agents.analyst.display_name", "Analyst")
+        assert data["agents"]["analyst"]["display_name"] == "Analyst"
+
+    def test_set_nested_list(self):
+        """Test setting value in list."""
+        data = {"tools": ["tool1", "tool2", "tool3"]}
+        set_nested_value(data, "tools.1", "new_tool")
+        assert data["tools"][1] == "new_tool"
+
+
+class TestValueParsing:
+    """Test value parsing from strings."""
+
+    def test_parse_boolean_true(self):
+        """Test parsing true boolean."""
+        assert parse_value("true") is True
+        assert parse_value("True") is True
+
+    def test_parse_boolean_false(self):
+        """Test parsing false boolean."""
+        assert parse_value("false") is False
+        assert parse_value("False") is False
+
+    def test_parse_none(self):
+        """Test parsing None/null."""
+        assert parse_value("none") is None
+        assert parse_value("null") is None
+
+    def test_parse_integer(self):
+        """Test parsing integer."""
+        assert parse_value("42") == 42
+        assert parse_value("-10") == -10
+
+    def test_parse_float(self):
+        """Test parsing float."""
+        assert parse_value("3.14") == 3.14
+        assert parse_value("-0.5") == -0.5
+
+    def test_parse_string(self):
+        """Test parsing string."""
+        assert parse_value("hello") == "hello"
+        assert parse_value("hello world") == "hello world"
+
+    def test_parse_json_list(self):
+        """Test parsing JSON list."""
+        assert parse_value('["a", "b", "c"]') == ["a", "b", "c"]
+        assert parse_value("[1, 2, 3]") == [1, 2, 3]
+
+    def test_parse_json_dict(self):
+        """Test parsing JSON dict."""
+        assert parse_value('{"key": "value"}') == {"key": "value"}
+
+
+class TestValueFormatting:
+    """Test value formatting for display."""
+
+    def test_format_simple_values(self):
+        """Test formatting simple values."""
+        assert format_value("string") == '"string"'
+        assert format_value(42) == "42"
+        assert format_value(True) == "true"
+        assert format_value(False) == "false"
+        assert format_value(None) == "null"
+
+    def test_format_list(self):
+        """Test formatting list."""
+        assert format_value([1, 2, 3]) == "[1, 2, 3]"
+        assert format_value(["a", "b"]) == '["a", "b"]'
+
+    def test_format_dict(self):
+        """Test formatting dict."""
+        result = format_value({"key": "value"})
+        assert 'key: "value"' in result
+
+    def test_format_empty_collections(self):
+        """Test formatting empty collections."""
+        assert format_value({}) == "{}"
+        assert format_value([]) == "[]"
+
+
+@pytest.mark.asyncio
+class TestConfigCommandHandling:
+    """Test the config command handler."""
+
+    async def test_handle_config_show(self):
+        """Test handling config show command."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "agents": {"test_agent": {"display_name": "Test Agent", "role": "Testing"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response = await handle_config_command("show", config_path)
+            assert "Current Configuration:" in response
+            assert "test_agent" in response
+            assert "Test Agent" in response
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_get(self):
+        """Test handling config get command."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "agents": {"test_agent": {"display_name": "Test Agent", "role": "Testing"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response = await handle_config_command("get agents.test_agent.display_name", config_path)
+            assert "Configuration value for `agents.test_agent.display_name`:" in response
+            assert "Test Agent" in response
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_set(self):
+        """Test handling config set command."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "agents": {"test_agent": {"display_name": "Old Name", "role": "Testing"}},
+                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response = await handle_config_command('set agents.test_agent.display_name "New Name"', config_path)
+            assert "Configuration updated successfully!" in response
+            assert "New Name" in response
+
+            # Verify the file was actually updated
+            config = Config.from_yaml(config_path)
+            assert config.agents["test_agent"].display_name == "New Name"
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_get_nonexistent(self):
+        """Test handling config get with nonexistent path."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {"agents": {}}
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            response = await handle_config_command("get agents.nonexistent", config_path)
+            assert "❌" in response
+            assert "not found" in response
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_set_invalid(self):
+        """Test handling config set with invalid value."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "defaults": {"num_history_runs": 5},
+                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            # Try to set a number field to a string value
+            response = await handle_config_command("set defaults.num_history_runs not_a_number", config_path)
+            assert "❌" in response
+            # The validation error should indicate the issue
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_unknown_operation(self):
+        """Test handling unknown config operation."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump({}, f)
+            config_path = Path(f.name)
+
+        try:
+            response = await handle_config_command("unknown_op", config_path)
+            assert "❌ Unknown operation" in response
+            assert "unknown_op" in response
+        finally:
+            config_path.unlink()

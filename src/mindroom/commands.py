@@ -23,6 +23,7 @@ class CommandType(Enum):
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
     WIDGET = "widget"
+    CONFIG = "config"  # Configuration command
     UNKNOWN = "unknown"  # Special type for unrecognized commands
 
 
@@ -33,6 +34,7 @@ COMMAND_DOCS = {
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
     CommandType.HELP: ("!help [topic]", "Get help"),
     CommandType.WIDGET: ("!widget [url]", "Add configuration widget"),
+    CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
 }
 
 
@@ -69,6 +71,7 @@ class CommandParser:
     LIST_SCHEDULES_PATTERN = re.compile(r"^!list[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
+    CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
 
     def parse(self, message: str) -> Command | None:  # noqa: PLR0911
         """Parse a message for commands.
@@ -137,6 +140,16 @@ class CommandParser:
             return Command(
                 type=CommandType.WIDGET,
                 args={"url": url},
+                raw_text=message,
+            )
+
+        # !config command
+        match = self.CONFIG_PATTERN.match(message)
+        if match:
+            args_text = match.group(1).strip() if match.group(1) else ""
+            return Command(
+                type=CommandType.CONFIG,
+                args={"args_text": args_text},
                 raw_text=message,
             )
 
@@ -214,6 +227,32 @@ Examples:
 
 Use `!list_schedules` to see task IDs."""
 
+    if topic == "config":
+        return """**Config Command**
+
+Usage: `!config <operation>` - View and modify MindRoom configuration
+
+**Viewing Configuration:**
+- `!config show` - Show entire configuration
+- `!config get <path>` - Get a specific configuration value
+- `!config get agents` - Show all agents
+- `!config get models.default` - Show default model
+- `!config get agents.analyst.display_name` - Show analyst's display name
+
+**Modifying Configuration:**
+- `!config set <path> <value>` - Set a configuration value
+- `!config set agents.analyst.display_name "Research Expert"` - Change display name
+- `!config set models.default.id gpt-4` - Change default model
+- `!config set defaults.markdown false` - Disable markdown by default
+- `!config set timezone America/New_York` - Set timezone
+
+**Path Syntax:**
+- Use dot notation to navigate nested config (e.g., `agents.analyst.role`)
+- Arrays use indexes (e.g., `agents.analyst.tools.0` for first tool)
+- String values with spaces must be quoted
+
+**Note:** Configuration changes are immediately saved to config.yaml and affect all new agent interactions."""
+
     if topic == "widget":
         return """**Widget Command**
 
@@ -234,6 +273,7 @@ Note: Widget support requires Element Desktop or self-hosted Element Web."""
 - `!schedule <time|condition> <message>` - Schedule time-based or event-driven workflows
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id|all>` - Cancel a scheduled task or all tasks
+- `!config <operation>` - View and modify MindRoom configuration
 - `!widget [url]` - Add configuration widget to the room
 - `!help [topic]` - Show this help or help for a specific command
 

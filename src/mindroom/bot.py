@@ -23,6 +23,7 @@ from .commands import (
     handle_widget_command,
 )
 from .config import Config
+from .config_commands import handle_config_command
 from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
@@ -1140,6 +1141,11 @@ class AgentBot:
                     room_id=room.room_id,
                     task_id=task_id,
                 )
+
+        elif command.type == CommandType.CONFIG:
+            # Handle config command
+            args_text = command.args.get("args_text", "")
+            response_text = await handle_config_command(args_text)
 
         elif command.type == CommandType.UNKNOWN:
             # Handle unknown commands
