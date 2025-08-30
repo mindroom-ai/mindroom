@@ -29,8 +29,9 @@ def test_get_datetime_context_format() -> None:
     # Should show timezone
     assert "America/New_York timezone" in context
 
-    # Should have proper time format (e.g., "12:30 PM EST")
-    assert "AM" in context or "PM" in context
+    # Should have proper 24-hour time format (e.g., "13:30 EST")
+    # Check for HH:MM format with 2 digits for hour and minute
+    assert re.search(r"\d{2}:\d{2}", context) is not None
     assert "EST" in context or "EDT" in context  # Eastern time zones
 
 
@@ -72,7 +73,8 @@ def test_agent_prompt_includes_datetime() -> None:
     assert "The current time is" in role
     assert "America/Los_Angeles timezone" in role
 
-    # Should have time in Pacific timezone
+    # Should have time in Pacific timezone (24-hour format)
+    assert re.search(r"\d{2}:\d{2}", role) is not None  # HH:MM format
     assert "PST" in role or "PDT" in role  # Pacific time zones
 
     # Should have the actual agent prompt content
@@ -130,19 +132,12 @@ def test_datetime_context_is_current() -> None:
     context = get_datetime_context("UTC")
 
     # Extract the time from the context
-    # Looking for pattern like "12:30 PM UTC"
-    time_match = re.search(r"(\d{1,2}):(\d{2}) (AM|PM)", context)
+    # Looking for pattern like "13:30 UTC" (24-hour format)
+    time_match = re.search(r"(\d{2}):(\d{2}) UTC", context)
     assert time_match is not None
 
     hour = int(time_match.group(1))
     minute = int(time_match.group(2))
-    period = time_match.group(3)
-
-    # Convert to 24-hour format
-    if period == "PM" and hour != 12:
-        hour += 12
-    elif period == "AM" and hour == 12:
-        hour = 0
 
     # Get current UTC time
     now = datetime.now(ZoneInfo("UTC"))

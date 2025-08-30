@@ -387,8 +387,8 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
     now = datetime.now(UTC)
     relative_str = humanize.naturaltime(dt, when=now)
 
-    # Format the datetime string
-    time_str = local_dt.strftime("%Y-%m-%d %I:%M %p %Z")
+    # Format the datetime string with 24-hour time
+    time_str = local_dt.strftime("%Y-%m-%d %H:%M %Z")
     return f"{time_str} ({relative_str})"
 
 

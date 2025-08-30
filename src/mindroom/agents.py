@@ -39,7 +39,7 @@ def get_datetime_context(timezone_str: str) -> str:
 
     # Format the datetime in a clear, readable way
     date_str = now.strftime("%A, %B %d, %Y")
-    time_str = now.strftime("%I:%M %p %Z")
+    time_str = now.strftime("%H:%M %Z")  # 24-hour format
 
     return f"""## Current Date and Time
 Today is {date_str}.
