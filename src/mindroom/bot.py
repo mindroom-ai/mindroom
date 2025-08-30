@@ -401,6 +401,10 @@ class AgentBot:
         if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
             return
 
+        # Skip duplicate responses early to avoid reprocessing during initial sync
+        if self._should_skip_duplicate_response(event):
+            return
+
         # We only receive events from rooms we're in - no need to check access
         _is_dm_room = await is_dm_room(self.client, room.room_id)
 
@@ -444,10 +448,6 @@ class AgentBot:
                     self.logger.info("Skipping routing: only one agent present")
                 else:
                     await self._handle_ai_routing(room, event, context.thread_history)
-            return
-
-        # Skip duplicate responses
-        if self._should_skip_duplicate_response(event):
             return
 
         # Check for team formation
