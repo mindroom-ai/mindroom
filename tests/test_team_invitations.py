@@ -6,6 +6,7 @@ memberships just like agents do.
 
 from __future__ import annotations
 
+from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -44,7 +45,7 @@ class TestTeamRoomMembership:
     """Test team room membership functionality."""
 
     @pytest.mark.asyncio
-    async def test_team_joins_configured_rooms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_team_joins_configured_rooms(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Test that teams join their configured rooms on startup."""
         # Create a mock team user
         team_user = AgentMatrixUser(
@@ -94,7 +95,7 @@ class TestTeamRoomMembership:
         assert "!test_room:localhost" in joined_rooms
 
     @pytest.mark.asyncio
-    async def test_team_leaves_unconfigured_rooms(self) -> None:
+    async def test_team_leaves_unconfigured_rooms(self, tmp_path: Path) -> None:
         """Test that teams leave rooms they're no longer configured for."""
         # Create a mock team user
         team_user = AgentMatrixUser(

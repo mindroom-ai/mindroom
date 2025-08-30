@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -128,7 +128,7 @@ class TestDMPreservationDuringCleanup:
             assert "!unconfigured1:server" in leave_calls
             assert "!unconfigured2:server" in leave_calls
 
-    async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path) -> None:
+    async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path) -> None:  # noqa: ARG002
         """Test that orphaned bot cleanup skips DM rooms (unconfigured rooms) when DM mode is enabled."""
         client = AsyncMock()
         config = Config(
@@ -155,7 +155,7 @@ class TestDMPreservationDuringCleanup:
             # Should not even try to kick
             assert not client.room_kick.called
 
-    async def test_orphaned_bot_cleanup_processes_regular_rooms(self, tmp_path: Path) -> None:
+    async def test_orphaned_bot_cleanup_processes_regular_rooms(self, tmp_path: Path) -> None:  # noqa: ARG002
         """Test that orphaned bot cleanup processes rooms when DM mode is disabled."""
         client = AsyncMock()
         config = Config(
@@ -199,7 +199,7 @@ class TestDMPreservationDuringCleanup:
                 reason="Bot no longer configured for this room",
             )
 
-    async def test_cleanup_all_orphaned_bots_respects_dm_rooms(self, tmp_path: Path) -> None:
+    async def test_cleanup_all_orphaned_bots_respects_dm_rooms(self, tmp_path: Path) -> None:  # noqa: ARG002
         """Test that cleanup_all_orphaned_bots respects DM rooms when DM mode is enabled."""
         client = AsyncMock()
         config = Config(

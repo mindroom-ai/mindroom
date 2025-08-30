@@ -6,6 +6,7 @@ memberships. This test module verifies that behavior.
 
 from __future__ import annotations
 
+from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -50,7 +51,7 @@ def mock_config() -> Config:
 
 
 @pytest.mark.asyncio
-async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Test that agents join their configured rooms on startup."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -99,7 +100,7 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ARG001
+async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # noqa: ARG001
     """Test that agents leave rooms they're no longer configured for."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -149,7 +150,7 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
-async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Test that agents update their room memberships when configuration changes."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(

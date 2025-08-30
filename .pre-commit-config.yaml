@@ -25,7 +25,7 @@ repos:
         entry: .venv/bin/mypy
         language: system
         types: [python]
-        files: ^(src/|tests/|matrix-ai-minimal/)
+        files: ^(src/|tests/)
         exclude: docs/source/conf.py
         pass_filenames: false
         args: [src, tests]

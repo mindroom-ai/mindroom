@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock
 
 import pytest
@@ -123,6 +123,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that agents join new rooms when their configuration is updated."""
     # Track room operations
@@ -204,6 +205,7 @@ async def test_router_updates_rooms_on_config_reload(
     updated_config: Config,
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that the router updates its room list when agents/teams change their rooms."""
     # Track room operations
@@ -278,6 +280,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that new agents are created and join their configured rooms."""
     # Track room operations
@@ -341,6 +344,7 @@ async def test_team_room_changes_on_config_reload(
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that teams update their room memberships when configuration changes."""
     # Track room operations
@@ -415,6 +419,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     updated_config: Config,
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that the orchestrator properly handles config reloads and updates all bots."""
     # Track config loads
@@ -520,6 +525,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that room membership state is correct after config updates."""
     # Simulate room membership state
