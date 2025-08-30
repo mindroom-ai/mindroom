@@ -115,12 +115,9 @@ class ReplacementStreamingResponse(StreamingResponse):
     not incremental concatenation.
     """
 
-    complete_content: str = ""  # Track all content for interactive processing
-
     def _update(self, new_chunk: str) -> None:
-        """Replace accumulated text with new chunk but preserve complete content."""
-        self.complete_content += new_chunk  # Keep all content for interactive processing
-        self.accumulated_text = new_chunk  # Only latest chunk for display
+        """Replace accumulated text with new chunk."""
+        self.accumulated_text = new_chunk
 
 
 async def send_streaming_response(
@@ -203,11 +200,4 @@ async def send_streaming_response(
 
     await streaming.finalize(client)
 
-    # For ReplacementStreamingResponse, return complete content for interactive processing
-    final_content = (
-        streaming.complete_content
-        if isinstance(streaming, ReplacementStreamingResponse)
-        else streaming.accumulated_text
-    )
-
-    return streaming.event_id, final_content
+    return streaming.event_id, streaming.accumulated_text

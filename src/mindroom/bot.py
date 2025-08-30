@@ -149,7 +149,7 @@ def create_bot_for_entity(
             team_agents=team_config.agents,
             team_mode=team_config.mode,
             team_model=team_config.model,
-            enable_streaming=True,
+            enable_streaming=False,
         )
 
     if entity_name in config.agents:
