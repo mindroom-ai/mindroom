@@ -31,7 +31,12 @@ def parse_config_args(args_text: str) -> tuple[str, list[str]]:
         return "show", []
 
     # Use shlex to handle quoted strings properly
-    parts = shlex.split(args_text)
+    try:
+        parts = shlex.split(args_text)
+    except ValueError as e:
+        # Handle parsing errors (e.g., unmatched quotes)
+        # Return a special operation that will trigger an error message
+        return "parse_error", [str(e)]
 
     if not parts:
         return "show", []
@@ -155,7 +160,7 @@ def format_value(value: Any) -> str:  # noqa: ANN401
     return yaml_str
 
 
-async def handle_config_command(args_text: str, config_path: Path | None = None) -> str:  # noqa: C901, PLR0911
+async def handle_config_command(args_text: str, config_path: Path | None = None) -> str:  # noqa: C901, PLR0911, PLR0912
     """Handle config command execution.
 
     Args:
@@ -226,6 +231,19 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
                 f"Set `{config_path_str}` to:\n```yaml\n{formatted_value}\n```\n\n"
                 f"Changes saved to {path} and will affect new agent interactions."
             )
+
+    elif operation == "parse_error":
+        # Handle parsing errors (e.g., unmatched quotes)
+        error_msg = args[0] if args else "Unknown parsing error"
+        return (
+            f"❌ **Command parsing error:**\n{error_msg}\n\n"
+            "**Common issues:**\n"
+            "• Unmatched quotes: Make sure quotes are properly paired\n"
+            '• For JSON arrays/objects, use matching quotes: `["item1", "item2"]`\n'
+            "• Or use single quotes consistently: `['item1', 'item2']`\n\n"
+            "**Example:**\n"
+            '`!config set agents.analyst.tools ["tool1", "tool2"]`'
+        )
 
     else:
         available_ops = ["show", "get", "set"]

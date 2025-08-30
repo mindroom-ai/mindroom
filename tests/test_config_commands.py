@@ -89,6 +89,20 @@ class TestConfigArgsParsing:
         assert operation == "set"
         assert args == ["agents.analyst.display_name", "Research Expert"]
 
+    def test_parse_unmatched_quotes(self) -> None:
+        """Test parsing with unmatched quotes returns parse_error."""
+        operation, args = parse_config_args('set test.value "unmatched')
+        assert operation == "parse_error"
+        assert len(args) == 1
+        assert "closing quotation" in args[0].lower()
+
+    def test_parse_mismatched_quotes(self) -> None:
+        """Test parsing with mismatched quotes returns parse_error."""
+        operation, args = parse_config_args("set test.value 'mismatched\"")
+        assert operation == "parse_error"
+        assert len(args) == 1
+        assert "closing quotation" in args[0].lower()
+
 
 class TestNestedValueOperations:
     """Test nested value get/set operations."""
@@ -328,5 +342,20 @@ class TestConfigCommandHandling:
             response = await handle_config_command("unknown_op", config_path)
             assert "❌ Unknown operation" in response
             assert "unknown_op" in response
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_parse_error(self) -> None:
+        """Test handling config command with parse error."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump({"models": {"default": {"provider": "openai", "id": "gpt-4"}}}, f)
+            config_path = Path(f.name)
+
+        try:
+            # Command with unmatched quotes
+            response = await handle_config_command('set test.value "unmatched', config_path)
+            assert "❌" in response
+            assert "parsing error" in response.lower()
+            assert "unmatched quotes" in response.lower()
         finally:
             config_path.unlink()
