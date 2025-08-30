@@ -404,7 +404,12 @@ class AgentBot:
             return
 
         # Check if sender is authorized to interact with agents
-        if not is_authorized_sender(event.sender, self.config):
+        is_authorized = is_authorized_sender(event.sender, self.config)
+        self.logger.debug(
+            f"Authorization check for {event.sender}: authorized={is_authorized}, "
+            f"authorized_users={self.config.authorized_users}",
+        )
+        if not is_authorized:
             self.logger.debug(f"Ignoring message from unauthorized sender: {event.sender}")
             return
 
@@ -1461,6 +1466,13 @@ class MultiAgentOrchestrator:
 
         if not entities_to_restart and not new_entities:
             self.config = new_config
+            # Still need to update config for all existing bots even if none are restarting
+            logger.info(
+                f"Config updated (no restarts needed). New authorized_users: {new_config.authorized_users}",
+            )
+            for entity_name, bot in self.agent_bots.items():
+                bot.config = new_config
+                logger.debug(f"Updated config for {entity_name}")
             return False
 
         # Stop entities that need restarting
@@ -1471,9 +1483,13 @@ class MultiAgentOrchestrator:
         self.config = new_config
 
         # Update config for all existing bots that aren't being restarted
+        logger.info(
+            f"Updating config for existing bots. New authorized_users: {new_config.authorized_users}",
+        )
         for entity_name, bot in self.agent_bots.items():
             if entity_name not in entities_to_restart:
                 bot.config = new_config
+                logger.debug(f"Updated config for {entity_name}")
 
         # Recreate entities that need restarting using self-management
         for entity_name in entities_to_restart:
