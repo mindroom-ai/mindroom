@@ -20,7 +20,7 @@ async def set_typing(
     client: nio.AsyncClient,
     room_id: str,
     typing: bool = True,
-    timeout_ms: int = 30000,
+    timeout_seconds: int = 30,
 ) -> None:
     """Set typing status for a user in a room.
 
@@ -28,9 +28,10 @@ async def set_typing(
         client: Matrix client instance
         room_id: Room to show typing indicator in
         typing: Whether to show or hide typing indicator
-        timeout_ms: How long the typing indicator should last (in milliseconds)
+        timeout_seconds: How long the typing indicator should last (in seconds)
 
     """
+    timeout_ms = timeout_seconds * 1000
     response = await client.room_typing(room_id, typing, timeout_ms)
     if isinstance(response, nio.RoomTypingError):
         logger.warning(
@@ -47,7 +48,7 @@ async def set_typing(
 async def typing_indicator(
     client: nio.AsyncClient,
     room_id: str,
-    timeout_ms: int = 30000,
+    timeout_seconds: int = 30,
 ) -> AsyncGenerator[None, None]:
     """Context manager for showing typing indicator while processing.
 
@@ -60,21 +61,21 @@ async def typing_indicator(
     Args:
         client: Matrix client instance
         room_id: Room to show typing indicator in
-        timeout_ms: How long each typing notification lasts
+        timeout_seconds: How long each typing notification lasts
 
     """
     # Start typing
-    await set_typing(client, room_id, True, timeout_ms)
+    await set_typing(client, room_id, True, timeout_seconds)
 
     # Create a task to periodically refresh the typing indicator
     # Matrix typing indicators expire, so we need to refresh them
-    refresh_interval = min(timeout_ms / 2, 15000) / 1000  # Convert to seconds
+    refresh_interval = min(timeout_seconds / 2, 15)  # Refresh at half timeout or 15s
 
     async def refresh_typing() -> None:
         """Refresh typing indicator periodically."""
         while True:
             await asyncio.sleep(refresh_interval)
-            await set_typing(client, room_id, True, timeout_ms)
+            await set_typing(client, room_id, True, timeout_seconds)
 
     refresh_task = asyncio.create_task(refresh_typing())
 
