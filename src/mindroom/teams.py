@@ -10,6 +10,12 @@ from agno.models.message import Message
 from agno.run.response import (
     RunResponse,
 )
+from agno.run.response import (
+    RunResponseContentEvent as AgentRunResponseContentEvent,
+)
+from agno.run.team import (
+    RunResponseContentEvent as TeamRunResponseContentEvent,
+)
 from agno.run.team import (
     TeamRunResponse,
 )
@@ -638,12 +644,9 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             logger.warning(f"Unexpected RunResponse in team stream: {content[:100]}")
             continue
 
-        # Check event type directly
-        event_type = getattr(event, "event", None)
-
-        if event_type == "RunResponseContent":
-            # Individual agent response
-            agent_display_name = getattr(event, "agent_name", None)
+        # Individual agent response event
+        elif isinstance(event, AgentRunResponseContentEvent):
+            agent_display_name = event.agent_name
             if agent_display_name:
                 content = str(event.content or "")
                 if agent_display_name in per_member:
@@ -652,8 +655,8 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                     logger.debug(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
                     consensus += content
 
-        elif event_type == "TeamRunResponseContent":
-            # Team consensus content
+        # Team consensus content event
+        elif isinstance(event, TeamRunResponseContentEvent):
             content = str(event.content or "")
             # Skip internal Agno markers
             if content.strip() in ["analysis", "assistant", "final"]:
@@ -663,7 +666,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 consensus += content
         else:
             # Skip other event types
-            logger.debug(f"Ignoring event type: {event_type}")
+            logger.debug(f"Ignoring event type: {type(event).__name__}")
             continue
 
         parts: list[str] = []
