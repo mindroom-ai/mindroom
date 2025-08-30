@@ -124,6 +124,7 @@ scripts.mindroom = "mindroom.cli:main"
 [dependency-groups]
 dev = [
   "aioresponses>=0.7.8",
+  "markdown-code-runner>=2.4",
   "matty>=0.3",
   "mypy>=1.17",
   "pre-commit>=4.2",

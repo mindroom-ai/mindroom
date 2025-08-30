@@ -30,12 +30,12 @@ repos:
         pass_filenames: false
         args: [src, tests]
 
-      - id: update-command-docs
-        name: Update command documentation
-        entry: .venv/bin/python scripts/update_command_docs.py
+      - id: update-readme-docs
+        name: Update README documentation
+        entry: .venv/bin/markdown-code-runner README.md
         language: system
         pass_filenames: false
-        files: ^src/mindroom/commands\.py$
+        files: ^(src/mindroom/commands\.py|README\.md)$
 
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.6.0"
