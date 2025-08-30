@@ -136,49 +136,23 @@ def parse_value(value_str: str) -> Any:  # noqa: ANN401
     return value_str
 
 
-def format_value(value: Any, indent: int = 0) -> str:  # noqa: ANN401, C901, PLR0911
-    """Format a value for display.
+def format_value(value: Any) -> str:  # noqa: ANN401
+    """Format a value for display as YAML.
 
     Args:
         value: Value to format
-        indent: Indentation level
 
     Returns:
-        Formatted string representation
+        YAML formatted string representation
 
     """
-    indent_str = "  " * indent
-
-    if isinstance(value, dict):
-        if not value:
-            return "{}"
-        lines = ["{"]
-        for key, val in value.items():
-            formatted_val = format_value(val, indent + 1)
-            lines.append(f"{indent_str}  {key}: {formatted_val}")
-        lines.append(f"{indent_str}}}")
-        return "\n".join(lines)
-    if isinstance(value, list):
-        if not value:
-            return "[]"
-        if all(isinstance(item, (str, int, float, bool, type(None))) for item in value):
-            # Simple list - format inline
-            formatted_items = [json.dumps(item) if isinstance(item, str) else str(item) for item in value]
-            return f"[{', '.join(formatted_items)}]"
-        # Complex list - format with indentation
-        lines = ["["]
-        for item in value:
-            formatted_item = format_value(item, indent + 1)
-            lines.append(f"{indent_str}  - {formatted_item}")
-        lines.append(f"{indent_str}]")
-        return "\n".join(lines)
-    if isinstance(value, str):
-        return json.dumps(value)
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
+    # Use yaml.dump for consistent formatting
+    yaml_str = yaml.dump(value, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    # Remove trailing newline and document end marker that yaml.dump adds
+    yaml_str = yaml_str.rstrip()
+    if yaml_str.endswith("..."):
+        yaml_str = yaml_str[:-3].rstrip()
+    return yaml_str
 
 
 async def handle_config_command(args_text: str, config_path: Path | None = None) -> str:  # noqa: C901, PLR0911
@@ -215,7 +189,7 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
             return f"❌ {e}"
         else:
             formatted = format_value(value)
-            return f"**Configuration value for `{config_path_str}`:**\n```json\n{formatted}\n```"
+            return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{formatted}\n```"
 
     elif operation == "set":
         if len(args) < 2:
@@ -249,7 +223,7 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
             formatted_value = format_value(value)
             return (
                 f"✅ **Configuration updated successfully!**\n\n"
-                f"Set `{config_path_str}` to:\n```json\n{formatted_value}\n```\n\n"
+                f"Set `{config_path_str}` to:\n```yaml\n{formatted_value}\n```\n\n"
                 f"Changes saved to {path} and will affect new agent interactions."
             )
 

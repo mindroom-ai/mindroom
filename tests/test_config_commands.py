@@ -177,21 +177,26 @@ class TestValueFormatting:
 
     def test_format_simple_values(self) -> None:
         """Test formatting simple values."""
-        assert format_value("string") == '"string"'
+        assert format_value("string") == "string"
         assert format_value(42) == "42"
         assert format_value(True) == "true"
         assert format_value(False) == "false"
-        assert format_value(None) == "null"
+        assert format_value(None) == "null"  # YAML represents None as null
 
     def test_format_list(self) -> None:
         """Test formatting list."""
-        assert format_value([1, 2, 3]) == "[1, 2, 3]"
-        assert format_value(["a", "b"]) == '["a", "b"]'
+        result = format_value([1, 2, 3])
+        assert "- 1" in result
+        assert "- 2" in result
+        assert "- 3" in result
+        result = format_value(["a", "b"])
+        assert "- a" in result
+        assert "- b" in result
 
     def test_format_dict(self) -> None:
         """Test formatting dict."""
         result = format_value({"key": "value"})
-        assert 'key: "value"' in result
+        assert "key: value" in result
 
     def test_format_empty_collections(self) -> None:
         """Test formatting empty collections."""
