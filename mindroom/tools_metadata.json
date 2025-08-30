@@ -5738,17 +5738,6 @@
         },
         {
           "default": null,
-          "description": "Headers to be used in the search request",
-          "label": "Headers",
-          "name": "headers",
-          "options": null,
-          "placeholder": "{\"User-Agent\": \"MyBot/1.0\"}",
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "default": null,
           "description": "Proxy to be used in the search request",
           "label": "Proxy",
           "name": "proxy",
@@ -5756,17 +5745,6 @@
           "placeholder": "http://proxy.example.com:8080",
           "required": false,
           "type": "url",
-          "validation": null
-        },
-        {
-          "default": null,
-          "description": "A list of proxies to be used in the search request",
-          "label": "Proxies",
-          "name": "proxies",
-          "options": null,
-          "placeholder": "{\"http\": \"proxy1\", \"https\": \"proxy2\"}",
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {
@@ -5793,7 +5771,7 @@
         }
       ],
       "dependencies": [
-        "duckduckgo-search"
+        "ddgs"
       ],
       "description": "Search engine for web search and news",
       "display_name": "DuckDuckGo",
@@ -6694,6 +6672,17 @@
           "description": "Enable web search and information extraction",
           "label": "Search Scraper",
           "name": "searchscraper",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        },
+        {
+          "default": false,
+          "description": "Enable automated browser actions and optional AI extraction",
+          "label": "Agentic Crawler",
+          "name": "agentic_crawler",
           "options": null,
           "placeholder": null,
           "required": false,
