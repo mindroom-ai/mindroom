@@ -201,7 +201,7 @@ class AgentBot:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
 
-    @cached_property
+    @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
         return create_agent(agent_name=self.agent_name, config=self.config)
