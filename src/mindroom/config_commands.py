@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shlex
 from pathlib import Path  # noqa: TC003
 from typing import Any
@@ -117,27 +116,20 @@ def parse_value(value_str: str) -> Any:  # noqa: ANN401
         Parsed value (str, int, float, bool, list, or dict)
 
     """
-    # Try to parse as JSON first (handles lists, dicts, bools, null)
+    # Try to parse as YAML first (handles unquoted strings in arrays/dicts)
+    # YAML is a superset of JSON, so this handles both formats
+    # Examples that work:
+    #   [item1, item2]          -> ['item1', 'item2']
+    #   ["item1", "item2"]      -> ['item1', 'item2']
+    #   {key: value}            -> {'key': 'value'}
+    #   {"key": "value"}        -> {'key': 'value'}
     try:
-        return json.loads(value_str)
-    except json.JSONDecodeError:
+        return yaml.safe_load(value_str)
+    except yaml.YAMLError:
         pass
 
-    # Check for boolean strings
-    if value_str.lower() == "true":
-        return True
-    if value_str.lower() == "false":
-        return False
-
-    # Try to parse as number
-    try:
-        if "." in value_str:
-            return float(value_str)
-        return int(value_str)
-    except ValueError:
-        pass
-
-    # Return as string
+    # If YAML parsing fails, return as string
+    # This handles cases where the string itself contains special YAML characters
     return value_str
 
 
@@ -203,6 +195,8 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
         config_path_str = args[0]
         # Join remaining args as the value (handles unquoted strings with spaces)
         value_str = " ".join(args[1:])
+
+        # Parse the value - YAML parsing handles both quoted and unquoted formats
         value = parse_value(value_str)
 
         try:

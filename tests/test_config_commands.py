@@ -359,3 +359,58 @@ class TestConfigCommandHandling:
             assert "unmatched quotes" in response.lower()
         finally:
             config_path.unlink()
+
+    async def test_handle_config_set_unquoted_array(self) -> None:
+        """Test handling config set with unquoted JSON array."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "agents": {
+                    "test_agent": {
+                        "display_name": "Test Agent",
+                        "role": "Testing",
+                        "tools": [],
+                    },
+                },
+                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            # This simulates what happens when user types: !config set path ["item1", "item2"]
+            # shlex turns it into: [item1, item2] (quotes consumed)
+            response = await handle_config_command("set agents.test_agent.tools [communication, lobby]", config_path)
+            assert "✅" in response
+
+            # Verify the file was actually updated
+            config = Config.from_yaml(config_path)
+            assert config.agents["test_agent"].tools == ["communication", "lobby"]
+        finally:
+            config_path.unlink()
+
+    async def test_handle_config_set_quoted_array(self) -> None:
+        """Test handling config set with properly quoted JSON array."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_data = {
+                "agents": {
+                    "test_agent": {
+                        "display_name": "Test Agent",
+                        "role": "Testing",
+                        "tools": [],
+                    },
+                },
+                "models": {"default": {"provider": "openai", "id": "gpt-4"}},
+            }
+            yaml.dump(config_data, f)
+            config_path = Path(f.name)
+
+        try:
+            # User properly quotes the entire JSON array
+            response = await handle_config_command('set agents.test_agent.tools ["tool1", "tool2"]', config_path)
+            assert "✅" in response
+
+            # Verify the file was actually updated
+            config = Config.from_yaml(config_path)
+            assert config.agents["test_agent"].tools == ["tool1", "tool2"]
+        finally:
+            config_path.unlink()
