@@ -7,18 +7,12 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from agno.agent import Agent
 from agno.models.message import Message
-from agno.run.response import (
-    RunResponse,
-)
+from agno.run.response import RunResponse
 from agno.run.response import (
     RunResponseContentEvent as AgentRunResponseContentEvent,
 )
-from agno.run.team import (
-    RunResponseContentEvent as TeamRunResponseContentEvent,
-)
-from agno.run.team import (
-    TeamRunResponse,
-)
+from agno.run.team import RunResponseContentEvent as TeamRunResponseContentEvent
+from agno.run.team import TeamRunResponse
 from agno.team import Team
 from pydantic import BaseModel, Field
 
@@ -500,6 +494,9 @@ def select_model_for_team(team_name: str, room_id: str, config: Config) -> str:
     return "default"
 
 
+NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
+
+
 async def team_response(
     agent_names: list[str],
     mode: TeamMode,
@@ -512,7 +509,7 @@ async def team_response(
     agents = _get_agents_from_orchestrator(agent_names, orchestrator)
 
     if not agents:
-        return "Sorry, no agents available for team collaboration."
+        return NO_AGENTS_RESPONSE
 
     prompt = _build_prompt_with_context(message, thread_history)
     team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
@@ -566,7 +563,7 @@ async def team_response_stream_raw(
     if not agents:
 
         async def _empty() -> AsyncIterator[RunResponse]:
-            yield RunResponse(content="Sorry, no agents available for team collaboration.")
+            yield RunResponse(content=NO_AGENTS_RESPONSE)
 
         return _empty()
 
@@ -580,7 +577,7 @@ async def team_response_stream_raw(
     return await team.arun(prompt, stream=True)
 
 
-async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
+async def team_response_stream(  # noqa: C901, PLR0912
     agent_ids: list[MatrixID],
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -624,21 +621,10 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     )
 
     async for event in raw_stream:
-        logger.debug("Received team event", my_event=event)
-
-        # Handle final team response (ends the stream)
-        if isinstance(event, TeamRunResponse):
-            logger.debug("Final TeamRunResponse received, ending stream")
-            final_parts = format_team_response(event)
-            final_text = "\n\n".join(final_parts) if final_parts else ""
-            header = format_team_header(agent_names)
-            yield header + final_text
-            continue
-
         # Handle error case
-        elif isinstance(event, RunResponse):
+        if isinstance(event, RunResponse):
             content = _get_response_content(event)
-            if "no agents available" in content.lower():
+            if NO_AGENTS_RESPONSE in content:
                 yield content
                 return
             logger.warning(f"Unexpected RunResponse in team stream: {content[:100]}")
@@ -657,15 +643,13 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
         # Team consensus content event
         elif isinstance(event, TeamRunResponseContentEvent):
-            content = str(event.content or "")
-            # Skip internal Agno markers
-            if content.strip() in ["analysis", "assistant", "final"]:
-                logger.debug(f"Skipping internal Agno marker: {content.strip()}")
-                continue
-            if content:
-                consensus += content
+            if event.content:
+                consensus += str(event.content)
+            else:
+                logger.debug("Empty team consensus event received")
+
+        # Skip other event types
         else:
-            # Skip other event types
             logger.debug(f"Ignoring event type: {type(event).__name__}")
             continue
 
