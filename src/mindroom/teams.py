@@ -611,7 +611,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     per_member: dict[str, str] = dict.fromkeys(display_names, "")
     consensus: str = ""
 
-    logger.info(f"Team streaming setup - agents: {agent_names}")
+    logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
 
     # Acquire raw event stream
     raw_stream = await team_response_stream_raw(
@@ -624,6 +624,14 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     )
 
     async for event in raw_stream:
+        # Log all events to understand what we're receiving
+        logger.debug(
+            f"Team stream event: type={type(event).__name__}, "
+            f"has_agent_name={hasattr(event, 'agent_name')}, "
+            f"agent_name={getattr(event, 'agent_name', 'N/A')}, "
+            f"has_content={hasattr(event, 'content')}",
+        )
+
         # Team consensus chunk from final response
         if isinstance(event, TeamRunResponse):
             # On completion, yield the exact non-stream formatted output
