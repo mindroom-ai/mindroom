@@ -293,7 +293,7 @@ async def handle_widget_command(
 
         logger.info(f"Successfully added widget to room {room_id}")
     except Exception as e:
-        logger.exception("Error adding widget to room %s", room_id)
+        logger.exception("Error adding widget to room", room_id=room_id)
         return f"❌ Error adding widget: {e!s}"
     else:
         return (

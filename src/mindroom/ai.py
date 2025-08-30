@@ -284,14 +284,14 @@ async def ai_response(
             thread_history,
         )
     except Exception as e:
-        logger.exception("Error preparing agent %s", agent_name)
+        logger.exception("Error preparing agent", agent=agent_name)
         return get_user_friendly_error_message(e, agent_name)
 
     # Execute the AI call - this can fail for network, rate limits, etc.
     try:
         response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
     except Exception as e:
-        logger.exception("Error generating AI response for agent %s", agent_name)
+        logger.exception("Error generating AI response", agent=agent_name)
         return get_user_friendly_error_message(e, agent_name)
 
     # Extract response content - this shouldn't fail
@@ -338,7 +338,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912
             thread_history,
         )
     except Exception as e:
-        logger.exception("Error preparing agent %s for streaming", agent_name)
+        logger.exception("Error preparing agent for streaming", agent=agent_name)
         yield get_user_friendly_error_message(e, agent_name)
         return
 
