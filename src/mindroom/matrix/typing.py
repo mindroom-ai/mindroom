@@ -21,7 +21,7 @@ async def set_typing(
     room_id: str,
     typing: bool = True,
     timeout_ms: int = 30000,
-) -> bool:
+) -> None:
     """Set typing status for a user in a room.
 
     Args:
@@ -30,30 +30,17 @@ async def set_typing(
         typing: Whether to show or hide typing indicator
         timeout_ms: How long the typing indicator should last (in milliseconds)
 
-    Returns:
-        True if successful, False otherwise
-
     """
-    try:
-        response = await client.room_typing(room_id, typing, timeout_ms)
-        if isinstance(response, nio.RoomTypingError):
-            logger.warning(
-                "Failed to set typing status",
-                room_id=room_id,
-                typing=typing,
-                error=response.message,
-            )
-            return False
-    except Exception:
-        logger.exception(
-            "Exception setting typing status",
+    response = await client.room_typing(room_id, typing, timeout_ms)
+    if isinstance(response, nio.RoomTypingError):
+        logger.warning(
+            "Failed to set typing status",
             room_id=room_id,
             typing=typing,
+            error=response.message,
         )
-        return False
     else:
         logger.debug("Set typing status", room_id=room_id, typing=typing)
-        return True
 
 
 @asynccontextmanager
