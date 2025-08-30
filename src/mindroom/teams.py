@@ -11,10 +11,6 @@ from agno.run.response import (
     RunResponse,
 )
 from agno.run.team import (
-    RunResponseContentEvent as TeamRunResponseContentEvent,
-)
-from agno.run.team import (
-    TeamRunEvent,
     TeamRunResponse,
 )
 from agno.team import Team
@@ -622,48 +618,52 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     )
 
     async for event in raw_stream:
-        # Team consensus chunk from final response
+        logger.debug("Received team event", my_event=event)
+
+        # Handle final team response (ends the stream)
         if isinstance(event, TeamRunResponse):
-            # On completion, yield the exact non-stream formatted output
+            logger.debug("Final TeamRunResponse received, ending stream")
             final_parts = format_team_response(event)
             final_text = "\n\n".join(final_parts) if final_parts else ""
             header = format_team_header(agent_names)
             yield header + final_text
             continue
+
+        # Handle error case
         elif isinstance(event, RunResponse):
-            # Error case - no agents available, just return the error message
             content = _get_response_content(event)
             if "no agents available" in content.lower():
                 yield content
                 return
             logger.warning(f"Unexpected RunResponse in team stream: {content[:100]}")
-            consensus += content
-        elif hasattr(event, "agent_name") and event.agent_name:
-            # Individual agent responses within the team (checking for agent_name attribute)
-            agent_display_name = event.agent_name
-            content = str(event.content or "")
+            continue
 
-            if agent_display_name in per_member:
-                per_member[agent_display_name] += content
-            else:
-                consensus += content
-                logger.debug(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
-        elif isinstance(event, TeamRunResponseContentEvent):
-            # Team-level content events - check the event type to determine if it's final content
-            if hasattr(event, "event") and event.event == TeamRunEvent.run_response_content.value:
-                # This is final team consensus content
+        # Check event type directly
+        event_type = getattr(event, "event", None)
+
+        if event_type == "RunResponseContent":
+            # Individual agent response
+            agent_display_name = getattr(event, "agent_name", None)
+            if agent_display_name:
                 content = str(event.content or "")
-                if content:
+                if agent_display_name in per_member:
+                    per_member[agent_display_name] += content
+                else:
+                    logger.debug(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
                     consensus += content
-            else:
-                # Skip intermediate content
-                logger.debug("Skipping non-final TeamRunResponseContentEvent")
+
+        elif event_type == "TeamRunResponseContent":
+            # Team consensus content
+            content = str(event.content or "")
+            # Skip internal Agno markers
+            if content.strip() in ["analysis", "assistant", "final"]:
+                logger.debug(f"Skipping internal Agno marker: {content.strip()}")
                 continue
+            if content:
+                consensus += content
         else:
-            # Skip unknown event types - don't rebuild document for these
-            logger.debug(
-                f"Ignoring event: {type(event).__name__} (type: {type(event)}, module: {type(event).__module__})",
-            )
+            # Skip other event types
+            logger.debug(f"Ignoring event type: {event_type}")
             continue
 
         parts: list[str] = []
