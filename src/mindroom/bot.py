@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import nio
 
 from . import interactive, voice_handler
-from .agents import create_agent, get_rooms_for_entity
+from .agents import create_agent, describe_agent, get_rooms_for_entity
 from .ai import ai_response, stream_agent_response
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import (
@@ -45,6 +45,7 @@ from .matrix.identity import (
     extract_server_name_from_homeserver,
 )
 from .matrix.mentions import format_message_with_mentions
+from .matrix.message_builder import build_message_content
 from .matrix.presence import should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
@@ -223,6 +224,8 @@ class AgentBot:
                     restored = await restore_scheduled_tasks(self.client, room_id, self.config)
                     if restored > 0:
                         self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
+                    # Send welcome message if room is empty
+                    await self._send_welcome_message_if_empty(room_id)
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
@@ -368,6 +371,74 @@ class AgentBot:
         await self.client.close()
         self.logger.info("Stopped agent bot")
 
+    async def _send_welcome_message_if_empty(self, room_id: str) -> None:
+        """Send a welcome message if the room has no messages yet.
+
+        Only called by the router agent when joining a room.
+        """
+        assert self.client is not None
+
+        try:
+            # Check if room has any messages
+            response = await self.client.room_messages(
+                room_id,
+                limit=1,
+                message_filter={"types": ["m.room.message"]},
+            )
+
+            if not isinstance(response, nio.RoomMessagesResponse):
+                self.logger.error("Failed to check room messages", room_id=room_id, error=str(response))
+                return
+
+            # If there are no messages in the room, send welcome message
+            if not response.chunk:
+                self.logger.info("Room is empty, sending welcome message", room_id=room_id)
+
+                # Get list of configured agents for this room
+                configured_agents = get_configured_agents_for_room(room_id, self.config)
+
+                # Build agent list for the welcome message
+                agent_list = []
+                for agent_id in configured_agents:
+                    agent_name = agent_id.agent_name(self.config)
+                    if agent_name and agent_name != ROUTER_AGENT_NAME:
+                        # Get agent description
+                        description = describe_agent(agent_name, self.config)
+                        # Format as a bullet point
+                        agent_list.append(f"• **@{agent_name}**: {description}")
+
+                # Create welcome message
+                welcome_msg = (
+                    "🎉 **Welcome to MindRoom!**\n\n"
+                    "I'm your routing assistant, here to help coordinate our team of specialized AI agents.\n\n"
+                )
+
+                if agent_list:
+                    welcome_msg += "**Available agents in this room:**\n"
+                    welcome_msg += "\n".join(agent_list)
+                    welcome_msg += "\n\n"
+
+                welcome_msg += (
+                    "**How to interact:**\n"
+                    "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
+                    "• Use `!help` to see available commands\n"
+                    "• Agents respond in threads to keep conversations organized\n"
+                    "• Multiple agents can collaborate when you mention them together\n\n"
+                    "**Quick commands:**\n"
+                    "• `!widget` - Add configuration widget to this room\n"
+                    "• `!schedule <time> <message>` - Schedule tasks and reminders\n"
+                    "• `!help [topic]` - Get detailed help\n\n"
+                    "Feel free to ask any agent for help or start a conversation!"
+                )
+
+                # Send the welcome message
+                message_content = build_message_content(welcome_msg)
+                await send_message(self.client, room_id, message_content)
+                self.logger.info("Welcome message sent", room_id=room_id)
+
+        except Exception:
+            self.logger.exception("Failed to send welcome message", room_id=room_id)
+
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
@@ -378,6 +449,9 @@ class AgentBot:
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
         if await join_room(self.client, room.room_id):
             self.logger.info("Joined room", room_id=room.room_id)
+            # If this is the router agent and the room is empty, send a welcome message
+            if self.agent_name == ROUTER_AGENT_NAME:
+                await self._send_welcome_message_if_empty(room.room_id)
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
