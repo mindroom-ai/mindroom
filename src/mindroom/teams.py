@@ -551,33 +551,33 @@ async def team_response(
 
     try:
         response = await team.arun(prompt)
-
-        if isinstance(response, TeamRunResponse):
-            if response.member_responses:
-                logger.debug(f"Team had {len(response.member_responses)} member responses")
-
-            logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
-
-            parts = format_team_response(response)
-            team_response = "\n\n".join(parts) if parts else "No team response generated."
-        else:
-            logger.warning(f"Unexpected response type: {type(response)}", response=response)
-            team_response = str(response)
-
-        logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:MAX_LOG_MESSAGE_LENGTH]}")
-        if len(team_response) > MAX_LOG_MESSAGE_LENGTH:
-            logger.debug(f"TEAM RESPONSE (full): {team_response}")
-
-        # Don't use @ mentions as that would trigger the agents again
-        agent_names = [str(a.name) for a in agents if a.name]
-        team_header = format_team_header(agent_names)
-
-        return team_header + team_response
     except Exception as e:
         logger.exception(f"Error in team response with agents {agent_list}")
         # Return user-friendly error message
         team_name = f"Team ({agent_list})"
         return get_user_friendly_error_message(e, team_name)
+
+    if isinstance(response, TeamRunResponse):
+        if response.member_responses:
+            logger.debug(f"Team had {len(response.member_responses)} member responses")
+
+        logger.info(f"Team consensus content: {response.content[:200] if response.content else 'None'}")
+
+        parts = format_team_response(response)
+        team_response = "\n\n".join(parts) if parts else "No team response generated."
+    else:
+        logger.warning(f"Unexpected response type: {type(response)}", response=response)
+        team_response = str(response)
+
+    logger.info(f"TEAM RESPONSE ({agent_list}): {team_response[:MAX_LOG_MESSAGE_LENGTH]}")
+    if len(team_response) > MAX_LOG_MESSAGE_LENGTH:
+        logger.debug(f"TEAM RESPONSE (full): {team_response}")
+
+    # Don't use @ mentions as that would trigger the agents again
+    agent_names = [str(a.name) for a in agents if a.name]
+    team_header = format_team_header(agent_names)
+
+    return team_header + team_response
 
 
 async def team_response_stream_raw(

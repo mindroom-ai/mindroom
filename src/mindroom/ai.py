@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import os
-import traceback
 from typing import TYPE_CHECKING, Any
 
 import diskcache
@@ -273,6 +272,8 @@ async def ai_response(
 
     """
     logger.info("AI request", agent=agent_name)
+
+    # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
     try:
         agent, full_prompt = await _prepare_agent_and_prompt(
             agent_name,
@@ -282,24 +283,22 @@ async def ai_response(
             config,
             thread_history,
         )
-
-        response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
-        response_text = _extract_response_content(response)
     except Exception as e:
-        # AI models can fail for various reasons (network, API limits, etc)
-        logger.exception("Error generating AI response for agent %s", agent_name)
-        logger.exception(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
-        logger.exception(
-            f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}",
-        )
-        logger.exception(f"Traceback:\n{traceback.format_exc()}")
-        # Return user-friendly error message that will be sent to the user
+        logger.exception("Error preparing agent %s", agent_name)
         return get_user_friendly_error_message(e, agent_name)
-    else:
-        return response_text
+
+    # Execute the AI call - this can fail for network, rate limits, etc.
+    try:
+        response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
+    except Exception as e:
+        logger.exception("Error generating AI response for agent %s", agent_name)
+        return get_user_friendly_error_message(e, agent_name)
+
+    # Extract response content - this shouldn't fail
+    return _extract_response_content(response)
 
 
-async def stream_agent_response(  # noqa: C901
+async def stream_agent_response(  # noqa: C901, PLR0912
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -328,15 +327,22 @@ async def stream_agent_response(  # noqa: C901
     """
     logger.info("AI streaming request", agent=agent_name)
 
-    agent, full_prompt = await _prepare_agent_and_prompt(
-        agent_name,
-        prompt,
-        storage_path,
-        room_id,
-        config,
-        thread_history,
-    )
+    # Prepare agent and prompt - this can fail if agent creation fails
+    try:
+        agent, full_prompt = await _prepare_agent_and_prompt(
+            agent_name,
+            prompt,
+            storage_path,
+            room_id,
+            config,
+            thread_history,
+        )
+    except Exception as e:
+        logger.exception("Error preparing agent %s for streaming", agent_name)
+        yield get_user_friendly_error_message(e, agent_name)
+        return
 
+    # Check cache (this shouldn't fail)
     cache = get_cache(storage_path)
     if cache is not None:
         model = agent.model
@@ -351,8 +357,16 @@ async def stream_agent_response(  # noqa: C901
 
     full_response = ""
 
+    # Execute the streaming AI call - this can fail for network, rate limits, etc.
     try:
         stream_generator = await agent.arun(full_prompt, session_id=session_id, stream=True)
+    except Exception as e:
+        logger.exception("Error starting streaming AI response")
+        yield get_user_friendly_error_message(e, agent_name)
+        return
+
+    # Process the stream events
+    try:
         async for event in stream_generator:
             if isinstance(event, RunResponseContentEvent) and event.content:
                 chunk_text = str(event.content)
@@ -370,11 +384,9 @@ async def stream_agent_response(  # noqa: C901
                     yield result_msg
             else:
                 logger.warning(f"Unhandled event type: {type(event).__name__} - {event}")
-
     except Exception as e:
-        logger.exception("Error generating streaming AI response")
-        error_message = get_user_friendly_error_message(e, agent_name)
-        yield error_message
+        logger.exception("Error during streaming AI response")
+        yield get_user_friendly_error_message(e, agent_name)
         return
 
     if cache is not None and full_response:
