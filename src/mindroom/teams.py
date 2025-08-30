@@ -8,11 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from agno.agent import Agent
 from agno.models.message import Message
 from agno.run.response import (
-    IntermediateRunResponseContentEvent,
     RunResponse,
-)
-from agno.run.response import (
-    RunResponseContentEvent as AgentRunResponseContentEvent,
 )
 from agno.run.team import (
     RunResponseContentEvent as TeamRunResponseContentEvent,
@@ -626,17 +622,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     )
 
     async for event in raw_stream:
-        # Log all events to understand what we're receiving
-        if isinstance(event, (AgentRunResponseContentEvent, IntermediateRunResponseContentEvent)):
-            # Log all attributes of the event to see what we have
-            attrs = [attr for attr in dir(event) if not attr.startswith("_")]
-            logger.debug(
-                f"AgentRunResponseContentEvent attributes: {attrs}, "
-                f"agent_id={getattr(event, 'agent_id', 'N/A')}, "
-                f"agent_name={getattr(event, 'agent_name', 'N/A')}, "
-                f"content={str(getattr(event, 'content', ''))[:50]}...",
-            )
-
         # Team consensus chunk from final response
         if isinstance(event, TeamRunResponse):
             # On completion, yield the exact non-stream formatted output
@@ -653,17 +638,16 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
                 return
             logger.warning(f"Unexpected RunResponse in team stream: {content[:100]}")
             consensus += content
-        elif isinstance(event, (AgentRunResponseContentEvent, IntermediateRunResponseContentEvent)):
-            # Individual agent responses within the team
-            agent_display_name = getattr(event, "agent_name", None)
+        elif hasattr(event, "agent_name") and event.agent_name:
+            # Individual agent responses within the team (checking for agent_name attribute)
+            agent_display_name = event.agent_name
             content = str(event.content or "")
 
-            if agent_display_name and agent_display_name in per_member:
+            if agent_display_name in per_member:
                 per_member[agent_display_name] += content
             else:
                 consensus += content
-                if agent_display_name:
-                    logger.debug(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
+                logger.debug(f"Unknown agent '{agent_display_name}' in team event, adding to consensus")
         elif isinstance(event, TeamRunResponseContentEvent):
             # Team-level content events - check the event type to determine if it's final content
             if hasattr(event, "event") and event.event == TeamRunEvent.run_response_content.value:
