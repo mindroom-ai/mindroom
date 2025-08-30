@@ -1,3 +1,5 @@
+"""Test scheduled task restoration and deduplication."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -11,6 +13,7 @@ from mindroom.scheduling import ScheduledWorkflow, restore_scheduled_tasks
 
 @pytest.mark.asyncio
 async def test_restore_skips_past_once_and_does_not_duplicate_cron() -> None:
+    """Test that past once tasks are skipped and cron tasks are not duplicated."""
     client = AsyncMock()
     config = AsyncMock()
 
@@ -75,4 +78,3 @@ async def test_restore_skips_past_once_and_does_not_duplicate_cron() -> None:
     restored = await restore_scheduled_tasks(client, "!r:server", config)
     # All should be skipped: 0 restored
     assert restored == 0
-

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -197,7 +198,7 @@ class TestBotIntegration:
         mock_is_user_online.return_value = True
         mock_fetch_history.return_value = []
 
-        async def mock_streaming_response():  # type: ignore[no-untyped-def]  # noqa: ANN202
+        async def mock_streaming_response() -> AsyncIterator[str]:
             yield "Test"
             yield " streaming"
             yield " response"

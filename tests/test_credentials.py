@@ -193,12 +193,14 @@ class TestCredentialsManager:
         # Test setting custom key name
         manager.set_api_key("service", "value123", "custom_key")
         creds = manager.load_credentials("service")
+        assert creds is not None
         assert creds["custom_key"] == "value123"
 
         # Test that other fields are preserved
         manager.save_credentials("multi", {"field1": "value1", "api_key": "old"})
         manager.set_api_key("multi", "new")
         creds = manager.load_credentials("multi")
+        assert creds is not None
         assert creds["api_key"] == "new"
         assert creds["field1"] == "value1"
 

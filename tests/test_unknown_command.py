@@ -35,12 +35,10 @@ def test_valid_commands_not_unknown() -> None:
     command = command_parser.parse("!help")
     assert command is not None
     assert command.type == CommandType.HELP
-    assert command.type != CommandType.UNKNOWN
 
     command = command_parser.parse("!schedule daily")
     assert command is not None
     assert command.type == CommandType.SCHEDULE
-    assert command.type != CommandType.UNKNOWN
 
 
 def test_non_commands_return_none() -> None:

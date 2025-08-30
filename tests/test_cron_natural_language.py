@@ -71,12 +71,13 @@ class TestCronNaturalLanguage:
         assert "15" in description
         assert "45" in description
 
-    def test_description_fallback_on_error(self, monkeypatch) -> None:
+    def test_description_fallback_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Falls back to raw cron string if description fails."""
         schedule = CronSchedule(minute="*/5")
 
-        def boom(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-            raise ValueError("descriptor failure")
+        def boom(*args, **kwargs) -> None:  # noqa: ANN002, ANN003, ARG001
+            msg = "descriptor failure"
+            raise ValueError(msg)
 
         # On main, get_description is imported in mindroom.scheduling
         monkeypatch.setattr("mindroom.scheduling.get_description", boom)
