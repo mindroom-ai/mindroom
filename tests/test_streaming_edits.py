@@ -70,10 +70,10 @@ class TestStreamingEdits:
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     async def test_agent_ignores_edits_of_responded_messages(
         self,
-        mock_ai_response_streaming: AsyncMock,  # noqa: ARG002
+        mock_stream_agent_response: AsyncMock,  # noqa: ARG002
         mock_ai_response: AsyncMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,

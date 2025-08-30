@@ -62,16 +62,6 @@ if TYPE_CHECKING:
             placeholder="10",
             description="A fixed number of maximum results",
         ),
-        # Network configuration
-        ConfigField(
-            name="headers",
-            label="Headers",
-            type="text",
-            required=False,
-            default=None,
-            placeholder='{"User-Agent": "MyBot/1.0"}',
-            description="Headers to be used in the search request",
-        ),
         ConfigField(
             name="proxy",
             label="Proxy",
@@ -80,15 +70,6 @@ if TYPE_CHECKING:
             default=None,
             placeholder="http://proxy.example.com:8080",
             description="Proxy to be used in the search request",
-        ),
-        ConfigField(
-            name="proxies",
-            label="Proxies",
-            type="text",
-            required=False,
-            default=None,
-            placeholder='{"http": "proxy1", "https": "proxy2"}',
-            description="A list of proxies to be used in the search request",
         ),
         ConfigField(
             name="timeout",
@@ -108,7 +89,7 @@ if TYPE_CHECKING:
             description="Verify SSL certificates for secure connections",
         ),
     ],
-    dependencies=["duckduckgo-search"],
+    dependencies=["ddgs"],
     docs_url="https://docs.agno.com/tools/toolkits/search/duckduckgo",
 )
 def duckduckgo_tools() -> type[DuckDuckGoTools]:

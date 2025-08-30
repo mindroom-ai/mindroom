@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from mindroom.cli import _run
 from mindroom.config import Config
-from mindroom.matrix import MATRIX_HOMESERVER
-from mindroom.matrix.mentions import create_mention_content_from_text
+from mindroom.constants import MATRIX_HOMESERVER
+from mindroom.matrix.mentions import format_message_with_mentions
 
 
 class LoginError(Exception):
@@ -96,7 +96,7 @@ class MindRoomE2ETest:
         config = Config.from_yaml()
 
         # Create content using the proper helper function
-        content = create_mention_content_from_text(
+        content = format_message_with_mentions(
             config=config,
             text=full_message,
             sender_domain=user_domain,

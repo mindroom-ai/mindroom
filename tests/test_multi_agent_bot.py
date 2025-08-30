@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from agno.run.response import RunResponseContentEvent
+from agno.run.team import TeamRunResponse
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config, ModelConfig
@@ -234,14 +236,14 @@ class TestAgentBot:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     @patch("mindroom.bot.fetch_thread_history")
     @patch("mindroom.bot.should_use_streaming")
     async def test_agent_bot_on_message_mentioned(
         self,
         mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
-        mock_ai_response_streaming: AsyncMock,
+        mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
@@ -254,7 +256,7 @@ class TestAgentBot:
             yield "Test"
             yield " response"
 
-        mock_ai_response_streaming.return_value = mock_streaming_response()
+        mock_stream_agent_response.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Test response"
         mock_fetch_history.return_value = []
         # Mock the presence check to return same value as enable_streaming
@@ -321,7 +323,7 @@ class TestAgentBot:
 
         # Should call AI and send response based on streaming mode
         if enable_streaming:
-            mock_ai_response_streaming.assert_called_once_with(
+            mock_stream_agent_response.assert_called_once_with(
                 agent_name="calculator",
                 prompt="@mindroom_calculator:localhost: What's 2+2?",
                 session_id="!test:localhost:$thread_root_id",
@@ -343,7 +345,7 @@ class TestAgentBot:
                 thread_history=[],
                 room_id="!test:localhost",
             )
-            mock_ai_response_streaming.assert_not_called()
+            mock_stream_agent_response.assert_not_called()
             # Without streaming, we expect 1 call
             assert bot.client.room_send.call_count == 1
 
@@ -374,14 +376,14 @@ class TestAgentBot:
     @patch("mindroom.teams.get_model_instance")
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     @patch("mindroom.bot.fetch_thread_history")
     @patch("mindroom.bot.should_use_streaming")
     async def test_agent_bot_thread_response(  # noqa: PLR0915
         self,
         mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
-        mock_ai_response_streaming: AsyncMock,
+        mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         mock_team_arun: AsyncMock,
         mock_get_model_instance: MagicMock,
@@ -446,9 +448,38 @@ class TestAgentBot:
             yield "Thread"
             yield " response"
 
-        mock_ai_response_streaming.return_value = mock_streaming_response()
+        mock_stream_agent_response.return_value = mock_streaming_response()
         mock_ai_response.return_value = "Thread response"
-        mock_team_arun.return_value = "Team response"
+
+        # Mock team arun to return either a string or async iterator based on stream parameter
+
+        async def mock_team_stream() -> AsyncGenerator[Any, None]:
+            # Yield member content events (using display names as Agno would)
+            event1 = MagicMock(spec=RunResponseContentEvent)
+            event1.event = "RunResponseContent"  # Set the event type
+            event1.agent_name = "CalculatorAgent"  # Display name, not short name
+            event1.content = "Team response chunk 1"
+            yield event1
+
+            event2 = MagicMock(spec=RunResponseContentEvent)
+            event2.event = "RunResponseContent"  # Set the event type
+            event2.agent_name = "GeneralAgent"  # Display name, not short name
+            event2.content = "Team response chunk 2"
+            yield event2
+
+            # Yield final team response
+            team_response = MagicMock(spec=TeamRunResponse)
+            team_response.content = "Team consensus"
+            team_response.member_responses = []
+            team_response.messages = []
+            yield team_response
+
+        def mock_team_arun_side_effect(*args: Any, **kwargs: Any) -> Any:  # noqa: ARG001, ANN401
+            if kwargs.get("stream"):
+                return mock_team_stream()
+            return "Team response"
+
+        mock_team_arun.side_effect = mock_team_arun_side_effect
         # Mock the presence check to return same value as enable_streaming
         mock_should_use_streaming.return_value = enable_streaming
 
@@ -469,18 +500,18 @@ class TestAgentBot:
 
         # Should respond as only agent in thread
         if enable_streaming:
-            mock_ai_response_streaming.assert_called_once()
+            mock_stream_agent_response.assert_called_once()
             mock_ai_response.assert_not_called()
             # With streaming, we expect 2 calls: initial message + final edit
             assert bot.client.room_send.call_count == 2
         else:
             mock_ai_response.assert_called_once()
-            mock_ai_response_streaming.assert_not_called()
+            mock_stream_agent_response.assert_not_called()
             # Without streaming, we expect 1 call
             assert bot.client.room_send.call_count == 1
 
         # Reset mocks
-        mock_ai_response_streaming.reset_mock()
+        mock_stream_agent_response.reset_mock()
         mock_ai_response.reset_mock()
         mock_team_arun.reset_mock()
         bot.client.room_send.reset_mock()
@@ -515,14 +546,15 @@ class TestAgentBot:
 
         await bot._on_message(mock_room, mock_event_2)
 
-        # Should form team and send team response when multiple agents in thread
-        mock_ai_response_streaming.assert_not_called()
+        # Should form team and send a structured streaming team response
+        mock_stream_agent_response.assert_not_called()
         mock_ai_response.assert_not_called()
         mock_team_arun.assert_called_once()
-        bot.client.room_send.assert_called_once()  # Team response sent
+        # Structured streaming sends an initial message and one or more edits
+        assert bot.client.room_send.call_count >= 1
 
         # Reset mocks
-        mock_ai_response_streaming.reset_mock()
+        mock_stream_agent_response.reset_mock()
         mock_ai_response.reset_mock()
         mock_team_arun.reset_mock()
         bot.client.room_send.reset_mock()
@@ -548,20 +580,20 @@ class TestAgentBot:
             yield "Mentioned"
             yield " response"
 
-        mock_ai_response_streaming.return_value = mock_streaming_response2()
+        mock_stream_agent_response.return_value = mock_streaming_response2()
         mock_ai_response.return_value = "Mentioned response"
 
         await bot._on_message(mock_room, mock_event_with_mention)
 
         # Should respond when explicitly mentioned
         if enable_streaming:
-            mock_ai_response_streaming.assert_called_once()
+            mock_stream_agent_response.assert_called_once()
             mock_ai_response.assert_not_called()
             # With streaming, we expect 2 calls: initial message + final edit
             assert bot.client.room_send.call_count == 2
         else:
             mock_ai_response.assert_called_once()
-            mock_ai_response_streaming.assert_not_called()
+            mock_stream_agent_response.assert_not_called()
             # Without streaming, we expect 1 call
             assert bot.client.room_send.call_count == 1
 

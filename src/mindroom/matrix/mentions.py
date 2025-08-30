@@ -101,7 +101,7 @@ def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tup
     return None
 
 
-def create_mention_content_from_text(
+def format_message_with_mentions(
     config: Config,
     text: str,
     sender_domain: str = "localhost",

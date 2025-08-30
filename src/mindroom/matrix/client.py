@@ -597,7 +597,7 @@ async def edit_message(
         client: The Matrix client
         room_id: The room ID where the message is
         event_id: The event ID of the message to edit
-        new_content: The new content dictionary (from create_mention_content_from_text)
+        new_content: The new content dictionary (from format_message_with_mentions)
         new_text: The new text (plain text version)
 
     Returns:

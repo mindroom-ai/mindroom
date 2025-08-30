@@ -27,17 +27,20 @@ async def test_interactive_question_preserves_thread_root_in_streaming() -> None
     # it registers the interactive question with the original thread_id, not the agent's message ID
 
     with (
-        patch("mindroom.bot.ai_response_streaming") as mock_ai_response,
+        patch("mindroom.bot.stream_agent_response") as mock_ai_response,
         patch("mindroom.bot.interactive.should_create_interactive_question") as mock_should_create,
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
         patch("mindroom.bot.interactive.add_reaction_buttons"),
-        patch("mindroom.bot.StreamingResponse") as mock_streaming_class,
+        patch("mindroom.streaming.ReplacementStreamingResponse") as mock_streaming_class,
     ):
         # Setup mock streaming response
         mock_streaming = MagicMock()
         mock_streaming.event_id = "$agent_message_id"
         mock_streaming.accumulated_text = "Test interactive response"
+        # Make methods awaitable to match production async API
+        mock_streaming.update_content = AsyncMock()
+        mock_streaming.finalize = AsyncMock()
         mock_streaming_class.return_value = mock_streaming
 
         # Setup mocks
@@ -72,6 +75,10 @@ async def test_interactive_question_preserves_thread_root_in_streaming() -> None
         # Mock client
         client = AsyncMock()
         client.user_id = "@mindroom_test:localhost"
+        # Mock room_send to return a proper response
+        mock_send_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_send_response.event_id = "$agent_message_id"
+        client.room_send.return_value = mock_send_response
         bot.client = client
 
         # Setup room and thread context
@@ -199,17 +206,20 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming() -> 
 async def test_interactive_question_without_thread_streaming() -> None:
     """Test that interactive questions work correctly when not in a thread (streaming)."""
     with (
-        patch("mindroom.bot.ai_response_streaming") as mock_ai_response,
+        patch("mindroom.bot.stream_agent_response") as mock_ai_response,
         patch("mindroom.bot.interactive.should_create_interactive_question") as mock_should_create,
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
         patch("mindroom.bot.interactive.add_reaction_buttons"),
-        patch("mindroom.bot.StreamingResponse") as mock_streaming_class,
+        patch("mindroom.streaming.ReplacementStreamingResponse") as mock_streaming_class,
     ):
         # Setup mock streaming response
         mock_streaming = MagicMock()
         mock_streaming.event_id = "$standalone_message"
         mock_streaming.accumulated_text = "Test interactive response"
+        # Make methods awaitable to match production async API
+        mock_streaming.update_content = AsyncMock()
+        mock_streaming.finalize = AsyncMock()
         mock_streaming_class.return_value = mock_streaming
 
         # Setup mocks
@@ -244,6 +254,10 @@ async def test_interactive_question_without_thread_streaming() -> None:
         # Mock client
         client = AsyncMock()
         client.user_id = "@mindroom_test:localhost"
+        # Mock room_send to return a proper response
+        mock_send_response = MagicMock(spec=nio.RoomSendResponse)
+        mock_send_response.event_id = "$standalone_message"
+        client.room_send.return_value = mock_send_response
         bot.client = client
 
         # Setup room without thread context

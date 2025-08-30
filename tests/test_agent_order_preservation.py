@@ -7,7 +7,7 @@ import pytest
 
 from mindroom.config import AgentConfig, Config, DefaultsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.teams import TeamMode, should_form_team
+from mindroom.teams import TeamMode, decide_team_formation
 from mindroom.thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
@@ -225,7 +225,7 @@ class TestIntegrationWithTeamFormation:
             mock_config.ids["research"],
         ]  # User tagged in this order
 
-        result = await should_form_team(
+        result = await decide_team_formation(
             tagged_agents=tagged_agents,
             agents_in_thread=[],
             all_mentioned_in_thread=[],

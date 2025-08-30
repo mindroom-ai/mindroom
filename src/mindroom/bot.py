@@ -13,7 +13,7 @@ import nio
 
 from . import interactive, voice_handler
 from .agents import create_agent, get_rooms_for_entity
-from .ai import ai_response, ai_response_streaming
+from .ai import ai_response, stream_agent_response
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import (
     Command,
@@ -44,7 +44,7 @@ from .matrix.identity import (
     extract_agent_name,
     extract_server_name_from_homeserver,
 )
-from .matrix.mentions import create_mention_content_from_text
+from .matrix.mentions import format_message_with_mentions
 from .matrix.presence import should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
@@ -60,8 +60,19 @@ from .scheduling import (
     restore_scheduled_tasks,
     schedule_task,
 )
-from .streaming import IN_PROGRESS_MARKER, StreamingResponse
-from .teams import TeamMode, create_team_response, get_team_model, handle_team_formation, should_form_team
+from .streaming import (
+    IN_PROGRESS_MARKER,
+    ReplacementStreamingResponse,
+    StreamingResponse,
+    send_streaming_response,
+)
+from .teams import (
+    TeamMode,
+    decide_team_formation,
+    select_model_for_team,
+    team_response,
+    team_response_stream,
+)
 from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
@@ -369,7 +380,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         if event.body.endswith(IN_PROGRESS_MARKER):
@@ -441,7 +452,7 @@ class AgentBot:
 
         # Check for team formation
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
-        form_team = await should_form_team(
+        form_team = await decide_team_formation(
             context.mentioned_agents,
             agents_in_thread,
             all_mentioned_in_thread,
@@ -454,19 +465,82 @@ class AgentBot:
 
         # Handle team formation (only first agent alphabetically)
         if form_team.should_form_team and self.matrix_id in form_team.agents:
-            team_response = await handle_team_formation(
-                agent_name=self.agent_name,
-                form_team_agents=form_team.agents,
-                form_team_mode=form_team.mode,
-                event_body=event.body,
-                room_id=room.room_id,
-                orchestrator=self.orchestrator,
-                thread_history=context.thread_history,
-                config=self.config,
+            # Determine if this agent should lead the team response
+            first_agent = min(form_team.agents, key=lambda x: x.username)
+            if self.matrix_id != first_agent:
+                return
+
+            # Get model for this team in this room
+            model_name = select_model_for_team(self.agent_name, room.room_id, self.config)
+
+            # Convert MatrixID to agent names for the team
+            agent_names = [mid.agent_name(self.config) or mid.username for mid in form_team.agents]
+
+            # Decide streaming based on presence
+            use_streaming = self.enable_streaming and await should_use_streaming(
+                self.client,
+                room.room_id,
+                requester_user_id=event.sender,
             )
 
-            if team_response:  # We handle the response
-                await self._send_response(room, event.event_id, team_response, context.thread_id)
+            if use_streaming:
+                # Streaming: returns formatted text chunks for live rendering
+                response_stream = team_response_stream(
+                    agent_ids=form_team.agents,
+                    message=event.body,
+                    orchestrator=self.orchestrator,
+                    mode=form_team.mode,
+                    thread_history=context.thread_history,
+                    model_name=model_name,
+                )
+
+                event_id, accumulated = await send_streaming_response(
+                    self.client,
+                    room.room_id,
+                    event.event_id,
+                    context.thread_id,
+                    self.matrix_id.domain,
+                    self.config,
+                    response_stream,
+                    streaming_cls=ReplacementStreamingResponse,
+                    header=None,
+                )
+
+                # Handle interactive questions in team responses
+                await self._handle_interactive_question(
+                    event_id,
+                    accumulated,
+                    room.room_id,
+                    context.thread_id,
+                    event.event_id,
+                    agent_name="team",  # Or could use team name
+                )
+
+                self.response_tracker.mark_responded(event.event_id)
+            else:
+                # Non-streaming: returns complete formatted response
+                response_text = await team_response(
+                    agent_names=agent_names,
+                    mode=form_team.mode,
+                    message=event.body,
+                    orchestrator=self.orchestrator,
+                    thread_history=context.thread_history,
+                    model_name=model_name,
+                )
+
+                event_id = await self._send_response(room, event.event_id, response_text, context.thread_id)
+
+                # Handle interactive questions in non-streaming team responses
+                if event_id:
+                    await self._handle_interactive_question(
+                        event_id,
+                        response_text,
+                        room.room_id,
+                        context.thread_id,
+                        event.event_id,
+                        agent_name="team",
+                    )
+
                 self.response_tracker.mark_responded(event.event_id)
             return
 
@@ -663,6 +737,47 @@ class AgentBot:
             )
             await interactive.add_reaction_buttons(self.client, room.room_id, event_id, response.options_list)
 
+    async def _handle_interactive_question(
+        self,
+        event_id: str | None,
+        content: str,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str,
+        agent_name: str | None = None,
+    ) -> None:
+        """Handle interactive question registration and reactions if present.
+
+        Args:
+            event_id: The message event ID
+            content: The message content to check for interactive questions
+            room_id: The Matrix room ID
+            thread_id: Thread ID if in a thread
+            reply_to_event_id: Event being replied to
+            agent_name: Name of agent (for registration)
+
+        """
+        if not event_id or not self.client:
+            return
+
+        if interactive.should_create_interactive_question(content):
+            response = interactive.parse_and_format_interactive(content, extract_mapping=True)
+            if response.option_map and response.options_list:
+                thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+                interactive.register_interactive_question(
+                    event_id,
+                    room_id,
+                    thread_root_for_registration,
+                    response.option_map,
+                    agent_name or self.agent_name,
+                )
+                await interactive.add_reaction_buttons(
+                    self.client,
+                    room_id,
+                    event_id,
+                    response.options_list,
+                )
+
     async def _process_and_respond_streaming(
         self,
         room: nio.MatrixRoom,
@@ -678,33 +793,9 @@ class AgentBot:
             return
 
         session_id = create_session_id(room.room_id, thread_id)
-        sender_id = self.matrix_id
-
-        # Get latest thread event for MSC3440 compliance (only for new messages)
-        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-            self.client,
-            room.room_id,
-            thread_id,
-            reply_to_event_id,
-            existing_event_id,
-        )
-
-        streaming = StreamingResponse(
-            room_id=room.room_id,
-            reply_to_event_id=reply_to_event_id,
-            thread_id=thread_id,
-            sender_domain=sender_id.domain,
-            config=self.config,
-            latest_thread_event_id=latest_thread_event_id,
-        )
-
-        # If we're editing an existing message, set the event_id
-        if existing_event_id:
-            streaming.event_id = existing_event_id
-            streaming.accumulated_text = ""  # Start fresh
 
         try:
-            async for chunk in ai_response_streaming(
+            response_stream = stream_agent_response(
                 agent_name=self.agent_name,
                 prompt=prompt,
                 session_id=session_id,
@@ -712,40 +803,31 @@ class AgentBot:
                 config=self.config,
                 thread_history=thread_history,
                 room_id=room.room_id,
-            ):
-                await streaming.update_content(chunk, self.client)
+            )
 
-            await streaming.finalize(self.client)
+            event_id, accumulated = await send_streaming_response(
+                self.client,
+                room.room_id,
+                reply_to_event_id,
+                thread_id,
+                self.matrix_id.domain,
+                self.config,
+                response_stream,
+                streaming_cls=StreamingResponse,
+                existing_event_id=existing_event_id,
+            )
 
-            if streaming.event_id:
-                self.logger.info("Sent streaming response", event_id=streaming.event_id)
-
+            # Handle interactive questions if present
+            await self._handle_interactive_question(
+                event_id,
+                accumulated,
+                room.room_id,
+                thread_id,
+                reply_to_event_id,
+            )
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
             # Don't mark as responded if streaming failed
-
-        # If the message contains an interactive question, register it and add reactions
-        if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
-            response = interactive.parse_and_format_interactive(streaming.accumulated_text, extract_mapping=True)
-            if response.option_map and response.options_list:
-                # For interactive questions, use the same thread root that _send_response uses:
-                # - If already in a thread, use that thread_id
-                # - If not in a thread, use reply_to_event_id (the user's message) as thread root
-                # This ensures consistency with how the bot creates threads
-                thread_root_for_registration = thread_id if thread_id else reply_to_event_id
-                interactive.register_interactive_question(
-                    streaming.event_id,
-                    room.room_id,
-                    thread_root_for_registration,
-                    response.option_map,
-                    self.agent_name,
-                )
-                await interactive.add_reaction_buttons(
-                    self.client,
-                    room.room_id,
-                    streaming.event_id,
-                    response.options_list,
-                )
 
     async def _generate_response(
         self,
@@ -775,21 +857,8 @@ class AgentBot:
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
-        # Store memory for this agent (do this once, before generating response)
+        # Prepare session id for memory storage (store after sending response)
         session_id = create_session_id(room_id, thread_id)
-        create_background_task(
-            store_conversation_memory(
-                prompt,
-                self.agent_name,
-                self.storage_path,
-                session_id,
-                self.config,
-                room_id,
-                thread_history,
-                user_id,
-            ),
-            name=f"memory_save_{self.agent_name}_{session_id}",
-        )
 
         # Dynamically determine whether to use streaming based on user presence
         # Only check presence if streaming is globally enabled
@@ -821,6 +890,24 @@ class AgentBot:
                 thread_history,
                 existing_event_id,
             )
+
+        # Store memory after response generation; ignore errors in tests/mocks
+        try:
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    self.agent_name,
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    room_id,
+                    thread_history,
+                    user_id,
+                ),
+                name=f"memory_save_{self.agent_name}_{session_id}",
+            )
+        except Exception:  # pragma: no cover
+            self.logger.debug("Skipping memory storage due to configuration error")
 
     async def _send_response(
         self,
@@ -861,7 +948,7 @@ class AgentBot:
             reply_to_event_id,
         )
 
-        content = create_mention_content_from_text(
+        content = format_message_with_mentions(
             self.config,
             response_text,
             sender_domain=sender_domain,
@@ -893,7 +980,7 @@ class AgentBot:
         sender_domain = sender_id.domain
 
         # For edits in threads, we don't need latest_thread_event_id as this is not creating a new message
-        content = create_mention_content_from_text(
+        content = format_message_with_mentions(
             self.config,
             new_text,
             sender_domain=sender_domain,
@@ -956,7 +1043,7 @@ class AgentBot:
             event.event_id,
         )
 
-        content = create_mention_content_from_text(
+        content = format_message_with_mentions(
             self.config,
             response_text,
             sender_domain=sender_domain,
@@ -1120,20 +1207,10 @@ class TeamBot(AgentBot):
             return
 
         # Get the appropriate model for this team and room
-        model_name = get_team_model(self.agent_name, room_id, self.config)
+        model_name = select_model_for_team(self.agent_name, room_id, self.config)
 
         # Convert team_mode string to TeamMode enum
         mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
-
-        # Create team response
-        response_text = await create_team_response(
-            agent_names=self.team_agents,
-            mode=mode,
-            message=prompt,
-            orchestrator=self.orchestrator,
-            thread_history=thread_history,
-            model_name=model_name,
-        )
 
         # Store memory once for the entire team (avoids duplicate LLM processing)
         session_id = create_session_id(room_id, thread_id)
@@ -1156,11 +1233,74 @@ class TeamBot(AgentBot):
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
-        if existing_event_id:
-            await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+        # Decide streaming based on presence
+        use_streaming = self.enable_streaming and await should_use_streaming(
+            self.client,
+            room_id,
+            requester_user_id=user_id,
+        )
+
+        if use_streaming and not existing_event_id:
+            # Use structured team streaming with live document rebuilding
+            # Convert team agent names to MatrixID objects
+            team_matrix_ids = [
+                MatrixID.from_username(agent_name, self.matrix_id.domain) for agent_name in self.team_agents
+            ]
+            response_stream = team_response_stream(
+                agent_ids=team_matrix_ids,
+                message=prompt,
+                orchestrator=self.orchestrator,
+                mode=mode,
+                thread_history=thread_history,
+                model_name=model_name,
+            )
+
+            event_id, accumulated = await send_streaming_response(
+                self.client,
+                room_id,
+                reply_to_event_id,
+                thread_id,
+                self.matrix_id.domain,
+                self.config,
+                response_stream,
+                streaming_cls=ReplacementStreamingResponse,
+                header=None,  # team_response_stream includes header
+            )
+
+            # Handle interactive questions in team leader responses
+            await self._handle_interactive_question(
+                event_id,
+                accumulated,
+                room_id,
+                thread_id,
+                reply_to_event_id,
+                agent_name=self.agent_name,  # Team leader's name
+            )
         else:
-            # Send as regular message (not streaming for teams)
-            await self._send_response(room, reply_to_event_id, response_text, thread_id)
+            # Fallback to non-streaming or editing existing message
+            response_text = await team_response(
+                agent_names=self.team_agents,
+                mode=mode,
+                message=prompt,
+                orchestrator=self.orchestrator,
+                thread_history=thread_history,
+                model_name=model_name,
+            )
+            if existing_event_id:
+                await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+            else:
+                event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
+
+                # Handle interactive questions in non-streaming team leader responses
+                if event_id:
+                    await self._handle_interactive_question(
+                        event_id,
+                        response_text,
+                        room_id,
+                        thread_id,
+                        reply_to_event_id,
+                        agent_name=self.agent_name,
+                    )
 
 
 @dataclass

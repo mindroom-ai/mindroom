@@ -36,10 +36,10 @@ dependencies = [
   "cron-descriptor>=1.4.5",
   "croniter>=6",
   "daytona",                                     # for Daytona tool
+  "ddgs",                                        # for DuckDuckGo tool
   "diskcache>=5.6.3",
   "docker",                                      # for Docker tool
   "duckdb",                                      # for DuckDB tool
-  "duckduckgo-search",                           # for DuckDuckGo tool
   "e2b-code-interpreter",                        # for E2B tool
   "elevenlabs",                                  # for ElevenLabs tool
   "exa-py",                                      # for Exa tool

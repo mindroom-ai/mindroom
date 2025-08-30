@@ -17,10 +17,10 @@ class TestTeamCoordination:
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.fetch_thread_history")
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     async def test_sequential_team_responses(
         self,
-        mock_ai_response_streaming: AsyncMock,  # noqa: ARG002
+        mock_stream_agent_response: AsyncMock,  # noqa: ARG002
         mock_fetch_thread_history: AsyncMock,
         tmp_path: Path,  # noqa: ARG002
     ) -> None:

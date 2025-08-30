@@ -56,7 +56,7 @@ async def test_send_response_with_skip_mentions() -> None:
     bot.logger = AsyncMock()
     bot.response_tracker = AsyncMock()
 
-    # Mock the create_mention_content_from_text to return a dict we can check
+    # Mock the format_message_with_mentions to return a dict we can check
     mock_content = {"body": "test", "msgtype": "m.text"}
 
     # Create a test room and event
@@ -76,7 +76,7 @@ async def test_send_response_with_skip_mentions() -> None:
 
     # Patch the function to capture what was passed
 
-    with patch("mindroom.bot.create_mention_content_from_text") as mock_create:
+    with patch("mindroom.bot.format_message_with_mentions") as mock_create:
         mock_create.return_value = mock_content.copy()
         with patch("mindroom.bot.send_message") as mock_send:
             mock_send.return_value = "$response123"

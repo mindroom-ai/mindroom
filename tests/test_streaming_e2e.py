@@ -221,7 +221,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         }
 
         # Mock AI response for helper (streaming)
-        with patch("mindroom.bot.ai_response_streaming") as mock_streaming:
+        with patch("mindroom.bot.stream_agent_response") as mock_streaming:
 
             async def stream_response(
                 _agent_name: str,

@@ -184,10 +184,10 @@ class TestTeamCollaboration:
     """Test team collaboration behaviors."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     async def test_team_coordinate_mode(
         self,
-        mock_ai_response_streaming: AsyncMock,  # noqa: ARG002
+        mock_stream_agent_response: AsyncMock,  # noqa: ARG002
         mock_research_agent: AgentMatrixUser,  # noqa: ARG002
         mock_analyst_agent: AgentMatrixUser,  # noqa: ARG002
         team_room_id: str,  # noqa: ARG002
@@ -461,7 +461,7 @@ class TestRouterTeamFormation:
         import nio  # noqa: PLC0415
 
         from mindroom.config import AgentConfig, Config, ModelConfig  # noqa: PLC0415
-        from mindroom.teams import should_form_team  # noqa: PLC0415
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = Config(
             agents={
@@ -477,7 +477,7 @@ class TestRouterTeamFormation:
         room.users = {"@mindroom_agent1:localhost": None, "@mindroom_agent2:localhost": None}
 
         # Test DM room with multiple agents and no mentions
-        result = await should_form_team(
+        result = await decide_team_formation(
             tagged_agents=[],  # No agents mentioned
             agents_in_thread=[],  # No agents have spoken yet
             all_mentioned_in_thread=[],  # No mentions in thread
@@ -495,7 +495,7 @@ class TestRouterTeamFormation:
 
         # Test DM room with single agent (should not form team)
         room.users = {"@mindroom_agent1:localhost": None}
-        result = await should_form_team(
+        result = await decide_team_formation(
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -517,7 +517,7 @@ class TestRouterTeamFormation:
         import nio  # noqa: PLC0415
 
         from mindroom.config import AgentConfig, Config, ModelConfig  # noqa: PLC0415
-        from mindroom.teams import should_form_team  # noqa: PLC0415
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = Config(
             agents={
@@ -539,7 +539,7 @@ class TestRouterTeamFormation:
         agents_in_thread = [config.ids["calculator"]]
 
         # Should NOT form a team inside a thread with a single agent
-        result = await should_form_team(
+        result = await decide_team_formation(
             tagged_agents=[],
             agents_in_thread=agents_in_thread,
             all_mentioned_in_thread=[],

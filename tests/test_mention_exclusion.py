@@ -147,9 +147,9 @@ async def test_agent_responds_when_mentioned_along_with_others() -> None:
     with patch("mindroom.bot.fetch_thread_history") as mock_fetch_history:
         mock_fetch_history.return_value = []
 
-        # Mock should_form_team to return False (no team formation)
-        with patch("mindroom.bot.should_form_team") as mock_should_form_team:
-            mock_should_form_team.return_value = Mock(should_form_team=False, agents=[], mode=None)
+        # Mock decide_team_formation to return False (no team formation)
+        with patch("mindroom.bot.decide_team_formation") as mock_decide_team_formation:
+            mock_decide_team_formation.return_value = Mock(decide_team_formation=False, agents=[], mode=None)
 
             # Mock the generate_response method to track if it's called
             with patch.object(general_bot, "_generate_response") as mock_generate:

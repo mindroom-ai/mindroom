@@ -24,7 +24,7 @@ from .matrix.client import (
     send_message,
 )
 from .matrix.identity import MatrixID
-from .matrix.mentions import create_mention_content_from_text, parse_mentions_in_text
+from .matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from .matrix.message_builder import build_message_content
 from .thread_utils import get_agents_in_thread, get_available_agents_in_room
 
@@ -198,7 +198,7 @@ async def execute_scheduled_workflow(
             workflow.room_id,
             workflow.thread_id,
         )
-        content = create_mention_content_from_text(
+        content = format_message_with_mentions(
             config,
             automated_message,
             sender_domain=config.domain,
