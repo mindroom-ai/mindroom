@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
 from agno.storage.sqlite import SqliteStorage
@@ -20,6 +22,31 @@ logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
 MAX_INSTRUCTION_LENGTH = 100
+
+
+def get_datetime_context(timezone_str: str) -> str:
+    """Generate current date and time context for the agent.
+
+    Args:
+        timezone_str: Timezone string (e.g., 'America/New_York', 'UTC')
+
+    Returns:
+        Formatted string with current date and time information
+
+    """
+    tz = ZoneInfo(timezone_str)
+    now = datetime.now(tz)
+
+    # Format the datetime in a clear, readable way
+    date_str = now.strftime("%A, %B %d, %Y")
+    time_str = now.strftime("%H:%M %Z")  # 24-hour format
+
+    return f"""## Current Date and Time
+Today is {date_str}.
+The current time is {time_str} ({timezone_str} timezone).
+
+"""
+
 
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
 RICH_PROMPTS = {
@@ -86,16 +113,22 @@ def create_agent(agent_name: str, config: Config) -> Agent:
         model_id=model_id,
     )
 
+    # Add current date and time context with user's configured timezone
+    datetime_context = get_datetime_context(config.timezone)
+
+    # Combine identity and datetime contexts
+    full_context = identity_context + datetime_context
+
     # Use rich prompt if available, otherwise use YAML config
     if agent_name in RICH_PROMPTS:
         logger.info(f"Using rich prompt for agent: {agent_name}")
-        # Prepend identity context to the rich prompt
-        role = identity_context + RICH_PROMPTS[agent_name]
+        # Prepend full context to the rich prompt
+        role = full_context + RICH_PROMPTS[agent_name]
         instructions = []  # Instructions are in the rich prompt
     else:
         logger.info(f"Using YAML config for agent: {agent_name}")
-        # For YAML agents, prepend identity to role and keep original instructions
-        role = identity_context + agent_config.role
+        # For YAML agents, prepend full context to role and keep original instructions
+        role = full_context + agent_config.role
         instructions = agent_config.instructions
 
     # Create agent with defaults applied
