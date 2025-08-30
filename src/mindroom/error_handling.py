@@ -5,8 +5,9 @@ This module provides unified error handling and user notification for various fa
 
 from __future__ import annotations
 
+import re
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Self
 
 from .logging_config import get_logger
 
@@ -150,7 +151,7 @@ def get_user_friendly_error_message(error: Exception, agent_name: str | None = N
         )
 
     # For unknown errors, provide a generic message but log the details
-    logger.error(f"Uncategorized error: {error}", exc_info=True)
+    logger.error(f"Uncategorized error: {error}")
     return (
         f"{agent_prefix}⚠️ **Unexpected Error**: I encountered an unexpected issue. "
         f"The error has been logged and will be investigated. Please try again or rephrase your request."
@@ -184,7 +185,6 @@ def _extract_tool_name_from_error(error: Exception) -> str | None:
     error_str = str(error)
 
     # Look for common patterns like "Tool 'name'" or "tool_name"
-    import re
 
     patterns = [
         r"Tool ['\"]([^'\"]+)['\"]",
@@ -224,8 +224,8 @@ async def send_error_message(
         Event ID if message was sent successfully, None otherwise
 
     """
-    from .matrix.client import get_latest_thread_event_id_if_needed, send_message
-    from .matrix.mentions import format_message_with_mentions
+    from .matrix.client import get_latest_thread_event_id_if_needed, send_message  # noqa: PLC0415
+    from .matrix.mentions import format_message_with_mentions  # noqa: PLC0415
 
     # Generate user-friendly error message
     error_message = get_user_friendly_error_message(error, agent_name)
@@ -233,7 +233,6 @@ async def send_error_message(
     # Log the full error for debugging
     logger.error(
         f"Error occurred in {agent_name or 'agent'}: {error}",
-        exc_info=True,
         extra={
             "agent": agent_name,
             "room_id": room_id,
@@ -257,7 +256,7 @@ async def send_error_message(
         )
 
     # Format the message with proper thread structure
-    from .config import Config
+    from .config import Config  # noqa: PLC0415
 
     config = Config()  # Load default config for formatting
 
@@ -297,7 +296,7 @@ class ErrorHandlingContext:
         thread_id: str | None = None,
         sender_domain: str | None = None,
         fallback_message: str | None = None,
-    ):
+    ) -> None:
         """Initialize error handling context.
 
         Args:
@@ -318,22 +317,28 @@ class ErrorHandlingContext:
         self.sender_domain = sender_domain
         self.fallback_message = fallback_message
 
-    async def __aenter__(self) -> ErrorHandlingContext:
+    async def __aenter__(self) -> Self:
+        """Enter the error handling context."""
         return self
 
-    async def __aexit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: Any) -> bool:
-        if exc_val is not None and self.client and self.room_id:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> bool:
+        """Exit the error handling context and handle any exceptions."""
+        if exc_val is not None and self.client and self.room_id and isinstance(exc_val, Exception):
             # Send error message to user
-            if isinstance(exc_val, Exception):
-                await send_error_message(
-                    self.client,
-                    self.room_id,
-                    exc_val,
-                    self.agent_name,
-                    self.reply_to_event_id,
-                    self.thread_id,
-                    self.sender_domain,
-                )
-                # Suppress the exception since we've handled it
-                return True
+            await send_error_message(
+                self.client,
+                self.room_id,
+                exc_val,
+                self.agent_name,
+                self.reply_to_event_id,
+                self.thread_id,
+                self.sender_domain,
+            )
+            # Suppress the exception since we've handled it
+            return True
         return False

@@ -10,7 +10,7 @@ from mindroom.error_handling import (
 class TestErrorCategorization:
     """Test error categorization logic."""
 
-    def test_api_key_errors(self):
+    def test_api_key_errors(self) -> None:
         """Test that API key errors are categorized correctly."""
         errors = [
             Exception("Invalid API key provided"),
@@ -22,7 +22,7 @@ class TestErrorCategorization:
         for error in errors:
             assert categorize_error(error) == ErrorCategory.API_KEY
 
-    def test_rate_limit_errors(self):
+    def test_rate_limit_errors(self) -> None:
         """Test that rate limit errors are categorized correctly."""
         errors = [
             Exception("Rate limit exceeded"),
@@ -33,7 +33,7 @@ class TestErrorCategorization:
         for error in errors:
             assert categorize_error(error) == ErrorCategory.RATE_LIMIT
 
-    def test_network_errors(self):
+    def test_network_errors(self) -> None:
         """Test that network errors are categorized correctly."""
         errors = [
             Exception("Connection refused"),
@@ -45,7 +45,7 @@ class TestErrorCategorization:
         for error in errors:
             assert categorize_error(error) == ErrorCategory.NETWORK
 
-    def test_timeout_errors(self):
+    def test_timeout_errors(self) -> None:
         """Test that timeout errors are categorized correctly."""
         errors = [
             Exception("Request timeout"),
@@ -55,7 +55,7 @@ class TestErrorCategorization:
         for error in errors:
             assert categorize_error(error) == ErrorCategory.TIMEOUT
 
-    def test_permission_errors(self):
+    def test_permission_errors(self) -> None:
         """Test that permission errors are categorized correctly."""
         errors = [
             Exception("Permission denied"),
@@ -66,7 +66,7 @@ class TestErrorCategorization:
         for error in errors:
             assert categorize_error(error) == ErrorCategory.PERMISSION
 
-    def test_unknown_errors(self):
+    def test_unknown_errors(self) -> None:
         """Test that unknown errors are categorized as unknown."""
         errors = [
             Exception("Some random error"),
@@ -81,7 +81,7 @@ class TestErrorCategorization:
 class TestUserFriendlyMessages:
     """Test user-friendly error message generation."""
 
-    def test_api_key_message(self):
+    def test_api_key_message(self) -> None:
         """Test API key error message generation."""
         error = Exception("Invalid OpenAI API key")
         message = get_user_friendly_error_message(error, "assistant")
@@ -91,7 +91,7 @@ class TestUserFriendlyMessages:
         assert "API key" in message
         assert "OpenAI" in message
 
-    def test_rate_limit_message(self):
+    def test_rate_limit_message(self) -> None:
         """Test rate limit error message generation."""
         error = Exception("Rate limit exceeded")
         message = get_user_friendly_error_message(error, "researcher")
@@ -100,7 +100,7 @@ class TestUserFriendlyMessages:
         assert "Rate Limit" in message
         assert "wait" in message
 
-    def test_network_message(self):
+    def test_network_message(self) -> None:
         """Test network error message generation."""
         error = Exception("Connection timeout")
         message = get_user_friendly_error_message(error)
@@ -108,7 +108,7 @@ class TestUserFriendlyMessages:
         assert "Network Error" in message or "Timeout" in message
         assert "try again" in message
 
-    def test_provider_extraction(self):
+    def test_provider_extraction(self) -> None:
         """Test that provider names are extracted correctly."""
         test_cases = [
             ("OpenAI API key invalid", "OpenAI"),
@@ -126,7 +126,7 @@ class TestUserFriendlyMessages:
             assert "Authentication Error" in message
             assert expected_provider in message or "AI service" in message
 
-    def test_message_without_agent_name(self):
+    def test_message_without_agent_name(self) -> None:
         """Test message generation without agent name."""
         error = Exception("API key invalid")
         message = get_user_friendly_error_message(error)
@@ -134,7 +134,7 @@ class TestUserFriendlyMessages:
         assert "[" not in message  # No agent prefix
         assert "Authentication Error" in message
 
-    def test_tool_error_message(self):
+    def test_tool_error_message(self) -> None:
         """Test tool error message generation."""
         error = Exception("Tool 'search' execution failed")
         message = get_user_friendly_error_message(error, "analyst")
