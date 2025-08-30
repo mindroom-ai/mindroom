@@ -1045,8 +1045,8 @@ class TestRouterSkipsSingleAgent:
         assert "Skipping routing: only one agent present" not in info_calls
 
     @pytest.mark.asyncio
-    async def test_router_skips_unknown_command_with_single_agent(self) -> None:
-        """Router should not respond to unknown command when only one agent is present."""
+    async def test_router_handles_command_even_with_single_agent(self) -> None:
+        """Router should handle commands even when only one agent is present."""
         # Create router agent
         agent_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -1097,11 +1097,11 @@ class TestRouterSkipsSingleAgent:
             mock_get_available.return_value = [config.ids["general"]]
             await bot._on_message(room, event)
 
-        # Router should not attempt to handle the command nor send a response
-        bot._handle_command.assert_not_called()
+        # Router should handle the command even with a single agent
+        # This ensures commands work properly in single-agent rooms
+        bot._handle_command.assert_called_once()
+        # Router should not send a response for unknown commands (handled by _handle_command)
         bot._send_response.assert_not_called()
-        info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
-        assert "Skipping command handling: only one agent present" in info_calls
 
     @pytest.mark.asyncio
     async def test_router_handles_command_with_multiple_agents(self) -> None:

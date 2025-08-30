@@ -539,13 +539,9 @@ class AgentBot:
         command = command_parser.parse(event.body)
         if command:
             if self.agent_name == ROUTER_AGENT_NAME:
-                # If there's only one agent present in the room, skip command handling
-                # so the single agent can handle the conversation naturally.
-                available_agents = get_available_agents_in_room(room, self.config)
-                if len(available_agents) == 1:
-                    self.logger.info("Skipping command handling: only one agent present")
-                else:
-                    await self._handle_command(room, event, command)
+                # Router always handles commands, even in single-agent rooms
+                # Commands like !schedule, !help, etc. need to work regardless
+                await self._handle_command(room, event, command)
             return
 
         context = await self._extract_message_context(room, event)
@@ -566,13 +562,19 @@ class AgentBot:
 
         # Router: Route when no specific agent mentioned and no agents in thread
         if self.agent_name == ROUTER_AGENT_NAME:
+            # Only perform AI routing when:
+            # 1. No specific agent is mentioned
+            # 2. No agents are already in the thread
+            # 3. There's more than one agent available (routing makes sense)
             if not context.mentioned_agents and not agents_in_thread:
-                # If there's only one agent present in the room, skip routing entirely
                 available_agents = get_available_agents_in_room(room, self.config)
                 if len(available_agents) == 1:
+                    # Skip routing in single-agent rooms - the agent will handle it directly
                     self.logger.info("Skipping routing: only one agent present")
                 else:
+                    # Multiple agents available - perform AI routing
                     await self._handle_ai_routing(room, event, context.thread_history)
+            # Router's job is done after routing/command handling/voice transcription
             return
 
         # Skip duplicate responses (after command handling/agent filters/router)
