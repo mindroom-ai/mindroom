@@ -180,6 +180,7 @@ class TestShouldFormTeam:
             mock_determine.return_value = TeamMode.COORDINATE
 
             result = await decide_team_formation(
+                agent=mock_config.ids["email"],
                 tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
                 agents_in_thread=[],
                 all_mentioned_in_thread=[],
@@ -202,6 +203,7 @@ class TestShouldFormTeam:
     async def test_decide_team_formation_without_ai_decision(self, mock_config):
         """Test team formation with hardcoded mode selection."""
         result = await decide_team_formation(
+            agent=mock_config.ids["email"],
             tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -220,6 +222,7 @@ class TestShouldFormTeam:
     async def test_decide_team_formation_no_message_fallback(self, mock_config):
         """Test fallback to hardcoded logic when message is None."""
         result = await decide_team_formation(
+            agent=mock_config.ids["email"],
             tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -238,6 +241,7 @@ class TestShouldFormTeam:
     async def test_decide_team_formation_no_config_fallback(self, mock_config):
         """Test fallback to hardcoded logic when config is None."""
         result = await decide_team_formation(
+            agent=mock_config.ids["email"],
             tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -256,6 +260,7 @@ class TestShouldFormTeam:
     async def test_decide_team_formation_no_team_needed(self, mock_config):
         """Test when no team formation is needed."""
         result = await decide_team_formation(
+            agent=mock_config.ids["email"],
             tagged_agents=[mock_config.ids["email"]],  # Only one agent
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -276,6 +281,7 @@ class TestShouldFormTeam:
             mock_determine.return_value = TeamMode.COLLABORATE
 
             result = await decide_team_formation(
+                agent=mock_config.ids["analyst"],
                 tagged_agents=[],
                 agents_in_thread=[mock_config.ids["research"], mock_config.ids["analyst"]],
                 all_mentioned_in_thread=[],
@@ -296,6 +302,7 @@ class TestShouldFormTeam:
             mock_determine.return_value = TeamMode.COLLABORATE
 
             result = await decide_team_formation(
+                agent=mock_config.ids["email"],
                 tagged_agents=[],
                 agents_in_thread=[],
                 all_mentioned_in_thread=[
@@ -332,6 +339,7 @@ class TestIntegrationScenarios:
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await decide_team_formation(
+                    agent=mock_config.ids["email"],
                     tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
@@ -360,6 +368,7 @@ class TestIntegrationScenarios:
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await decide_team_formation(
+                    agent=mock_config.ids["analyst"],
                     tagged_agents=[mock_config.ids["research"], mock_config.ids["analyst"]],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
@@ -378,6 +387,7 @@ class TestIntegrationScenarios:
         """Test that the function still works with old call signature."""
         # Old code might call without message and config
         result = await decide_team_formation(
+            agent=mock_config.ids["email"],
             tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
             agents_in_thread=[],
             all_mentioned_in_thread=[],

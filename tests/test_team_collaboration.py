@@ -478,6 +478,7 @@ class TestRouterTeamFormation:
 
         # Test DM room with multiple agents and no mentions
         result = await decide_team_formation(
+            agent=config.ids["agent1"],
             tagged_agents=[],  # No agents mentioned
             agents_in_thread=[],  # No agents have spoken yet
             all_mentioned_in_thread=[],  # No mentions in thread
@@ -496,6 +497,7 @@ class TestRouterTeamFormation:
         # Test DM room with single agent (should not form team)
         room.users = {"@mindroom_agent1:localhost": None}
         result = await decide_team_formation(
+            agent=config.ids["agent1"],
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -540,6 +542,7 @@ class TestRouterTeamFormation:
 
         # Should NOT form a team inside a thread with a single agent
         result = await decide_team_formation(
+            agent=config.ids["calculator"],
             tagged_agents=[],
             agents_in_thread=agents_in_thread,
             all_mentioned_in_thread=[],

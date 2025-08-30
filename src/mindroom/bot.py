@@ -182,7 +182,6 @@ class AgentBot:
 
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
-    response_tracker: ResponseTracker = field(init=False)
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
 
@@ -205,6 +204,11 @@ class AgentBot:
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
         return create_agent(agent_name=self.agent_name, config=self.config)
+
+    @cached_property
+    def response_tracker(self) -> ResponseTracker:
+        """Get or create the response tracker for this agent."""
+        return ResponseTracker(self.agent_name, base_path=self.storage_path)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -299,10 +303,6 @@ class AgentBot:
 
         # Set avatar if available
         await self._set_avatar_if_available()
-
-        # Initialize response tracker
-        # Use storage_path for tests to ensure isolation
-        self.response_tracker = ResponseTracker(self.agent_name, base_path=self.storage_path)
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
@@ -401,10 +401,6 @@ class AgentBot:
         if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
             return
 
-        # Skip duplicate responses early to avoid reprocessing during initial sync
-        if self._should_skip_duplicate_response(event):
-            return
-
         # We only receive events from rooms we're in - no need to check access
         _is_dm_room = await is_dm_room(self.client, room.room_id)
 
@@ -450,9 +446,14 @@ class AgentBot:
                     await self._handle_ai_routing(room, event, context.thread_history)
             return
 
+        # Skip duplicate responses (after command handling/agent filters/router)
+        if self._should_skip_duplicate_response(event):
+            return
+
         # Check for team formation
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = await decide_team_formation(
+            self.matrix_id,
             context.mentioned_agents,
             agents_in_thread,
             all_mentioned_in_thread,
@@ -466,7 +467,8 @@ class AgentBot:
         # Handle team formation (only first agent alphabetically)
         if form_team.should_form_team and self.matrix_id in form_team.agents:
             # Determine if this agent should lead the team response
-            first_agent = min(form_team.agents, key=lambda x: x.username)
+            # Use the same ordering as decide_team_formation (by full_id)
+            first_agent = min(form_team.agents, key=lambda x: x.full_id)
             if self.matrix_id != first_agent:
                 return
 

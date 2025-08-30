@@ -226,6 +226,7 @@ class TestIntegrationWithTeamFormation:
         ]  # User tagged in this order
 
         result = await decide_team_formation(
+            agent=mock_config.ids["email"],  # The agent calling this function
             tagged_agents=tagged_agents,
             agents_in_thread=[],
             all_mentioned_in_thread=[],
