@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from . import agent_prompts
 from .ai import get_model_instance
 from .constants import ROUTER_AGENT_NAME
+from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .matrix.rooms import get_room_alias_from_id
 from .thread_utils import get_available_agents_in_room
@@ -548,7 +549,13 @@ async def team_response(
     logger.info(f"Executing team response with {len(agents)} agents in {mode.value} mode")
     logger.info(f"TEAM PROMPT: {prompt[:500]}")
 
-    response = await team.arun(prompt)
+    try:
+        response = await team.arun(prompt)
+    except Exception as e:
+        logger.exception(f"Error in team response with agents {agent_list}")
+        # Return user-friendly error message
+        team_name = f"Team ({agent_list})"
+        return get_user_friendly_error_message(e, team_name)
 
     if isinstance(response, TeamRunResponse):
         if response.member_responses:
@@ -604,7 +611,17 @@ async def team_response_stream_raw(
     for agent in agents:
         logger.debug(f"Team member: {agent.name}")
 
-    return await team.arun(prompt, stream=True)
+    try:
+        return await team.arun(prompt, stream=True)
+    except Exception as e:
+        logger.exception(f"Error in team streaming with agents {agent_names}")
+        team_name = f"Team ({', '.join(agent_names)})"
+        error_message = get_user_friendly_error_message(e, team_name)
+
+        async def _error() -> AsyncIterator[RunResponse]:
+            yield RunResponse(content=error_message)
+
+        return _error()
 
 
 async def team_response_stream(  # noqa: C901, PLR0912, PLR0915

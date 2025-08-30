@@ -20,6 +20,25 @@ def test_help_command() -> None:
     assert command.args["topic"] == "invite"
 
 
+def test_hi_command() -> None:
+    """Test hi command parsing."""
+    # Basic hi command
+    command = command_parser.parse("!hi")
+    assert command is not None
+    assert command.type == CommandType.HI
+    assert command.args == {}
+
+    # Case insensitive
+    command = command_parser.parse("!HI")
+    assert command is not None
+    assert command.type == CommandType.HI
+
+    # With trailing space (should still work)
+    command = command_parser.parse("!hi ")
+    assert command is not None
+    assert command.type == CommandType.HI
+
+
 def test_invalid_commands() -> None:
     """Test that invalid commands are handled correctly."""
     # Commands that should return UNKNOWN

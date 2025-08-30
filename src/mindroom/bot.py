@@ -46,6 +46,7 @@ from .matrix.identity import (
     extract_server_name_from_homeserver,
 )
 from .matrix.mentions import format_message_with_mentions
+from .matrix.message_builder import build_message_content
 from .matrix.presence import should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
@@ -95,6 +96,85 @@ logger = get_logger(__name__)
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
+
+
+def _format_agent_description(agent_name: str, config: Config) -> str:
+    """Format a concise agent description for the welcome message."""
+    if agent_name in config.agents:
+        agent_config = config.agents[agent_name]
+        desc_parts = []
+
+        # Add role first
+        if agent_config.role:
+            desc_parts.append(agent_config.role)
+
+        # Add tools with better formatting
+        if agent_config.tools:
+            # Wrap each tool name in backticks
+            formatted_tools = [f"`{tool}`" for tool in agent_config.tools[:3]]
+            tools_str = ", ".join(formatted_tools)
+            if len(agent_config.tools) > 3:
+                tools_str += f" +{len(agent_config.tools) - 3} more"
+            desc_parts.append(f"(🔧 {tools_str})")
+
+        return " ".join(desc_parts) if desc_parts else ""
+
+    if agent_name in config.teams:
+        team_config = config.teams[agent_name]
+        team_desc = f"Team of {len(team_config.agents)} agents"
+        if team_config.role:
+            return f"{team_config.role} ({team_desc})"
+        return team_desc
+
+    return ""
+
+
+def _generate_welcome_message(room_id: str, config: Config) -> str:
+    """Generate the welcome message text for a room."""
+    # Get list of configured agents for this room
+    configured_agents = get_configured_agents_for_room(room_id, config)
+
+    # Build agent list for the welcome message
+    agent_list = []
+    for agent_id in configured_agents:
+        agent_name = agent_id.agent_name(config)
+        if not agent_name or agent_name == ROUTER_AGENT_NAME:
+            continue
+
+        description = _format_agent_description(agent_name, config)
+        # Always show the agent, with or without description
+        agent_entry = f"• **@{agent_name}**"
+        if description:
+            agent_entry += f": {description}"
+        agent_list.append(agent_entry)
+
+    # Create welcome message
+    welcome_msg = (
+        "🎉 **Welcome to MindRoom!**\n\n"
+        "I'm your routing assistant, here to help coordinate our team of specialized AI agents. 🤖\n\n"
+    )
+
+    if agent_list:
+        welcome_msg += "🧠 **Available agents in this room:**\n"
+        welcome_msg += "\n".join(agent_list)
+        welcome_msg += "\n\n"
+
+    welcome_msg += (
+        "💬 **How to interact:**\n"
+        "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
+        "• Use `!help` to see available commands\n"
+        "• Agents respond in threads to keep conversations organized\n"
+        "• Multiple agents can collaborate when you mention them together\n"
+        "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
+        "⚡ **Quick commands:**\n"
+        "• `!hi` - Show this welcome message again\n"
+        "• `!widget` - Add configuration widget to this room\n"
+        "• `!schedule <time> <message>` - Schedule tasks and reminders\n"
+        "• `!help [topic]` - Get detailed help\n\n"
+        "✨ Feel free to ask any agent for help or start a conversation!"
+    )
+
+    return welcome_msg
 
 
 def _should_skip_mentions(event_source: dict) -> bool:
@@ -224,6 +304,8 @@ class AgentBot:
                     restored = await restore_scheduled_tasks(self.client, room_id, self.config)
                     if restored > 0:
                         self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
+                    # Send welcome message if room is empty
+                    await self._send_welcome_message_if_empty(room_id)
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
@@ -369,6 +451,49 @@ class AgentBot:
         await self.client.close()
         self.logger.info("Stopped agent bot")
 
+    async def _send_welcome_message_if_empty(self, room_id: str) -> None:
+        """Send a welcome message if the room has no messages yet.
+
+        Only called by the router agent when joining a room.
+        """
+        assert self.client is not None
+
+        # Check if room has any messages
+        response = await self.client.room_messages(
+            room_id,
+            limit=2,  # Get 2 messages to check if we already sent welcome
+            message_filter={"types": ["m.room.message"]},
+        )
+
+        # nio returns error types on failure - this is necessary
+        if not isinstance(response, nio.RoomMessagesResponse):
+            self.logger.error("Failed to check room messages", room_id=room_id, error=str(response))
+            return
+
+        # Only send welcome message if room is empty or only has our own welcome message
+        if not response.chunk:
+            # Room is completely empty
+            self.logger.info("Room is empty, sending welcome message", room_id=room_id)
+
+            # Generate and send the welcome message
+            welcome_msg = _generate_welcome_message(room_id, self.config)
+            message_content = build_message_content(welcome_msg)
+            await send_message(self.client, room_id, message_content)
+            self.logger.info("Welcome message sent", room_id=room_id)
+        elif len(response.chunk) == 1:
+            # Check if the only message is our welcome message
+            msg = response.chunk[0]
+            if (
+                hasattr(msg, "sender")
+                and msg.sender == self.agent_user.user_id
+                and hasattr(msg, "body")
+                and "Welcome to MindRoom" in msg.body
+            ):
+                self.logger.debug("Welcome message already sent", room_id=room_id)
+                return
+            # Otherwise, room has a different message, don't send welcome
+        # Room has other messages, don't send welcome
+
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
@@ -379,6 +504,9 @@ class AgentBot:
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
         if await join_room(self.client, room.room_id):
             self.logger.info("Joined room", room_id=room.room_id)
+            # If this is the router agent and the room is empty, send a welcome message
+            if self.agent_name == ROUTER_AGENT_NAME:
+                await self._send_welcome_message_if_empty(room.room_id)
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
@@ -1032,11 +1160,14 @@ class AgentBot:
             self.config,
             thread_history,
         )
-        if not suggested_agent:
-            return
 
-        # Router mentions the suggested agent and asks them to help
-        response_text = f"@{suggested_agent} could you help with this?"
+        if not suggested_agent:
+            # Send error message when routing fails
+            response_text = "⚠️ I couldn't determine which agent should help with this. Please try mentioning an agent directly with @ or rephrase your request."
+            self.logger.warning("Router failed to determine agent")
+        else:
+            # Router mentions the suggested agent and asks them to help
+            response_text = f"@{suggested_agent} could you help with this?"
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
@@ -1072,8 +1203,13 @@ class AgentBot:
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:
+    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901
         self.logger.info("Handling command", command_type=command.type.value)
+
+        # Check if we've already responded to this command to prevent duplicate responses on restart
+        if self.response_tracker.has_responded(event.event_id):
+            self.logger.debug("Already responded to command", event_id=event.event_id, command_type=command.type.value)
+            return
 
         event_info = EventInfo.from_event(event.source)
 
@@ -1095,6 +1231,10 @@ class AgentBot:
         if command.type == CommandType.HELP:
             topic = command.args.get("topic")
             response_text = get_command_help(topic)
+
+        elif command.type == CommandType.HI:
+            # Generate the welcome message for this room
+            response_text = _generate_welcome_message(room.room_id, self.config)
 
         elif command.type == CommandType.SCHEDULE:
             full_text = command.args["full_text"]

@@ -24,6 +24,7 @@ class CommandType(Enum):
     CANCEL_SCHEDULE = "cancel_schedule"
     WIDGET = "widget"
     CONFIG = "config"  # Configuration command
+    HI = "hi"  # Welcome message command
     UNKNOWN = "unknown"  # Special type for unrecognized commands
 
 
@@ -35,6 +36,7 @@ COMMAND_DOCS = {
     CommandType.HELP: ("!help [topic]", "Get help"),
     CommandType.WIDGET: ("!widget [url]", "Add configuration widget"),
     CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
+    CommandType.HI: ("!hi", "Show welcome message"),
 }
 
 
@@ -72,6 +74,7 @@ class CommandParser:
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
+    HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
 
     def parse(self, message: str) -> Command | None:  # noqa: PLR0911
         """Parse a message for commands.
@@ -91,6 +94,14 @@ class CommandParser:
             return None
 
         # Try to match each command pattern
+
+        # !hi command (check this early as it's simple)
+        if self.HI_PATTERN.match(message):
+            return Command(
+                type=CommandType.HI,
+                args={},
+                raw_text=message,
+            )
 
         # !help command
         match = self.HELP_PATTERN.match(message)
@@ -333,7 +344,7 @@ async def handle_widget_command(
 
         logger.info(f"Successfully added widget to room {room_id}")
     except Exception as e:
-        logger.exception("Error adding widget to room %s", room_id)
+        logger.exception("Error adding widget to room", room_id=room_id)
         return f"❌ Error adding widget: {e!s}"
     else:
         return (

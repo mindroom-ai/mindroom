@@ -67,6 +67,7 @@ class TestThreadingBehavior:
 
         # Initialize components that depend on client
         bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
 
         # Mock the agent to return a response
         mock_agent = MagicMock()
@@ -250,6 +251,7 @@ class TestThreadingBehavior:
 
         # Initialize components that depend on client
         bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
 
         # Mock the agent to return a response
         mock_agent = MagicMock()
@@ -347,6 +349,7 @@ class TestThreadingBehavior:
 
         # Initialize components that depend on client
         bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
 
         # Mock the agent to return a response
         mock_agent = MagicMock()

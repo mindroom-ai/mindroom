@@ -191,7 +191,7 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
             logger.info(f"Ensured Matrix user for agent: {agent_name} -> {agent_user.user_id}")
         except Exception:
             # Continue with other agents even if one fails
-            logger.exception("Failed to create Matrix user for agent %s", agent_name)
+            logger.exception("Failed to create Matrix user for agent", agent_name=agent_name)
 
     # Create team users
     for team_name, team_config in config.teams.items():
@@ -205,6 +205,6 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
             logger.info(f"Ensured Matrix user for team: {team_name} -> {team_user.user_id}")
         except Exception:
             # Continue with other teams even if one fails
-            logger.exception("Failed to create Matrix user for team %s", team_name)
+            logger.exception("Failed to create Matrix user for team", team_name=team_name)
 
     return agent_users
