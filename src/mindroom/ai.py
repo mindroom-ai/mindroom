@@ -162,8 +162,9 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     extra_kwargs = model_config.extra_kwargs or {}
 
     if provider == "ollama":
-        # Get Ollama host from CredentialsManager (synced from OLLAMA_HOST env var)
-        host = get_ollama_host() or model_config.host or "http://localhost:11434"
+        # Priority: model config > env/CredentialsManager > default
+        # This allows per-model host configuration in config.yaml
+        host = model_config.host or get_ollama_host() or "http://localhost:11434"
         logger.debug(f"Using Ollama host: {host}")
         return Ollama(id=model_id, host=host, **extra_kwargs)
     if provider == "openai":
