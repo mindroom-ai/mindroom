@@ -23,7 +23,7 @@ from .commands import (
     handle_widget_command,
 )
 from .config import Config
-from .config_commands import apply_config_change, handle_config_command
+from .config_commands import handle_config_command
 from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
@@ -730,46 +730,6 @@ class AgentBot:
         )
         self.response_tracker.mark_responded(event.event_id)
 
-    async def _add_config_confirmation_reactions(self, room_id: str, event_id: str) -> None:
-        """Add confirmation reaction buttons to a config change message.
-
-        Args:
-            room_id: The room ID
-            event_id: The event ID of the message to add reactions to
-
-        """
-        assert self.client is not None
-
-        # Add ✅ reaction
-        confirm_response = await self.client.room_send(
-            room_id=room_id,
-            message_type="m.reaction",
-            content={
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": event_id,
-                    "key": "✅",
-                },
-            },
-        )
-        if not isinstance(confirm_response, nio.RoomSendResponse):
-            self.logger.warning("Failed to add confirm reaction", error=str(confirm_response))
-
-        # Add ❌ reaction
-        cancel_response = await self.client.room_send(
-            room_id=room_id,
-            message_type="m.reaction",
-            content={
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": event_id,
-                    "key": "❌",
-                },
-            },
-        )
-        if not isinstance(cancel_response, nio.RoomSendResponse):
-            self.logger.warning("Failed to add cancel reaction", error=str(cancel_response))
-
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions and config confirmations."""
         assert self.client is not None
@@ -784,7 +744,7 @@ class AgentBot:
 
         if pending_change and self.agent_name == ROUTER_AGENT_NAME:
             # Only router handles config confirmations
-            await self._handle_config_confirmation_reaction(room, event, pending_change)
+            await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
             return
 
         # Otherwise handle as interactive question
@@ -835,78 +795,6 @@ class AgentBot:
             )
             # Mark the original interactive question as responded
             self.response_tracker.mark_responded(event.reacts_to)
-
-    async def _handle_config_confirmation_reaction(
-        self,
-        room: nio.MatrixRoom,
-        event: nio.ReactionEvent,
-        pending_change: config_confirmation.PendingConfigChange,
-    ) -> None:
-        """Handle reactions to config confirmation messages.
-
-        Args:
-            room: The room the reaction occurred in
-            event: The reaction event
-            pending_change: The pending configuration change
-
-        """
-        # Only process reactions from the requester
-        if event.sender != pending_change.requester:
-            self.logger.debug(
-                "Ignoring config reaction from non-requester",
-                sender=event.sender,
-                requester=pending_change.requester,
-            )
-            return
-
-        # Don't process our own reactions
-        assert self.client is not None
-        if event.sender == self.client.user_id:
-            return
-
-        reaction_key = event.key
-
-        # Only handle ✅ and ❌ reactions
-        if reaction_key not in ["✅", "❌"]:
-            return
-
-        # Remove the pending change from memory and Matrix state
-        config_confirmation.remove_pending_change(event.reacts_to)
-        await config_confirmation.remove_pending_change_from_matrix(
-            self.client,
-            pending_change.room_id,
-            event.reacts_to,
-        )
-
-        if reaction_key == "✅":
-            # User confirmed - apply the change
-            response_text = await apply_config_change(
-                pending_change.config_path,
-                pending_change.new_value,
-            )
-
-            self.logger.info(
-                "Config change confirmed",
-                path=pending_change.config_path,
-                requester=event.sender,
-            )
-        else:
-            # User cancelled
-            response_text = "❌ Configuration change cancelled."
-            self.logger.info(
-                "Config change cancelled",
-                path=pending_change.config_path,
-                requester=event.sender,
-            )
-
-        # Send the response
-        await self._send_response(
-            room,
-            event.reacts_to,  # Reply to the confirmation message
-            response_text,
-            pending_change.thread_id,
-            skip_mentions=True,
-        )
 
     async def _on_voice_message(
         self,
@@ -1475,7 +1363,7 @@ class AgentBot:
                         )
 
                     # Add reaction buttons
-                    await self._add_config_confirmation_reactions(room.room_id, event_id)
+                    await config_confirmation.add_confirmation_reactions(self.client, room.room_id, event_id)
 
                 self.response_tracker.mark_responded(event.event_id)
                 return  # Exit early since we've handled the response

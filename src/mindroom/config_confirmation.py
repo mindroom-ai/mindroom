@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nio
 
 from .logging_config import get_logger
+
+if TYPE_CHECKING:
+    from .bot import AgentBot
 
 logger = get_logger(__name__)
 
@@ -290,3 +293,119 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
 def cleanup() -> None:
     """Clean up when shutting down."""
     _pending_changes.clear()
+
+
+async def add_confirmation_reactions(client: nio.AsyncClient, room_id: str, event_id: str) -> None:
+    """Add confirmation reaction buttons to a config change message.
+
+    Args:
+        client: The Matrix client
+        room_id: The room ID
+        event_id: The event ID of the message to add reactions to
+
+    """
+    # Add ✅ reaction
+    confirm_response = await client.room_send(
+        room_id=room_id,
+        message_type="m.reaction",
+        content={
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": event_id,
+                "key": "✅",
+            },
+        },
+    )
+    if not isinstance(confirm_response, nio.RoomSendResponse):
+        logger.warning("Failed to add confirm reaction", error=str(confirm_response))
+
+    # Add ❌ reaction
+    cancel_response = await client.room_send(
+        room_id=room_id,
+        message_type="m.reaction",
+        content={
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": event_id,
+                "key": "❌",
+            },
+        },
+    )
+    if not isinstance(cancel_response, nio.RoomSendResponse):
+        logger.warning("Failed to add cancel reaction", error=str(cancel_response))
+
+
+async def handle_confirmation_reaction(
+    bot: AgentBot,
+    room: nio.MatrixRoom,
+    event: nio.ReactionEvent,
+    pending_change: PendingConfigChange,
+) -> None:
+    """Handle reactions to config confirmation messages.
+
+    Args:
+        bot: The agent bot instance
+        room: The room the reaction occurred in
+        event: The reaction event
+        pending_change: The pending configuration change
+
+    """
+    # Only process reactions from the requester
+    if event.sender != pending_change.requester:
+        logger.debug(
+            "Ignoring config reaction from non-requester",
+            sender=event.sender,
+            requester=pending_change.requester,
+        )
+        return
+
+    # Don't process our own reactions
+    assert bot.client is not None
+    if event.sender == bot.client.user_id:
+        return
+
+    reaction_key = event.key
+
+    # Only handle ✅ and ❌ reactions
+    if reaction_key not in ["✅", "❌"]:
+        return
+
+    # Remove the pending change from memory and Matrix state
+    remove_pending_change(event.reacts_to)
+    await remove_pending_change_from_matrix(
+        bot.client,
+        pending_change.room_id,
+        event.reacts_to,
+    )
+
+    if reaction_key == "✅":
+        # User confirmed - apply the change
+        from .config_commands import apply_config_change  # noqa: PLC0415
+
+        response_text = await apply_config_change(
+            pending_change.config_path,
+            pending_change.new_value,
+        )
+
+        logger.info(
+            "Config change confirmed",
+            path=pending_change.config_path,
+            requester=event.sender,
+        )
+    else:
+        # User cancelled
+        response_text = "❌ Configuration change cancelled."
+        logger.info(
+            "Config change cancelled",
+            path=pending_change.config_path,
+            requester=event.sender,
+        )
+
+    # Send the response
+    await bot._send_response(
+        room,
+        event.reacts_to,  # Reply to the confirmation message
+        response_text,
+        pending_change.thread_id,
+        skip_mentions=True,
+    )
