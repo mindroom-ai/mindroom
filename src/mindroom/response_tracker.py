@@ -32,6 +32,7 @@ class ResponseTracker:
     agent_name: str
     base_path: Path = TRACKING_DIR
     _responded_events: dict[str, float] = field(default_factory=dict, init=False)
+    _user_to_response_map: dict[str, str] = field(default_factory=dict, init=False)
     _responses_file: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -49,6 +50,8 @@ class ResponseTracker:
 
         with self._responses_file.open() as f:
             data = json.load(f)
+            # Load user-to-response mapping if it exists
+            self._user_to_response_map = data.get("user_to_response_map", {})
             return data.get("events", {})  # type: ignore[no-any-return]
 
     def _save_responded_events(self) -> None:
@@ -57,7 +60,14 @@ class ResponseTracker:
         with self._responses_file.open("w") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
-                json.dump({"events": self._responded_events}, f, indent=2)
+                json.dump(
+                    {
+                        "events": self._responded_events,
+                        "user_to_response_map": self._user_to_response_map,
+                    },
+                    f,
+                    indent=2,
+                )
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
@@ -73,16 +83,43 @@ class ResponseTracker:
         """
         return event_id in self._responded_events
 
-    def mark_responded(self, event_id: str) -> None:
+    def mark_responded(self, event_id: str, response_event_id: str | None = None) -> None:
         """Mark an event as responded to with current timestamp.
 
         Args:
             event_id: The Matrix event ID we responded to
+            response_event_id: The event ID of our response message (optional)
 
         """
         self._responded_events[event_id] = time.time()
+        if response_event_id:
+            self._user_to_response_map[event_id] = response_event_id
         self._save_responded_events()
         logger.debug(f"Marked event {event_id} as responded for agent {self.agent_name}")
+
+    def get_response_event_id(self, user_event_id: str) -> str | None:
+        """Get the response event ID for a given user message event ID.
+
+        Args:
+            user_event_id: The user's message event ID
+
+        Returns:
+            The agent's response event ID if it exists, None otherwise
+
+        """
+        return self._user_to_response_map.get(user_event_id)
+
+    def remove_response_mapping(self, user_event_id: str) -> None:
+        """Remove the response mapping for a user event.
+
+        Args:
+            user_event_id: The user's message event ID to remove
+
+        """
+        if user_event_id in self._user_to_response_map:
+            del self._user_to_response_map[user_event_id]
+            self._save_responded_events()
+            logger.debug(f"Removed response mapping for event {user_event_id}")
 
     def cleanup_old_events(self, max_events: int = 10000, max_age_days: int = 30) -> None:
         """Remove old events based on count and age.
@@ -96,17 +133,33 @@ class ResponseTracker:
         max_age_seconds = max_age_days * 24 * 60 * 60
 
         # First remove events older than max_age_days
-        self._responded_events = {
+        events_to_keep = {
             event_id: timestamp
             for event_id, timestamp in self._responded_events.items()
             if current_time - timestamp < max_age_seconds
         }
+
+        # Clean up user_to_response_map for removed events
+        self._user_to_response_map = {
+            user_id: response_id
+            for user_id, response_id in self._user_to_response_map.items()
+            if user_id in events_to_keep
+        }
+
+        self._responded_events = events_to_keep
 
         # Then trim to max_events if still over limit
         if len(self._responded_events) > max_events:
             # Sort by timestamp and keep only the most recent ones
             sorted_events = sorted(self._responded_events.items(), key=lambda x: x[1])
             self._responded_events = dict(sorted_events[-max_events:])
+
+            # Clean up user_to_response_map for trimmed events
+            self._user_to_response_map = {
+                user_id: response_id
+                for user_id, response_id in self._user_to_response_map.items()
+                if user_id in self._responded_events
+            }
 
         self._save_responded_events()
         logger.info(f"Cleaned up old events for {self.agent_name}, keeping {len(self._responded_events)} events")

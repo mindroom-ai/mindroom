@@ -517,15 +517,10 @@ class AgentBot:
         if event.body.endswith(IN_PROGRESS_MARKER):
             return
 
-        # Skip edit events - they have m.relates_to with rel_type == "m.replace"
-        # NOTE: This means the bot won't respond to edited messages at all.
-        # Ideally, when a user edits their message, the bot would edit its response too,
-        # but this requires complex tracking of message relationships and response regeneration.
-        # For now, we ignore all edits to prevent them being treated as new messages.
-        # Users who want a new response after editing should send a new message instead.
+        # Handle edit events - regenerate response if the edited message had one
         event_info = EventInfo.from_event(event.source)
         if event_info.is_edit:
-            self.logger.debug(f"Skipping edit event {event.event_id}")
+            await self._handle_message_edit(room, event, event_info)
             return
 
         # Skip our own messages (unless voice transcription from router)
@@ -663,7 +658,7 @@ class AgentBot:
                     agent_name="team",  # Or could use team name
                 )
 
-                self.response_tracker.mark_responded(event.event_id)
+                self.response_tracker.mark_responded(event.event_id, event_id)
             else:
                 # Show typing indicator while team generates response
                 async with typing_indicator(self.client, room.room_id):
@@ -690,7 +685,7 @@ class AgentBot:
                         agent_name="team",
                     )
 
-                self.response_tracker.mark_responded(event.event_id)
+                self.response_tracker.mark_responded(event.event_id, event_id)
             return
 
         # Check if we should respond individually
@@ -713,7 +708,7 @@ class AgentBot:
 
         # Generate and send response
         self.logger.info("Processing", event_id=event.event_id)
-        await self._generate_response(
+        response_event_id = await self._generate_response(
             room_id=room.room_id,
             prompt=event.body,
             reply_to_event_id=event.event_id,
@@ -721,7 +716,8 @@ class AgentBot:
             thread_history=context.thread_history,
             user_id=event.sender,
         )
-        self.response_tracker.mark_responded(event.event_id)
+        if response_event_id:
+            self.response_tracker.mark_responded(event.event_id, response_event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
@@ -858,10 +854,10 @@ class AgentBot:
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Process a message and send a response (non-streaming)."""
         if not prompt.strip():
-            return
+            return None
 
         session_id = create_session_id(room.room_id, thread_id)
 
@@ -880,7 +876,7 @@ class AgentBot:
         if existing_event_id:
             # Edit the existing message
             await self._edit_message(room.room_id, existing_event_id, response_text, thread_id)
-            return
+            return existing_event_id
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(room, reply_to_event_id, response.formatted_text, thread_id)
@@ -898,6 +894,8 @@ class AgentBot:
                 self.agent_name,
             )
             await interactive.add_reaction_buttons(self.client, room.room_id, event_id, response.options_list)
+
+        return event_id
 
     async def _handle_interactive_question(
         self,
@@ -948,11 +946,11 @@ class AgentBot:
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Process a message and send a response (streaming)."""
         assert self.client is not None
         if not prompt.strip():
-            return
+            return None
 
         session_id = create_session_id(room.room_id, thread_id)
 
@@ -992,6 +990,9 @@ class AgentBot:
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
             # Don't mark as responded if streaming failed
+            return None
+        else:
+            return event_id
 
     async def _generate_response(
         self,
@@ -1002,7 +1003,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Generate and send/edit a response using AI.
 
         Args:
@@ -1014,9 +1015,12 @@ class AgentBot:
             existing_event_id: If provided, edit this message instead of sending a new one
             user_id: User ID of the sender for identifying user messages in history
 
+        Returns:
+            Event ID of the response message, or None if failed
+
         """
         if not prompt.strip():
-            return
+            return None
 
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
@@ -1037,7 +1041,7 @@ class AgentBot:
 
         # Dispatch to appropriate method
         if use_streaming:
-            await self._process_and_respond_streaming(
+            event_id = await self._process_and_respond_streaming(
                 room,
                 prompt,
                 reply_to_event_id,
@@ -1046,7 +1050,7 @@ class AgentBot:
                 existing_event_id,
             )
         else:
-            await self._process_and_respond(
+            event_id = await self._process_and_respond(
                 room,
                 prompt,
                 reply_to_event_id,
@@ -1056,22 +1060,25 @@ class AgentBot:
             )
 
         # Store memory after response generation; ignore errors in tests/mocks
-        try:
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    self.agent_name,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    room_id,
-                    thread_history,
-                    user_id,
-                ),
-                name=f"memory_save_{self.agent_name}_{session_id}",
-            )
-        except Exception:  # pragma: no cover
-            self.logger.debug("Skipping memory storage due to configuration error")
+        if event_id:
+            try:
+                create_background_task(
+                    store_conversation_memory(
+                        prompt,
+                        self.agent_name,
+                        self.storage_path,
+                        session_id,
+                        self.config,
+                        room_id,
+                        thread_history,
+                        user_id,
+                    ),
+                    name=f"memory_save_{self.agent_name}_{session_id}",
+                )
+            except Exception:  # pragma: no cover
+                self.logger.debug("Skipping memory storage due to configuration error")
+
+        return event_id
 
     async def _send_response(
         self,
@@ -1226,6 +1233,108 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
+
+    async def _handle_message_edit(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        event_info: EventInfo,
+    ) -> None:
+        """Handle an edited message by regenerating the agent's response.
+
+        Args:
+            room: The Matrix room
+            event: The edited message event
+            event_info: Information about the edit event
+
+        """
+        if not event_info.original_event_id:
+            self.logger.debug("Edit event has no original event ID")
+            return
+
+        # Check if sender is authorized (same check as regular messages)
+        if not is_authorized_sender(event.sender, self.config):
+            self.logger.debug(f"Ignoring edit from unauthorized sender: {event.sender}")
+            return
+
+        # Skip our own edits
+        if event.sender == self.matrix_id.full_id:
+            return
+
+        # Check if we had responded to the original message
+        response_event_id = self.response_tracker.get_response_event_id(event_info.original_event_id)
+        if not response_event_id:
+            self.logger.debug(f"No previous response found for edited message {event_info.original_event_id}")
+            return
+
+        self.logger.info(
+            "Regenerating response for edited message",
+            original_event_id=event_info.original_event_id,
+            response_event_id=response_event_id,
+        )
+
+        # Extract message context for the edited message
+        context = await self._extract_message_context(room, event)
+
+        # Check if we should respond to the edited message
+        should_respond = should_agent_respond(
+            agent_name=self.agent_name,
+            am_i_mentioned=context.am_i_mentioned,
+            is_thread=context.is_thread,
+            room=room,
+            thread_history=context.thread_history,
+            config=self.config,
+            mentioned_agents=context.mentioned_agents,
+        )
+
+        if not should_respond:
+            self.logger.debug("Agent should not respond to edited message")
+            return
+
+        # Generate new response
+        session_id = create_session_id(room.room_id, context.thread_id)
+        async with typing_indicator(self.client, room.room_id):
+            if ENABLE_STREAMING and await should_use_streaming(self.client, room.room_id):
+                # Streaming response - edit the existing message
+                response_stream = stream_agent_response(
+                    agent_name=self.agent_name,
+                    prompt=event.body,
+                    session_id=session_id,
+                    storage_path=self.storage_path,
+                    config=self.config,
+                    thread_history=context.thread_history,
+                    room_id=room.room_id,
+                )
+
+                _, accumulated = await send_streaming_response(
+                    self.client,
+                    room.room_id,
+                    event_info.original_event_id,  # Use original event ID for context
+                    context.thread_id,
+                    self.matrix_id.domain,
+                    self.config,
+                    response_stream,
+                    streaming_cls=StreamingResponse,
+                    existing_event_id=response_event_id,  # Edit the existing response
+                )
+            else:
+                # Non-streaming response - edit the existing message
+                response_text = await ai_response(
+                    agent_name=self.agent_name,
+                    prompt=event.body,
+                    session_id=session_id,
+                    storage_path=self.storage_path,
+                    config=self.config,
+                    thread_history=context.thread_history,
+                    room_id=room.room_id,
+                )
+
+                # Edit the existing response message
+                await self._edit_message(room.room_id, response_event_id, response_text, context.thread_id)
+
+        # Update the response tracker (keep the same mapping, just update timestamp)
+        self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
+        self.logger.info("Successfully regenerated response for edited message")
 
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901
         self.logger.info("Handling command", command_type=command.type.value)
