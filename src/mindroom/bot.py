@@ -1059,24 +1059,21 @@ class AgentBot:
                 existing_event_id,
             )
 
-        # Store memory after response generation; ignore errors in tests/mocks
+        # Store memory after response generation
         if event_id:
-            try:
-                create_background_task(
-                    store_conversation_memory(
-                        prompt,
-                        self.agent_name,
-                        self.storage_path,
-                        session_id,
-                        self.config,
-                        room_id,
-                        thread_history,
-                        user_id,
-                    ),
-                    name=f"memory_save_{self.agent_name}_{session_id}",
-                )
-            except Exception:  # pragma: no cover
-                self.logger.debug("Skipping memory storage due to configuration error")
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    self.agent_name,
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    room_id,
+                    thread_history,
+                    user_id,
+                ),
+                name=f"memory_save_{self.agent_name}_{session_id}",
+            )
 
         return event_id
 
@@ -1259,6 +1256,12 @@ class AgentBot:
 
         # Skip our own edits
         if event.sender == self.matrix_id.full_id:
+            return
+
+        # Skip edits from other agents (e.g., streaming edits)
+        sender_agent_name = extract_agent_name(event.sender, self.config)
+        if sender_agent_name:
+            self.logger.debug(f"Ignoring edit from other agent: {sender_agent_name}")
             return
 
         # Check if we had responded to the original message

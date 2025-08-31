@@ -246,8 +246,8 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_bot_ignores_own_edits(tmp_path: Path) -> None:
-    """Test that the bot ignores its own edit events (e.g., streaming edits)."""
+async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
+    """Test that the bot ignores edit events from other agents (e.g., streaming edits)."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
         agent_name="test_agent",
@@ -256,9 +256,12 @@ async def test_bot_ignores_own_edits(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config
+    # Create a minimal mock config with multiple agents
     config = Mock()
-    config.agents = {"test_agent": Mock()}
+    config.agents = {
+        "test_agent": Mock(),
+        "helper_agent": Mock(),
+    }
     config.domain = "example.com"
 
     # Create the bot
@@ -285,8 +288,8 @@ async def test_bot_ignores_own_edits(tmp_path: Path) -> None:
     # Simulate that the bot has responded to some message
     bot.response_tracker.mark_responded("$original:example.com", "$response:example.com")
 
-    # Create an edit event from the bot itself
-    edit_event = nio.RoomMessageText.from_dict(
+    # Test 1: Bot's own edit
+    own_edit_event = nio.RoomMessageText.from_dict(
         {
             "content": {
                 "body": "* Updated response",
@@ -307,7 +310,7 @@ async def test_bot_ignores_own_edits(tmp_path: Path) -> None:
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
+    own_edit_event.source = {
         "content": {
             "body": "* Updated response",
             "msgtype": "m.text",
@@ -324,15 +327,57 @@ async def test_bot_ignores_own_edits(tmp_path: Path) -> None:
         "sender": "@test_agent:example.com",
     }
 
+    # Test 2: Another agent's edit
+    other_agent_edit = nio.RoomMessageText.from_dict(
+        {
+            "content": {
+                "body": "* Hey @test_agent what's up",
+                "msgtype": "m.text",
+                "m.new_content": {
+                    "body": "Hey @test_agent what's up",
+                    "msgtype": "m.text",
+                },
+                "m.relates_to": {
+                    "event_id": "$original:example.com",
+                    "rel_type": "m.replace",
+                },
+            },
+            "event_id": "$edit2:example.com",
+            "sender": "@mindroom_helper_agent:example.com",  # Another agent's edit
+            "origin_server_ts": 1000002,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    other_agent_edit.source = {
+        "content": {
+            "body": "* Hey @test_agent what's up",
+            "msgtype": "m.text",
+            "m.new_content": {
+                "body": "Hey @test_agent what's up",
+                "msgtype": "m.text",
+            },
+            "m.relates_to": {
+                "event_id": "$original:example.com",
+                "rel_type": "m.replace",
+            },
+        },
+        "event_id": "$edit2:example.com",
+        "sender": "@mindroom_helper_agent:example.com",
+    }
+
     # Mock the methods
     with (
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(bot, "_edit_message", new_callable=AsyncMock) as mock_edit,
     ):
-        # Process the edit event
-        await bot._on_message(room, edit_event)
+        # Process the bot's own edit event
+        await bot._on_message(room, own_edit_event)
 
-        # Verify that the bot did NOT attempt to regenerate (ignores its own edits)
+        # Process another agent's edit event
+        await bot._on_message(room, other_agent_edit)
+
+        # Verify that the bot did NOT attempt to regenerate for either edit
         mock_context.assert_not_called()
         mock_edit.assert_not_called()
 
