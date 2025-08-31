@@ -32,8 +32,8 @@ def register_pending_change(
     room_id: str,
     thread_id: str | None,
     config_path: str,
-    old_value: Any,  # noqa: ANN401
-    new_value: Any,  # noqa: ANN401
+    old_value: Any,
+    new_value: Any,
     config_dict: dict[str, Any],
     requester: str,
 ) -> None:

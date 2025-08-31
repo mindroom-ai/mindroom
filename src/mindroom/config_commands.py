@@ -296,11 +296,10 @@ async def apply_config_change(config_dict: dict[str, Any], config_path: Path | N
 
         # Save to file
         new_config.save_to_yaml(path)
-    except Exception as e:
-        logger.exception("Failed to apply config change")
-        return f"❌ Failed to apply configuration change: {e}"
-    else:
-        return (
+        return (  # noqa: TRY300
             f"✅ **Configuration updated successfully!**\n\n"
             f"Changes saved to {path} and will affect new agent interactions."
         )
+    except Exception as e:
+        logger.exception("Failed to apply config change")
+        return f"❌ Failed to apply configuration change: {e}"
