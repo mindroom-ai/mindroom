@@ -302,9 +302,16 @@ class AgentBot:
                 # Only the router agent should restore scheduled tasks
                 # to avoid duplicate task instances after restart
                 if self.agent_name == ROUTER_AGENT_NAME:
-                    restored = await restore_scheduled_tasks(self.client, room_id, self.config)
-                    if restored > 0:
-                        self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
+                    # Restore scheduled tasks
+                    restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config)
+                    if restored_tasks > 0:
+                        self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
+
+                    # Restore pending config confirmations
+                    restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
+                    if restored_configs > 0:
+                        self.logger.info(f"Restored {restored_configs} pending config changes in room {room_id}")
+
                     # Send welcome message if room is empty
                     await self._send_welcome_message_if_empty(room_id)
             else:
@@ -863,8 +870,13 @@ class AgentBot:
         if reaction_key not in ["✅", "❌"]:
             return
 
-        # Remove the pending change
+        # Remove the pending change from memory and Matrix state
         config_confirmation.remove_pending_change(event.reacts_to)
+        await config_confirmation.remove_pending_change_from_matrix(
+            self.client,
+            pending_change.room_id,
+            event.reacts_to,
+        )
 
         if reaction_key == "✅":
             # User confirmed - apply the change
@@ -1438,6 +1450,15 @@ class AgentBot:
 
                 if event_id:
                     # Register the pending change
+                    pending_change = config_confirmation.PendingConfigChange(
+                        room_id=room.room_id,
+                        thread_id=event_info.thread_id,
+                        config_path=change_info["config_path"],
+                        old_value=change_info["old_value"],
+                        new_value=change_info["new_value"],
+                        config_dict=change_info["config_dict"],
+                        requester=event.sender,
+                    )
                     config_confirmation.register_pending_change(
                         event_id=event_id,
                         room_id=room.room_id,
@@ -1447,6 +1468,13 @@ class AgentBot:
                         new_value=change_info["new_value"],
                         config_dict=change_info["config_dict"],
                         requester=event.sender,
+                    )
+
+                    # Store in Matrix state for persistence
+                    await config_confirmation.store_pending_change_in_matrix(
+                        self.client,
+                        event_id,
+                        pending_change,
                     )
 
                     # Add reaction buttons
