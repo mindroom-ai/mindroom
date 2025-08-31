@@ -45,27 +45,36 @@ async def generate_room_topic_ai(room_key: str, room_name: str, config: Config) 
     # Build agent list for the prompt
     agent_list = ", ".join(agents_in_room)
 
-    prompt = f"""Generate a concise, informative room topic for a Matrix room.
+    prompt = f"""Generate a concise, informative room topic for a MindRoom Matrix room.
+
+Context about MindRoom:
+MindRoom is a platform that frees AI agents from being trapped in single apps. Key features:
+- AI agents with persistent memory that work across all platforms (Slack, Discord, Telegram, WhatsApp)
+- Agents collaborate naturally in threads and remember everything across sessions
+- Built on Matrix protocol for secure, federated communication
+- 80+ integrations with tools like Gmail, GitHub, Spotify, Home Assistant
+- Self-hosted or cloud options with military-grade encryption
 
 Room details:
 - Room key/alias: {room_key}
 - Room name: {room_name}
-- Configured agents: {agent_list}
+- Configured agents: {agent_list if agent_list else "No specific agents configured yet"}
 
 Create a topic that:
 1. Describes the room's purpose based on its name
-2. Mentions key capabilities or the type of work done here
-3. Is welcoming and informative
-4. Uses 1-2 relevant emojis
-5. Is under 100 characters
-6. Follows this format: [emoji] [Description] • [Capabilities/Purpose]
+2. Mentions the AI agents or capabilities available
+3. Highlights MindRoom's persistent memory or cross-platform nature when relevant
+4. Is welcoming and informative
+5. Uses 1-2 relevant emojis
+6. Is under 100 characters
+7. Follows this format: [emoji] [Description] • [Capabilities/Purpose]
 
 Examples:
-- 💻 Development Hub • Code, build, and deploy with AI assistance
-- 📊 Analysis Center • Data insights and strategic recommendations
-- 🏠 Main Lobby • Your AI team headquarters for all discussions
-- 💰 Finance Room • Market analysis and investment insights
-- 🔬 Research Lab • Scientific exploration with AI precision
+- 💻 Development Hub • AI agents that remember your code patterns across sessions
+- 📊 Analysis Center • Persistent insights with cross-platform data access
+- 🏠 Main Lobby • Your AI team headquarters with continuous memory
+- 💰 Finance Room • AI agents tracking markets 24/7 with full context
+- 🔬 Research Lab • Collaborative AI exploration with shared knowledge
 
 Generate the topic:"""
 
