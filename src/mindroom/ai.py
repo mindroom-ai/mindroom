@@ -22,7 +22,7 @@ from agno.run.response import (
 
 from .agents import create_agent
 from .constants import ENABLE_AI_CACHE
-from .credentials import get_credentials_manager
+from .credentials_sync import get_api_key_for_provider, get_ollama_host
 from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .memory import build_memory_enhanced_prompt
@@ -99,6 +99,9 @@ def get_cache(storage_path: Path) -> diskcache.Cache | None:
 def _set_api_key_env_var(provider: str) -> None:
     """Set environment variable for a provider from CredentialsManager.
 
+    Since we sync from .env to CredentialsManager on startup,
+    this will always use the latest keys from .env.
+
     Args:
         provider: Provider name (e.g., 'openai', 'anthropic')
 
@@ -111,18 +114,20 @@ def _set_api_key_env_var(provider: str) -> None:
         "gemini": "GOOGLE_API_KEY",
         "google": "GOOGLE_API_KEY",
         "cerebras": "CEREBRAS_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "groq": "GROQ_API_KEY",
     }
 
     if provider not in env_vars:
         return
 
-    # Get API key from CredentialsManager
-    creds_manager = get_credentials_manager()
-    api_key = creds_manager.get_api_key(provider)
+    # Get API key from CredentialsManager (which has been synced from .env)
+    api_key = get_api_key_for_provider(provider)
 
     # Set environment variable if key exists
     if api_key:
         os.environ[env_vars[provider]] = api_key
+        logger.debug(f"Set {env_vars[provider]} from CredentialsManager")
 
 
 def get_model_instance(config: Config, model_name: str = "default") -> Model:
@@ -157,13 +162,10 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     extra_kwargs = model_config.extra_kwargs or {}
 
     if provider == "ollama":
-        # For Ollama, also check CredentialsManager for host configuration
-        creds_manager = get_credentials_manager()
-        ollama_creds = creds_manager.load_credentials("ollama")
-        if ollama_creds and "host" in ollama_creds:
-            host = ollama_creds["host"]
-        else:
-            host = model_config.host or "http://localhost:11434"
+        # Priority: model config > env/CredentialsManager > default
+        # This allows per-model host configuration in config.yaml
+        host = model_config.host or get_ollama_host() or "http://localhost:11434"
+        logger.debug(f"Using Ollama host: {host}")
         return Ollama(id=model_id, host=host, **extra_kwargs)
     if provider == "openai":
         return OpenAIChat(id=model_id, **extra_kwargs)
