@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.logging_config import get_logger
-from mindroom.topic_generator import generate_room_topic, get_default_topic
+from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
 from .client import check_and_set_avatar, create_room, join_room, matrix_client
 from .identity import MatrixID, extract_server_name_from_homeserver
@@ -90,18 +90,18 @@ def get_room_alias_from_id(room_id: str) -> str | None:
 async def ensure_room_exists(
     client: nio.AsyncClient,
     room_key: str,
+    config: Config,
     room_name: str | None = None,
     power_users: list[str] | None = None,
-    config: Config | None = None,
 ) -> str | None:
     """Ensure a room exists, creating it if necessary.
 
     Args:
         client: Matrix client to use for room creation
         room_key: The room key/alias (without domain)
+        config: Configuration with agent settings for topic generation
         room_name: Display name for the room (defaults to room_key with underscores replaced)
         power_users: List of user IDs to grant power levels to
-        config: Configuration with agent settings (for topic generation)
 
     Returns:
         Room ID if room exists or was created, None on failure
@@ -145,16 +145,8 @@ async def ensure_room_exists(
     if room_name is None:
         room_name = room_key.replace("_", " ").title()
 
-    # Generate a contextual topic for the room
-    if config:
-        try:
-            topic = generate_room_topic(room_key, room_name, config)
-        except Exception as e:
-            logger.warning(f"Failed to generate topic for {room_key}: {e}, using default")
-            topic = get_default_topic(room_name)
-    else:
-        topic = get_default_topic(room_name)
-
+    # Generate a contextual topic for the room using AI
+    topic = await generate_room_topic_ai(room_key, room_name, config)
     logger.info(f"Creating room {room_key} with topic: {topic}")
 
     created_room_id = await create_room(
@@ -218,12 +210,15 @@ async def ensure_all_rooms_exist(
         room_id = await ensure_room_exists(
             client=client,
             room_key=room_key,
-            power_users=power_users,
             config=config,
+            power_users=power_users,
         )
 
         if room_id:
             room_ids[room_key] = room_id
+            # For existing rooms, ensure they have a topic set
+            room_name = room_key.replace("_", " ").title()
+            await ensure_room_has_topic(client, room_id, room_key, room_name, config)
 
     return room_ids
 
