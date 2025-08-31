@@ -128,6 +128,10 @@ async def ensure_room_exists(
 
         # Try to join the room
         if await join_room(client, room_id):
+            # For existing rooms, ensure they have a topic set
+            if room_name is None:
+                room_name = room_key.replace("_", " ").title()
+            await ensure_room_has_topic(client, room_id, room_key, room_name, config)
             return str(room_id)
         # Room exists but we can't join - this means the room was created
         # but this user isn't a member. Return the room ID anyway since
@@ -216,9 +220,6 @@ async def ensure_all_rooms_exist(
 
         if room_id:
             room_ids[room_key] = room_id
-            # For existing rooms, ensure they have a topic set
-            room_name = room_key.replace("_", " ").title()
-            await ensure_room_has_topic(client, room_id, room_key, room_name, config)
 
     return room_ids
 
