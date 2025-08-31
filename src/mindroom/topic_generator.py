@@ -43,7 +43,7 @@ async def generate_room_topic_ai(room_key: str, room_name: str, config: Config) 
             agents_in_room.append(display_name)
 
     # Build agent list for the prompt
-    agent_list = ", ".join(agents_in_room) if agents_in_room else "various AI agents"
+    agent_list = ", ".join(agents_in_room)
 
     prompt = f"""Generate a concise, informative room topic for a Matrix room.
 
@@ -78,15 +78,10 @@ Generate the topic:"""
         response_model=RoomTopic,
     )
 
-    try:
-        response = await agent.arun(prompt, session_id=f"topic_{room_key}")
-        if isinstance(response.content, RoomTopic):
-            return response.content.topic
-        return f"🤖 {room_name} • Powered by MindRoom agents"
-    except Exception as e:
-        logger.warning(f"Failed to generate AI topic for {room_key}: {e}")
-        # Simple fallback
-        return f"🤖 {room_name} • Powered by MindRoom agents"
+    response = await agent.arun(prompt, session_id=f"topic_{room_key}")
+    content = response.content
+    assert isinstance(content, RoomTopic)  # Type narrowing for mypy
+    return content.topic
 
 
 async def ensure_room_has_topic(
@@ -109,31 +104,26 @@ async def ensure_room_has_topic(
         True if topic was set or already exists, False on error
 
     """
-    try:
-        # Check if room already has a topic
-        response = await client.room_get_state_event(room_id, "m.room.topic")
-        if hasattr(response, "content") and response.content.get("topic"):
-            logger.debug(f"Room {room_key} already has topic: {response.content['topic']}")
-            return True
+    # Check if room already has a topic
+    response = await client.room_get_state_event(room_id, "m.room.topic")
+    if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("topic"):
+        logger.debug(f"Room {room_key} already has topic: {response.content['topic']}")
+        return True
 
-        # Generate and set topic
-        logger.info(f"Generating AI topic for existing room {room_key}")
-        topic = await generate_room_topic_ai(room_key, room_name, config)
+    # Generate and set topic
+    logger.info(f"Generating AI topic for existing room {room_key}")
+    topic = await generate_room_topic_ai(room_key, room_name, config)
 
-        # Set the topic
-        response = await client.room_put_state(
-            room_id=room_id,
-            event_type="m.room.topic",
-            content={"topic": topic},
-        )
+    # Set the topic
+    response = await client.room_put_state(
+        room_id=room_id,
+        event_type="m.room.topic",
+        content={"topic": topic},
+    )
 
-        if hasattr(response, "event_id"):
-            logger.info(f"Set topic for room {room_key}: {topic}")
-            return True
+    if isinstance(response, nio.RoomPutStateResponse):
+        logger.info(f"Set topic for room {room_key}: {topic}")
+        return True
 
-        logger.warning(f"Failed to set topic for room {room_key}: {response}")
-        return False
-
-    except Exception as e:
-        logger.error(f"Error checking/setting topic for room {room_key}: {e}")
-        return False
+    logger.warning(f"Failed to set topic for room {room_key}: {response}")
+    return False
