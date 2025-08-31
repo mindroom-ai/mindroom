@@ -29,6 +29,7 @@ async def test_router_processes_own_voice_transcriptions() -> None:
         rooms=["!test:example.com"],
     )
     bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
     bot.logger = MagicMock()
 
     # Create mock room and event
