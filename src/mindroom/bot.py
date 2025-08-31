@@ -1281,6 +1281,10 @@ class AgentBot:
         context = await self._extract_message_context(room, event)
 
         # Check if we should respond to the edited message
+        # KNOWN LIMITATION: This doesn't work correctly for the router suggestion case.
+        # When: User asks question → Router suggests agent → Agent responds → User edits
+        # The agent won't regenerate because it's not mentioned in the edited message.
+        # Proper fix would require tracking response chains (user → router → agent).
         should_respond = should_agent_respond(
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,
