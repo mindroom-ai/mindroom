@@ -77,8 +77,8 @@ def register_pending_change(
     room_id: str,
     thread_id: str | None,
     config_path: str,
-    old_value: Any,
-    new_value: Any,
+    old_value: Any,  # noqa: ANN401
+    new_value: Any,  # noqa: ANN401
     config_dict: dict[str, Any],
     requester: str,
 ) -> None:
@@ -286,7 +286,7 @@ async def restore_pending_changes(client: nio.AsyncClient, room_id: str) -> int:
                 expired=expired_count,
             )
 
-        return restored_count
+        return restored_count  # noqa: TRY300
 
     except Exception:
         logger.exception("Error restoring pending config changes from Matrix state")
