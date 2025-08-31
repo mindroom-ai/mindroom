@@ -59,7 +59,7 @@ services:
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.service=${INSTANCE_NAME:-mindroom}-api
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.priority=100
       - traefik.http.services.${INSTANCE_NAME:-mindroom}-api.loadbalancer.server.port=${BACKEND_PORT:-8765}
-      # Frontend routes (for the Vite dev server on port $FRONTEND_PORT)
+      # Frontend routes (for the Vite dev server on port 3003)
       # Frontend has lower priority (50) and catches everything else
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN}`)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
@@ -67,7 +67,7 @@ services:
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls.certresolver=porkbun
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.service=${INSTANCE_NAME:-mindroom}
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.priority=50
-      - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=${FRONTEND_PORT:-3003}
+      - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=3003
 
 networks:
   mindroom-network:
