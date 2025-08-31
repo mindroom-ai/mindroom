@@ -20,6 +20,19 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def room_key_to_name(room_key: str) -> str:
+    """Convert a room key to a human-readable room name.
+
+    Args:
+        room_key: The room key (e.g., 'dev', 'analysis_room')
+
+    Returns:
+        Human-readable room name (e.g., 'Dev', 'Analysis Room')
+
+    """
+    return room_key.replace("_", " ").title()
+
+
 def load_rooms() -> dict[str, MatrixRoom]:
     """Load room state from YAML file."""
     state = MatrixState.load()
@@ -87,7 +100,7 @@ def get_room_alias_from_id(room_id: str) -> str | None:
     return None
 
 
-async def ensure_room_exists(
+async def ensure_room_exists(  # noqa: C901
     client: nio.AsyncClient,
     room_key: str,
     config: Config,
@@ -122,7 +135,7 @@ async def ensure_room_exists(
         # Update our state if needed
         if room_key not in existing_rooms or existing_rooms[room_key].room_id != room_id:
             if room_name is None:
-                room_name = room_key.replace("_", " ").title()
+                room_name = room_key_to_name(room_key)
             add_room(room_key, room_id, full_alias, room_name)
             logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
 
@@ -130,7 +143,7 @@ async def ensure_room_exists(
         if await join_room(client, room_id):
             # For existing rooms, ensure they have a topic set
             if room_name is None:
-                room_name = room_key.replace("_", " ").title()
+                room_name = room_key_to_name(room_key)
             await ensure_room_has_topic(client, room_id, room_key, room_name, config)
             return str(room_id)
         # Room exists but we can't join - this means the room was created
@@ -147,7 +160,7 @@ async def ensure_room_exists(
 
     # Create the room
     if room_name is None:
-        room_name = room_key.replace("_", " ").title()
+        room_name = room_key_to_name(room_key)
 
     # Generate a contextual topic for the room using AI
     topic = await generate_room_topic_ai(room_key, room_name, config)
