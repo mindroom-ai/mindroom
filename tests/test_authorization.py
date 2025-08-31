@@ -73,26 +73,26 @@ def test_no_restrictions_only_allows_mindroom_user(
     monkeypatch.setattr(mock_config_no_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
     # Random users should NOT be allowed
-    assert not is_authorized_sender("@random_user:example.com", mock_config_no_restrictions)
-    assert not is_authorized_sender("@another_user:different.com", mock_config_no_restrictions)
+    assert not is_authorized_sender("@random_user:example.com", mock_config_no_restrictions, "!test:server")
+    assert not is_authorized_sender("@another_user:different.com", mock_config_no_restrictions, "!test:server")
 
     # Agents should still be allowed
-    assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_no_restrictions)
+    assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_no_restrictions, "!test:server")
 
     # mindroom_user should always be allowed
-    assert is_authorized_sender("@mindroom_user:example.com", mock_config_no_restrictions)
+    assert is_authorized_sender("@mindroom_user:example.com", mock_config_no_restrictions, "!test:server")
 
 
 def test_authorized_users_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that users in the authorized_users list are allowed."""
-    assert is_authorized_sender("@alice:example.com", mock_config_with_restrictions)
-    assert is_authorized_sender("@bob:example.com", mock_config_with_restrictions)
+    assert is_authorized_sender("@alice:example.com", mock_config_with_restrictions, "!test:server")
+    assert is_authorized_sender("@bob:example.com", mock_config_with_restrictions, "!test:server")
 
 
 def test_unauthorized_users_blocked(mock_config_with_restrictions: Config) -> None:
     """Test that users NOT in the authorized_users list are blocked."""
-    assert not is_authorized_sender("@charlie:example.com", mock_config_with_restrictions)
-    assert not is_authorized_sender("@random_user:example.com", mock_config_with_restrictions)
+    assert not is_authorized_sender("@charlie:example.com", mock_config_with_restrictions, "!test:server")
+    assert not is_authorized_sender("@random_user:example.com", mock_config_with_restrictions, "!test:server")
 
 
 def test_agents_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,11 +101,11 @@ def test_agents_always_allowed(mock_config_with_restrictions: Config, monkeypatc
     monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
     # Configured agents should be allowed
-    assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_with_restrictions)
-    assert is_authorized_sender("@mindroom_analyst:example.com", mock_config_with_restrictions)
+    assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_with_restrictions, "!test:server")
+    assert is_authorized_sender("@mindroom_analyst:example.com", mock_config_with_restrictions, "!test:server")
 
     # Non-configured agent should be blocked
-    assert not is_authorized_sender("@mindroom_unknown:example.com", mock_config_with_restrictions)
+    assert not is_authorized_sender("@mindroom_unknown:example.com", mock_config_with_restrictions, "!test:server")
 
 
 def test_teams_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,10 +113,10 @@ def test_teams_always_allowed(mock_config_with_restrictions: Config, monkeypatch
     monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
     # Configured team should be allowed
-    assert is_authorized_sender("@mindroom_test_team:example.com", mock_config_with_restrictions)
+    assert is_authorized_sender("@mindroom_test_team:example.com", mock_config_with_restrictions, "!test:server")
 
     # Non-configured team should be blocked
-    assert not is_authorized_sender("@mindroom_unknown_team:example.com", mock_config_with_restrictions)
+    assert not is_authorized_sender("@mindroom_unknown_team:example.com", mock_config_with_restrictions, "!test:server")
 
 
 def test_router_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,7 +124,11 @@ def test_router_always_allowed(mock_config_with_restrictions: Config, monkeypatc
     monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
     # Router should always be allowed
-    assert is_authorized_sender(f"@mindroom_{ROUTER_AGENT_NAME}:example.com", mock_config_with_restrictions)
+    assert is_authorized_sender(
+        f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+        mock_config_with_restrictions,
+        "!test:server",
+    )
 
 
 def test_mindroom_user_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,10 +137,10 @@ def test_mindroom_user_always_allowed(mock_config_with_restrictions: Config, mon
     monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
     # mindroom_user should always be allowed, even with restrictions
-    assert is_authorized_sender("@mindroom_user:example.com", mock_config_with_restrictions)
+    assert is_authorized_sender("@mindroom_user:example.com", mock_config_with_restrictions, "!test:server")
 
     # mindroom_user from a different domain should NOT be allowed
-    assert not is_authorized_sender("@mindroom_user:different.com", mock_config_with_restrictions)
+    assert not is_authorized_sender("@mindroom_user:different.com", mock_config_with_restrictions, "!test:server")
 
 
 def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,22 +148,26 @@ def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config, mo
     monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
 
     # Authorized users - allowed
-    assert is_authorized_sender("@alice:example.com", mock_config_with_restrictions)
+    assert is_authorized_sender("@alice:example.com", mock_config_with_restrictions, "!test:server")
 
     # Unauthorized users - blocked
-    assert not is_authorized_sender("@eve:example.com", mock_config_with_restrictions)
+    assert not is_authorized_sender("@eve:example.com", mock_config_with_restrictions, "!test:server")
 
     # Agents - allowed
-    assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_with_restrictions)
+    assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_with_restrictions, "!test:server")
 
     # Teams - allowed
-    assert is_authorized_sender("@mindroom_test_team:example.com", mock_config_with_restrictions)
+    assert is_authorized_sender("@mindroom_test_team:example.com", mock_config_with_restrictions, "!test:server")
 
     # Router - allowed
-    assert is_authorized_sender(f"@mindroom_{ROUTER_AGENT_NAME}:example.com", mock_config_with_restrictions)
+    assert is_authorized_sender(
+        f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+        mock_config_with_restrictions,
+        "!test:server",
+    )
 
     # Unknown agent - blocked
-    assert not is_authorized_sender("@mindroom_fake_agent:example.com", mock_config_with_restrictions)
+    assert not is_authorized_sender("@mindroom_fake_agent:example.com", mock_config_with_restrictions, "!test:server")
 
 
 @pytest.fixture
@@ -207,11 +215,6 @@ def test_room_specific_permissions(mock_config_with_room_permissions: Config, mo
     assert not is_authorized_sender("@dave:example.com", mock_config_with_room_permissions, "!room1:example.com")
     assert not is_authorized_sender("@dave:example.com", mock_config_with_room_permissions, "!room2:example.com")
     assert not is_authorized_sender("@dave:example.com", mock_config_with_room_permissions, "!room3:example.com")
-
-    # Test without room_id (backward compatibility)
-    assert is_authorized_sender("@alice:example.com", mock_config_with_room_permissions)  # Global user
-    assert not is_authorized_sender("@bob:example.com", mock_config_with_room_permissions)  # Room-specific only
-    assert not is_authorized_sender("@charlie:example.com", mock_config_with_room_permissions)  # Room-specific only
 
 
 def test_default_room_access(monkeypatch: pytest.MonkeyPatch) -> None:

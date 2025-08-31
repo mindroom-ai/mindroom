@@ -33,17 +33,17 @@ def test_authorization_check_uses_updated_config() -> None:
     # Mock the domain property
     with patch.object(Config, "domain", property(lambda _: "example.com")):
         # Alice should be authorized
-        assert is_authorized_sender("@alice:example.com", config)
+        assert is_authorized_sender("@alice:example.com", config, "!test:server")
 
         # Bob should not be authorized
-        assert not is_authorized_sender("@bob:example.com", config)
+        assert not is_authorized_sender("@bob:example.com", config, "!test:server")
 
         # Now update the config to add Bob
         config.authorization.global_users = ["@alice:example.com", "@bob:example.com"]
 
         # Both should now be authorized
-        assert is_authorized_sender("@alice:example.com", config)
-        assert is_authorized_sender("@bob:example.com", config)
+        assert is_authorized_sender("@alice:example.com", config, "!test:server")
+        assert is_authorized_sender("@bob:example.com", config, "!test:server")
 
         # mindroom_user should always be authorized
-        assert is_authorized_sender("@mindroom_user:example.com", config)
+        assert is_authorized_sender("@mindroom_user:example.com", config, "!test:server")
