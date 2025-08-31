@@ -68,7 +68,7 @@ This will start:
 ### 4. Access Your Instance
 
 After starting, your instance will be available at:
-- **Frontend**: `http://localhost:{FRONTEND_PORT}` (e.g., `http://localhost:3003`)
+- **Frontend**: `http://localhost:{FRONTEND_PORT}` (e.g., `http://localhost:3005`)
 - **Backend API**: `http://localhost:{BACKEND_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
 - **Auth Portal** (if enabled): `https://auth-{DOMAIN}` (e.g., `https://auth-myapp.example.com`)
@@ -107,9 +107,9 @@ Output:
 ┏━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━┓
 ┃ Name    ┃  Status   ┃ Backend ┃ Frontend ┃   Matrix ┃ Domain    ┃ Data       ┃
 ┡━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━┩
-│ prod    │ ● running │    8765 │     3003 │ 8448 (S) │ prod.com  │ ./instance…│
-│ dev     │ ○ stopped │    8766 │     3004 │ 8449 (T) │ dev.local │ ./instance…│
-│ test    │ ● running │    8767 │     3005 │     none │ test.local│ ./instance…│
+│ prod    │ ● running │    8765 │     3005 │ 8448 (S) │ prod.com  │ ./instance…│
+│ dev     │ ○ stopped │    8766 │     3006 │ 8449 (T) │ dev.local │ ./instance…│
+│ test    │ ● running │    8767 │     3007 │     none │ test.local│ ./instance…│
 └─────────┴───────────┴─────────┴──────────┴──────────┴───────────┴────────────┘
 
 (S) = Synapse, (T) = Tuwunel
@@ -174,7 +174,7 @@ python deploy/test_matrix.py 8450 Synapse
 
 Ports are automatically assigned and tracked:
 - **Backend**: Starts at 8765, increments for each instance
-- **Frontend**: Starts at 3003, increments for each instance
+- **Frontend**: Starts at 3005, increments for each instance (internal port always 3003)
 - **Matrix**: Starts at 8448, increments for each instance
 
 The instance manager ensures no port conflicts.
@@ -243,7 +243,7 @@ docker logs {instance_name}-tuwunel
 ### Instance Registry
 - `instances.json` - Tracks all instances, ports, and configuration
 - Automatically manages port allocation (no conflicts!)
-- Port allocation starts at: Backend (8765), Frontend (3003), Matrix (8448)
+- Port allocation starts at: Backend (8765), Frontend (3005), Matrix (8448)
 
 ### Docker Compose Structure
 The system uses parameterized Docker Compose files:
@@ -286,7 +286,7 @@ OLLAMA_HOST=
 # Instance configuration
 INSTANCE_NAME=myapp
 BACKEND_PORT=8765
-FRONTEND_PORT=3003
+FRONTEND_PORT=3005
 DATA_DIR=/absolute/path/to/instance_data/myapp
 INSTANCE_DOMAIN=myapp.localhost
 
