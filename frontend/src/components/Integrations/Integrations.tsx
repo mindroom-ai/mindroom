@@ -165,9 +165,6 @@ export function Integrations() {
       // Show generic config dialog for tools with config_fields
       const tool = integration as any; // Cast to access config_fields
       if (tool.config_fields && tool.config_fields.length > 0) {
-        // Icon will be loaded from iconMapping instead of dynamic require
-        const IconComponent = null;
-
         setConfigDialog({
           service: integration.id,
           displayName: integration.name,
@@ -176,7 +173,7 @@ export function Integrations() {
           isEditing: integration.status === 'connected',
           docsUrl: tool.docs_url || null,
           helperText: tool.helper_text || null,
-          icon: IconComponent,
+          icon: null, // Icon loaded from integration object or backend
           iconColor: tool.icon_color || integration.iconColor,
         });
       } else {
