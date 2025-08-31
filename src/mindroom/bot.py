@@ -532,13 +532,19 @@ class AgentBot:
         if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
             return
 
+        # Check if we've already seen this message (prevents reprocessing after restart)
+        if self.response_tracker.has_responded(event.event_id):
+            self.logger.debug("Already seen message", event_id=event.event_id)
+            return
+
         # Check if sender is authorized to interact with agents
-        is_authorized = is_authorized_sender(event.sender, self.config)
+        is_authorized = is_authorized_sender(event.sender, self.config, room.room_id)
         self.logger.debug(
-            f"Authorization check for {event.sender}: authorized={is_authorized}, "
-            f"authorized_users={self.config.authorized_users}",
+            f"Authorization check for {event.sender}: authorized={is_authorized}, room={room.room_id}",
         )
         if not is_authorized:
+            # Mark as seen even though we're not responding (prevents reprocessing after permission changes)
+            self.response_tracker.mark_responded(event.event_id)
             self.logger.debug(f"Ignoring message from unauthorized sender: {event.sender}")
             return
 
@@ -728,7 +734,7 @@ class AgentBot:
         assert self.client is not None
 
         # Check if sender is authorized to interact with agents
-        if not is_authorized_sender(event.sender, self.config):
+        if not is_authorized_sender(event.sender, self.config, room.room_id):
             self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
             return
 
@@ -794,14 +800,16 @@ class AgentBot:
         if event.sender == self.matrix_id.full_id:
             return
 
-        # Check if sender is authorized to interact with agents
-        if not is_authorized_sender(event.sender, self.config):
-            self.logger.debug(f"Ignoring voice message from unauthorized sender: {event.sender}")
-            return
-
-        # Check if we've already responded to this voice message (e.g., after restart)
+        # Check if we've already seen this voice message (prevents reprocessing after restart)
         if self.response_tracker.has_responded(event.event_id):
             self.logger.debug("Already processed voice message", event_id=event.event_id)
+            return
+
+        # Check if sender is authorized to interact with agents
+        if not is_authorized_sender(event.sender, self.config, room.room_id):
+            # Mark as seen even though we're not responding
+            self.response_tracker.mark_responded(event.event_id)
+            self.logger.debug(f"Ignoring voice message from unauthorized sender: {event.sender}")
             return
 
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
@@ -1617,7 +1625,7 @@ class MultiAgentOrchestrator:
 
         # Always update config for ALL existing bots (even those being restarted will get new config when recreated)
         logger.info(
-            f"Updating config. New authorized_users: {new_config.authorized_users}",
+            f"Updating config. New authorization: {new_config.authorization.global_users}",
         )
         for entity_name, bot in self.agent_bots.items():
             if entity_name not in entities_to_restart:

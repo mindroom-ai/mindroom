@@ -11,8 +11,8 @@ from mindroom.thread_utils import is_authorized_sender
 def test_authorization_check_uses_updated_config() -> None:
     """Test that is_authorized_sender uses the updated config.
 
-    This demonstrates that when the config.authorized_users list is updated,
-    the authorization checks will use the new list.
+    This demonstrates that when the config.authorization is updated,
+    the authorization checks will use the new configuration.
     """
     # Create config with alice authorized
     config = Config(
@@ -23,7 +23,11 @@ def test_authorization_check_uses_updated_config() -> None:
                 "rooms": ["test_room"],
             },
         },
-        authorized_users=["@alice:example.com"],
+        authorization={
+            "global_users": ["@alice:example.com"],
+            "room_permissions": {},
+            "default_room_access": False,
+        },
     )
 
     # Mock the domain property
@@ -35,7 +39,7 @@ def test_authorization_check_uses_updated_config() -> None:
         assert not is_authorized_sender("@bob:example.com", config)
 
         # Now update the config to add Bob
-        config.authorized_users = ["@alice:example.com", "@bob:example.com"]
+        config.authorization.global_users = ["@alice:example.com", "@bob:example.com"]
 
         # Both should now be authorized
         assert is_authorized_sender("@alice:example.com", config)
