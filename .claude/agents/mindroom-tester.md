@@ -271,7 +271,7 @@ matty send "room" "@mindroom_general @mindroom_code @mindroom_analyst create a d
 
 #### Testing Agent Invites and Scheduling
 ```bash
-# Test invite functionality
+# Test thread functionality
 matty thread-start "room" "m1" "Starting a discussion"
 # In the thread:
 matty thread-reply "room" "t1" "@mindroom_research can you help with this?"
