@@ -31,7 +31,6 @@ def mock_home_bot() -> AgentBot:
     bot.logger = MagicMock()
     bot._generate_response = AsyncMock()  # type: ignore[method-assign]
     bot.response_tracker = MagicMock()
-    bot.response_tracker.has_responded.return_value = False
     return bot
 
 

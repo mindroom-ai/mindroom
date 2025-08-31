@@ -42,7 +42,8 @@ def mock_agent_bot() -> AgentBot:
         access_token=TEST_ACCESS_TOKEN,
     )
     config = Config.from_yaml()  # Load actual config for testing
-    bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
     bot.logger = MagicMock()
     bot._send_response = AsyncMock()  # type: ignore[method-assign]
@@ -653,7 +654,8 @@ class TestCommandHandling:
         )
 
         config = Config(router=RouterConfig(model="default"))
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_news:localhost"
         bot.logger = MagicMock()
@@ -751,7 +753,8 @@ class TestCommandHandling:
         )
 
         config = Config(router=RouterConfig(model="default"))
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_finance:localhost"
         bot.logger = MagicMock()
@@ -856,7 +859,8 @@ class TestCommandHandling:
         )
 
         config = Config(router=RouterConfig(model="default"))
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"
         bot.logger = MagicMock()
@@ -926,11 +930,13 @@ class TestRouterSkipsSingleAgent:
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
         }
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
 
         # Create context with no mentions and no agents in thread
         mock_context = MagicMock()
@@ -1003,11 +1009,13 @@ class TestRouterSkipsSingleAgent:
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
         }
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()  # type: ignore[method-assign]
         bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
 
         # Create context with no mentions and no agents in thread
         mock_context = MagicMock()
@@ -1077,7 +1085,8 @@ class TestRouterSkipsSingleAgent:
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
         }
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_command = AsyncMock()  # type: ignore[method-assign]
@@ -1136,7 +1145,8 @@ class TestRouterSkipsSingleAgent:
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
         }
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_command = AsyncMock()  # type: ignore[method-assign]
@@ -1195,7 +1205,8 @@ class TestRouterSkipsSingleAgent:
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
         }
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()  # type: ignore[method-assign]
@@ -1270,7 +1281,8 @@ class TestRouterSkipsSingleAgent:
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
         }
 
-        bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_command = AsyncMock()  # type: ignore[method-assign]

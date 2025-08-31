@@ -320,6 +320,7 @@ class TestDMIntegration:
             config.ids["researcher"].full_id if "researcher" in config.ids else "@mindroom_researcher:localhost"
         )
         bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
         bot.response_tracker.has_responded = MagicMock(return_value=False)
         bot.orchestrator = orchestrator
 
@@ -411,6 +412,7 @@ class TestDMIntegration:
         bot.client = AsyncMock()
         bot.client.user_id = config.ids["test_agent"].full_id
         bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
         bot.response_tracker.has_responded = MagicMock(return_value=False)
         bot.logger = MagicMock()
 
