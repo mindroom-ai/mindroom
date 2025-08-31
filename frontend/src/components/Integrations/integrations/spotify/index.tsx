@@ -1,6 +1,6 @@
+import { FaSpotify } from 'react-icons/fa';
 import { Integration, IntegrationProvider, IntegrationConfig } from '../types';
 import { API_BASE } from '@/lib/api';
-import { Music } from 'lucide-react';
 
 class SpotifyIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
@@ -8,7 +8,7 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     name: 'Spotify',
     description: 'Music streaming service integration',
     category: 'entertainment',
-    icon: <Music className="h-5 w-5" />,
+    icon: <FaSpotify className="h-5 w-5" />,
     status: 'available',
     setup_type: 'oauth',
     connected: false,

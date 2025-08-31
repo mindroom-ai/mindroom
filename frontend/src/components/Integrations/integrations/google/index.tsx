@@ -1,6 +1,6 @@
+import { FaGoogle } from 'react-icons/fa';
 import { Integration, IntegrationProvider, IntegrationConfig } from '../types';
 import { GoogleIntegration as GoogleIntegrationComponent } from '@/components/GoogleIntegration/GoogleIntegration';
-import { Google } from '@lobehub/icons';
 
 // Wrapper component to handle the dialog integration
 function GoogleConfigDialog(props: { onClose: () => void; onSuccess?: () => void }) {
@@ -14,7 +14,7 @@ class GoogleIntegrationProvider implements IntegrationProvider {
     name: 'Google Services',
     description: 'Gmail, Calendar, and Drive integration',
     category: 'email',
-    icon: <Google className="h-5 w-5" />,
+    icon: <FaGoogle className="h-5 w-5" />,
     status: 'available',
     setup_type: 'special',
     connected: false,
