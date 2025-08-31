@@ -25,6 +25,7 @@ from .commands import (
 from .config import Config
 from .config_commands import handle_config_command
 from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
+from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix.client import (
@@ -2003,6 +2004,10 @@ async def main(log_level: str, storage_path: Path) -> None:
     """
     # Set up logging with the specified level
     setup_logging(level=log_level)
+
+    # Sync API keys from environment to CredentialsManager
+    logger.info("Syncing API keys from environment to CredentialsManager...")
+    sync_env_to_credentials()
 
     # Create storage directory if it doesn't exist
     storage_path.mkdir(parents=True, exist_ok=True)
