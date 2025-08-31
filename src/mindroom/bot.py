@@ -595,10 +595,6 @@ class AgentBot:
             # Router's job is done after routing/command handling/voice transcription
             return
 
-        # Skip duplicate responses (after command handling/agent filters/router)
-        if self._should_skip_duplicate_response(event):
-            return
-
         # Check for team formation
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
         form_team = await decide_team_formation(
@@ -1333,39 +1329,6 @@ class AgentBot:
                 skip_mentions=True,
             )
             self.response_tracker.mark_responded(event.event_id)
-
-    def _should_skip_duplicate_response(self, event: nio.RoomMessageText) -> bool:
-        """Check if we should skip responding to avoid duplicates.
-
-        This handles two cases:
-        1. We've already responded to this exact event
-        2. This is an edit of a message we've already responded to (from users)
-
-        Note: Edits from agents are filtered earlier in _on_message to avoid
-        responding to incomplete streaming messages.
-
-        Args:
-            event: The Matrix message event
-
-        Returns:
-            True if we should skip processing this message
-
-        """
-        event_info = EventInfo.from_event(event.source)
-
-        if event_info.is_edit:
-            if event_info.original_event_id and self.response_tracker.has_responded(
-                event_info.original_event_id,
-            ):
-                self.logger.debug(
-                    "Ignoring edit of already-responded message",
-                    original_event_id=event_info.original_event_id,
-                )
-                return True
-        elif self.response_tracker.has_responded(event.event_id):
-            return True
-
-        return False
 
 
 @dataclass
