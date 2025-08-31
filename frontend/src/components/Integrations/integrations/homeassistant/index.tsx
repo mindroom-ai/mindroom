@@ -1,4 +1,4 @@
-import { SiHomeassistant } from 'react-icons/si';
+import { Home } from 'lucide-react';
 import { Integration, IntegrationProvider, IntegrationConfig } from '../types';
 import { HomeAssistantIntegration as HomeAssistantIntegrationComponent } from '@/components/HomeAssistantIntegration/HomeAssistantIntegration';
 
@@ -14,7 +14,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
     name: 'Home Assistant',
     description: 'Control and monitor your smart home devices',
     category: 'smart_home',
-    icon: <SiHomeassistant className="h-5 w-5" />,
+    icon: <Home className="h-5 w-5" />,
     status: 'available',
     setup_type: 'special',
     connected: false,

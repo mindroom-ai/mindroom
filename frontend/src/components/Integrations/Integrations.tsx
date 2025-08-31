@@ -165,19 +165,8 @@ export function Integrations() {
       // Show generic config dialog for tools with config_fields
       const tool = integration as any; // Cast to access config_fields
       if (tool.config_fields && tool.config_fields.length > 0) {
-        // Get the icon component
-        const iconName = tool.icon || integration.icon;
-        let IconComponent = null;
-        if (iconName && typeof iconName === 'string') {
-          // Try to get icon from react-icons
-          try {
-            const icons = require('react-icons/fa');
-            IconComponent = icons[iconName];
-          } catch (e) {
-            console.log('Icon not found:', iconName);
-            // Icon not found - will use default
-          }
-        }
+        // Icon will be loaded from iconMapping instead of dynamic require
+        const IconComponent = null;
 
         setConfigDialog({
           service: integration.id,
