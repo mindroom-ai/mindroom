@@ -133,20 +133,11 @@ class ResponseTracker:
         max_age_seconds = max_age_days * 24 * 60 * 60
 
         # First remove events older than max_age_days
-        events_to_keep = {
+        self._responded_events = {
             event_id: timestamp
             for event_id, timestamp in self._responded_events.items()
             if current_time - timestamp < max_age_seconds
         }
-
-        # Clean up user_to_response_map for removed events
-        self._user_to_response_map = {
-            user_id: response_id
-            for user_id, response_id in self._user_to_response_map.items()
-            if user_id in events_to_keep
-        }
-
-        self._responded_events = events_to_keep
 
         # Then trim to max_events if still over limit
         if len(self._responded_events) > max_events:
@@ -154,12 +145,12 @@ class ResponseTracker:
             sorted_events = sorted(self._responded_events.items(), key=lambda x: x[1])
             self._responded_events = dict(sorted_events[-max_events:])
 
-            # Clean up user_to_response_map for trimmed events
-            self._user_to_response_map = {
-                user_id: response_id
-                for user_id, response_id in self._user_to_response_map.items()
-                if user_id in self._responded_events
-            }
+        # Clean up user_to_response_map to match responded_events
+        self._user_to_response_map = {
+            user_id: response_id
+            for user_id, response_id in self._user_to_response_map.items()
+            if user_id in self._responded_events
+        }
 
         self._save_responded_events()
         logger.info(f"Cleaned up old events for {self.agent_name}, keeping {len(self._responded_events)} events")

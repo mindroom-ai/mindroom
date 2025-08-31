@@ -857,9 +857,6 @@ class AgentBot:
         existing_event_id: str | None = None,
     ) -> str | None:
         """Process a message and send a response (non-streaming)."""
-        if not prompt.strip():
-            return None
-
         session_id = create_session_id(room.room_id, thread_id)
 
         # Show typing indicator while generating response
@@ -950,9 +947,6 @@ class AgentBot:
     ) -> str | None:
         """Process a message and send a response (streaming)."""
         assert self.client is not None
-        if not prompt.strip():
-            return None
-
         session_id = create_session_id(room.room_id, thread_id)
 
         try:
@@ -1061,20 +1055,19 @@ class AgentBot:
             )
 
         # Store memory after response generation
-        if event_id:
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    self.agent_name,
-                    self.storage_path,
-                    session_id,
-                    self.config,
-                    room_id,
-                    thread_history,
-                    user_id,
-                ),
-                name=f"memory_save_{self.agent_name}_{session_id}",
-            )
+        create_background_task(
+            store_conversation_memory(
+                prompt,
+                self.agent_name,
+                self.storage_path,
+                session_id,
+                self.config,
+                room_id,
+                thread_history,
+                user_id,
+            ),
+            name=f"memory_save_{self.agent_name}_{session_id}",
+        )
 
         return event_id
 
