@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.topic_generator import generate_room_topic, get_default_topic
 
 from .client import check_and_set_avatar, create_room, join_room, matrix_client
 from .identity import MatrixID, extract_server_name_from_homeserver
@@ -91,6 +92,7 @@ async def ensure_room_exists(
     room_key: str,
     room_name: str | None = None,
     power_users: list[str] | None = None,
+    config: Config | None = None,
 ) -> str | None:
     """Ensure a room exists, creating it if necessary.
 
@@ -99,6 +101,7 @@ async def ensure_room_exists(
         room_key: The room key/alias (without domain)
         room_name: Display name for the room (defaults to room_key with underscores replaced)
         power_users: List of user IDs to grant power levels to
+        config: Configuration with agent settings (for topic generation)
 
     Returns:
         Room ID if room exists or was created, None on failure
@@ -142,13 +145,23 @@ async def ensure_room_exists(
     if room_name is None:
         room_name = room_key.replace("_", " ").title()
 
-    logger.info(f"Creating room {room_key}")
+    # Generate a contextual topic for the room
+    if config:
+        try:
+            topic = generate_room_topic(room_key, room_name, config)
+        except Exception as e:
+            logger.warning(f"Failed to generate topic for {room_key}: {e}, using default")
+            topic = get_default_topic(room_name)
+    else:
+        topic = get_default_topic(room_name)
+
+    logger.info(f"Creating room {room_key} with topic: {topic}")
 
     created_room_id = await create_room(
         client=client,
         name=room_name,
         alias=room_key,
-        topic=f"Mindroom {room_name}",
+        topic=topic,
         power_users=power_users or [],
     )
 
@@ -202,7 +215,12 @@ async def ensure_all_rooms_exist(
         power_users = get_agent_ids_for_room(room_key, config)
 
         # Ensure room exists
-        room_id = await ensure_room_exists(client=client, room_key=room_key, power_users=power_users)
+        room_id = await ensure_room_exists(
+            client=client,
+            room_key=room_key,
+            power_users=power_users,
+            config=config,
+        )
 
         if room_id:
             room_ids[room_key] = room_id
