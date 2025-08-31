@@ -249,7 +249,6 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
                 "config_path": config_path_str,
                 "old_value": old_value,
                 "new_value": value,
-                "config_dict": test_config_dict,
                 "path": str(path),
             }
 
@@ -277,22 +276,42 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
         ), None
 
 
-async def apply_config_change(config_dict: dict[str, Any], config_path: Path | None = None) -> str:
+async def apply_config_change(
+    config_path_str: str,
+    new_value: Any,  # noqa: ANN401
+    config_file_path: Path | None = None,
+) -> str:
     """Apply a confirmed configuration change.
 
     Args:
-        config_dict: The modified configuration dictionary
-        config_path: Optional path to config file
+        config_path_str: The configuration path (e.g., "agents.analyst.role")
+        new_value: The new value to set
+        config_file_path: Optional path to config file
 
     Returns:
         Success or error message
 
     """
-    path = config_path or DEFAULT_AGENTS_CONFIG
+    path = config_file_path or DEFAULT_AGENTS_CONFIG
 
     try:
-        # Create config object from the modified dict
-        new_config = Config(**config_dict)
+        # Load the current configuration
+        config = Config.from_yaml(path)
+        config_dict = config.model_dump()
+
+        # Apply the specific change
+        set_nested_value(config_dict, config_path_str, new_value)
+
+        # Validate the modified config
+        try:
+            new_config = Config(**config_dict)
+        except ValidationError as ve:
+            errors = ["❌ Configuration validation failed:"]
+            for error in ve.errors():
+                location = " → ".join(str(loc) for loc in error["loc"])
+                errors.append(f"• {location}: {error['msg']}")
+            error_msg = "\n".join(errors)
+            return f"{error_msg}\n\nChanges were NOT applied."
 
         # Save to file
         new_config.save_to_yaml(path)

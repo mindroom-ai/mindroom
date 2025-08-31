@@ -880,7 +880,10 @@ class AgentBot:
 
         if reaction_key == "✅":
             # User confirmed - apply the change
-            response_text = await apply_config_change(pending_change.config_dict)
+            response_text = await apply_config_change(
+                pending_change.config_path,
+                pending_change.new_value,
+            )
 
             self.logger.info(
                 "Config change confirmed",
@@ -1450,15 +1453,6 @@ class AgentBot:
 
                 if event_id:
                     # Register the pending change
-                    pending_change = config_confirmation.PendingConfigChange(
-                        room_id=room.room_id,
-                        thread_id=event_info.thread_id,
-                        config_path=change_info["config_path"],
-                        old_value=change_info["old_value"],
-                        new_value=change_info["new_value"],
-                        config_dict=change_info["config_dict"],
-                        requester=event.sender,
-                    )
                     config_confirmation.register_pending_change(
                         event_id=event_id,
                         room_id=room.room_id,
@@ -1466,16 +1460,19 @@ class AgentBot:
                         config_path=change_info["config_path"],
                         old_value=change_info["old_value"],
                         new_value=change_info["new_value"],
-                        config_dict=change_info["config_dict"],
                         requester=event.sender,
                     )
 
+                    # Get the pending change we just registered
+                    pending_change = config_confirmation.get_pending_change(event_id)
+
                     # Store in Matrix state for persistence
-                    await config_confirmation.store_pending_change_in_matrix(
-                        self.client,
-                        event_id,
-                        pending_change,
-                    )
+                    if pending_change:
+                        await config_confirmation.store_pending_change_in_matrix(
+                            self.client,
+                            event_id,
+                            pending_change,
+                        )
 
                     # Add reaction buttons
                     await self._add_config_confirmation_reactions(room.room_id, event_id)

@@ -28,7 +28,6 @@ class PendingConfigChange:
     config_path: str
     old_value: Any
     new_value: Any
-    config_dict: dict[str, Any]  # The complete modified config dict
     requester: str  # User who requested the change
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -45,7 +44,6 @@ class PendingConfigChange:
             "config_path": self.config_path,
             "old_value": self.old_value,
             "new_value": self.new_value,
-            "config_dict": self.config_dict,
             "requester": self.requester,
             "created_at": self.created_at.isoformat(),
         }
@@ -62,7 +60,6 @@ class PendingConfigChange:
             config_path=data["config_path"],
             old_value=data["old_value"],
             new_value=data["new_value"],
-            config_dict=data["config_dict"],
             requester=data["requester"],
             created_at=created_at,
         )
@@ -79,7 +76,6 @@ def register_pending_change(
     config_path: str,
     old_value: Any,  # noqa: ANN401
     new_value: Any,  # noqa: ANN401
-    config_dict: dict[str, Any],
     requester: str,
 ) -> None:
     """Register a pending configuration change for confirmation.
@@ -91,7 +87,6 @@ def register_pending_change(
         config_path: The configuration path being changed
         old_value: The current value
         new_value: The proposed new value
-        config_dict: The complete modified configuration dictionary
         requester: User ID who requested the change
 
     """
@@ -101,7 +96,6 @@ def register_pending_change(
         config_path=config_path,
         old_value=old_value,
         new_value=new_value,
-        config_dict=config_dict,
         requester=requester,
     )
     logger.info(
