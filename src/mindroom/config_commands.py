@@ -152,7 +152,7 @@ def format_value(value: Any) -> str:  # noqa: ANN401
     return yaml_str
 
 
-async def handle_config_command(args_text: str, config_path: Path | None = None) -> str:  # noqa: C901, PLR0911, PLR0912
+async def handle_config_command(args_text: str, config_path: Path | None = None) -> tuple[str, dict[str, Any] | None]:  # noqa: C901, PLR0911, PLR0912
     """Handle config command execution.
 
     Args:
@@ -160,7 +160,8 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
         config_path: Optional path to config file
 
     Returns:
-        Response message for the user
+        Tuple of (response message, config change dict or None)
+        The config change dict contains info needed for confirmation
 
     """
     operation, args = parse_config_args(args_text)
@@ -173,24 +174,30 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
     if operation == "show":
         # Show entire config
         yaml_str = yaml.dump(config_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
-        return f"**Current Configuration:**\n```yaml\n{yaml_str}```"
+        return f"**Current Configuration:**\n```yaml\n{yaml_str}```", None
 
     if operation == "get":
         if not args:
-            return "❌ Please specify a configuration path to get\nExample: `!config get agents.analyst.display_name`"
+            return (
+                "❌ Please specify a configuration path to get\nExample: `!config get agents.analyst.display_name`",
+                None,
+            )
 
         config_path_str = args[0]
         try:
             value = get_nested_value(config_dict, config_path_str)
         except (KeyError, IndexError) as e:
-            return f"❌ Configuration path not found: `{config_path_str}`\nError: {e}"
+            return f"❌ Configuration path not found: `{config_path_str}`\nError: {e}", None
         else:
             formatted = format_value(value)
-            return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{formatted}\n```"
+            return f"**Configuration value for `{config_path_str}`:**\n```yaml\n{formatted}\n```", None
 
     elif operation == "set":
         if len(args) < 2:
-            return '❌ Please specify a path and value\nExample: `!config set agents.analyst.display_name "New Name"`'
+            return (
+                '❌ Please specify a path and value\nExample: `!config set agents.analyst.display_name "New Name"`',
+                None,
+            )
 
         config_path_str = args[0]
         # Join remaining args as the value (handles unquoted strings with spaces)
@@ -199,17 +206,23 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
         # Parse the value - YAML parsing handles both quoted and unquoted formats
         value = parse_value(value_str)
 
+        # Get the current value for comparison
+        try:
+            old_value = get_nested_value(config_dict, config_path_str)
+        except (KeyError, IndexError):
+            old_value = None  # Path doesn't exist yet
+
+        # Create a copy to test the change
+        test_config_dict = config_dict.copy()
+
         try:
             # Verify the path exists or can be created
-            set_nested_value(config_dict, config_path_str, value)
+            set_nested_value(test_config_dict, config_path_str, value)
 
             # Validate the modified config
-            new_config = Config(**config_dict)
-
-            # Save to file
-            new_config.save_to_yaml(path)
+            Config(**test_config_dict)  # This will raise ValidationError if invalid
         except (KeyError, IndexError) as e:
-            return f"❌ Configuration path error: `{config_path_str}`\nError: {e}"
+            return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
         except ValidationError as e:
             # Validation failed - explain why
             errors = []
@@ -217,14 +230,30 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
                 location = " → ".join(str(loc) for loc in error["loc"])
                 errors.append(f"• {location}: {error['msg']}")
             error_msg = "\n".join(errors)
-            return f"❌ Invalid configuration:\n{error_msg}\n\nChanges were NOT saved."
+            return f"❌ Invalid configuration:\n{error_msg}\n\nChanges were NOT applied.", None
         else:
-            formatted_value = format_value(value)
-            return (
-                f"✅ **Configuration updated successfully!**\n\n"
-                f"Set `{config_path_str}` to:\n```yaml\n{formatted_value}\n```\n\n"
-                f"Changes saved to {path} and will affect new agent interactions."
+            # Format the preview message
+            formatted_old = format_value(old_value) if old_value is not None else "Not set"
+            formatted_new = format_value(value)
+
+            preview_msg = (
+                f"**Configuration Change Preview**\n\n"
+                f"📝 **Path:** `{config_path_str}`\n\n"
+                f"**Current value:**\n```yaml\n{formatted_old}\n```\n"
+                f"**New value:**\n```yaml\n{formatted_new}\n```\n\n"
+                f"React with ✅ to confirm or ❌ to cancel this change."
             )
+
+            # Return the preview and the change info for confirmation
+            change_info = {
+                "config_path": config_path_str,
+                "old_value": old_value,
+                "new_value": value,
+                "config_dict": test_config_dict,
+                "path": str(path),
+            }
+
+            return preview_msg, change_info
 
     elif operation == "parse_error":
         # Handle parsing errors (e.g., unmatched quotes)
@@ -237,7 +266,7 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
             "• Or use single quotes consistently: `['item1', 'item2']`\n\n"
             "**Example:**\n"
             '`!config set agents.analyst.tools ["tool1", "tool2"]`'
-        )
+        ), None
 
     else:
         available_ops = ["show", "get", "set"]
@@ -245,4 +274,33 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
             f"❌ Unknown operation: '{operation}'\n"
             f"Available operations: {', '.join(available_ops)}\n\n"
             "Try `!help config` for usage examples."
+        ), None
+
+
+async def apply_config_change(config_dict: dict[str, Any], config_path: Path | None = None) -> str:
+    """Apply a confirmed configuration change.
+
+    Args:
+        config_dict: The modified configuration dictionary
+        config_path: Optional path to config file
+
+    Returns:
+        Success or error message
+
+    """
+    path = config_path or DEFAULT_AGENTS_CONFIG
+
+    try:
+        # Create config object from the modified dict
+        new_config = Config(**config_dict)
+
+        # Save to file
+        new_config.save_to_yaml(path)
+    except Exception as e:
+        logger.exception("Failed to apply config change")
+        return f"❌ Failed to apply configuration change: {e}"
+    else:
+        return (
+            f"✅ **Configuration updated successfully!**\n\n"
+            f"Changes saved to {path} and will affect new agent interactions."
         )

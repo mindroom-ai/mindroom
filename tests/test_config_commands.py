@@ -9,7 +9,6 @@ import pytest
 import yaml
 
 from mindroom.commands import CommandParser, CommandType
-from mindroom.config import Config
 from mindroom.config_commands import (
     format_value,
     get_nested_value,
@@ -233,7 +232,8 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response = await handle_config_command("show", config_path)
+            response, change_info = await handle_config_command("show", config_path)
+            assert change_info is None  # show command should not return change info
             assert "Current Configuration:" in response
             assert "test_agent" in response
             assert "Test Agent" in response
@@ -250,7 +250,8 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response = await handle_config_command("get agents.test_agent.display_name", config_path)
+            response, change_info = await handle_config_command("get agents.test_agent.display_name", config_path)
+            assert change_info is None  # get command should not return change info
             assert "Configuration value for `agents.test_agent.display_name`:" in response
             assert "Test Agent" in response
         finally:
@@ -267,13 +268,16 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response = await handle_config_command('set agents.test_agent.display_name "New Name"', config_path)
-            assert "Configuration updated successfully!" in response
+            response, change_info = await handle_config_command(
+                'set agents.test_agent.display_name "New Name"',
+                config_path,
+            )
+            assert change_info is not None  # set command should return change info for confirmation
+            assert "Configuration Change Preview" in response
             assert "New Name" in response
-
-            # Verify the file was actually updated
-            config = Config.from_yaml(config_path)
-            assert config.agents["test_agent"].display_name == "New Name"
+            # Verify the change_info contains the correct values
+            assert change_info["old_value"] == "Old Name"
+            assert change_info["new_value"] == "New Name"
         finally:
             config_path.unlink()
 
@@ -285,7 +289,8 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response = await handle_config_command("get agents.nonexistent", config_path)
+            response, change_info = await handle_config_command("get agents.nonexistent", config_path)
+            assert change_info is None
             assert "❌" in response
             assert "not found" in response
         finally:
@@ -308,7 +313,8 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response = await handle_config_command("get agents.test_agent.tools.5", config_path)
+            response, change_info = await handle_config_command("get agents.test_agent.tools.5", config_path)
+            assert change_info is None
             assert "❌" in response
             assert "not found" in response
         finally:
@@ -326,7 +332,11 @@ class TestConfigCommandHandling:
 
         try:
             # Try to set a number field to a string value
-            response = await handle_config_command("set defaults.num_history_runs not_a_number", config_path)
+            response, change_info = await handle_config_command(
+                "set defaults.num_history_runs not_a_number",
+                config_path,
+            )
+            assert change_info is None  # Invalid config should not return change info
             assert "❌" in response
             # The validation error should indicate the issue
         finally:
@@ -339,7 +349,8 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response = await handle_config_command("unknown_op", config_path)
+            response, change_info = await handle_config_command("unknown_op", config_path)
+            assert change_info is None
             assert "❌ Unknown operation" in response
             assert "unknown_op" in response
         finally:
@@ -353,7 +364,8 @@ class TestConfigCommandHandling:
 
         try:
             # Command with unmatched quotes
-            response = await handle_config_command('set test.value "unmatched', config_path)
+            response, change_info = await handle_config_command('set test.value "unmatched', config_path)
+            assert change_info is None
             assert "❌" in response
             assert "parsing error" in response.lower()
             assert "unmatched quotes" in response.lower()
@@ -379,12 +391,14 @@ class TestConfigCommandHandling:
         try:
             # This simulates what happens when user types: !config set path ["item1", "item2"]
             # shlex turns it into: [item1, item2] (quotes consumed)
-            response = await handle_config_command("set agents.test_agent.tools [communication, lobby]", config_path)
-            assert "✅" in response
-
-            # Verify the file was actually updated
-            config = Config.from_yaml(config_path)
-            assert config.agents["test_agent"].tools == ["communication", "lobby"]
+            response, change_info = await handle_config_command(
+                "set agents.test_agent.tools [communication, lobby]",
+                config_path,
+            )
+            assert change_info is not None  # set command should return change info
+            assert "Configuration Change Preview" in response
+            # Check that the change_info contains the correct new value
+            assert change_info["new_value"] == ["communication", "lobby"]
         finally:
             config_path.unlink()
 
@@ -406,11 +420,13 @@ class TestConfigCommandHandling:
 
         try:
             # User properly quotes the entire JSON array
-            response = await handle_config_command('set agents.test_agent.tools ["tool1", "tool2"]', config_path)
-            assert "✅" in response
-
-            # Verify the file was actually updated
-            config = Config.from_yaml(config_path)
-            assert config.agents["test_agent"].tools == ["tool1", "tool2"]
+            response, change_info = await handle_config_command(
+                'set agents.test_agent.tools ["tool1", "tool2"]',
+                config_path,
+            )
+            assert change_info is not None  # set command should return change info
+            assert "Configuration Change Preview" in response
+            # Check that the change_info contains the correct new value
+            assert change_info["new_value"] == ["tool1", "tool2"]
         finally:
             config_path.unlink()
