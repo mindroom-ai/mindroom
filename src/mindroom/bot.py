@@ -765,7 +765,7 @@ class AgentBot:
 
             # Generate the response, editing the acknowledgment message
             prompt = f"The user selected: {selected_value}"
-            await self._generate_response(
+            response_event_id = await self._generate_response(
                 room_id=room.room_id,
                 prompt=prompt,
                 reply_to_event_id=event.reacts_to,
@@ -775,7 +775,9 @@ class AgentBot:
                 user_id=event.sender,
             )
             # Mark the original interactive question as responded
-            self.response_tracker.mark_responded(event.reacts_to)
+            # The response_event_id will be the same as ack_event_id since we're editing
+            if response_event_id:
+                self.response_tracker.mark_responded(event.reacts_to, response_event_id)
 
     async def _on_voice_message(
         self,
@@ -807,15 +809,18 @@ class AgentBot:
 
         if transcribed_message:
             event_info = EventInfo.from_event(event.source)
-            await self._send_response(
+            response_event_id = await self._send_response(
                 room=room,
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
                 thread_id=event_info.thread_id,
             )
-
-        # Mark the voice message as responded so we don't process it again
-        self.response_tracker.mark_responded(event.event_id)
+            # Mark the voice message as responded with the response event ID
+            if response_event_id:
+                self.response_tracker.mark_responded(event.event_id, response_event_id)
+        else:
+            # Mark as responded even if no transcription (to avoid reprocessing)
+            self.response_tracker.mark_responded(event.event_id)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
