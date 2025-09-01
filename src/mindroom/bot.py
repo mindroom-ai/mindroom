@@ -1235,11 +1235,6 @@ class AgentBot:
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901
         self.logger.info("Handling command", command_type=command.type.value)
 
-        # Check if we've already responded to this command to prevent duplicate responses on restart
-        if self.response_tracker.has_responded(event.event_id):
-            self.logger.debug("Already responded to command", event_id=event.event_id, command_type=command.type.value)
-            return
-
         event_info = EventInfo.from_event(event.source)
 
         # Widget command modifies room state, so it doesn't need a thread
