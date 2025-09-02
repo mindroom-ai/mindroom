@@ -298,7 +298,6 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
-    stop_manager: StopManager = field(default_factory=StopManager, init=False)  # Stop button manager
 
     @property
     def agent_name(self) -> str:
@@ -324,6 +323,11 @@ class AgentBot:
     def response_tracker(self) -> ResponseTracker:
         """Get or create the response tracker for this agent."""
         return ResponseTracker(self.agent_name, base_path=self.storage_path)
+
+    @cached_property
+    def stop_manager(self) -> StopManager:
+        """Get or create the StopManager for this agent."""
+        return StopManager()
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -429,7 +433,6 @@ class AgentBot:
         await self.ensure_user_account()
         self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
         await self._set_avatar_if_available()
-        self.stop_manager = StopManager()
         await self._set_presence_with_model_info()
 
         # Register event callbacks - wrap them to run as background tasks
