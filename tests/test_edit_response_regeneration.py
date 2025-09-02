@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.config import Config
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 
@@ -707,6 +708,87 @@ async def test_on_voice_message_no_transcription_still_marks_responded(tmp_path:
         # Verify voice handler was called but _send_response was not
         mock_handle_voice.assert_called_once_with(bot.client, room, voice_event, config)
         mock_send_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
+    """Test that unauthorized users cannot trigger response regeneration through edits."""
+    # Create a mock agent user
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    # Create a minimal mock config with authorization
+    config = Config(
+        agents={"test_agent": {"display_name": "Test Agent", "role": "Test agent", "rooms": ["!test:example.com"]}},
+        authorization={
+            "global_users": ["@authorized:example.com"],
+            "room_permissions": {},
+            "default_room_access": False,
+        },
+    )
+    config.domain = "example.com"
+
+    # Create the bot
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+
+    # Mock the client
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@test_agent:example.com"
+
+    # Create real ResponseTracker with the test path
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+
+    # Mock logger
+    bot.logger = MagicMock()
+
+    room = Mock(spec=nio.MatrixRoom)
+    room.room_id = "!test:example.com"
+    room.is_direct = False
+
+    # Original message from authorized user
+    original_event = Mock(spec=nio.RoomMessageText)
+    original_event.event_id = "$original:example.com"
+    original_event.sender = "@authorized:example.com"
+    original_event.body = "Original question"
+    original_event.source = {"event_id": "$original:example.com"}
+
+    # Store that we responded to the original
+    bot.response_tracker.mark_responded("$original:example.com", "$response:example.com")
+
+    # Edit from unauthorized user (trying to regenerate)
+    edit_event = Mock(spec=nio.RoomMessageText)
+    edit_event.event_id = "$edit:example.com"
+    edit_event.sender = "@unauthorized:example.com"
+    edit_event.body = "Edited question"
+    edit_event.source = {
+        "event_id": "$edit:example.com",
+        "content": {
+            "m.relates_to": {
+                "rel_type": "m.replace",
+                "event_id": "$original:example.com",
+            },
+        },
+    }
+
+    # Test that authorization check works
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=False) as mock_is_auth,
+        patch.object(bot, "_handle_message_edit") as mock_handle_edit,
+    ):
+        await bot._on_message(room, edit_event)
+        # Verify authorization was checked
+        mock_is_auth.assert_called_once_with(edit_event.sender, config, room.room_id)
+        # Should not handle edit for unauthorized user
+        mock_handle_edit.assert_not_called()
 
 
 @pytest.mark.asyncio
