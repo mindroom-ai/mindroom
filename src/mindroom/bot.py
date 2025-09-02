@@ -731,6 +731,8 @@ class AgentBot:
                     message_id=event.reacts_to,
                     stopped_by=event.sender,
                 )
+                # Always remove the stop button when user clicks it (whether cancelling or not)
+                await self.stop_manager.remove_stop_button(self.client, event.reacts_to)
                 # Send a confirmation message
                 await self._send_response(room.room_id, event.reacts_to, "✅ Generation stopped", None)
                 return
@@ -1582,46 +1584,17 @@ class AgentBot:
             self.logger.debug("Agent should not respond to edited message")
             return
 
-        # Generate new response
-        session_id = create_session_id(room.room_id, context.thread_id)
-        async with typing_indicator(self.client, room.room_id):
-            if ENABLE_STREAMING and await should_use_streaming(self.client, room.room_id):
-                # Streaming response - edit the existing message
-                response_stream = stream_agent_response(
-                    agent_name=self.agent_name,
-                    prompt=event.body,
-                    session_id=session_id,
-                    storage_path=self.storage_path,
-                    config=self.config,
-                    thread_history=context.thread_history,
-                    room_id=room.room_id,
-                )
-
-                _, accumulated = await send_streaming_response(
-                    self.client,
-                    room.room_id,
-                    event_info.original_event_id,  # Use original event ID for context
-                    context.thread_id,
-                    self.matrix_id.domain,
-                    self.config,
-                    response_stream,
-                    streaming_cls=StreamingResponse,
-                    existing_event_id=response_event_id,  # Edit the existing response
-                )
-            else:
-                # Non-streaming response - edit the existing message
-                response_text = await ai_response(
-                    agent_name=self.agent_name,
-                    prompt=event.body,
-                    session_id=session_id,
-                    storage_path=self.storage_path,
-                    config=self.config,
-                    thread_history=context.thread_history,
-                    room_id=room.room_id,
-                )
-
-                # Edit the existing response message
-                await self._edit_message(room.room_id, response_event_id, response_text, context.thread_id)
+        # Generate new response using the cancellable framework
+        # This allows users to cancel regenerations just like original responses
+        await self._generate_response(
+            room_id=room.room_id,
+            prompt=event.body,
+            reply_to_event_id=event_info.original_event_id,  # Use original for context
+            thread_id=context.thread_id,
+            thread_history=context.thread_history,
+            existing_event_id=response_event_id,  # Edit the existing response
+            user_id=event.sender,
+        )
 
         # Update the response tracker (keep the same mapping, just update timestamp)
         self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
