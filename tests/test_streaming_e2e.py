@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 @pytest.mark.e2e  # Mark as end-to-end test
 @pytest.mark.requires_matrix  # Requires real Matrix server for streaming e2e test
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
+@patch("mindroom.bot.is_user_online")
 @patch("mindroom.matrix.users.ensure_all_agent_users")
 @patch("mindroom.bot.login_agent_user")
 @patch("mindroom.bot.AgentBot.ensure_user_account")
@@ -32,9 +33,13 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     mock_ensure_user: AsyncMock,
     mock_login: AsyncMock,
     mock_ensure_all: AsyncMock,
+    mock_is_user_online: AsyncMock,
     tmp_path: Path,
 ) -> None:
     """End-to-end test that agents don't respond to streaming edits from other agents."""
+    # Mock user as online for stop button to show
+    mock_is_user_online.return_value = True
+
     # Mock ensure_all_agent_users to return proper user objects
 
     mock_agents = {

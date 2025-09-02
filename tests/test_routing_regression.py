@@ -65,12 +65,14 @@ class TestRoutingRegression:
     """Regression tests for routing behavior."""
 
     @pytest.mark.asyncio
+    @patch("mindroom.bot.is_user_online")
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.suggest_agent_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
         self,
         mock_suggest_agent: AsyncMock,
         mock_ai_response: AsyncMock,
+        mock_is_user_online: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -81,6 +83,9 @@ class TestRoutingRegression:
         agent would respond to the same message.
         """
         test_room_id = "!research:localhost"
+
+        # Mock user as online for stop button to show
+        mock_is_user_online.return_value = True
 
         # Set up research bot (the one being mentioned)
         research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
@@ -322,10 +327,12 @@ class TestRoutingRegression:
         assert mock_team_arun.call_count == 1  # Team formed once
 
     @pytest.mark.asyncio
+    @patch("mindroom.bot.is_user_online")
     @patch("mindroom.bot.ai_response")
     async def test_router_message_has_completion_marker(
         self,
         mock_ai_response: AsyncMock,
+        mock_is_user_online: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,  # noqa: ARG002
         tmp_path: Path,
@@ -336,6 +343,9 @@ class TestRoutingRegression:
         that agent ignores it.
         """
         test_room_id = "!research:localhost"
+
+        # Mock user as online for stop button to show
+        mock_is_user_online.return_value = True
 
         # Create router agent
         router_agent = AgentMatrixUser(
