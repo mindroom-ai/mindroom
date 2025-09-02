@@ -121,7 +121,7 @@ class TestRoutingRegression:
 
         # Process with research bot - SHOULD respond
         await research_bot._on_message(mock_room, message_event)
-        assert research_bot.client.room_send.call_count == 1  # type: ignore[union-attr]
+        assert research_bot.client.room_send.call_count == 3  # type: ignore[union-attr]  # initial + reaction + final
         assert mock_ai_response.call_count == 1
 
         # Process with news bot - should NOT respond and NOT use router
@@ -217,7 +217,7 @@ class TestRoutingRegression:
         # Router SHOULD have been called
         mock_suggest_agent.assert_called_once()
         # Router bot should send the routing message
-        assert router_bot.client.room_send.call_count == 1  # type: ignore[union-attr]
+        assert router_bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # Router doesn't use stop button
 
         # Process with other bots - they should not do anything
         await research_bot._on_message(mock_room, message_event)
@@ -318,7 +318,7 @@ class TestRoutingRegression:
         # The alphabetically first agent (news) handles team formation
         # The other agent (research) does not respond individually
         assert research_bot.client.room_send.call_count == 0  # type: ignore[union-attr]  # No individual response
-        assert news_bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # Team response
+        assert news_bot.client.room_send.call_count == 3  # type: ignore[union-attr]  # Team response with stop button
         assert mock_team_arun.call_count == 1  # Team formed once
 
     @pytest.mark.asyncio
@@ -382,5 +382,5 @@ class TestRoutingRegression:
         await research_bot._on_message(mock_room, router_message)
 
         # Research bot SHOULD respond
-        assert research_bot.client.room_send.call_count == 1  # type: ignore[union-attr]
+        assert research_bot.client.room_send.call_count == 3  # type: ignore[union-attr]  # initial + reaction + final
         assert mock_ai_response.call_count == 1

@@ -139,7 +139,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
             await bot._on_message(room, event)
 
     # Team bot should have sent exactly one message
-    assert bot.client.room_send.call_count == 1
+    assert bot.client.room_send.call_count == 2  # initial + streaming updates for team
     args, kwargs = bot.client.room_send.call_args
     # kwargs contains content with formatted body
     assert "🤝 Team Response" in kwargs["content"]["formatted_body"]
