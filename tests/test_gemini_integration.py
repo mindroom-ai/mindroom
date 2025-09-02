@@ -56,12 +56,12 @@ class TestGeminiIntegration:
             ),
         }
 
-        with patch("src.mindroom.ai.get_credentials_manager") as mock_creds:
-            mock_creds.return_value.get_api_key.return_value = "test-google-api-key"
-            with patch("os.environ", {}):
+        with patch("src.mindroom.ai.get_api_key_for_provider") as mock_get_api_key:
+            mock_get_api_key.return_value = "test-google-api-key"
+            with patch.dict("os.environ", {}, clear=True):
                 get_model_instance(config, "test_model")
-                # Check that the environment variable would be set
-                mock_creds.return_value.get_api_key.assert_called_with("gemini")
+                # Check that the API key was retrieved for gemini
+                mock_get_api_key.assert_called_with("gemini")
 
     def test_unsupported_provider_raises_error(self) -> None:
         """Test that unsupported providers raise appropriate errors."""
