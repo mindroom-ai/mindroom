@@ -214,6 +214,7 @@ def _prepare_matrix_config(
                 matrix_server_name=matrix_server_name,
                 postgres_host=f"{instance.name}-postgres",
                 redis_host=f"{instance.name}-redis",
+                macaroon_secret_key=secrets.token_hex(32),
             )
         else:
             # For Tuwunel or other matrix types

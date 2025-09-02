@@ -48,7 +48,7 @@ from .matrix.identity import (
 )
 from .matrix.mentions import format_message_with_mentions
 from .matrix.message_builder import build_message_content
-from .matrix.presence import should_use_streaming
+from .matrix.presence import build_agent_status_message, set_presence_status, should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.typing import typing_indicator
@@ -378,6 +378,13 @@ class AgentBot:
             except Exception as e:
                 self.logger.warning(f"Failed to set avatar: {e}")
 
+    async def _set_presence_with_model_info(self) -> None:
+        """Set presence status with model information."""
+        assert self.client is not None
+
+        status_msg = build_agent_status_message(self.agent_name, self.config)
+        await set_presence_status(self.client, status_msg)
+
     async def ensure_rooms(self) -> None:
         """Ensure agent is in the correct rooms based on configuration.
 
@@ -390,17 +397,11 @@ class AgentBot:
 
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
-        # Ensure user account exists
         await self.ensure_user_account()
-
-        # Login with the account
         self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
-
-        # Set avatar if available
         await self._set_avatar_if_available()
-
-        # Initialize stop manager
         self.stop_manager = StopManager()
+        await self._set_presence_with_model_info()
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
@@ -1491,7 +1492,7 @@ class TeamBot(AgentBot):
         """Teams don't have individual agents, return None."""
         return None
 
-    async def _generate_response(
+    async def _generate_response(  # noqa: C901
         self,
         room_id: str,
         prompt: str,
@@ -1775,6 +1776,7 @@ class MultiAgentOrchestrator:
         for entity_name, bot in self.agent_bots.items():
             if entity_name not in entities_to_restart:
                 bot.config = new_config
+                await bot._set_presence_with_model_info()
                 logger.debug(f"Updated config for {entity_name}")
 
         if not entities_to_restart and not new_entities:
