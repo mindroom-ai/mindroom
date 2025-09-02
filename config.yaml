@@ -359,4 +359,17 @@ voice:
     model: default  # Model for command recognition
     confidence_threshold: 0.7
 
-authorized_users: []
+# Authorization configuration with fine-grained permissions
+authorization:
+  # Users with access to all rooms
+  global_users:
+    - '@test:m-test-4.mindroom.chat'
+
+  # Room-specific permissions (example)
+  room_permissions: {}
+    # '!specific_room:example.com':
+    #   - '@user1:example.com'
+    #   - '@user2:example.com'
+
+  # Default permission for rooms not explicitly configured
+  default_room_access: false

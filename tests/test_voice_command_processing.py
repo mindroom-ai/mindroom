@@ -76,6 +76,7 @@ async def test_router_ignores_non_voice_self_messages() -> None:
         rooms=["!test:example.com"],
     )
     bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
     bot.logger = MagicMock()
 
     # Create mock room and event

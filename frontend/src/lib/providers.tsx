@@ -1,6 +1,4 @@
 import { ReactElement } from 'react';
-import { SiOpenai, SiAnthropic, SiGoogle, SiPerplexity } from 'react-icons/si';
-import { FaBrain } from 'react-icons/fa';
 import {
   Ollama,
   OpenRouter,
@@ -11,7 +9,12 @@ import {
   Cohere,
   XAI,
   Cerebras,
+  OpenAI,
+  Anthropic,
+  Google,
+  Perplexity,
 } from '@lobehub/icons';
+import { Brain } from 'lucide-react';
 
 export interface ProviderInfo {
   id: string;
@@ -28,7 +31,7 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     name: 'OpenAI',
     description: 'Configure your OpenAI API key for GPT models',
     color: 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20',
-    icon: (className = 'h-5 w-5') => <SiOpenai className={className} />,
+    icon: (className = 'h-5 w-5') => <OpenAI className={className} />,
     requiresApiKey: true,
   },
   anthropic: {
@@ -36,7 +39,7 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     name: 'Anthropic',
     description: 'Configure your Anthropic API key for Claude models',
     color: 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20',
-    icon: (className = 'h-5 w-5') => <SiAnthropic className={className} />,
+    icon: (className = 'h-5 w-5') => <Anthropic className={className} />,
     requiresApiKey: true,
   },
   ollama: {
@@ -60,7 +63,7 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     name: 'Google Gemini',
     description: 'Configure your Google API key for Gemini models',
     color: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
-    icon: (className = 'h-5 w-5') => <SiGoogle className={className} />,
+    icon: (className = 'h-5 w-5') => <Google className={className} />,
     requiresApiKey: true,
   },
   google: {
@@ -68,7 +71,7 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     name: 'Google Gemini',
     description: 'Configure your Google API key for Gemini models',
     color: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
-    icon: (className = 'h-5 w-5') => <SiGoogle className={className} />,
+    icon: (className = 'h-5 w-5') => <Google className={className} />,
     requiresApiKey: true,
   },
   groq: {
@@ -108,7 +111,7 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     name: 'Perplexity',
     description: 'Configure your Perplexity API key',
     color: 'bg-teal-500/10 text-teal-600 dark:text-teal-400 border-teal-500/20',
-    icon: (className = 'h-5 w-5') => <SiPerplexity className={className} />,
+    icon: (className = 'h-5 w-5') => <Perplexity className={className} />,
     requiresApiKey: true,
   },
   cohere: {
@@ -152,7 +155,7 @@ export function getProviderInfo(providerId: string): ProviderInfo {
       id: providerId,
       name: providerId,
       color: 'bg-gray-500/10 text-gray-600 dark:text-gray-400',
-      icon: (className = 'h-5 w-5') => <FaBrain className={className} />,
+      icon: (className = 'h-5 w-5') => <Brain className={className} />,
       requiresApiKey: true,
     }
   );
