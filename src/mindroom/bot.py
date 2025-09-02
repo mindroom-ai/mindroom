@@ -29,6 +29,7 @@ from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
 from .matrix.client import (
+    _latest_thread_event_id,
     check_and_set_avatar,
     edit_message,
     fetch_thread_history,
@@ -1275,16 +1276,17 @@ class AgentBot:
         sender_domain = sender_id.domain
 
         # For edits in threads, we need to get the latest thread event ID for MSC3440 compliance
+        # When editing, we still need the latest thread event for the fallback behavior
+        # So we fetch it directly rather than using get_latest_thread_event_id_if_needed
         latest_thread_event_id = None
         if thread_id:
             assert self.client is not None
-            latest_thread_event_id = await get_latest_thread_event_id_if_needed(
-                self.client,
-                room_id,
-                thread_id,
-                None,  # No reply_to for edits
-                event_id,  # We're editing this event
-            )
+            # For edits, we always need the latest thread event ID
+            # We can use the event being edited as the fallback if we can't get the latest
+            latest_thread_event_id = await _latest_thread_event_id(self.client, room_id, thread_id)
+            # If we couldn't get the latest, use the event being edited as fallback
+            if latest_thread_event_id is None:
+                latest_thread_event_id = event_id
 
         content = format_message_with_mentions(
             self.config,
