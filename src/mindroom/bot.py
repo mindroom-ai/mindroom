@@ -1253,7 +1253,7 @@ class AgentBot:
             return
 
         # Check if sender is authorized (same check as regular messages)
-        if not is_authorized_sender(event.sender, self.config):
+        if not is_authorized_sender(event.sender, self.config, room.room_id):
             self.logger.debug(f"Ignoring edit from unauthorized sender: {event.sender}")
             return
 
@@ -1287,6 +1287,11 @@ class AgentBot:
         # When: User asks question → Router suggests agent → Agent responds → User edits
         # The agent won't regenerate because it's not mentioned in the edited message.
         # Proper fix would require tracking response chains (user → router → agent).
+        #
+        # KNOWN LIMITATION: If the user edits their message while the agent is still
+        # generating a response, there's no cancellation mechanism. The original response
+        # will complete and be sent, then the regeneration will edit it. This can lead to
+        # confusing behavior where the user briefly sees the old response before it updates.
         should_respond = should_agent_respond(
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,

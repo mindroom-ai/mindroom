@@ -418,3 +418,384 @@ async def test_response_tracker_mapping_persistence(tmp_path: Path) -> None:
     tracker3 = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
     assert tracker3.get_response_event_id(user_event_1) is None
     assert tracker3.get_response_event_id(user_event_2) == response_event_2
+
+
+@pytest.mark.asyncio
+async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
+    """Test that _on_reaction properly tracks the response event ID."""
+    # Create a mock agent user
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    # Create a minimal mock config
+    config = Mock()
+    config.agents = {"test_agent": Mock()}
+    config.domain = "example.com"
+    config.authorization = Mock()
+    config.authorization.is_authorized = Mock(return_value=True)
+
+    # Create the bot
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+
+    # Mock the client
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@test_agent:example.com"
+
+    # Create real ResponseTracker with the test path
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+
+    # Mock logger
+    bot.logger = MagicMock()
+
+    # Create a room
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+
+    # Create a reaction event
+    reaction_event = nio.ReactionEvent.from_dict(
+        {
+            "content": {
+                "m.relates_to": {
+                    "event_id": "$question:example.com",
+                    "key": "1️⃣",
+                    "rel_type": "m.annotation",
+                },
+            },
+            "event_id": "$reaction:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.reaction",
+            "room_id": "!test:example.com",
+        },
+    )
+    reaction_event.reacts_to = "$question:example.com"
+    reaction_event.key = "1️⃣"
+
+    # Mock interactive.handle_reaction to return a result
+    with (
+        patch("mindroom.bot.interactive.handle_reaction", new_callable=AsyncMock) as mock_handle_reaction,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
+        patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
+        patch("mindroom.bot.fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
+        patch("mindroom.bot.has_user_responded_after_message", return_value=False),
+    ):
+        # Setup mocks
+        mock_handle_reaction.return_value = ("Option 1", "thread_id")  # selected_value, thread_id
+        mock_send_response.return_value = "$ack_event:example.com"  # Acknowledgment event ID
+        mock_generate_response.return_value = (
+            "$response_event:example.com"  # Response event ID (same as ack since we edit)
+        )
+        mock_fetch_history.return_value = []
+
+        # Process the reaction event
+        await bot._on_reaction(room, reaction_event)
+
+        # Verify that the bot tracked the response correctly
+        assert bot.response_tracker.has_responded("$question:example.com")
+        assert bot.response_tracker.get_response_event_id("$question:example.com") == "$response_event:example.com"
+
+        # Verify the methods were called with correct parameters
+        mock_handle_reaction.assert_called_once()
+        mock_send_response.assert_called_once()
+        mock_generate_response.assert_called_once()
+
+        # Verify that _generate_response was called with the acknowledgment event ID for editing
+        call_kwargs = mock_generate_response.call_args.kwargs
+        assert call_kwargs["existing_event_id"] == "$ack_event:example.com"
+
+
+@pytest.mark.asyncio
+async def test_on_voice_message_tracks_response_event_id(tmp_path: Path) -> None:
+    """Test that _on_voice_message properly tracks the response event ID."""
+    # Create a mock agent user
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    # Create a minimal mock config with voice enabled
+    config = Mock()
+    config.agents = {"test_agent": Mock()}
+    config.domain = "example.com"
+    config.voice = Mock()
+    config.voice.enabled = True
+    config.authorization = Mock()
+    config.authorization.is_authorized = Mock(return_value=True)
+
+    # Create the bot
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+
+    # Mock the client
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@test_agent:example.com"
+
+    # Create real ResponseTracker with the test path
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+
+    # Mock logger
+    bot.logger = MagicMock()
+
+    # Create a room
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+
+    # Create a voice message event
+    voice_event = nio.RoomMessageAudio.from_dict(
+        {
+            "content": {
+                "body": "voice_message.ogg",
+                "msgtype": "m.audio",
+                "url": "mxc://example.com/voice123",
+                "org.matrix.msc1767.audio": {
+                    "duration": 5000,
+                    "waveform": [0, 100, 200],
+                },
+                "org.matrix.msc3245.voice": {},
+            },
+            "event_id": "$voice:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    voice_event.source = {
+        "content": {
+            "body": "voice_message.ogg",
+            "msgtype": "m.audio",
+            "url": "mxc://example.com/voice123",
+            "org.matrix.msc1767.audio": {
+                "duration": 5000,
+                "waveform": [0, 100, 200],
+            },
+            "org.matrix.msc3245.voice": {},
+        },
+        "event_id": "$voice:example.com",
+        "sender": "@user:example.com",
+    }
+
+    # Mock voice_handler.handle_voice_message to return a transcription
+    with (
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
+    ):
+        # Setup mocks
+        mock_handle_voice.return_value = "This is the transcribed message from voice"
+        mock_send_response.return_value = "$response:example.com"
+
+        # Process the voice event
+        await bot._on_voice_message(room, voice_event)
+
+        # Verify that the bot tracked the response correctly
+        assert bot.response_tracker.has_responded("$voice:example.com")
+        assert bot.response_tracker.get_response_event_id("$voice:example.com") == "$response:example.com"
+
+        # Verify the methods were called
+        mock_handle_voice.assert_called_once_with(bot.client, room, voice_event, config)
+        mock_send_response.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_on_voice_message_no_transcription_still_marks_responded(tmp_path: Path) -> None:
+    """Test that _on_voice_message marks as responded even when no transcription is produced."""
+    # Create a mock agent user
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    # Create a minimal mock config with voice enabled
+    config = Mock()
+    config.agents = {"test_agent": Mock()}
+    config.domain = "example.com"
+    config.voice = Mock()
+    config.voice.enabled = True
+    config.authorization = Mock()
+    config.authorization.is_authorized = Mock(return_value=True)
+
+    # Create the bot
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+
+    # Mock the client
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@test_agent:example.com"
+
+    # Create real ResponseTracker with the test path
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+
+    # Mock logger
+    bot.logger = MagicMock()
+
+    # Create a room
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+
+    # Create a voice message event
+    voice_event = nio.RoomMessageAudio.from_dict(
+        {
+            "content": {
+                "body": "voice_message.ogg",
+                "msgtype": "m.audio",
+                "url": "mxc://example.com/voice123",
+                "org.matrix.msc1767.audio": {
+                    "duration": 5000,
+                    "waveform": [0, 100, 200],
+                },
+                "org.matrix.msc3245.voice": {},
+            },
+            "event_id": "$voice:example.com",
+            "sender": "@user:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    voice_event.source = {
+        "content": {
+            "body": "voice_message.ogg",
+            "msgtype": "m.audio",
+            "url": "mxc://example.com/voice123",
+            "org.matrix.msc1767.audio": {
+                "duration": 5000,
+                "waveform": [0, 100, 200],
+            },
+            "org.matrix.msc3245.voice": {},
+        },
+        "event_id": "$voice:example.com",
+        "sender": "@user:example.com",
+    }
+
+    # Mock voice_handler.handle_voice_message to return None (no transcription)
+    with (
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch.object(bot, "_send_response", new_callable=AsyncMock) as mock_send_response,
+    ):
+        # Setup mocks
+        mock_handle_voice.return_value = None  # No transcription
+
+        # Process the voice event
+        await bot._on_voice_message(room, voice_event)
+
+        # Verify that the bot marked as responded even without a transcription
+        assert bot.response_tracker.has_responded("$voice:example.com")
+        # Should not have a response event ID since no response was sent
+        assert bot.response_tracker.get_response_event_id("$voice:example.com") is None
+
+        # Verify voice handler was called but _send_response was not
+        mock_handle_voice.assert_called_once_with(bot.client, room, voice_event, config)
+        mock_send_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_voice_message_unauthorized_sender_marks_responded(tmp_path: Path) -> None:
+    """Test that _on_voice_message marks as responded for unauthorized senders."""
+    # Create a mock agent user
+    agent_user = AgentMatrixUser(
+        agent_name="test_agent",
+        user_id="@test_agent:example.com",
+        display_name="Test Agent",
+        password="test_password",  # noqa: S106
+    )
+
+    # Create a minimal mock config with voice enabled
+    config = Mock()
+    config.agents = {"test_agent": Mock()}
+    config.domain = "example.com"
+    config.voice = Mock()
+    config.voice.enabled = True
+
+    # Create the bot
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+
+    # Mock the client
+    bot.client = AsyncMock(spec=nio.AsyncClient)
+    bot.client.user_id = "@test_agent:example.com"
+
+    # Create real ResponseTracker with the test path
+    bot.response_tracker = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
+
+    # Mock logger
+    bot.logger = MagicMock()
+
+    # Create a room
+    room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
+
+    # Create a voice message event from unauthorized sender
+    voice_event = nio.RoomMessageAudio.from_dict(
+        {
+            "content": {
+                "body": "voice_message.ogg",
+                "msgtype": "m.audio",
+                "url": "mxc://example.com/voice123",
+                "org.matrix.msc1767.audio": {
+                    "duration": 5000,
+                    "waveform": [0, 100, 200],
+                },
+                "org.matrix.msc3245.voice": {},
+            },
+            "event_id": "$voice:example.com",
+            "sender": "@unauthorized:example.com",
+            "origin_server_ts": 1000000,
+            "type": "m.room.message",
+            "room_id": "!test:example.com",
+        },
+    )
+    voice_event.source = {
+        "content": {
+            "body": "voice_message.ogg",
+            "msgtype": "m.audio",
+            "url": "mxc://example.com/voice123",
+            "org.matrix.msc1767.audio": {
+                "duration": 5000,
+                "waveform": [0, 100, 200],
+            },
+            "org.matrix.msc3245.voice": {},
+        },
+        "event_id": "$voice:example.com",
+        "sender": "@unauthorized:example.com",
+    }
+
+    # Mock is_authorized_sender to return False
+    with (
+        patch("mindroom.bot.is_authorized_sender", return_value=False) as mock_is_authorized,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+    ):
+        # Process the voice event
+        await bot._on_voice_message(room, voice_event)
+
+        # Verify that the bot marked as responded even for unauthorized sender
+        assert bot.response_tracker.has_responded("$voice:example.com")
+        # Should not have a response event ID since no response was sent
+        assert bot.response_tracker.get_response_event_id("$voice:example.com") is None
+
+        # Verify authorization was checked but voice handler was not called
+        mock_is_authorized.assert_called_once()
+        mock_handle_voice.assert_not_called()
