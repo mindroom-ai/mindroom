@@ -1008,18 +1008,26 @@ class AgentBot:
             reply_to_event_id: Event to reply to
             thread_id: Thread ID if in thread
             response_function: Async function that generates the response (takes message_id parameter)
-            thinking_message: Optional thinking message to show (None to skip)
-            existing_event_id: ID of existing message to edit
+            thinking_message: Thinking message to show (only used when existing_event_id is None)
+            existing_event_id: ID of existing message to edit (for interactive questions)
 
         Returns:
             The initial message ID if created, None otherwise
 
+        Note: In practice, either thinking_message or existing_event_id is provided, never both.
+
         """
         assert self.client is not None
 
-        # Send initial thinking message if requested and not editing
+        # Validate the mutual exclusivity constraint
+        assert not (thinking_message and existing_event_id), (
+            "thinking_message and existing_event_id are mutually exclusive"
+        )
+
+        # Send initial thinking message if not editing an existing message
         initial_message_id = None
-        if thinking_message and not existing_event_id:
+        if thinking_message:
+            assert not existing_event_id  # Redundant but makes the logic clear
             initial_message_id = await self._send_response(
                 room_id,
                 reply_to_event_id,
