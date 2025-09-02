@@ -24,9 +24,13 @@ if TYPE_CHECKING:
 @pytest.fixture
 def mock_calculator_agent() -> AgentMatrixUser:
     """Create a mock calculator agent user."""
+    # Import here to get the actual domain from environment
+    from mindroom.config import Config  # noqa: PLC0415
+
+    config = Config.from_yaml()
     return AgentMatrixUser(
         agent_name="calculator",
-        user_id="@mindroom_calculator:localhost",
+        user_id=f"@mindroom_calculator:{config.domain}",
         display_name="CalculatorAgent",
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
@@ -36,9 +40,13 @@ def mock_calculator_agent() -> AgentMatrixUser:
 @pytest.fixture
 def mock_general_agent() -> AgentMatrixUser:
     """Create a mock general agent user."""
+    # Import here to get the actual domain from environment
+    from mindroom.config import Config  # noqa: PLC0415
+
+    config = Config.from_yaml()
     return AgentMatrixUser(
         agent_name="general",
-        user_id="@mindroom_general:localhost",
+        user_id=f"@mindroom_general:{config.domain}",
         display_name="GeneralAgent",
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
@@ -54,8 +62,8 @@ async def test_agent_processes_direct_mention(
 ) -> None:
     """Test that an agent processes messages where it's directly mentioned."""
     mock_fetch_history.return_value = []
-    test_room_id = "!test:example.org"
-    test_user_id = "@alice:example.org"
+    test_room_id = "!test:localhost"
+    test_user_id = "@alice:localhost"
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
         # Mock the client
@@ -67,11 +75,11 @@ async def test_agent_processes_direct_mention(
 
         config = Config.from_yaml()
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
         await bot.start()
 
         # Create a message mentioning the calculator agent
-        message_body = "@mindroom_calculator:localhost What's 15% of 200?"
+        message_body = f"@mindroom_calculator:{config.domain} What's 15% of 200?"
         message_event = nio.RoomMessageText(
             body=message_body,
             formatted_body=message_body,
@@ -80,10 +88,10 @@ async def test_agent_processes_direct_mention(
                 "content": {
                     "msgtype": "m.text",
                     "body": message_body,
-                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:example.org"},
+                    "m.mentions": {"user_ids": [f"@mindroom_calculator:{config.domain}"]},
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
                 },
-                "event_id": "$test_event:example.org",
+                "event_id": "$test_event:localhost",
                 "sender": test_user_id,
                 "origin_server_ts": 1234567890,
                 "type": "m.room.message",
@@ -98,11 +106,14 @@ async def test_agent_processes_direct_mention(
             m.put(
                 re.compile(rf".*{re.escape(test_room_id)}/send/m\.room\.message/.*"),
                 status=200,
-                payload={"event_id": "$response_event:example.org"},
+                payload={"event_id": "$response_event:localhost"},
             )
 
-            # Mock the AI response
-            with patch("mindroom.bot.ai_response_streaming") as mock_ai:
+            # Mock the AI response and presence check
+            with (
+                patch("mindroom.bot.stream_agent_response") as mock_ai,
+                patch("mindroom.bot.should_use_streaming", return_value=True),
+            ):
 
                 async def mock_streaming_response() -> AsyncGenerator[str, None]:
                     yield "15% of 200 is 30"
@@ -115,8 +126,8 @@ async def test_agent_processes_direct_mention(
                 # Verify AI was called with correct parameters (full message body as prompt)
                 mock_ai.assert_called_once_with(
                     agent_name="calculator",
-                    prompt="@mindroom_calculator:localhost What's 15% of 200?",
-                    session_id=f"{test_room_id}:$thread_root:example.org",
+                    prompt=f"@mindroom_calculator:{config.domain} What's 15% of 200?",
+                    session_id=f"{test_room_id}:$thread_root:localhost",
                     thread_history=[],
                     storage_path=tmp_path,
                     config=config,
@@ -138,7 +149,7 @@ async def test_agent_ignores_other_agents(
     tmp_path: Path,
 ) -> None:
     """Test that agents ignore messages from other agents."""
-    test_room_id = "!test:example.org"
+    test_room_id = "!test:localhost"
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
         mock_client = AsyncMock()
@@ -148,7 +159,7 @@ async def test_agent_ignores_other_agents(
 
         config = Config.from_yaml()
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], config=config)
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
         await bot.start()
 
         # Create a message from another agent
@@ -158,7 +169,7 @@ async def test_agent_ignores_other_agents(
             format="org.matrix.custom.html",
             source={
                 "content": {"msgtype": "m.text", "body": "Hello from general agent"},
-                "event_id": "$test_event:example.org",
+                "event_id": "$test_event:localhost",
                 "sender": mock_general_agent.user_id,
                 "origin_server_ts": 1234567890,
                 "type": "m.room.message",
@@ -168,7 +179,7 @@ async def test_agent_ignores_other_agents(
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
-        with patch("mindroom.bot.ai_response_streaming") as mock_ai:
+        with patch("mindroom.bot.stream_agent_response") as mock_ai:
             await bot._on_message(room, message_event)
 
             # Should not process the message
@@ -184,21 +195,25 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     tmp_path: Path,
 ) -> None:
     """Test that agents respond in threads based on whether other agents are participating."""
-    test_room_id = "!test:example.org"
-    test_user_id = "@alice:example.org"
-    thread_root_id = "$thread_root:example.org"
-
-    # Mock the config to include both agents
-
+    # Create the config first to get the actual domain
     mock_config = Config(
         agents={
-            "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-            "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+            "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
+            "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
         },
         teams={},
         room_models={},
         models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
     )
+
+    # Use the actual domain from config (which comes from MATRIX_HOMESERVER env var)
+    domain = mock_config.domain
+    test_room_id = "!test:localhost"  # Room ID can stay as localhost
+    test_user_id = f"@alice:{domain}"
+    thread_root_id = f"$thread_root:{domain}"
+
+    # Update the mock agent to use the correct domain
+    mock_calculator_agent.user_id = f"@mindroom_calculator:{domain}"
 
     with (
         patch("mindroom.bot.login_agent_user") as mock_login,
@@ -216,7 +231,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         config = Config.from_yaml()
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[test_room_id], enable_streaming=False, config=config)
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id], enable_streaming=False)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -244,7 +259,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                         "event_id": thread_root_id,
                     },
                 },
-                "event_id": "$test_event:example.org",
+                "event_id": f"$test_event:{domain}",
                 "sender": test_user_id,
                 "origin_server_ts": 1234567890,
                 "type": "m.room.message",
@@ -259,6 +274,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
             patch("mindroom.bot.fetch_thread_history") as mock_fetch,
+            patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
+            patch("mindroom.bot.should_use_streaming", return_value=False),  # No streaming
         ):
             # Only this agent in the thread
             mock_fetch.return_value = [
@@ -299,7 +317,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                         "event_id": thread_root_id,
                     },
                 },
-                "event_id": "$test_event_2:example.org",  # Different event ID
+                "event_id": f"$test_event_2:{domain}",  # Different event ID
                 "sender": test_user_id,
                 "origin_server_ts": 1234567891,
                 "type": "m.room.message",
@@ -310,6 +328,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
             patch("mindroom.bot.fetch_thread_history") as mock_fetch,
+            patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
+            patch("mindroom.bot.should_use_streaming", return_value=False),  # No streaming
         ):
             # Multiple agents in the thread
             mock_fetch.return_value = [
@@ -321,7 +342,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                     "event_id": "msg2",
                 },
                 {
-                    "sender": "@mindroom_general:localhost",
+                    "sender": f"@mindroom_general:{domain}",
                     "body": "I can also help",
                     "timestamp": 125,
                     "event_id": "msg3",
@@ -341,20 +362,20 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         # Test 3: Thread with multiple agents WITH mention - should respond
         message_event_with_mention = nio.RoomMessageText(
-            body="@mindroom_calculator:localhost What about 20% of 300?",
-            formatted_body="@mindroom_calculator:localhost What about 20% of 300?",
+            body=f"@mindroom_calculator:{domain} What about 20% of 300?",
+            formatted_body=f"@mindroom_calculator:{domain} What about 20% of 300?",
             format="org.matrix.custom.html",
             source={
                 "content": {
                     "msgtype": "m.text",
-                    "body": "@mindroom_calculator:localhost What about 20% of 300?",
+                    "body": f"@mindroom_calculator:{domain} What about 20% of 300?",
                     "m.relates_to": {
                         "rel_type": "m.thread",
                         "event_id": thread_root_id,
                     },
-                    "m.mentions": {"user_ids": ["@mindroom_calculator:localhost"]},
+                    "m.mentions": {"user_ids": [f"@mindroom_calculator:{domain}"]},
                 },
-                "event_id": "$test_event2:example.org",
+                "event_id": f"$test_event2:{domain}",
                 "sender": test_user_id,
                 "origin_server_ts": 1234567890,
                 "type": "m.room.message",
@@ -365,6 +386,9 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
             patch("mindroom.bot.fetch_thread_history") as mock_fetch,
+            patch("mindroom.bot.is_dm_room", return_value=False),  # Not a DM room
+            patch("mindroom.bot.interactive.handle_text_response", new=AsyncMock()),  # Mock interactive handler
+            patch("mindroom.bot.should_use_streaming", return_value=False),  # No streaming
         ):
             mock_fetch.return_value = [
                 {"sender": test_user_id, "body": "What's 10% of 100?", "timestamp": 123, "event_id": "msg1"},
@@ -375,7 +399,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                     "event_id": "msg2",
                 },
                 {
-                    "sender": "@mindroom_general:localhost",
+                    "sender": f"@mindroom_general:{domain}",
                     "body": "I can also help",
                     "timestamp": 125,
                     "event_id": "msg3",
@@ -390,7 +414,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             # Should process the message with explicit mention
             mock_ai.assert_called_once_with(
                 agent_name="calculator",
-                prompt="@mindroom_calculator:localhost What about 20% of 300?",
+                prompt=f"@mindroom_calculator:{domain} What about 20% of 300?",
                 session_id=f"{test_room_id}:{thread_root_id}",
                 thread_history=mock_fetch.return_value,
                 storage_path=tmp_path,
@@ -406,6 +430,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_matrix  # Requires real Matrix server for multi-agent orchestration
+@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     """Test that the orchestrator manages multiple agents correctly."""
     with patch("mindroom.matrix.users.ensure_all_agent_users") as mock_ensure:
@@ -450,7 +476,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
             mock_client = AsyncMock()
             mock_client.add_event_callback = MagicMock()
             mock_client.user_id = "@mindroom_calculator:localhost"
-            mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:example.org"))
+            mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:localhost"))
             # Don't run sync_forever, just verify setup
             mock_client.sync_forever = AsyncMock()
             mock_login.return_value = mock_client
@@ -468,8 +494,8 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser, tmp_path: Path) -> None:
     """Test that agents properly handle room invitations."""
-    initial_room = "!initial:example.org"
-    invite_room = "!invite:example.org"
+    initial_room = "!initial:localhost"
+    invite_room = "!invite:localhost"
 
     with patch("mindroom.bot.login_agent_user") as mock_login:
         mock_client = AsyncMock()
@@ -479,7 +505,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
 
         config = Config.from_yaml()
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, rooms=[initial_room], config=config)
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[initial_room])
         await bot.start()
 
         # Create invite event for a different room
@@ -487,7 +513,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_room.room_id = invite_room
         mock_room.display_name = "Invite Room"
         mock_event = MagicMock(spec=nio.InviteEvent)
-        mock_event.sender = "@inviter:example.org"
+        mock_event.sender = "@inviter:localhost"
 
         await bot._on_invite(mock_room, mock_event)
 

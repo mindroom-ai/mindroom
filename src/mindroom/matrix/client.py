@@ -11,22 +11,13 @@ from typing import Any
 import markdown
 import nio
 
+from mindroom.constants import ENCRYPTION_KEYS_DIR
 from mindroom.logging_config import get_logger
 
+from .event_info import EventInfo
 from .identity import MatrixID, extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
-
-
-def extract_thread_info(event_source: dict) -> tuple[bool, str | None]:
-    """Extract thread information from a Matrix event.
-
-    Returns (is_thread, thread_id).
-    """
-    relates_to = event_source.get("content", {}).get("m.relates_to", {})
-    is_thread = relates_to and relates_to.get("rel_type") == "m.thread"
-    thread_id = relates_to.get("event_id") if is_thread else None
-    return is_thread, thread_id
 
 
 def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
@@ -41,6 +32,41 @@ def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
             ssl_context = ssl_module.create_default_context()
         return ssl_context
     return None
+
+
+def create_matrix_client(
+    homeserver: str,
+    user_id: str | None = None,
+    access_token: str | None = None,
+    store_path: str | None = None,
+) -> nio.AsyncClient:
+    """Create a Matrix client with consistent configuration.
+
+    Args:
+        homeserver: The Matrix homeserver URL
+        user_id: Optional user ID for authenticated client
+        access_token: Optional access token for authenticated client
+        store_path: Optional path for encryption key storage (defaults to .nio_store/<user_id>)
+
+    Returns:
+        nio.AsyncClient: Configured Matrix client instance
+
+    """
+    ssl_context = _maybe_ssl_context(homeserver)
+
+    # Default store path for encryption support
+    if store_path is None and user_id:
+        safe_user_id = user_id.replace(":", "_").replace("@", "")
+        store_path = str(ENCRYPTION_KEYS_DIR / safe_user_id)
+        # Ensure the directory exists
+        Path(store_path).mkdir(parents=True, exist_ok=True)
+
+    client = nio.AsyncClient(homeserver, user_id, store_path=store_path, ssl=ssl_context)
+
+    if access_token:
+        client.access_token = access_token
+
+    return client
 
 
 @asynccontextmanager
@@ -64,12 +90,7 @@ async def matrix_client(
             response = await client.login(password="secret")
 
     """
-    ssl_context = _maybe_ssl_context(homeserver)
-    if access_token:
-        client = nio.AsyncClient(homeserver, user_id, store_path=".nio_store", ssl=ssl_context)
-        client.access_token = access_token
-    else:
-        client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
+    client = create_matrix_client(homeserver, user_id, access_token)
 
     try:
         yield client
@@ -92,8 +113,7 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
         ValueError: If login fails
 
     """
-    ssl_context = _maybe_ssl_context(homeserver)
-    client = nio.AsyncClient(homeserver, user_id, ssl=ssl_context)
+    client = create_matrix_client(homeserver, user_id)
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):
@@ -322,6 +342,49 @@ async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
     return None
 
 
+async def get_room_name(client: nio.AsyncClient, room_id: str) -> str:
+    """Get the display name of a Matrix room.
+
+    Args:
+        client: Authenticated Matrix client
+        room_id: The room ID to get the name for
+
+    Returns:
+        Room name if found, fallback name for DM/unnamed rooms
+
+    """
+    # Try to get the room name directly
+    response = await client.room_get_state_event(room_id, "m.room.name")
+    if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("name"):
+        return str(response.content["name"])
+
+    # Get room state for fallback naming
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        return "Unnamed Room"
+
+    # Check for room name in state events
+    for event in response.events:
+        if event.get("type") == "m.room.name" and event.get("content", {}).get("name"):
+            return str(event["content"]["name"])
+
+    # Build member list for DM/group room names
+    members = [
+        event.get("content", {}).get("displayname", event.get("state_key", ""))
+        for event in response.events
+        if event.get("type") == "m.room.member"
+        and event.get("content", {}).get("membership") == "join"
+        and event.get("state_key") != client.user_id
+    ]
+
+    if len(members) == 1:
+        return f"DM with {members[0]}"
+    if members:
+        return f"Room with {', '.join(members[:3])}" + (" and others" if len(members) > 3 else "")
+
+    return "Unnamed Room"
+
+
 async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
     """Leave a Matrix room.
 
@@ -421,8 +484,8 @@ async def fetch_thread_history(
                     root_message_found = True
                     thread_messages_found += 1
                 else:
-                    relates_to = event.source.get("content", {}).get("m.relates_to", {})
-                    if relates_to.get("rel_type") == "m.thread" and relates_to.get("event_id") == thread_id:
+                    event_info = EventInfo.from_event(event.source)
+                    if event_info.is_thread and event_info.thread_id == thread_id:
                         messages.append(_extract_message_data(event))
                         thread_messages_found += 1
 
@@ -431,6 +494,65 @@ async def fetch_thread_history(
         from_token = response.end
 
     return list(reversed(messages))  # Return in chronological order
+
+
+async def _latest_thread_event_id(
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+) -> str:
+    """Get the latest event ID in a thread for MSC3440 fallback compliance.
+
+    This function fetches the thread history and returns the latest event ID.
+    If the thread has no messages yet, returns the thread_id itself as fallback.
+
+    Args:
+        client: Matrix client
+        room_id: Room ID
+        thread_id: Thread root event ID
+
+    Returns:
+        The latest event ID in the thread, or thread_id if thread is empty
+
+    """
+    thread_msgs = await fetch_thread_history(client, room_id, thread_id)
+    if thread_msgs:
+        last_event_id = thread_msgs[-1].get("event_id")
+        return str(last_event_id) if last_event_id else thread_id
+    return thread_id
+
+
+async def get_latest_thread_event_id_if_needed(
+    client: nio.AsyncClient | None,
+    room_id: str,
+    thread_id: str | None,
+    reply_to_event_id: str | None = None,
+    existing_event_id: str | None = None,
+) -> str | None:
+    """Get the latest thread event ID only when needed for MSC3440 compliance.
+
+    This helper encapsulates the common pattern of conditionally fetching
+    the latest thread event ID based on various conditions.
+
+    Args:
+        client: Matrix client (can be None)
+        room_id: Room ID
+        thread_id: Thread root event ID (can be None)
+        reply_to_event_id: Event ID being replied to (if any)
+        existing_event_id: Existing event ID being edited (if any)
+
+    Returns:
+        The latest event ID in the thread if needed, None otherwise
+
+    """
+    # Only fetch latest thread event when:
+    # 1. We have a thread_id
+    # 2. We have a client
+    # 3. We're not editing an existing message
+    # 4. We're not making a genuine reply
+    if thread_id and client and not existing_event_id and not reply_to_event_id:
+        return await _latest_thread_event_id(client, room_id, thread_id)
+    return None
 
 
 def markdown_to_html(text: str) -> str:
@@ -475,7 +597,7 @@ async def edit_message(
         client: The Matrix client
         room_id: The room ID where the message is
         event_id: The event ID of the message to edit
-        new_content: The new content dictionary (from create_mention_content_from_text)
+        new_content: The new content dictionary (from format_message_with_mentions)
         new_text: The new text (plain text version)
 
     Returns:

@@ -5,21 +5,28 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Literal, NamedTuple
+from zoneinfo import ZoneInfo
 
 import humanize
 import nio
-import pytz
+from agno.agent import Agent
+from cron_descriptor import get_description  # type: ignore[import-untyped]
+from croniter import croniter  # type: ignore[import-untyped]
+from pydantic import BaseModel, Field
 
+from .ai import get_model_instance
 from .logging_config import get_logger
-from .workflow_scheduling import (
-    ScheduledWorkflow,
-    WorkflowParseError,
-    parse_workflow_schedule,
-    run_cron_task,
-    run_once_task,
+from .matrix.client import (
+    fetch_thread_history,
+    get_latest_thread_event_id_if_needed,
+    send_message,
 )
+from .matrix.identity import MatrixID
+from .matrix.mentions import format_message_with_mentions, parse_mentions_in_text
+from .matrix.message_builder import build_message_content
+from .thread_utils import get_agents_in_thread, get_available_agents_in_room
 
 if TYPE_CHECKING:
     from .config import Config
@@ -36,6 +43,331 @@ MESSAGE_PREVIEW_LENGTH = 50
 _running_tasks: dict[str, asyncio.Task] = {}
 
 
+class _AgentValidationResult(NamedTuple):
+    """Result of agent mention validation."""
+
+    all_valid: bool
+    valid_agents: list[MatrixID]
+    invalid_agents: list[MatrixID]
+
+
+# ---- Workflow scheduling primitives ----
+
+
+class CronSchedule(BaseModel):
+    """Standard cron-like schedule definition."""
+
+    minute: str = Field(default="*", description="0-59, *, */5, or comma-separated")
+    hour: str = Field(default="*", description="0-23, *, */2, or comma-separated")
+    day: str = Field(default="*", description="1-31, *, or comma-separated")
+    month: str = Field(default="*", description="1-12, *, or comma-separated")
+    weekday: str = Field(default="*", description="0-6 (0=Sunday), *, or comma-separated")
+
+    def to_cron_string(self) -> str:
+        """Convert to standard cron format."""
+        return f"{self.minute} {self.hour} {self.day} {self.month} {self.weekday}"
+
+    def to_natural_language(self) -> str:
+        """Convert cron schedule to natural language description."""
+        try:
+            cron_str = self.to_cron_string()
+            return str(get_description(cron_str))
+        except Exception:
+            return f"Cron: {self.to_cron_string()}"
+
+
+class ScheduledWorkflow(BaseModel):
+    """Structured representation of a scheduled task or workflow."""
+
+    schedule_type: Literal["once", "cron"]
+    execute_at: datetime | None = None
+    cron_schedule: CronSchedule | None = None
+    message: str
+    description: str
+    created_by: str | None = None
+    thread_id: str | None = None
+    room_id: str | None = None
+
+
+class WorkflowParseError(BaseModel):
+    """Error response when workflow parsing fails."""
+
+    error: str
+    suggestion: str | None = None
+
+
+async def parse_workflow_schedule(
+    request: str,
+    config: Config,
+    available_agents: list[MatrixID],
+    current_time: datetime | None = None,
+) -> ScheduledWorkflow | WorkflowParseError:
+    """Parse natural language into structured workflow using AI."""
+    if current_time is None:
+        current_time = datetime.now(UTC)
+
+    assert available_agents, "No agents available for scheduling"
+    agent_list = ", ".join(f"@{name}" for name in available_agents)
+
+    prompt = f"""Parse this scheduling request into a structured workflow.
+
+Current time (UTC): {current_time.isoformat()}Z
+Request: "{request}"
+
+Your task is to:
+1. Determine if this is a one-time task or recurring (cron)
+2. Extract the schedule/timing
+3. Create a message that mentions the appropriate agents
+
+Available agents: {agent_list}
+
+IMPORTANT: Event-based and conditional requests:
+When users say "if", "when", "whenever", "once X happens" or describe events/conditions:
+1. Convert to an appropriate recurring (cron) schedule for polling
+2. Include BOTH the condition check AND the action in the message
+3. Choose polling frequency based on urgency and type
+
+Important rules:
+- For conditional/event-based requests, ALWAYS include the check condition in the message
+- Mention relevant agents with @ only when needed
+- Convert time expressions to UTC for the schedule, but DO NOT include them in the message
+- Remove time phrases like "in 15 seconds" from the message itself
+- If schedule_type is "once", you MUST provide execute_at
+- If schedule_type is "cron", you MUST provide cron_schedule
+
+Examples of event/condition phrasing to include in the message (do not include times in these examples):
+- @email_assistant Check for emails containing 'urgent'. If found, @phone_agent notify the user.
+- @crypto_agent Check Bitcoin price. If below $40,000, @notification_agent alert the user.
+- @monitoring_agent Check server CPU usage. If above 80%, @ops_agent scale up the servers.
+- @reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points.
+"""
+
+    model = get_model_instance(config, "default")
+
+    agent = Agent(
+        name="WorkflowParser",
+        role="Parse scheduling requests into structured workflows",
+        model=model,
+        response_model=ScheduledWorkflow,
+    )
+
+    try:
+        response = await agent.arun(prompt, session_id=f"workflow_parse_{uuid.uuid4()}")
+        result = response.content
+
+        if isinstance(result, ScheduledWorkflow):
+            if result.schedule_type == "once" and not result.execute_at:
+                # Match previous behavior: default to 30 minutes from now
+                result.execute_at = current_time + timedelta(minutes=30)
+            elif result.schedule_type == "cron" and not result.cron_schedule:
+                result.cron_schedule = CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*")
+
+            logger.info("Successfully parsed workflow schedule", request=request, schedule_type=result.schedule_type)
+            return result
+
+        logger.error("Unexpected response type from AI", response_type=type(result).__name__)
+        return WorkflowParseError(
+            error="Failed to parse the schedule request",
+            suggestion="Try being more specific about the timing and what you want to happen",
+        )
+
+    except Exception as e:
+        logger.exception("Error parsing workflow schedule", error=str(e), request=request)
+        return WorkflowParseError(
+            error=f"Error parsing schedule: {e!s}",
+            suggestion="Try a simpler format like 'Daily at 9am, check my email'",
+        )
+
+
+async def execute_scheduled_workflow(
+    client: nio.AsyncClient,
+    workflow: ScheduledWorkflow,
+    config: Config,
+) -> None:
+    """Execute a scheduled workflow by posting its message to the thread."""
+    if not workflow.room_id:
+        logger.error("Cannot execute workflow without room_id")
+        return
+
+    try:
+        automated_message = (
+            f"⏰ [Automated Task]\n{workflow.message}\n\n_Note: Automated task - no follow-up expected._"
+        )
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            client,
+            workflow.room_id,
+            workflow.thread_id,
+        )
+        content = format_message_with_mentions(
+            config,
+            automated_message,
+            sender_domain=config.domain,
+            thread_event_id=workflow.thread_id,
+            latest_thread_event_id=latest_thread_event_id,
+        )
+        await send_message(client, workflow.room_id, content)
+        logger.info("Executed scheduled workflow", description=workflow.description, thread_id=workflow.thread_id)
+    except Exception as e:
+        logger.exception("Failed to execute scheduled workflow")
+        if workflow.room_id:
+            error_message = f"❌ Scheduled task failed: {workflow.description}\nError: {e!s}"
+            error_content = build_message_content(
+                body=error_message,
+                thread_event_id=workflow.thread_id,
+                latest_thread_event_id=workflow.thread_id,
+            )
+            await send_message(client, workflow.room_id, error_content)
+
+
+async def run_cron_task(
+    client: nio.AsyncClient,
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    running_tasks: dict[str, asyncio.Task],
+    config: Config,
+) -> None:
+    """Run a recurring task based on cron schedule."""
+    if not workflow.cron_schedule:
+        logger.error("No cron schedule provided for recurring task")
+        return
+
+    cron_string = workflow.cron_schedule.to_cron_string()
+
+    try:
+        cron = croniter(cron_string, datetime.now(UTC))
+        while True:
+            next_run = cron.get_next(datetime)
+            delay = (next_run - datetime.now(UTC)).total_seconds()
+            if delay > 0:
+                logger.info(
+                    f"Waiting {delay:.0f} seconds until next execution",
+                    task_id=task_id,
+                    next_run=next_run.isoformat(),
+                )
+                await asyncio.sleep(delay)
+            await execute_scheduled_workflow(client, workflow, config)
+            if task_id not in running_tasks:
+                logger.info(f"Task {task_id} no longer in running tasks, stopping")
+                break
+    except asyncio.CancelledError:
+        logger.info(f"Cron task {task_id} was cancelled")
+        raise
+    except Exception as e:
+        logger.exception(f"Error in cron task {task_id}")
+        if workflow.room_id:
+            error_message = f"❌ Recurring task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
+            error_content = build_message_content(
+                body=error_message,
+                thread_event_id=workflow.thread_id,
+                latest_thread_event_id=workflow.thread_id,
+            )
+            await send_message(client, workflow.room_id, error_content)
+
+
+async def run_once_task(
+    client: nio.AsyncClient,
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+) -> None:
+    """Run a one-time scheduled task."""
+    if not workflow.execute_at:
+        logger.error("No execution time provided for one-time task")
+        return
+
+    try:
+        delay = (workflow.execute_at - datetime.now(UTC)).total_seconds()
+        if delay > 0:
+            logger.info(
+                f"Waiting {delay:.0f} seconds until execution",
+                task_id=task_id,
+                execute_at=workflow.execute_at.isoformat(),
+            )
+            await asyncio.sleep(delay)
+        await execute_scheduled_workflow(client, workflow, config)
+    except asyncio.CancelledError:
+        logger.info(f"One-time task {task_id} was cancelled")
+        raise
+    except Exception as e:
+        logger.exception(f"Error in one-time task {task_id}")
+        if workflow.room_id:
+            error_message = f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {e!s}"
+            error_content = build_message_content(
+                body=error_message,
+                thread_event_id=workflow.thread_id,
+                latest_thread_event_id=workflow.thread_id,
+            )
+            await send_message(client, workflow.room_id, error_content)
+
+
+async def _validate_agent_mentions(
+    message: str,
+    room: nio.MatrixRoom,
+    thread_id: str | None,
+    config: Config,
+) -> _AgentValidationResult:
+    """Validate that all mentioned agents are accessible.
+
+    Args:
+        message: The message that may contain @agent mentions
+        room: The Matrix room object
+        thread_id: The thread ID where the schedule will execute (if in a thread)
+        config: Application configuration
+
+    Returns:
+        _AgentValidationResult with validation status and agent lists
+
+    """
+    # Parse mentions - this handles all the agent name resolution properly
+    _, mentioned_user_ids, _ = parse_mentions_in_text(message, config.domain, config)
+
+    if not mentioned_user_ids:
+        # No agents mentioned, validation passes
+        return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
+
+    # Extract agent names from the mentioned user IDs
+
+    mentioned_agents: list[MatrixID] = []
+    for user_id in mentioned_user_ids:
+        mid = MatrixID.parse(user_id)
+        agent_name = mid.agent_name(config)
+        if agent_name and mid not in mentioned_agents:
+            mentioned_agents.append(mid)
+
+    if not mentioned_agents:
+        # No valid agents mentioned
+        return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
+
+    valid_agents: list[MatrixID] = []
+    invalid_agents: list[MatrixID] = []
+
+    if thread_id:
+        # For threads, check if agents are in the room
+        room_agents = get_available_agents_in_room(room, config)
+
+        # Agents can now respond in any room they're in
+        for mid in mentioned_agents:
+            if mid in room_agents:
+                valid_agents.append(mid)
+            else:
+                invalid_agents.append(mid)
+    else:
+        # For room messages, check if agents are configured for the room
+        room_agents = get_available_agents_in_room(room, config)
+        for mid in mentioned_agents:
+            if mid in room_agents:
+                valid_agents.append(mid)
+            else:
+                invalid_agents.append(mid)
+
+    all_valid = len(invalid_agents) == 0
+    return _AgentValidationResult(
+        all_valid=all_valid,
+        valid_agents=valid_agents,
+        invalid_agents=invalid_agents,
+    )
+
+
 def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
     """Format a datetime with timezone and relative time delta.
 
@@ -48,26 +380,27 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
 
     """
     # Convert UTC to target timezone
-    tz = pytz.timezone(timezone_str)
+    tz = ZoneInfo(timezone_str)
     local_dt = dt.astimezone(tz)
 
     # Get human-readable relative time using humanize
     now = datetime.now(UTC)
     relative_str = humanize.naturaltime(dt, when=now)
 
-    # Format the datetime string
-    time_str = local_dt.strftime("%Y-%m-%d %I:%M %p %Z")
+    # Format the datetime string with 24-hour time
+    time_str = local_dt.strftime("%Y-%m-%d %H:%M %Z")
     return f"{time_str} ({relative_str})"
 
 
-async def schedule_task(
+async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str | None,
-    agent_user_id: str,  # noqa: ARG001
     scheduled_by: str,
     full_text: str,
     config: Config,
+    room: nio.MatrixRoom,
+    mentioned_agents: list[MatrixID] | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -75,8 +408,25 @@ async def schedule_task(
         Tuple of (task_id, response_message)
 
     """
-    # Parse the workflow request
-    workflow_result = await parse_workflow_schedule(full_text, config)
+    # Get agents that are available in the thread
+    available_agents: list[MatrixID] = []
+    if thread_id:
+        # Get agents already participating in the thread
+        thread_history = await fetch_thread_history(client, room_id, thread_id)
+        available_agents = get_agents_in_thread(thread_history, config)
+
+    # Add any agents mentioned in the command itself
+    if mentioned_agents:
+        for mid in mentioned_agents:
+            if mid not in available_agents:
+                available_agents.append(mid)
+
+    # If no agents found in thread or mentions, fall back to agents in the room
+    if not available_agents:
+        available_agents = get_available_agents_in_room(room, config)
+
+    # Parse the workflow request with available agents
+    workflow_result = await parse_workflow_schedule(full_text, config, available_agents)
 
     if isinstance(workflow_result, WorkflowParseError):
         error_msg = f"❌ {workflow_result.error}"
@@ -90,6 +440,32 @@ async def schedule_task(
         return (None, "❌ Failed to schedule: One-time task missing execution time")
     if workflow_result.schedule_type == "cron" and not workflow_result.cron_schedule:
         return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
+
+    # Validate that all mentioned agents are accessible
+    validation_result = await _validate_agent_mentions(workflow_result.message, room, thread_id, config)
+
+    if not validation_result.all_valid:
+        error_msg = "❌ Failed to schedule: The following agents are not available in this "
+        if thread_id:
+            error_msg += "thread"
+        else:
+            error_msg += "room"
+        error_msg += f": {', '.join(agent.full_id for agent in validation_result.invalid_agents)}"
+
+        # Provide helpful suggestions
+        suggestions: list[str] = []
+        for agent in validation_result.invalid_agents:
+            agent_name = agent.agent_name(config)
+            if agent_name:
+                # Agent exists but not available in this room/thread
+                suggestions.append(f"{agent.full_id} is not available in this {'thread' if thread_id else 'room'}")
+            else:
+                suggestions.append(f"{agent.full_id} does not exist")
+
+        if suggestions:
+            error_msg += "\n\n💡 " + "\n💡 ".join(suggestions)
+
+        return (None, error_msg)
 
     # Add metadata to workflow
     workflow_result.created_by = scheduled_by
@@ -165,7 +541,7 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
     response = await client.room_get_state(room_id)
 
     if not isinstance(response, nio.RoomGetStateResponse):
-        logger.error("Failed to get room state", response=str(response))
+        logger.error("Failed to get room state", response=str(response), room_id=room_id, thread_id=thread_id)
         return "Unable to retrieve scheduled tasks."
 
     tasks = []
@@ -377,6 +753,6 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config:
             continue
 
     if restored_count > 0:
-        logger.info(f"Restored {restored_count} scheduled tasks in room {room_id}")
+        logger.info("Restored scheduled tasks in room", room_id=room_id, restored_count=restored_count)
 
     return restored_count

@@ -2,7 +2,7 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["typer", "rich", "pydantic", "pyyaml"]
+# dependencies = ["typer", "rich", "pydantic", "pyyaml", "jinja2"]
 # ///
 """Docker Mindroom instance manager."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
@@ -12,6 +12,7 @@ import base64
 import contextlib
 import json
 import os
+import platform as plat
 import secrets
 import shutil
 import socket
@@ -22,6 +23,7 @@ from pathlib import Path
 
 import typer
 import yaml
+from jinja2 import Template
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.table import Table
@@ -35,7 +37,12 @@ console = Console()
 # Get the script's directory to ensure paths are relative to it
 SCRIPT_DIR = Path(__file__).parent.absolute()
 REGISTRY_FILE = SCRIPT_DIR / "instances.json"
+ENV_DIR = SCRIPT_DIR / "envs"
 ENV_TEMPLATE = SCRIPT_DIR / ".env.template"
+DEFAULT_REGISTRY = "git.nijho.lt/basnijholt"
+
+# Ensure env directory exists
+ENV_DIR.mkdir(exist_ok=True)
 
 
 # Pydantic Models
@@ -56,6 +63,12 @@ class MatrixType(str, Enum):
     SYNAPSE = "synapse"
 
 
+class AuthType(str, Enum):
+    """Authentication type enum."""
+
+    AUTHELIA = "authelia"
+
+
 class Instance(BaseModel):
     """Instance configuration model."""
 
@@ -67,6 +80,7 @@ class Instance(BaseModel):
     domain: str
     status: InstanceStatus = InstanceStatus.CREATED
     matrix_type: MatrixType | None = None
+    auth_type: AuthType | None = None
 
 
 class AllocatedPorts(BaseModel):
@@ -141,61 +155,36 @@ def _is_port_in_use(port: int) -> bool:
             return False
 
 
+def _find_available_port(start_port: int, allocated_ports: list[int], port_type: str) -> int:
+    """Find next available port starting from start_port."""
+    port = start_port
+    skipped = []
+
+    while port in allocated_ports or _is_port_in_use(port):
+        if _is_port_in_use(port) and port not in allocated_ports:
+            skipped.append(port)
+        port += 1
+        # Safety check to avoid infinite loop
+        if port > start_port + 1000:
+            msg = f"Could not find available {port_type} port starting from {start_port}"
+            raise RuntimeError(msg)
+
+    if skipped:
+        console.print(
+            f"[yellow]Note:[/yellow] {port_type.capitalize()} port(s) {skipped} already in use by other processes, using port {port}",
+        )
+
+    return port
+
+
 def _find_next_ports(registry: Registry) -> tuple[int, int, int]:
     """Find the next available ports that are not in use on the system."""
     defaults = registry.defaults
     allocated = registry.allocated_ports
 
-    # Find available backend port
-    backend_port = defaults.backend_port_start
-    skipped_backend = []
-    while backend_port in allocated.backend or _is_port_in_use(backend_port):
-        if _is_port_in_use(backend_port) and backend_port not in allocated.backend:
-            skipped_backend.append(backend_port)
-        backend_port += 1
-        # Safety check to avoid infinite loop
-        if backend_port > defaults.backend_port_start + 1000:
-            msg = f"Could not find available backend port starting from {defaults.backend_port_start}"
-            raise RuntimeError(msg)
-
-    if skipped_backend:
-        console.print(
-            f"[yellow]Note:[/yellow] Backend port(s) {skipped_backend} already in use by other processes, using port {backend_port}",
-        )
-
-    # Find available frontend port
-    frontend_port = defaults.frontend_port_start
-    skipped_frontend = []
-    while frontend_port in allocated.frontend or _is_port_in_use(frontend_port):
-        if _is_port_in_use(frontend_port) and frontend_port not in allocated.frontend:
-            skipped_frontend.append(frontend_port)
-        frontend_port += 1
-        # Safety check to avoid infinite loop
-        if frontend_port > defaults.frontend_port_start + 1000:
-            msg = f"Could not find available frontend port starting from {defaults.frontend_port_start}"
-            raise RuntimeError(msg)
-
-    if skipped_frontend:
-        console.print(
-            f"[yellow]Note:[/yellow] Frontend port(s) {skipped_frontend} already in use by other processes, using port {frontend_port}",
-        )
-
-    # Find available Matrix port (starting at 8448)
-    matrix_port = defaults.matrix_port_start
-    skipped_matrix = []
-    while matrix_port in allocated.matrix or _is_port_in_use(matrix_port):
-        if _is_port_in_use(matrix_port) and matrix_port not in allocated.matrix:
-            skipped_matrix.append(matrix_port)
-        matrix_port += 1
-        # Safety check to avoid infinite loop
-        if matrix_port > defaults.matrix_port_start + 1000:
-            msg = f"Could not find available matrix port starting from {defaults.matrix_port_start}"
-            raise RuntimeError(msg)
-
-    if skipped_matrix:
-        console.print(
-            f"[yellow]Note:[/yellow] Matrix port(s) {skipped_matrix} already in use by other processes, using port {matrix_port}",
-        )
+    backend_port = _find_available_port(defaults.backend_port_start, allocated.backend, "backend")
+    frontend_port = _find_available_port(defaults.frontend_port_start, allocated.frontend, "frontend")
+    matrix_port = _find_available_port(defaults.matrix_port_start, allocated.matrix, "matrix")
 
     return backend_port, frontend_port, matrix_port
 
@@ -207,41 +196,44 @@ def _prepare_matrix_config(
     template_dir: Path,
     target_dir: Path,
 ) -> None:
-    """Prepare Matrix configuration files (shared logic for Synapse and Tuwunel)."""
+    """Prepare Matrix configuration files using Jinja2 templates."""
     if not template_dir.exists():
         return
 
     matrix_server_name = f"m-{instance.domain}"
 
+    # Look for Jinja2 template
+    template_file = template_dir / f"{config_file_name}.j2"
+    if template_file.exists():
+        template_content = template_file.read_text()
+        template = Template(template_content)
+
+        # Render template with variables
+        if matrix_type == MatrixType.SYNAPSE:
+            content = template.render(
+                matrix_server_name=matrix_server_name,
+                postgres_host=f"{instance.name}-postgres",
+                redis_host=f"{instance.name}-redis",
+            )
+        else:
+            # For Tuwunel or other matrix types
+            content = template.render(
+                matrix_server_name=matrix_server_name,
+            )
+
+        with (target_dir / config_file_name).open("w") as f:
+            f.write(content)
+
+    # Copy other files (like signing.key, log.config, etc.)
     for file in template_dir.glob("*"):
-        if not file.is_file():
+        if not file.is_file() or file.suffix == ".j2":
             continue
 
         if file.name == config_file_name:
-            # Generate config file with correct values
-            with file.open() as f:
-                content = f.read()
+            # Skip - already handled by template
+            continue
 
-            # Common replacements
-            content = content.replace('server_name: "localhost"', f'server_name: "{matrix_server_name}"')
-            content = content.replace(
-                "public_baseurl: http://localhost:8008/",
-                f"public_baseurl: https://{matrix_server_name}/",
-            )
-
-            # Matrix-specific replacements
-            if matrix_type == MatrixType.SYNAPSE:
-                # Replace postgres and redis hostnames with container names
-                content = content.replace("host: postgres", f"host: {instance.name}-postgres")
-                content = content.replace("host: redis", f"host: {instance.name}-redis")
-            elif matrix_type == MatrixType.TUWUNEL:
-                # Tuwunel-specific replacements if needed
-                pass
-
-            with (target_dir / file.name).open("w") as f:
-                f.write(content)
-
-        elif file.name == "signing.key" and matrix_type == MatrixType.SYNAPSE:
+        if file.name == "signing.key" and matrix_type == MatrixType.SYNAPSE:
             # Generate a unique signing key for Synapse
             key_bytes = secrets.token_bytes(32)
             key_b64 = base64.b64encode(key_bytes).decode("ascii")
@@ -256,15 +248,44 @@ def _prepare_matrix_config(
             shutil.copy(file, target_dir / file.name)
 
 
-def _get_docker_compose_files(instance: Instance, env_file_relative: str, project_root: Path) -> str:
-    """Get the docker-compose command with appropriate files based on matrix type."""
+def _get_docker_compose_files(instance: Instance, name: str, project_root: Path) -> str:
+    """Get the docker-compose command with appropriate files based on matrix and auth type."""
+    env_file_relative = f"deploy/envs/{name}.env"
     base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
 
+    # Add Matrix server compose file if configured
     if instance.matrix_type == MatrixType.TUWUNEL:
-        return f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
-    if instance.matrix_type == MatrixType.SYNAPSE:
-        return f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+        base_cmd = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
+    elif instance.matrix_type == MatrixType.SYNAPSE:
+        base_cmd = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+
+    # Add Authelia compose file if configured
+    if instance.auth_type == AuthType.AUTHELIA:
+        base_cmd = f"{base_cmd} -f deploy/docker-compose.authelia.yml"
+
     return base_cmd
+
+
+def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str:
+    """Get the list of services to start based on instance configuration."""
+    if only_matrix:
+        if not instance.matrix_type:
+            msg = f"Instance '{instance.name}' has no Matrix server configured!"
+            raise ValueError(msg)
+        return _get_matrix_services(instance.matrix_type).strip()
+
+    # Start full stack: frontend + backend + matrix + auth
+    services = ["frontend", "backend"]
+
+    if instance.matrix_type == MatrixType.SYNAPSE:
+        services.extend(["postgres", "redis", "synapse"])
+    elif instance.matrix_type == MatrixType.TUWUNEL:
+        services.append("tuwunel")
+
+    if instance.auth_type == AuthType.AUTHELIA:
+        services.append("authelia")
+
+    return " ".join(services)
 
 
 def _get_matrix_services(matrix_type: MatrixType | None) -> str:
@@ -276,9 +297,45 @@ def _get_matrix_services(matrix_type: MatrixType | None) -> str:
     return ""
 
 
+def _get_auth_services(auth_type: AuthType | None) -> str:
+    """Get the list of services to start based on auth type."""
+    if auth_type == AuthType.AUTHELIA:
+        return " authelia"  # Redis removed - using in-memory sessions
+    return ""
+
+
+def _pull_images_from_registry(registry_url: str, console: Console) -> None:
+    """Pull images from registry and tag them locally.
+
+    Args:
+        registry_url: Registry URL to pull from
+        console: Rich console for output
+
+    Raises:
+        typer.Exit: If pulling fails
+
+    """
+    console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}...")
+    # Detect platform
+    arch = "arm64" if plat.machine() == "aarch64" else "amd64"
+
+    images = [
+        (f"{registry_url}/mindroom-backend:{arch}", "deploy-mindroom-backend:latest"),
+        (f"{registry_url}/mindroom-frontend:{arch}", "deploy-mindroom-frontend:latest"),
+    ]
+    for source, target in images:
+        pull_cmd = f"docker pull {source} && docker tag {source} {target}"
+        console.print(f"  Pulling {source.split('/')[-1]}...")
+        result = subprocess.run(pull_cmd, check=False, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            console.print(f"[red]✗[/red] Failed to pull {source}")
+            console.print(result.stderr)
+            raise typer.Exit(1)
+
+
 def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixType | None) -> None:
     """Create and configure the environment file for an instance."""
-    env_file = SCRIPT_DIR / f".env.{name}"
+    env_file = ENV_DIR / f"{name}.env"
     if ENV_TEMPLATE.exists():
         shutil.copy(ENV_TEMPLATE, env_file)
     else:
@@ -375,13 +432,116 @@ def _verify_extra_hosts_for_federation(matrix_type: MatrixType | None, instances
         raise typer.Exit(1)
 
 
-def _create_wellknown_files(name: str, instance: Instance) -> None:
+def _create_directory_with_permissions(path: Path, uid: int = 1000, gid: int = 1000) -> None:
+    """Create a directory with proper ownership and permissions."""
+    path.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError, PermissionError):
+        os.chown(path, uid, gid)
+        path.chmod(0o755)
+
+
+def _copy_credentials_to_instance(instance: Instance) -> None:
+    """Copy credentials from ~/.mindroom/credentials to instance data directory."""
+    source_dir = Path.home() / ".mindroom" / "credentials"
+    if not source_dir.exists():
+        return
+
+    target_dir = Path(instance.data_dir) / "mindroom_data" / "credentials"
+
+    # Copy all credential files
+    for cred_file in source_dir.glob("*.json"):
+        target_file = target_dir / cred_file.name
+        if not target_file.exists():
+            shutil.copy2(cred_file, target_file)
+            # Set proper permissions for Docker
+            with contextlib.suppress(OSError, PermissionError):
+                os.chown(target_file, 1000, 1000)
+                target_file.chmod(0o644)
+
+
+def _copy_config_to_instance(instance: Instance) -> None:
+    """Copy config.yaml from the main mindroom directory to instance config directory."""
+    source_config = SCRIPT_DIR.parent / "config.yaml"
+    if not source_config.exists():
+        console.print("[yellow]Warning:[/yellow] config.yaml not found in mindroom directory")
+        return
+
+    target_config = Path(instance.data_dir) / "config" / "config.yaml"
+
+    # Only copy if target doesn't exist (preserve customizations)
+    if not target_config.exists():
+        shutil.copy2(source_config, target_config)
+        # Set proper permissions for Docker
+        with contextlib.suppress(OSError, PermissionError):
+            os.chown(target_config, 1000, 1000)
+            target_config.chmod(0o644)
+        console.print("[green]✓[/green] Copied config.yaml to instance")
+
+
+def _create_instance_directories(instance: Instance) -> None:
+    """Create all necessary directories for an instance with proper permissions."""
+    # Base directories needed by all instances
+    base_dirs = [
+        "config",
+        "mindroom_data",
+        "mindroom_data/sessions",
+        "mindroom_data/tracking",
+        "mindroom_data/memory",  # For mem0/chroma vector DB
+        "mindroom_data/credentials",
+        "logs",
+    ]
+
+    for subdir in base_dirs:
+        dir_path = Path(f"{instance.data_dir}/{subdir}")
+        _create_directory_with_permissions(dir_path)
+
+    # Copy credentials from ~/.mindroom/credentials if they exist
+    _copy_credentials_to_instance(instance)
+
+    # Copy config.yaml to instance
+    _copy_config_to_instance(instance)
+
+
+def _create_synapse_directories(instance: Instance) -> None:
+    """Create directories needed for Synapse."""
+    for matrix_dir in ["synapse", "synapse/media_store", "postgres", "redis"]:
+        dir_path = Path(f"{instance.data_dir}/{matrix_dir}")
+        _create_directory_with_permissions(dir_path)
+
+
+def _setup_tuwunel_directory(instance: Instance, env_file: Path) -> None:
+    """Set up Tuwunel directory, clearing if server name changed."""
+    tuwunel_dir = Path(f"{instance.data_dir}/tuwunel")
+
+    # Check if Tuwunel database exists and might have wrong server name
+    if tuwunel_dir.exists() and any(tuwunel_dir.iterdir()):
+        # Read current server name from env file
+        current_server_name = None
+        with env_file.open() as f:
+            for line in f:
+                if line.startswith("MATRIX_SERVER_NAME="):
+                    current_server_name = line.split("=", 1)[1].strip()
+                    break
+
+        # If server name changed, clear the database (safe - Tuwunel recreates it)
+        if current_server_name and current_server_name != instance.domain:
+            console.print("[yellow]i[/yellow] Clearing Tuwunel database due to server name change")
+            shutil.rmtree(tuwunel_dir)
+
+    _create_directory_with_permissions(tuwunel_dir)
+
+
+def _create_wellknown_files(instance: Instance) -> None:
     """Create well-known files for Matrix federation."""
     matrix_server_name = f"m-{instance.domain}"
 
+    # Create well-known directory in instance data
+    wellknown_dir = Path(instance.data_dir) / "well-known"
+    wellknown_dir.mkdir(parents=True, exist_ok=True)
+
     # Server well-known (for federation discovery)
     server_wellknown = {"m.server": f"{matrix_server_name}:443"}
-    with (SCRIPT_DIR / f"well-known-{name}.json").open("w") as wf:
+    with (wellknown_dir / "server.json").open("w") as wf:
         json.dump(server_wellknown, wf, indent=2)
 
     # Client well-known (for client discovery)
@@ -390,7 +550,7 @@ def _create_wellknown_files(name: str, instance: Instance) -> None:
             "base_url": f"https://{matrix_server_name}",
         },
     }
-    with (SCRIPT_DIR / f"well-known-client-{name}.json").open("w") as wf:
+    with (wellknown_dir / "client.json").open("w") as wf:
         json.dump(client_wellknown, wf, indent=2)
 
 
@@ -400,7 +560,7 @@ def _setup_synapse_config(instance: Instance) -> None:
     synapse_dir.mkdir(parents=True, exist_ok=True)
     (synapse_dir / "media_store").mkdir(parents=True, exist_ok=True)
 
-    template_dir = SCRIPT_DIR / "synapse-template"
+    template_dir = SCRIPT_DIR / "templates" / "synapse"
     _prepare_matrix_config(
         instance,
         MatrixType.SYNAPSE,
@@ -408,6 +568,57 @@ def _setup_synapse_config(instance: Instance) -> None:
         template_dir,
         synapse_dir,
     )
+
+
+def _setup_authelia_config(instance: Instance) -> None:
+    """Set up Authelia configuration directory and files."""
+    authelia_dir = Path(instance.data_dir) / "authelia"
+    authelia_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use Jinja2 template
+    jinja_template = SCRIPT_DIR / "templates" / "authelia" / "configuration.yml.j2"
+    users_template = SCRIPT_DIR / "templates" / "authelia" / "users_database.yml"
+
+    if jinja_template.exists():
+        # Use Jinja2 template
+        template_content = jinja_template.read_text()
+        template = Template(template_content)
+
+        # Determine domain configuration
+        domain_parts = instance.domain.split(".")
+        is_production = len(domain_parts) >= 2 and domain_parts[-1] != "localhost"
+
+        if is_production:
+            root_domain = ".".join(domain_parts[-2:])  # e.g., "mindroom.chat"
+            subdomain = domain_parts[0]  # e.g., "try"
+            cookie_domain = f".{root_domain}"  # e.g., ".mindroom.chat"
+            auth_domain = f"auth-{subdomain}.{root_domain}"  # e.g., "auth-try.mindroom.chat"
+        else:
+            root_domain = instance.domain
+            cookie_domain = instance.domain
+            auth_domain = f"auth-{instance.domain}"
+
+        # Render the template with variables
+        config_content = template.render(
+            jwt_secret=secrets.token_hex(32),
+            session_secret=secrets.token_hex(32),
+            encryption_key=secrets.token_hex(32),
+            instance_domain=instance.domain,
+            root_domain=root_domain,
+            cookie_domain=cookie_domain,
+            auth_domain=auth_domain,
+            is_production=is_production,
+        )
+
+        # Write the rendered configuration
+        (authelia_dir / "configuration.yml").write_text(config_content)
+    else:
+        console.print("[red]✗[/red] Authelia configuration template not found!")
+        raise typer.Exit(1)
+
+    # Copy users database
+    if users_template.exists():
+        shutil.copy(users_template, authelia_dir / "users_database.yml")
 
 
 def _update_registry(registry: Registry, instance: Instance, matrix_type: MatrixType | None) -> None:
@@ -420,7 +631,7 @@ def _update_registry(registry: Registry, instance: Instance, matrix_type: Matrix
     save_registry(registry)
 
 
-def _print_instance_info(instance: Instance, matrix_type: MatrixType | None) -> None:
+def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, auth_type: AuthType | None = None) -> None:
     """Print information about the created instance."""
     console.print(f"[green]✓[/green] Created instance '[cyan]{instance.name}[/cyan]'")
     console.print(f"  [dim]Backend port:[/dim] {instance.backend_port}")
@@ -429,10 +640,22 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None) -> 
         console.print(f"  [dim]Matrix port:[/dim] {instance.matrix_port}")
     console.print(f"  [dim]Data dir:[/dim] {instance.data_dir}")
     console.print(f"  [dim]Domain:[/dim] {instance.domain}")
-    console.print(f"  [dim]Env file:[/dim] .env.{instance.name}")
+    console.print(f"  [dim]Env file:[/dim] envs/{instance.name}.env")
     if matrix_type:
         matrix_name = "Tuwunel (lightweight)" if matrix_type == MatrixType.TUWUNEL else "Synapse (full)"
         console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
+    if auth_type:
+        console.print("  [dim]Auth:[/dim] [green]Authelia (production-ready)[/green]")
+        console.print("    [yellow]Default login:[/yellow] admin / mindroom")
+        # Determine auth URL based on domain type
+        domain_parts = instance.domain.split(".")
+        if len(domain_parts) >= 2 and domain_parts[-1] != "localhost":
+            root_domain = ".".join(domain_parts[-2:])
+            subdomain = domain_parts[0]
+            auth_url = f"https://auth-{subdomain}.{root_domain}"
+        else:
+            auth_url = f"https://auth-{instance.domain}"
+        console.print(f"    [dim]Auth URL:[/dim] {auth_url}")
 
 
 @app.command()
@@ -443,6 +666,11 @@ def create(
         None,
         "--matrix",
         help="Include Matrix server: 'tuwunel' (lightweight) or 'synapse' (full)",
+    ),
+    auth: str | None = typer.Option(
+        None,
+        "--auth",
+        help="Include authentication: 'authelia' (production-ready auth server)",
     ),
 ) -> None:
     """Create a new instance with automatic port allocation."""
@@ -459,6 +687,15 @@ def create(
             matrix_type = MatrixType(matrix)
         except ValueError:
             console.print(f"[red]✗[/red] Invalid matrix option '{matrix}'. Use 'tuwunel' or 'synapse'")
+            raise typer.Exit(1)  # noqa: B904
+
+    # Validate and convert auth type to enum
+    auth_type: AuthType | None = None
+    if auth:
+        try:
+            auth_type = AuthType(auth)
+        except ValueError:
+            console.print(f"[red]✗[/red] Invalid auth option '{auth}'. Use 'authelia'")
             raise typer.Exit(1)  # noqa: B904
 
     # Allocate ports and create instance
@@ -482,6 +719,7 @@ def create(
         domain=domain or f"{name}.localhost",
         status=InstanceStatus.CREATED,
         matrix_type=matrix_type,
+        auth_type=auth_type,
     )
 
     # Create environment file
@@ -489,23 +727,30 @@ def create(
 
     # Create well-known files for Matrix federation
     if matrix_type:
-        _create_wellknown_files(name, instance)
+        _create_wellknown_files(instance)
 
     # Set up Synapse configuration if needed
     if matrix_type == MatrixType.SYNAPSE:
         _setup_synapse_config(instance)
 
+    # Set up Authelia configuration if needed
+    if auth_type == AuthType.AUTHELIA:
+        _setup_authelia_config(instance)
+
     # Update registry
     _update_registry(registry, instance, matrix_type)
 
     # Print instance information
-    _print_instance_info(instance, matrix_type)
+    _print_instance_info(instance, matrix_type, auth_type)
 
 
 @app.command()
 def start(  # noqa: PLR0912, PLR0915
     name: str = typer.Argument("default", help="Instance name to start"),
     only_matrix: bool = typer.Option(False, "--only-matrix", help="Start only Matrix server without backend/frontend"),
+    use_registry: bool = typer.Option(False, "--registry", "-r", help="Pull images from registry instead of building"),
+    registry_url: str = typer.Option(DEFAULT_REGISTRY, "--registry-url", help="Registry URL to pull from"),
+    no_build: bool = typer.Option(False, "--no-build", help="Skip building images (use existing local images)"),
 ) -> None:
     """Start a Mindroom instance."""
     registry = load_registry()
@@ -513,9 +758,9 @@ def start(  # noqa: PLR0912, PLR0915
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
         raise typer.Exit(1)
 
-    env_file = SCRIPT_DIR / f".env.{name}"
+    env_file = ENV_DIR / f"{name}.env"
     if not env_file.exists():
-        console.print(f"[red]✗[/red] Environment file .env.{name} not found!")
+        console.print(f"[red]✗[/red] Environment file {env_file} not found!")
         raise typer.Exit(1)
 
     # Verify federation configuration if Matrix is enabled
@@ -524,58 +769,18 @@ def start(  # noqa: PLR0912, PLR0915
         _verify_extra_hosts_for_federation(instance.matrix_type, registry.instances)
 
     # Create data directories with proper permissions
-    # Use UID/GID 1000 for Docker containers (standard non-root user)
-    docker_uid, docker_gid = 1000, 1000
-
-    for subdir in ["config", "tmp", "logs", "mindroom", "mindroom/credentials", "mem0"]:
-        dir_path = Path(f"{instance.data_dir}/{subdir}")
-        dir_path.mkdir(parents=True, exist_ok=True)
-        # Ensure proper ownership and permissions for Docker containers
-        with contextlib.suppress(OSError, PermissionError):
-            os.chown(dir_path, docker_uid, docker_gid)
-            dir_path.chmod(0o755)
+    _create_instance_directories(instance)
 
     # Create Matrix data directories if enabled
-    matrix_type = instance.matrix_type
-    if matrix_type == MatrixType.TUWUNEL:
-        tuwunel_dir = Path(f"{instance.data_dir}/tuwunel")
-
-        # Check if Tuwunel database exists and might have wrong server name
-        # If the .env file has a different MATRIX_SERVER_NAME than what's in the database,
-        # we need to clear the database
-        if tuwunel_dir.exists() and any(tuwunel_dir.iterdir()):
-            # Read current server name from env file
-            current_server_name = None
-            with env_file.open() as f:
-                for line in f:
-                    if line.startswith("MATRIX_SERVER_NAME="):
-                        current_server_name = line.split("=", 1)[1].strip()
-                        break
-
-            # If server name changed or we're having issues, clear the database
-            # This is safe because Tuwunel will recreate it
-            if current_server_name and current_server_name != instance.domain:
-                console.print("[yellow]i[/yellow] Clearing Tuwunel database due to server name change")
-                shutil.rmtree(tuwunel_dir)
-                tuwunel_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            tuwunel_dir.mkdir(parents=True, exist_ok=True)
-
-        with contextlib.suppress(OSError, PermissionError):
-            os.chown(tuwunel_dir, docker_uid, docker_gid)
-            tuwunel_dir.chmod(0o755)
-    elif matrix_type == MatrixType.SYNAPSE:
-        for matrix_dir in ["synapse", "synapse/media_store", "postgres", "redis"]:
-            dir_path = Path(f"{instance.data_dir}/{matrix_dir}")
-            dir_path.mkdir(parents=True, exist_ok=True)
-            with contextlib.suppress(OSError, PermissionError):
-                os.chown(dir_path, docker_uid, docker_gid)
-                dir_path.chmod(0o755)
+    if instance.matrix_type == MatrixType.TUWUNEL:
+        _setup_tuwunel_directory(instance, env_file)
+    elif instance.matrix_type == MatrixType.SYNAPSE:
+        _create_synapse_directories(instance)
 
         # Copy Synapse config template if needed
         synapse_dir = Path(f"{instance.data_dir}/synapse")
         if not (synapse_dir / "homeserver.yaml").exists():
-            template_dir = SCRIPT_DIR / "synapse-template"
+            template_dir = SCRIPT_DIR / "templates" / "synapse"
             _prepare_matrix_config(
                 instance,
                 MatrixType.SYNAPSE,
@@ -587,32 +792,38 @@ def start(  # noqa: PLR0912, PLR0915
     # Start with docker compose (modern syntax) - run from parent directory for build context
     # Get the parent directory (project root)
     project_root = SCRIPT_DIR.parent
-    env_file_relative = f"deploy/.env.{name}"
 
     # Build the docker compose command using helper
-    compose_files = _get_docker_compose_files(instance, env_file_relative, project_root)
+    compose_files = _get_docker_compose_files(instance, name, project_root)
 
     # Determine which services to start based on flags
-    if only_matrix:
-        if not matrix_type:
-            console.print(f"[red]✗[/red] Instance '{name}' has no Matrix server configured!")
-            raise typer.Exit(1)
-        services = _get_matrix_services(matrix_type).strip()
-        status_msg = f"Starting Matrix server for '{name}'..."
-        console.print("[yellow]ℹ[/yellow] Starting only Matrix server (no backend/frontend)")  # noqa: RUF001
-    else:
-        # Start full stack: frontend + backend + matrix
-        services = "frontend backend"
-        services += _get_matrix_services(matrix_type)
-        status_msg = f"Starting instance '{name}'..."
+    try:
+        services = _get_services_to_start(instance, only_matrix)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1) from e
 
-    cmd = f"{compose_files} -p {name} up -d --build {services}"
+    status_msg = f"Starting Matrix server for '{name}'..." if only_matrix else f"Starting instance '{name}'..."
+    if only_matrix:
+        console.print("[yellow]ℹ[/yellow] Starting only Matrix server (no backend/frontend)")  # noqa: RUF001
+
+    # Pull images from registry if requested
+    if use_registry:
+        _pull_images_from_registry(registry_url, console)
+        build_flag = ""
+    elif no_build:
+        build_flag = ""
+    else:
+        build_flag = "--build"
+
+    cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]{status_msg}[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
 
     # If Matrix is enabled, also start the well-known service for federation
-    if result.returncode == 0 and matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
+    if result.returncode == 0 and instance.matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
+        env_file_relative = f"deploy/envs/{name}.env"
         wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
         with console.status(f"[yellow]Starting federation well-known service for '{name}'...[/yellow]"):
             wellknown_result = subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
@@ -675,6 +886,9 @@ def restart(
         "--only-matrix",
         help="Restart only Matrix server without backend/frontend",
     ),
+    use_registry: bool = typer.Option(False, "--registry", "-r", help="Pull images from registry instead of building"),
+    registry_url: str = typer.Option(DEFAULT_REGISTRY, "--registry-url", help="Registry URL to pull from"),
+    no_build: bool = typer.Option(False, "--no-build", help="Skip building images (use existing local images)"),
 ) -> None:
     """Restart a Mindroom instance (stop and start)."""
     registry = load_registry()
@@ -702,7 +916,7 @@ def restart(
         for instance_name in running_instances:
             instance = registry.instances[instance_name]
             console.print(f"\n[yellow]Restarting '[cyan]{instance_name}[/cyan]'...[/yellow]")
-            _restart_instance(instance_name, instance, registry, only_matrix)
+            _restart_instance(instance_name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
         console.print("\n[green]✓[/green] All instances restarted successfully!")
         return
@@ -717,10 +931,18 @@ def restart(
 
     instance = registry.instances[name]
     console.print(f"[yellow]Restarting instance '[cyan]{name}[/cyan]'...[/yellow]")
-    _restart_instance(name, instance, registry, only_matrix)
+    _restart_instance(name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
 
-def _restart_instance(name: str, instance: Instance, registry: Registry, only_matrix: bool) -> None:  # noqa: PLR0912
+def _restart_instance(  # noqa: PLR0912, PLR0915
+    name: str,
+    instance: Instance,
+    registry: Registry,
+    only_matrix: bool,
+    use_registry: bool = False,
+    registry_url: str = DEFAULT_REGISTRY,
+    no_build: bool = False,
+) -> None:
     """Helper function to restart a single instance."""
     # Verify federation configuration if Matrix is enabled
     if instance.matrix_type:
@@ -740,36 +962,38 @@ def _restart_instance(name: str, instance: Instance, registry: Registry, only_ma
         raise typer.Exit(1)
 
     # Start the instance
-    env_file = SCRIPT_DIR / f".env.{name}"
+    env_file = ENV_DIR / f"{name}.env"
     if not env_file.exists():
         console.print(f"[red]✗[/red] Environment file not found: {env_file}")
         raise typer.Exit(1)
 
-    # Get matrix type from registry
-    matrix_type = instance.matrix_type
-
     # Build compose command
-    env_file_relative = f"deploy/.env.{name}"
-    compose_files = _get_docker_compose_files(instance, env_file_relative, project_root)
+    compose_files = _get_docker_compose_files(instance, name, project_root)
 
     # Determine which services to restart based on flags
-    if only_matrix:
-        if not matrix_type:
-            console.print(f"[red]✗[/red] Instance '{name}' has no Matrix server configured!")
-            raise typer.Exit(1)
-        services = _get_matrix_services(matrix_type).strip()
-    else:
-        # Start full stack: frontend + backend + matrix
-        services = "frontend backend"
-        services += _get_matrix_services(matrix_type)
+    try:
+        services = _get_services_to_start(instance, only_matrix)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1) from e
 
-    start_cmd = f"{compose_files} -p {name} up -d --build {services}"
+    # Pull images from registry if requested
+    if use_registry:
+        _pull_images_from_registry(registry_url, console)
+        build_flag = ""
+    elif no_build:
+        build_flag = ""
+    else:
+        build_flag = "--build"
+
+    start_cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
         result = subprocess.run(start_cmd, check=False, shell=True, capture_output=True, text=True)
 
     # If Matrix is enabled, also restart the well-known service for federation
-    if result.returncode == 0 and matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
+    if result.returncode == 0 and instance.matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
+        env_file_relative = f"deploy/envs/{name}.env"
         wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
         subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
 
@@ -871,17 +1095,9 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
             shutil.rmtree(data_dir)
 
         # Remove env file
-        env_file = SCRIPT_DIR / f".env.{name}"
+        env_file = ENV_DIR / f"{name}.env"
         if env_file.exists():
             env_file.unlink()
-
-        # Remove well-known files if they exist (for Matrix federation)
-        wellknown_server = SCRIPT_DIR / f"well-known-{name}.json"
-        if wellknown_server.exists():
-            wellknown_server.unlink()
-        wellknown_client = SCRIPT_DIR / f"well-known-client-{name}.json"
-        if wellknown_client.exists():
-            wellknown_client.unlink()
 
         # Update registry - remove instance and free up ports
         del registry.instances[name]
@@ -924,7 +1140,7 @@ def get_actual_status(name: str) -> tuple[bool, bool, bool]:
 
 
 @app.command("list")
-def list_instances() -> None:
+def list_instances() -> None:  # noqa: PLR0912
     """List all configured instances."""
     registry = load_registry()
     instances = registry.instances
@@ -974,17 +1190,58 @@ def list_instances() -> None:
         else:
             matrix_display = "[dim]disabled[/dim]"
 
+        # Add auth indicator to domain if configured
+        domain_display = instance.domain
+        if instance.auth_type == AuthType.AUTHELIA:
+            domain_display = f"{instance.domain} 🔒"
+
         table.add_row(
             name,
             status_display,
             str(instance.backend_port),
             str(instance.frontend_port),
             matrix_display,
-            instance.domain,
+            domain_display,
             instance.data_dir,
         )
 
     console.print(table)
+
+
+@app.command()
+def pull(
+    registry_url: str = typer.Option(DEFAULT_REGISTRY, "--registry-url", help="Registry URL to pull from"),
+    tag: str = typer.Option(None, "--tag", "-t", help="Image tag to pull (default: auto-detect platform)"),
+) -> None:
+    """Pull latest images from registry."""
+    # Auto-detect platform if tag not specified
+    if tag is None:
+        tag = "arm64" if plat.machine() == "aarch64" else "amd64"
+        console.print(f"[blue]🔍[/blue] Auto-detected platform: {tag}")
+
+    console.print(f"[blue]🐳[/blue] Pulling images from {registry_url}:{tag}...")
+
+    images = [
+        (f"{registry_url}/mindroom-backend:{tag}", "deploy-mindroom-backend:latest"),
+        (f"{registry_url}/mindroom-frontend:{tag}", "deploy-mindroom-frontend:latest"),
+    ]
+
+    for source, target in images:
+        with console.status(f"Pulling {source.split('/')[-1]}..."):
+            pull_cmd = f"docker pull {source}"
+            result = subprocess.run(pull_cmd, check=False, shell=True, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                # Tag the image
+                tag_cmd = f"docker tag {source} {target}"
+                subprocess.run(tag_cmd, check=False, shell=True, capture_output=True, text=True)
+                console.print(f"[green]✓[/green] Pulled {source.split('/')[-1]}")
+            else:
+                console.print(f"[red]✗[/red] Failed to pull {source}")
+                console.print(f"[dim]{result.stderr}[/dim]")
+                raise typer.Exit(1)
+
+    console.print("[green]✓[/green] All images pulled successfully!")
 
 
 if __name__ == "__main__":

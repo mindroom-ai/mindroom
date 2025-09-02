@@ -261,7 +261,7 @@ def test_tools_requiring_config_metadata() -> None:
         has_config_fields = bool(metadata.config_fields)
         has_config_status = metadata.status == ToolStatus.REQUIRES_CONFIG
 
-        if has_config_fields:
+        if has_config_fields and metadata.config_fields is not None:
             field_names = [field.name for field in metadata.config_fields]
             tools_with_config_fields.append((tool_name, field_names))
 

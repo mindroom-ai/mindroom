@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from mindroom.config import Config
-from mindroom.matrix.mentions import create_mention_content_from_text, parse_mentions_in_text
+from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 
 
 class TestMentionParsing:
@@ -93,15 +93,16 @@ class TestMentionParsing:
         assert processed == "@mindroom_calculator:localhost help! @mindroom_calculator:localhost are you there?"
         assert mentions == ["@mindroom_calculator:localhost"]  # Only one entry
 
-    def test_create_mention_content_from_text(self) -> None:
+    def test_format_message_with_mentions(self) -> None:
         """Test the full content creation with mentions."""
         config = Config.from_yaml()
 
-        content = create_mention_content_from_text(
+        content = format_message_with_mentions(
             config,
             "@calculator and @code please help",
             sender_domain="matrix.org",
             thread_event_id="$thread123",
+            latest_thread_event_id="$thread123",  # For thread fallback
         )
 
         assert content["msgtype"] == "m.text"
@@ -144,8 +145,8 @@ class TestMentionParsing:
             ("@Calculator help me", ["calculator"]),
             ("@CALCULATOR help me", ["calculator"]),
             ("@CaLcUlAtOr help me", ["calculator"]),
-            ("@Code @EMAIL_ASSISTANT help", ["code", "email_assistant"]),
-            ("@EMAIL_assistant @Code help", ["email_assistant", "code"]),
+            ("@Code @EMAIL help", ["code", "email"]),
+            ("@EMAIL @Code help", ["email", "code"]),
         ]
 
         for text, expected_agents in test_cases:

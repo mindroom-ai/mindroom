@@ -88,7 +88,7 @@ agents:
     tools:
     - csv
     - calculator
-  email_assistant:
+  email:
     display_name: EmailAssistant
     instructions:
     - Search and retrieve emails based on user queries
@@ -107,6 +107,7 @@ agents:
       intelligence
     rooms:
     - lobby
+    - communication
     - productivity
     tools:
     - gmail
@@ -285,11 +286,6 @@ models:
   gpt_oss_120b:
     id: openai/gpt-oss-120b
     provider: openrouter
-    extra_kwargs:
-      request_params:
-        provider:
-          order: ["Cerebras"]
-          allow_fallbacks: false
   devstral:
     id: devstral:24b
     provider: ollama
@@ -345,6 +341,7 @@ teams:
     role: A team with all the great agents.
     rooms:
     - research
+    - lobby
 
 # Timezone for displaying scheduled tasks (Seattle/Pacific Time)
 timezone: America/Los_Angeles
@@ -361,3 +358,18 @@ voice:
   intelligence:
     model: default  # Model for command recognition
     confidence_threshold: 0.7
+
+# Authorization configuration with fine-grained permissions
+authorization:
+  # Users with access to all rooms
+  global_users:
+    - '@test:m-test-4.mindroom.chat'
+
+  # Room-specific permissions (example)
+  room_permissions: {}
+    # '!specific_room:example.com':
+    #   - '@user1:example.com'
+    #   - '@user2:example.com'
+
+  # Default permission for rooms not explicitly configured
+  default_room_access: false

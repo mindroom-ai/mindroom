@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import nio
 
 from .logging_config import get_logger
-from .matrix.client import extract_thread_info
+from .matrix.event_info import EventInfo
 from .matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
@@ -156,7 +156,8 @@ async def handle_text_response(
     if not message_text.isdigit() or len(message_text) > 1:
         return None
 
-    _, thread_id = extract_thread_info(event.source)
+    thread_info = EventInfo.from_event(event.source)
+    thread_id = thread_info.thread_id
 
     # Find matching active questions in this room/thread
     for question_event_id, question in _active_questions.items():
@@ -200,13 +201,14 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         InteractiveResponse with formatted_text, option_map, and options_list
 
     """
-    match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
+    # Find the first interactive block for processing
+    first_match = re.search(INTERACTIVE_PATTERN, response_text, re.DOTALL)
 
-    if not match:
+    if not first_match:
         return InteractiveResponse(response_text, None, None)
 
     try:
-        interactive_data = json.loads(match.group(1))
+        interactive_data = json.loads(first_match.group(1))
     except json.JSONDecodeError:
         return InteractiveResponse(response_text, None, None)
 
@@ -217,7 +219,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         return InteractiveResponse(response_text, None, None)
 
     options = options[:MAX_OPTIONS]
-    clean_response = response_text.replace(match.group(0), "").strip()
+    clean_response = response_text.replace(first_match.group(0), "").strip()
 
     option_lines = []
     option_map: dict[str, str] | None = {} if extract_mapping else None

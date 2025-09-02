@@ -16,8 +16,6 @@ from mindroom.bot import AgentBot
 from mindroom.commands import Command, CommandType
 from mindroom.config import AgentConfig, Config, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
-from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD
 
@@ -77,8 +75,6 @@ class TestResponseTrackingRegression:
         )
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -149,8 +145,6 @@ class TestResponseTrackingRegression:
         )
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
         # Mock successful room_send
         mock_send_response = MagicMock()
@@ -229,8 +223,6 @@ class TestResponseTrackingRegression:
         )
         bot.client = AsyncMock()
         bot.client.user_id = mock_router_agent.user_id
-        bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-        bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
         # Mock successful room_send
         mock_send_response = MagicMock()

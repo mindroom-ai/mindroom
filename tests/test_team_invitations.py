@@ -6,7 +6,7 @@ memberships just like agents do.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -15,9 +15,8 @@ import pytest
 from mindroom.bot import TeamBot
 from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.thread_invites import ThreadInviteManager
 
-from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+from .conftest import TEST_PASSWORD
 
 
 @pytest.fixture
@@ -46,7 +45,7 @@ class TestTeamRoomMembership:
     """Test team room membership functionality."""
 
     @pytest.mark.asyncio
-    async def test_team_joins_configured_rooms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_team_joins_configured_rooms(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Test that teams join their configured rooms on startup."""
         # Create a mock team user
         team_user = AgentMatrixUser(
@@ -60,7 +59,7 @@ class TestTeamRoomMembership:
         config = Config(router=RouterConfig(model="default"))
         bot = TeamBot(
             agent_user=team_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=["!test_room:localhost"],
             team_agents=["agent1"],
@@ -96,7 +95,7 @@ class TestTeamRoomMembership:
         assert "!test_room:localhost" in joined_rooms
 
     @pytest.mark.asyncio
-    async def test_team_leaves_unconfigured_rooms(self) -> None:
+    async def test_team_leaves_unconfigured_rooms(self, tmp_path: Path) -> None:
         """Test that teams leave rooms they're no longer configured for."""
         # Create a mock team user
         team_user = AgentMatrixUser(
@@ -110,7 +109,7 @@ class TestTeamRoomMembership:
         config = Config(router=RouterConfig(model="default"))
         bot = TeamBot(
             agent_user=team_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=[],  # No configured rooms
             team_agents=["agent1"],
@@ -122,10 +121,6 @@ class TestTeamRoomMembership:
         # Mock the client
         mock_client = AsyncMock()
         bot.client = mock_client
-
-        # Initialize thread_invite_manager as would happen in start()
-        bot.thread_invite_manager = ThreadInviteManager(mock_client)
-        bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
 
         # Mock joined_rooms to return a room the team is in
         joined_rooms_response = MagicMock()

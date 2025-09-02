@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.workflow_scheduling import CronSchedule
+from mindroom.scheduling import CronSchedule
 
 
 class TestCronNaturalLanguage:
@@ -70,6 +70,18 @@ class TestCronNaturalLanguage:
         # Should mention minutes 15 and 45
         assert "15" in description
         assert "45" in description
+
+    def test_description_fallback_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Falls back to raw cron string if description fails."""
+        schedule = CronSchedule(minute="*/5")
+
+        def boom(*args, **kwargs) -> None:  # noqa: ANN002, ANN003, ARG001
+            msg = "descriptor failure"
+            raise ValueError(msg)
+
+        # On main, get_description is imported in mindroom.scheduling
+        monkeypatch.setattr("mindroom.scheduling.get_description", boom)
+        assert schedule.to_natural_language().startswith("Cron: ")
 
 
 if __name__ == "__main__":

@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from functools import cached_property
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import BaseModel, Field
 
-from .constants import DEFAULT_AGENTS_CONFIG, ROUTER_AGENT_NAME
+from .constants import DEFAULT_AGENTS_CONFIG, MATRIX_HOMESERVER, ROUTER_AGENT_NAME
 from .logging_config import get_logger
+
+if TYPE_CHECKING:
+    from .matrix.identity import MatrixID
 
 logger = get_logger(__name__)
 
@@ -125,6 +129,23 @@ class VoiceConfig(BaseModel):
     )
 
 
+class AuthorizationConfig(BaseModel):
+    """Authorization configuration with fine-grained permissions."""
+
+    global_users: list[str] = Field(
+        default_factory=list,
+        description="Users with access to all rooms (e.g., '@user:example.com')",
+    )
+    room_permissions: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Room-specific user permissions. Keys are room IDs, values are lists of authorized user IDs",
+    )
+    default_room_access: bool = Field(
+        default=False,
+        description="Default permission for rooms not explicitly configured",
+    )
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -140,6 +161,41 @@ class Config(BaseModel):
         default="UTC",
         description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
     )
+    authorization: AuthorizationConfig = Field(
+        default_factory=AuthorizationConfig,
+        description="Authorization configuration with fine-grained permissions",
+    )
+
+    @cached_property
+    def domain(self) -> str:
+        """Extract the domain from the MATRIX_HOMESERVER."""
+        from .matrix.identity import extract_server_name_from_homeserver  # noqa: PLC0415
+
+        return extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+
+    @cached_property
+    def ids(self) -> dict[str, MatrixID]:
+        """Get MatrixID objects for all agents and teams.
+
+        Returns:
+            Dictionary mapping agent/team names to their MatrixID objects.
+
+        """
+        from .matrix.identity import MatrixID  # noqa: PLC0415
+
+        mapping: dict[str, MatrixID] = {}
+
+        # Add all agents
+        for agent_name in self.agents:
+            mapping[agent_name] = MatrixID.from_agent(agent_name, self.domain)
+
+        # Add router agent separately (it's not in config.agents)
+        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, self.domain)
+
+        # Add all teams
+        for team_name in self.teams:
+            mapping[team_name] = MatrixID.from_agent(team_name, self.domain)
+        return mapping
 
     @classmethod
     def from_yaml(cls, config_path: Path | None = None) -> Config:

@@ -1,0 +1,179 @@
+# Minimal Synapse configuration for mindroom development
+# WITH ALL RATE LIMITS EFFECTIVELY DISABLED
+
+server_name: "{{ matrix_server_name }}"
+public_baseurl: https://{{ matrix_server_name }}/
+
+# HTTP listener
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    bind_addresses: ['0.0.0.0']
+    resources:
+      - names: [client, federation]
+
+# Database
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: synapse_password
+    database: synapse
+    host: {{ postgres_host }}
+    port: 5432
+
+# Redis for caching (optional but recommended)
+redis:
+  enabled: true
+  host: {{ redis_host }}
+  port: 6379
+
+# Storage
+media_store_path: "/data/media_store"
+signing_key_path: "/data/signing.key"
+
+# Logging
+log_config: "/data/log.config"
+
+# Registration - open for development
+enable_registration: true
+enable_registration_without_verification: true
+
+# Allow federation to private IPs for local development
+# By default Synapse blocks private IP ranges (10.x, 172.16.x, 192.168.x)
+# Setting this empty allows federation between Docker containers
+# WARNING: Do not use this in production!
+federation_ip_range_blacklist: []
+
+# ========================================
+# COMPLETE RATE LIMITING CONFIGURATION
+# ALL LIMITS SET TO EFFECTIVELY INFINITE
+# ========================================
+
+# RC (Rate Control) Settings - all disabled
+rc_message:
+  per_second: 1000000
+  burst_count: 1000000
+
+rc_registration:
+  per_second: 1000000
+  burst_count: 1000000
+
+rc_registration_token_validity:
+  per_second: 1000000
+  burst_count: 1000000
+
+rc_login:
+  address:
+    per_second: 1000000
+    burst_count: 1000000
+  account:
+    per_second: 1000000
+    burst_count: 1000000
+  failed_attempts:
+    per_second: 1000000
+    burst_count: 1000000
+
+rc_admin_redaction:
+  per_second: 1000000
+  burst_count: 1000000
+
+rc_joins:
+  local:
+    per_second: 1000000
+    burst_count: 1000000
+  remote:
+    per_second: 1000000
+    burst_count: 1000000
+
+rc_joins_per_room:
+  per_second: 1000000
+  burst_count: 1000000
+
+rc_3pid_validation:
+  per_second: 1000000
+  burst_count: 1000000
+
+rc_invites:
+  per_room:
+    per_second: 1000000
+    burst_count: 1000000
+  per_user:
+    per_second: 1000000
+    burst_count: 1000000
+  per_issuer:
+    per_second: 1000000
+    burst_count: 1000000
+
+rc_third_party_invite:
+  per_second: 1000000
+  burst_count: 1000000
+
+rc_federation:
+  window_size: 1
+  sleep_limit: 1000000
+  sleep_delay: 1
+  reject_limit: 1000000
+  concurrent: 1000000
+
+# Media and uploads
+max_upload_size: "10G"
+max_image_pixels: "100M"
+
+# Enable URL preview
+url_preview_enabled: true
+url_preview_ip_range_blacklist: []
+
+# Presence - enable for development
+presence:
+  enabled: true
+
+# Allow public room list
+allow_public_rooms_without_auth: true
+allow_public_rooms_over_federation: true
+
+# Disable all telemetry
+report_stats: false
+
+# Trust any X-Forwarded-For headers (for reverse proxy)
+# WARNING: Only use in development!
+use_forwarded_for: true
+x_forwarded: true
+
+# Additional development-friendly settings
+suppress_key_server_warning: true
+enable_group_creation: true
+user_directory:
+  enabled: true
+  search_all_users: true
+
+# Retention policy - disabled for development
+retention:
+  enabled: false
+
+# Password config - very permissive for development
+password_config:
+  enabled: true
+  minimum_length: 1
+
+# Push notifications - disabled for local development
+push:
+  enabled: false
+
+# Email - disabled for local development
+email:
+  enable_notifs: false
+
+# Room complexity limits - disabled
+limit_remote_rooms:
+  enabled: false
+
+# Experimental features that might be useful for development
+experimental_features:
+  # MSC2815: Enable redacting event relations
+  msc2815_enabled: true
+  # MSC3266: Enable room summary for spaces
+  msc3266_enabled: true
+  # MSC3030: Jump to date API
+  msc3030_enabled: true

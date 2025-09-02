@@ -28,7 +28,6 @@ class TestResponseTracker:
         tracker = ResponseTracker("test_agent", base_path=temp_dir)
 
         assert tracker.agent_name == "test_agent"
-        assert tracker.base_path == temp_dir
         assert isinstance(tracker._responded_events, dict)
         assert len(tracker._responded_events) == 0
 

@@ -1,6 +1,7 @@
 
 # Mindroom instance files
 deploy/.env.*
+envs/*.env
 deploy/instances.json
 deploy/instance_data/
 *.yaml.backup

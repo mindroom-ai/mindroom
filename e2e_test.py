@@ -17,9 +17,9 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from mindroom.cli import _run
-from mindroom.matrix import MATRIX_HOMESERVER
-from mindroom.matrix.client import markdown_to_html
-from mindroom.matrix.mentions import parse_mentions_in_text
+from mindroom.config import Config
+from mindroom.constants import MATRIX_HOMESERVER
+from mindroom.matrix.mentions import format_message_with_mentions
 
 
 class LoginError(Exception):
@@ -58,13 +58,21 @@ class MindRoomE2ETest:
         with Path("matrix_state.yaml").open() as f:  # noqa: ASYNC230
             users_data = yaml.safe_load(f)
 
-        # Use the main user account
-        self.username = users_data["accounts"]["user"]["username"]
-        self.password = users_data["accounts"]["user"]["password"]
+        # Use the agent_user account
+        self.username = users_data["accounts"]["agent_user"]["username"]
+        self.password = users_data["accounts"]["agent_user"]["password"]
         self.room_id = users_data["rooms"]["lobby"]["room_id"]
 
         # Create client
-        self.client = nio.AsyncClient(MATRIX_HOMESERVER, f"@{self.username}:localhost")
+        # Extract domain from homeserver URL
+        domain = "m-test.mindroom.chat"  # Use the actual server domain
+        config = nio.AsyncClientConfig(encryption_enabled=False)
+        self.client = nio.AsyncClient(
+            MATRIX_HOMESERVER,
+            f"@{self.username}:{domain}",
+            config=config,
+            ssl=False,  # Disable SSL verification for test server
+        )
 
     async def login(self) -> None:
         """Login to Matrix."""
@@ -77,27 +85,22 @@ class MindRoomE2ETest:
     async def send_mention(self, agent_name: str, message: str) -> str:
         """Send a message with proper Matrix mention."""
         # Extract domain from the logged-in user's ID
-        user_domain = "localhost"  # default
+        user_domain = "m-test.mindroom.chat"  # Use the actual server domain
         if self.client.user_id and ":" in self.client.user_id:
             user_domain = self.client.user_id.split(":", 1)[1]
 
         # Start with the primary agent mention
         full_message = f"@{agent_name} {message}"
 
-        # Parse ALL mentions in the text (including ones in the message body)
-        processed_text, all_mentioned_ids, markdown_text = parse_mentions_in_text(full_message, user_domain)
+        # Load config to use the helper function
+        config = Config.from_yaml()
 
-        # Convert markdown to HTML
-        formatted_html = markdown_to_html(markdown_text)
-
-        # Create content with all mentions properly set
-        content = {
-            "msgtype": "m.text",
-            "body": processed_text,
-            "format": "org.matrix.custom.html",
-            "formatted_body": formatted_html,
-            "m.mentions": {"user_ids": all_mentioned_ids} if all_mentioned_ids else {},
-        }
+        # Create content using the proper helper function
+        content = format_message_with_mentions(
+            config=config,
+            text=full_message,
+            sender_domain=user_domain,
+        )
 
         response = await self.client.room_send(room_id=self.room_id, message_type="m.room.message", content=content)
 

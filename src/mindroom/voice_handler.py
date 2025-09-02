@@ -255,10 +255,12 @@ Output the formatted message only, no explanation:"""
         if response and response.content:
             return response.content.strip()  # type: ignore[no-any-return]
 
-    except Exception:
+    except Exception as e:
         logger.exception("Error processing transcription")
-        # Return original transcription as fallback
-        return transcription
+        # Return error message so user knows what happened
+        from .error_handling import get_user_friendly_error_message  # noqa: PLC0415
+
+        return get_user_friendly_error_message(e, "VoiceProcessor")
     else:
         # Return original transcription if no valid response from model
         return transcription

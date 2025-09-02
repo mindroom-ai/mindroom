@@ -5,18 +5,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import nio
 
 from .constants import VOICE_PREFIX
 from .logging_config import get_logger
-from .matrix.client import get_room_members, invite_to_room
-from .matrix.identity import MatrixID
-
-if TYPE_CHECKING:
-    from .config import Config
-    from .thread_invites import ThreadInviteManager
 
 logger = get_logger(__name__)
 
@@ -24,28 +18,47 @@ logger = get_logger(__name__)
 class CommandType(Enum):
     """Types of commands supported."""
 
-    INVITE = "invite"
-    UNINVITE = "uninvite"
-    LIST_INVITES = "list_invites"
     HELP = "help"
     SCHEDULE = "schedule"
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
     WIDGET = "widget"
+    CONFIG = "config"  # Configuration command
+    HI = "hi"  # Welcome message command
     UNKNOWN = "unknown"  # Special type for unrecognized commands
 
 
 # Command documentation for each command type
 COMMAND_DOCS = {
-    CommandType.INVITE: ("!invite <agent>", "Invite an agent to the current thread"),
-    CommandType.UNINVITE: ("!uninvite <agent>", "Remove an agent from the thread"),
-    CommandType.LIST_INVITES: ("!list_invites", "Show all invited agents"),
     CommandType.SCHEDULE: ("!schedule <task>", "Schedule a task"),
     CommandType.LIST_SCHEDULES: ("!list_schedules", "List scheduled tasks"),
     CommandType.CANCEL_SCHEDULE: ("!cancel_schedule <id>", "Cancel a scheduled task"),
     CommandType.HELP: ("!help [topic]", "Get help"),
     CommandType.WIDGET: ("!widget [url]", "Add configuration widget"),
+    CommandType.CONFIG: ("!config <operation>", "Manage configuration"),
+    CommandType.HI: ("!hi", "Show welcome message"),
 }
+
+
+def _get_command_entries(format_code: bool = False) -> list[str]:
+    """Get command entries as a list of formatted strings.
+
+    Args:
+        format_code: If True, wrap commands in backticks for markdown
+
+    Returns:
+        List of formatted command strings
+
+    """
+    entries = []
+    for cmd_type in CommandType:
+        if cmd_type in COMMAND_DOCS and cmd_type != CommandType.UNKNOWN:
+            syntax, description = COMMAND_DOCS[cmd_type]
+            if format_code:
+                entries.append(f"- `{syntax}` - {description}")
+            else:
+                entries.append(f"- {syntax} - {description}")
+    return entries
 
 
 def get_command_list() -> str:
@@ -55,11 +68,7 @@ def get_command_list() -> str:
         Formatted string with all commands and their descriptions
 
     """
-    lines = ["Available commands:"]
-    for cmd_type in CommandType:
-        if cmd_type in COMMAND_DOCS:
-            syntax, description = COMMAND_DOCS[cmd_type]
-            lines.append(f"- {syntax} - {description}")
+    lines = ["Available commands:", *_get_command_entries(format_code=False)]
     return "\n".join(lines)
 
 
@@ -76,18 +85,13 @@ class CommandParser:
     """Parser for user commands in messages."""
 
     # Command patterns
-    # Match: !invite agent
-    INVITE_PATTERN = re.compile(
-        r"^!invite\s+@?(\w+)$",  # agent name
-        re.IGNORECASE,
-    )
-    UNINVITE_PATTERN = re.compile(r"^!uninvite\s+@?(\w+)$", re.IGNORECASE)
-    LIST_INVITES_PATTERN = re.compile(r"^!list[_-]?invites?$", re.IGNORECASE)
     HELP_PATTERN = re.compile(r"^!help(?:\s+(.+))?$", re.IGNORECASE)
     SCHEDULE_PATTERN = re.compile(r"^!schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
     LIST_SCHEDULES_PATTERN = re.compile(r"^!list[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
     WIDGET_PATTERN = re.compile(r"^!widget(?:\s+(.+))?$", re.IGNORECASE)
+    CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
+    HI_PATTERN = re.compile(r"^!hi$", re.IGNORECASE)
 
     def parse(self, message: str) -> Command | None:  # noqa: PLR0911
         """Parse a message for commands.
@@ -108,33 +112,10 @@ class CommandParser:
 
         # Try to match each command pattern
 
-        # !invite command
-        match = self.INVITE_PATTERN.match(message)
-        if match:
-            agent_name = match.group(1)
-            args = {
-                "agent_name": agent_name,
-            }
+        # !hi command (check this early as it's simple)
+        if self.HI_PATTERN.match(message):
             return Command(
-                type=CommandType.INVITE,
-                args=args,
-                raw_text=message,
-            )
-
-        # !uninvite command
-        match = self.UNINVITE_PATTERN.match(message)
-        if match:
-            agent_name = match.group(1)
-            return Command(
-                type=CommandType.UNINVITE,
-                args={"agent_name": agent_name},
-                raw_text=message,
-            )
-
-        # !list_invites command
-        if self.LIST_INVITES_PATTERN.match(message):
-            return Command(
-                type=CommandType.LIST_INVITES,
+                type=CommandType.HI,
                 args={},
                 raw_text=message,
             )
@@ -190,6 +171,16 @@ class CommandParser:
                 raw_text=message,
             )
 
+        # !config command
+        match = self.CONFIG_PATTERN.match(message)
+        if match:
+            args_text = match.group(1).strip() if match.group(1) else ""
+            return Command(
+                type=CommandType.CONFIG,
+                args={"args_text": args_text},
+                raw_text=message,
+            )
+
         # Unknown command - return a special Command indicating it's unknown
         logger.debug(f"Unknown command: {message}")
         return Command(
@@ -199,7 +190,7 @@ class CommandParser:
         )
 
 
-def get_command_help(topic: str | None = None) -> str:  # noqa: PLR0911
+def get_command_help(topic: str | None = None) -> str:
     """Get help text for commands.
 
     Args:
@@ -209,34 +200,6 @@ def get_command_help(topic: str | None = None) -> str:  # noqa: PLR0911
         Help text
 
     """
-    if topic == "invite":
-        return """**Invite Command**
-
-Usage: `!invite <agent>` - Invite an agent to this thread
-
-Example:
-- `!invite calculator` - Invite calculator agent to this thread
-
-Note: Invites only work in threads. The agent will be able to participate in this thread only.
-Agents are automatically removed from the room 24 hours after being invited."""
-
-    if topic == "uninvite":
-        return """**Uninvite Command**
-
-Usage: `!uninvite <agent>`
-
-Example:
-- `!uninvite calculator` - Remove calculator agent from this thread
-
-The agent will no longer receive messages from this thread."""
-
-    if topic in {"list", "list_invites"}:
-        return """**List Invites Command**
-
-Usage: `!list_invites` or `!listinvites`
-
-Shows all agents currently invited to this thread."""
-
     if topic == "schedule":
         return """**Schedule Command**
 
@@ -292,6 +255,32 @@ Examples:
 
 Use `!list_schedules` to see task IDs."""
 
+    if topic == "config":
+        return """**Config Command**
+
+Usage: `!config <operation>` - View and modify MindRoom configuration
+
+**Viewing Configuration:**
+- `!config show` - Show entire configuration
+- `!config get <path>` - Get a specific configuration value
+- `!config get agents` - Show all agents
+- `!config get models.default` - Show default model
+- `!config get agents.analyst.display_name` - Show analyst's display name
+
+**Modifying Configuration:**
+- `!config set <path> <value>` - Set a configuration value
+- `!config set agents.analyst.display_name "Research Expert"` - Change display name
+- `!config set models.default.id gpt-4` - Change default model
+- `!config set defaults.markdown false` - Disable markdown by default
+- `!config set timezone America/New_York` - Set timezone
+
+**Path Syntax:**
+- Use dot notation to navigate nested config (e.g., `agents.analyst.role`)
+- Arrays use indexes (e.g., `agents.analyst.tools.0` for first tool)
+- String values with spaces must be quoted
+
+**Note:** Configuration changes are immediately saved to config.yaml and affect all new agent interactions."""
+
     if topic == "widget":
         return """**Widget Command**
 
@@ -306,19 +295,15 @@ Pin it to keep it visible in the room.
 
 Note: Widget support requires Element Desktop or self-hosted Element Web."""
 
-    # General help
-    return """**Available Commands**
+    # General help - dynamically generated from COMMAND_DOCS
+    commands_text = "\n".join(_get_command_entries(format_code=True))
 
-- `!invite <agent>` - Invite an agent to this thread
-- `!uninvite <agent>` - Remove an agent from this thread
-- `!list_invites` - List all invited agents
-- `!schedule <time|condition> <message>` - Schedule time-based or event-driven workflows
-- `!list_schedules` - List scheduled tasks
-- `!cancel_schedule <id|all>` - Cancel a scheduled task or all tasks
-- `!widget [url]` - Add configuration widget to the room
-- `!help [topic]` - Show this help or help for a specific command
+    return f"""**Available Commands**
 
-**New Scheduling Features:**
+{commands_text}
+
+**Scheduling Features:**
+- Time-based and event-driven workflows
 - Recurring tasks with cron-style scheduling (daily, weekly, hourly)
 - Agent workflows - mention agents to have them collaborate on scheduled tasks
 - Natural language time parsing - "tomorrow", "in 5 minutes", "every Monday"
@@ -327,57 +312,6 @@ Note: All commands only work within threads, not in main room messages
 (except !widget which works in the main room).
 
 For detailed help on a command, use: `!help <command>`"""
-
-
-async def handle_invite_command(
-    room_id: str,
-    thread_id: str,
-    agent_name: str,
-    sender: str,
-    agent_domain: str,
-    client: nio.AsyncClient,
-    thread_invite_manager: ThreadInviteManager,
-    config: Config,
-) -> str:
-    """Handle the invite command to invite an agent to a thread."""
-    if agent_name not in config.agents:
-        return f"❌ Unknown agent: @{agent_name}. Available agents: {', '.join(f'@{name}' for name in sorted(config.agents.keys()))}"
-
-    # Add the thread invitation
-    await thread_invite_manager.add_invite(thread_id, room_id, agent_name, sender)
-
-    # Check if agent user exists in room
-    agent_user_id = MatrixID.from_agent(agent_name, agent_domain).full_id
-    room_members = await get_room_members(client, room_id)
-
-    if isinstance(room_members, set):
-        if agent_user_id not in room_members:
-            # Invite the agent to the room (regular room invitation)
-            success = await invite_to_room(client, room_id, agent_user_id)
-            if success:
-                logger.info("Invited agent to room", agent=agent_name, room_id=room_id)
-            else:
-                logger.error("Failed to invite agent to room", agent=agent_name, room_id=room_id)
-    else:
-        logger.error("Failed to get room members", room_id=room_id, error=str(room_members))
-
-    response_text = f"✅ Invited @{agent_name} to this thread."
-    response_text += f"\n\n@{agent_name}, you've been invited to help in this thread!"
-    return response_text
-
-
-async def handle_list_invites_command(
-    room_id: str,
-    thread_id: str,
-    thread_invite_manager: ThreadInviteManager,
-) -> str:
-    """Handle the list invites command."""
-    thread_invites = await thread_invite_manager.get_thread_agents(thread_id, room_id)
-    if thread_invites:
-        thread_list = "\n".join([f"- @{agent}" for agent in thread_invites])
-        return f"**Invited agents in this thread:**\n{thread_list}"
-
-    return "No agents are currently invited to this thread."
 
 
 async def handle_widget_command(
@@ -425,7 +359,7 @@ async def handle_widget_command(
 
         logger.info(f"Successfully added widget to room {room_id}")
     except Exception as e:
-        logger.exception("Error adding widget to room %s", room_id)
+        logger.exception("Error adding widget to room", room_id=room_id)
         return f"❌ Error adding widget: {e!s}"
     else:
         return (

@@ -5,6 +5,8 @@ from typing import Any
 
 import pytest
 
+import mindroom.credentials
+from mindroom.constants import CREDENTIALS_DIR
 from mindroom.credentials import CredentialsManager, get_credentials_manager
 
 
@@ -28,8 +30,7 @@ class TestCredentialsManager:
     def test_initialization_default_path(self) -> None:
         """Test that default path is created correctly."""
         manager = CredentialsManager()
-        expected_path = Path.home() / ".mindroom" / "credentials"
-        assert manager.base_path == expected_path
+        assert manager.base_path == CREDENTIALS_DIR
         assert manager.base_path.exists()
 
     def test_initialization_custom_path(self, temp_credentials_dir: Path) -> None:
@@ -192,18 +193,25 @@ class TestCredentialsManager:
         # Test setting custom key name
         manager.set_api_key("service", "value123", "custom_key")
         creds = manager.load_credentials("service")
+        assert creds is not None
         assert creds["custom_key"] == "value123"
 
         # Test that other fields are preserved
         manager.save_credentials("multi", {"field1": "value1", "api_key": "old"})
         manager.set_api_key("multi", "new")
         creds = manager.load_credentials("multi")
+        assert creds is not None
         assert creds["api_key"] == "new"
         assert creds["field1"] == "value1"
 
 
 class TestGlobalCredentialsManager:
     """Test the global credentials manager singleton."""
+
+    @pytest.fixture(autouse=True)
+    def reset_global_manager(self) -> None:
+        """Reset the global credentials manager before each test."""
+        mindroom.credentials._credentials_manager = None
 
     def test_get_credentials_manager_singleton(self) -> None:
         """Test that get_credentials_manager returns the same instance."""
@@ -214,5 +222,4 @@ class TestGlobalCredentialsManager:
     def test_global_manager_default_path(self) -> None:
         """Test that global manager uses the default path."""
         manager = get_credentials_manager()
-        expected_path = Path.home() / ".mindroom" / "credentials"
-        assert manager.base_path == expected_path
+        assert manager.base_path == CREDENTIALS_DIR

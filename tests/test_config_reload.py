@@ -3,27 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock
 
 import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
+from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.thread_invites import ThreadInviteManager
 
-from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+from .conftest import TEST_PASSWORD
 
 
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
     """Helper to setup a test bot with required attributes."""
     bot.client = mock_client
-    # Initialize thread_invite_manager as would happen in start()
-    bot.thread_invite_manager = ThreadInviteManager(mock_client)
-    # Mock get_agent_threads to return empty list (no thread invitations)
-    bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
 
 
 @pytest.fixture
@@ -48,6 +43,13 @@ def initial_config() -> Config:
                 role="Test team",
                 agents=["agent1", "agent2"],
                 rooms=["room3"],
+            ),
+        },
+        models={
+            "default": ModelConfig(
+                provider="ollama",
+                id="llama3.2",
+                host="http://localhost:11434",
             ),
         },
     )
@@ -80,6 +82,13 @@ def updated_config() -> Config:
                 role="Test team",
                 agents=["agent1", "agent2", "agent3"],  # Added agent3
                 rooms=["room3", "room6"],  # Added room6
+            ),
+        },
+        models={
+            "default": ModelConfig(
+                provider="ollama",
+                id="llama3.2",
+                host="http://localhost:11434",
             ),
         },
     )
@@ -128,6 +137,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that agents join new rooms when their configuration is updated."""
     # Track room operations
@@ -182,7 +192,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     config = Config(router=RouterConfig(model="default"))
     agent1_bot = AgentBot(
         agent_user=mock_agent_users["agent1"],
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         config=config,
         rooms=["room1", "room2"],  # Initial rooms
     )
@@ -209,6 +219,7 @@ async def test_router_updates_rooms_on_config_reload(
     updated_config: Config,
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that the router updates its room list when agents/teams change their rooms."""
     # Track room operations
@@ -257,7 +268,7 @@ async def test_router_updates_rooms_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     router_bot = AgentBot(
         agent_user=mock_agent_users[ROUTER_AGENT_NAME],
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         config=config,
         rooms=list(updated_router_rooms),
     )
@@ -283,6 +294,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that new agents are created and join their configured rooms."""
     # Track room operations
@@ -325,7 +337,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     agent3_bot = AgentBot(
         agent_user=mock_agent_users["agent3"],
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         config=config,
         rooms=["room5"],
     )
@@ -346,6 +358,7 @@ async def test_team_room_changes_on_config_reload(
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that teams update their room memberships when configuration changes."""
     # Track room operations
@@ -394,7 +407,7 @@ async def test_team_room_changes_on_config_reload(
     config = Config(router=RouterConfig(model="default"))
     team1_bot = AgentBot(
         agent_user=mock_agent_users["team1"],
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         config=config,
         rooms=["room3", "room6"],
     )
@@ -413,11 +426,14 @@ async def test_team_room_changes_on_config_reload(
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
+@pytest.mark.requires_matrix  # This test requires a real Matrix server or extensive mocking
+@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
+async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     initial_config: Config,
     updated_config: Config,
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that the orchestrator properly handles config reloads and updates all bots."""
     # Track config loads
@@ -441,6 +457,12 @@ async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
+    # Mock topic generation to avoid calling AI
+    async def mock_generate_room_topic_ai(room_key: str, room_name: str, config: Config) -> str:  # noqa: ARG001
+        return f"Test topic for {room_name}"
+
+    monkeypatch.setattr("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai)
+
     # Create orchestrator
     # Mock start/sync at class level so newly created bots during update_config don't perform real login/sync
     # But we need to ensure client gets set when start() is called
@@ -455,7 +477,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
     monkeypatch.setattr("mindroom.bot.TeamBot.start", mock_start)
     monkeypatch.setattr("mindroom.bot.TeamBot.sync_forever", AsyncMock())
 
-    orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
+    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
     # Initialize with initial config
     await orchestrator.initialize()
@@ -473,15 +495,12 @@ async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
     assert set(orchestrator.agent_bots["team1"].rooms) == {"room3"}
     assert set(orchestrator.agent_bots[ROUTER_AGENT_NAME].rooms) == {"room1", "room2", "room3"}
 
-    # Create a mock start method that initializes thread_invite_manager and client
+    # Create a mock start method that initializes client
     async def mock_start_with_thread_manager(self: AgentBot) -> None:
-        """Mock start that initializes thread_invite_manager and client."""
+        """Mock start that initializes client."""
         if not hasattr(self, "client") or self.client is None:
             self.client = AsyncMock()
             self.client.user_id = self.agent_user.user_id
-        if not hasattr(self, "thread_invite_manager") or self.thread_invite_manager is None:
-            self.thread_invite_manager = ThreadInviteManager(self.client)
-            self.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
 
     # Patch AgentBot.start and TeamBot.start to use our mock
     monkeypatch.setattr("mindroom.bot.AgentBot.start", mock_start_with_thread_manager)
@@ -489,10 +508,6 @@ async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
 
     # Mock bot operations for update
     for bot in orchestrator.agent_bots.values():
-        # Initialize thread_invite_manager as would happen in start()
-        if not hasattr(bot, "thread_invite_manager") or bot.thread_invite_manager is None:
-            bot.thread_invite_manager = ThreadInviteManager(AsyncMock())
-            bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
         monkeypatch.setattr(bot, "stop", AsyncMock())
         monkeypatch.setattr(bot, "start", mock_start_with_thread_manager)
         monkeypatch.setattr(bot, "ensure_user_account", AsyncMock())
@@ -501,12 +516,6 @@ async def test_orchestrator_handles_config_reload(  # noqa: C901, PLR0915
     # Update config
     updated = await orchestrator.update_config()
     assert updated  # Should return True since config changed
-
-    # Initialize thread_invite_manager for any new bots created during update
-    for bot in orchestrator.agent_bots.values():
-        if not hasattr(bot, "thread_invite_manager") or bot.thread_invite_manager is None:
-            bot.thread_invite_manager = ThreadInviteManager(AsyncMock())
-            bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
 
     # Verify updated state
     assert "agent1" in orchestrator.agent_bots
@@ -536,6 +545,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
     updated_config: Config,  # noqa: ARG001
     mock_agent_users: dict[str, AgentMatrixUser],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Test that room membership state is correct after config updates."""
     # Simulate room membership state
@@ -627,7 +637,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=Path(TEST_TMP_DIR),
+            storage_path=tmp_path,
             config=config,
             rooms=bot_config["new"],
         )

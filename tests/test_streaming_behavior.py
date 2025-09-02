@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -12,9 +12,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
 from mindroom.streaming import IN_PROGRESS_MARKER, StreamingResponse
-from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD
 
@@ -63,16 +61,26 @@ class TestStreamingBehavior:
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
+    @patch("mindroom.bot.should_use_streaming")
     async def test_streaming_agent_mentions_another_agent(  # noqa: PLR0915
         self,
-        mock_ai_response_streaming: AsyncMock,
+        mock_should_use_streaming: AsyncMock,
+        mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
         mock_helper_agent: AgentMatrixUser,
         mock_calculator_agent: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Test complete flow of one agent streaming and mentioning another."""
+
+        # Configure streaming - helper will stream, calculator won't
+        def side_effect(client: Any, room_id: str, requester_user_id: str | None = None) -> bool:  # noqa: ARG001, ANN401
+            # Helper streams when mentioned by user
+            return requester_user_id == "@user:localhost"
+
+        mock_should_use_streaming.side_effect = side_effect
+
         # Set up helper bot (the one that will stream)
         config = self.config
 
@@ -84,8 +92,6 @@ class TestStreamingBehavior:
             config=config,
         )
         helper_bot.client = AsyncMock()
-        helper_bot.response_tracker = ResponseTracker(helper_bot.agent_name, base_path=tmp_path)
-        helper_bot.thread_invite_manager = ThreadInviteManager(helper_bot.client)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -103,8 +109,6 @@ class TestStreamingBehavior:
             config=config,
         )
         calc_bot.client = AsyncMock()
-        calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
-        calc_bot.thread_invite_manager = ThreadInviteManager(calc_bot.client)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -126,7 +130,7 @@ class TestStreamingBehavior:
             yield "Let me help with that calculation. "
             yield "@mindroom_calculator:localhost what's 2+2?"
 
-        mock_ai_response_streaming.return_value = streaming_generator()
+        mock_stream_agent_response.return_value = streaming_generator()
 
         # Set up room
         mock_room = MagicMock()
@@ -227,8 +231,6 @@ class TestStreamingBehavior:
             config=config,
         )
         calc_bot.client = AsyncMock()
-        calc_bot.response_tracker = ResponseTracker(calc_bot.agent_name, base_path=tmp_path)
-        calc_bot.thread_invite_manager = ThreadInviteManager(calc_bot.client)
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()

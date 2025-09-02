@@ -5,9 +5,15 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Load .env file if it exists
+# Load .env file if it exists (only set variables that aren't already set)
 if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
+    # Use a subshell to avoid polluting the environment
+    while IFS='=' read -r key value; do
+        # Only set if not already set
+        if [[ ! -v $key ]] && [[ $key != \#* ]] && [[ -n $key ]]; then
+            export "$key=$value"
+        fi
+    done < <(grep -v '^#' .env | grep -v '^$')
 fi
 
 # Set ports from environment variables or use defaults
@@ -17,9 +23,13 @@ FRONTEND_PORT=${FRONTEND_PORT:-3003}
 # Detect if running in Docker
 if [ -f /.dockerenv ] || [ -n "$DOCKER_CONTAINER" ]; then
     HOST="0.0.0.0"
+    # In Docker, always use port 3003 for the frontend internally
+    # The external port mapping is handled by Docker
+    INTERNAL_FRONTEND_PORT=3003
     echo -e "${BLUE}Starting MindRoom Configuration Widget (Docker mode)...${NC}"
 else
     HOST="localhost"
+    INTERNAL_FRONTEND_PORT=${FRONTEND_PORT}
     echo -e "${BLUE}Starting MindRoom Configuration Widget...${NC}"
 fi
 
@@ -58,15 +68,15 @@ if [ ! -d "node_modules" ]; then
 fi
 
 if [ "$HOST" = "0.0.0.0" ]; then
-    VITE_BACKEND_PORT=$BACKEND_PORT BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev:docker &
+    VITE_BACKEND_PORT=$BACKEND_PORT BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$INTERNAL_FRONTEND_PORT pnpm run dev:docker &
 else
-    VITE_BACKEND_PORT=$BACKEND_PORT BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$FRONTEND_PORT pnpm run dev &
+    VITE_BACKEND_PORT=$BACKEND_PORT BACKEND_PORT=$BACKEND_PORT FRONTEND_PORT=$INTERNAL_FRONTEND_PORT pnpm run dev &
 fi
 FRONTEND_PID=$!
 cd ..  # Return to root directory
 
 echo -e "${GREEN}Widget is running!${NC}"
-echo -e "Frontend: http://$HOST:$FRONTEND_PORT"
+echo -e "Frontend: http://$HOST:$INTERNAL_FRONTEND_PORT"
 echo -e "Backend: http://$HOST:$BACKEND_PORT"
 echo -e "\nPress Ctrl+C to stop both servers"
 

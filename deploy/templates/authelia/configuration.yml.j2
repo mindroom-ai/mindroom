@@ -1,0 +1,96 @@
+---
+# Authelia configuration
+# https://www.authelia.com/configuration/prologue/introduction/
+
+# Server configuration
+server:
+  host: 0.0.0.0
+  port: 9091
+
+# Log level
+log:
+  level: info
+
+# Theme (light, dark, grey, auto)
+theme: auto
+
+# JWT Secret
+jwt_secret: {{ jwt_secret }}
+
+# Default redirection URL (now configured per cookie below)
+
+# TOTP Configuration for 2FA
+totp:
+  issuer: authelia.com
+  period: 30
+  skew: 1
+
+# Authentication backend - file-based for simplicity
+# Users are defined in users_database.yml
+authentication_backend:
+  file:
+    path: /config/users_database.yml
+    password:
+      algorithm: argon2id
+      iterations: 1
+      memory: 1024
+      parallelism: 8
+      key_length: 32
+      salt_length: 16
+
+# Access Control - who can access what
+access_control:
+  default_policy: deny
+  rules:
+    # Allow access to Authelia itself
+    - domain: {{ auth_domain }}
+      policy: bypass
+
+    # Require authentication for all instances
+    {% if is_production %}
+    - domain: '*.{{ root_domain }}'
+      policy: one_factor
+    {% else %}
+    - domain: '*.localhost'
+      policy: one_factor
+    {% endif %}
+
+# Session configuration
+session:
+  name: authelia_session
+  secret: {{ session_secret }}
+  expiration: 1h
+  inactivity: 5m
+  remember_me_duration: 1M
+
+  cookies:
+    - domain: {{ cookie_domain }}
+      authelia_url: https://{{ auth_domain }}
+      default_redirection_url: https://{{ instance_domain }}
+
+# Regulation - prevent brute force
+regulation:
+  max_retries: 3
+  find_time: 2m
+  ban_time: 5m
+
+# Storage for user preferences and 2FA
+storage:
+  encryption_key: {{ encryption_key }}
+  local:
+    path: /config/db.sqlite3
+
+# Notifier for password reset (start with filesystem for testing)
+notifier:
+  disable_startup_check: false
+  filesystem:
+    filename: /config/notification.txt
+
+  # For production, use SMTP:
+  # smtp:
+  #   host: smtp.gmail.com
+  #   port: 587
+  #   username: your-email@gmail.com
+  #   password: your-app-password
+  #   sender: "Authelia <your-email@gmail.com>"
+  #   subject: "[Authelia] {title}"

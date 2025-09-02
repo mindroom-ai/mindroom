@@ -1,7 +1,11 @@
 // API configuration
+// If VITE_API_URL is explicitly set to empty string, use relative URLs (for Docker/production)
+// Otherwise use the provided URL or fallback to localhost
+const viteApiUrl = (import.meta as any).env?.VITE_API_URL;
 export const API_BASE_URL =
-  (import.meta as any).env?.VITE_API_URL ??
-  `http://localhost:${(import.meta as any).env?.VITE_BACKEND_PORT || '8765'}`;
+  viteApiUrl === ''
+    ? '' // Use relative URLs when empty (Docker/production mode)
+    : viteApiUrl ?? `http://localhost:${(import.meta as any).env?.VITE_BACKEND_PORT || '8765'}`;
 
 // Export as API_BASE for compatibility
 export const API_BASE = API_BASE_URL;
@@ -39,6 +43,14 @@ export const API_ENDPOINTS = {
     toggle: `${API_BASE_URL}/api/simple/mode/toggle`,
   },
 
+  // Matrix operations
+  matrix: {
+    agentsRooms: `${API_BASE_URL}/api/matrix/agents/rooms`,
+    agentRooms: (agentId: string) => `${API_BASE_URL}/api/matrix/agents/${agentId}/rooms`,
+    leaveRoom: `${API_BASE_URL}/api/matrix/rooms/leave`,
+    leaveRoomsBulk: `${API_BASE_URL}/api/matrix/rooms/leave-bulk`,
+  },
+
   // Other endpoints
   tools: `${API_BASE_URL}/api/tools`,
   rooms: `${API_BASE_URL}/api/rooms`,
@@ -48,17 +60,32 @@ export const API_ENDPOINTS = {
 
 // Helper function to make API calls
 export async function fetchAPI(url: string, options?: RequestInit) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  });
+  // Add a timeout to prevent hanging requests
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
-  if (!response.ok) {
-    throw new Error(`API call failed: ${response.statusText}`);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`API call failed: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('API call timed out');
+    }
+    throw error;
   }
-
-  return response.json();
 }

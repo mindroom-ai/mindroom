@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -12,45 +11,47 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from . import interactive, voice_handler
+from . import config_confirmation, interactive, voice_handler
 from .agents import create_agent, get_rooms_for_entity
-from .ai import ai_response, ai_response_streaming
+from .ai import ai_response, stream_agent_response
 from .background_tasks import create_background_task, wait_for_background_tasks
 from .commands import (
     Command,
     CommandType,
     command_parser,
     get_command_help,
-    handle_invite_command,
-    handle_list_invites_command,
     handle_widget_command,
 )
 from .config import Config
-from .constants import ROUTER_AGENT_NAME, VOICE_PREFIX
+from .config_commands import handle_config_command
+from .constants import ENABLE_STREAMING, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, VOICE_PREFIX
+from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import emoji, get_logger, setup_logging
-from .matrix import MATRIX_HOMESERVER
 from .matrix.client import (
     check_and_set_avatar,
     edit_message,
-    extract_thread_info,
     fetch_thread_history,
     get_joined_rooms,
+    get_latest_thread_event_id_if_needed,
     get_room_members,
     invite_to_room,
     join_room,
     leave_room,
     send_message,
 )
+from .matrix.event_info import EventInfo
 from .matrix.identity import (
     MatrixID,
     extract_agent_name,
     extract_server_name_from_homeserver,
 )
-from .matrix.mentions import create_mention_content_from_text
-from .matrix.presence import build_agent_status_message, set_presence_status
+from .matrix.mentions import format_message_with_mentions
+from .matrix.message_builder import build_message_content
+from .matrix.presence import build_agent_status_message, set_presence_status, should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
+from .matrix.typing import typing_indicator
 from .matrix.users import AgentMatrixUser, create_agent_user, login_agent_user
 from .memory import store_conversation_memory
 from .response_tracker import ResponseTracker
@@ -63,17 +64,28 @@ from .scheduling import (
     restore_scheduled_tasks,
     schedule_task,
 )
-from .streaming import IN_PROGRESS_MARKER, StreamingResponse
-from .teams import TeamMode, create_team_response, get_team_model, handle_team_formation, should_form_team
-from .thread_invites import ThreadInviteManager
+from .streaming import (
+    IN_PROGRESS_MARKER,
+    ReplacementStreamingResponse,
+    StreamingResponse,
+    send_streaming_response,
+)
+from .teams import (
+    TeamMode,
+    decide_team_formation,
+    select_model_for_team,
+    team_response,
+    team_response_stream,
+)
 from .thread_utils import (
     check_agent_mentioned,
     create_session_id,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     get_available_agents_in_room,
-    get_safe_thread_root,
+    get_configured_agents_for_room,
     has_user_responded_after_message,
+    is_authorized_sender,
     should_agent_respond,
 )
 
@@ -86,7 +98,85 @@ logger = get_logger(__name__)
 
 # Constants
 SYNC_TIMEOUT_MS = 30000
-CLEANUP_INTERVAL_SECONDS = 3600
+
+
+def _format_agent_description(agent_name: str, config: Config) -> str:
+    """Format a concise agent description for the welcome message."""
+    if agent_name in config.agents:
+        agent_config = config.agents[agent_name]
+        desc_parts = []
+
+        # Add role first
+        if agent_config.role:
+            desc_parts.append(agent_config.role)
+
+        # Add tools with better formatting
+        if agent_config.tools:
+            # Wrap each tool name in backticks
+            formatted_tools = [f"`{tool}`" for tool in agent_config.tools[:3]]
+            tools_str = ", ".join(formatted_tools)
+            if len(agent_config.tools) > 3:
+                tools_str += f" +{len(agent_config.tools) - 3} more"
+            desc_parts.append(f"(🔧 {tools_str})")
+
+        return " ".join(desc_parts) if desc_parts else ""
+
+    if agent_name in config.teams:
+        team_config = config.teams[agent_name]
+        team_desc = f"Team of {len(team_config.agents)} agents"
+        if team_config.role:
+            return f"{team_config.role} ({team_desc})"
+        return team_desc
+
+    return ""
+
+
+def _generate_welcome_message(room_id: str, config: Config) -> str:
+    """Generate the welcome message text for a room."""
+    # Get list of configured agents for this room
+    configured_agents = get_configured_agents_for_room(room_id, config)
+
+    # Build agent list for the welcome message
+    agent_list = []
+    for agent_id in configured_agents:
+        agent_name = agent_id.agent_name(config)
+        if not agent_name or agent_name == ROUTER_AGENT_NAME:
+            continue
+
+        description = _format_agent_description(agent_name, config)
+        # Always show the agent, with or without description
+        agent_entry = f"• **@{agent_name}**"
+        if description:
+            agent_entry += f": {description}"
+        agent_list.append(agent_entry)
+
+    # Create welcome message
+    welcome_msg = (
+        "🎉 **Welcome to MindRoom!**\n\n"
+        "I'm your routing assistant, here to help coordinate our team of specialized AI agents. 🤖\n\n"
+    )
+
+    if agent_list:
+        welcome_msg += "🧠 **Available agents in this room:**\n"
+        welcome_msg += "\n".join(agent_list)
+        welcome_msg += "\n\n"
+
+    welcome_msg += (
+        "💬 **How to interact:**\n"
+        "• Mention an agent with @ to get their attention (e.g., @mindroom_assistant)\n"
+        "• Use `!help` to see available commands\n"
+        "• Agents respond in threads to keep conversations organized\n"
+        "• Multiple agents can collaborate when you mention them together\n"
+        "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
+        "⚡ **Quick commands:**\n"
+        "• `!hi` - Show this welcome message again\n"
+        "• `!widget` - Add configuration widget to this room\n"
+        "• `!schedule <time> <message>` - Schedule tasks and reminders\n"
+        "• `!help [topic]` - Get detailed help\n\n"
+        "✨ Feel free to ask any agent for help or start a conversation!"
+    )
+
+    return welcome_msg
 
 
 def _should_skip_mentions(event_source: dict) -> bool:
@@ -124,7 +214,7 @@ def create_bot_for_entity(
         Bot instance or None if entity not found in config
 
     """
-    enable_streaming = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() == "true"
+    enable_streaming = ENABLE_STREAMING
 
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
@@ -142,7 +232,7 @@ def create_bot_for_entity(
             team_agents=team_config.agents,
             team_mode=team_config.mode,
             team_model=team_config.model,
-            enable_streaming=False,
+            enable_streaming=True,
         )
 
     if entity_name in config.agents:
@@ -162,8 +252,7 @@ class MessageContext:
     is_thread: bool
     thread_id: str | None
     thread_history: list[dict]
-    is_invited_to_thread: bool
-    mentioned_agents: list[str]
+    mentioned_agents: list[MatrixID]
 
 
 @dataclass
@@ -177,9 +266,6 @@ class AgentBot:
 
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
-    response_tracker: ResponseTracker = field(init=False)
-    thread_invite_manager: ThreadInviteManager = field(init=False)
-    invitation_timeout_hours: int = field(default=24)  # Configurable invitation timeout
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
 
@@ -196,12 +282,17 @@ class AgentBot:
     @cached_property
     def matrix_id(self) -> MatrixID:
         """Get the Matrix ID for this agent bot."""
-        return MatrixID.parse(self.agent_user.user_id)
+        return self.agent_user.matrix_id
 
-    @cached_property
+    @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        return create_agent(agent_name=self.agent_name, storage_path=self.storage_path / "agents", config=self.config)
+        return create_agent(agent_name=self.agent_name, config=self.config)
+
+    @cached_property
+    def response_tracker(self) -> ResponseTracker:
+        """Get or create the response tracker for this agent."""
+        return ResponseTracker(self.agent_name, base_path=self.storage_path)
 
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
@@ -212,20 +303,24 @@ class AgentBot:
                 # Only the router agent should restore scheduled tasks
                 # to avoid duplicate task instances after restart
                 if self.agent_name == ROUTER_AGENT_NAME:
-                    restored = await restore_scheduled_tasks(self.client, room_id, self.config)
-                    if restored > 0:
-                        self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
+                    # Restore scheduled tasks
+                    restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config)
+                    if restored_tasks > 0:
+                        self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
+
+                    # Restore pending config confirmations
+                    restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
+                    if restored_configs > 0:
+                        self.logger.info(f"Restored {restored_configs} pending config changes in room {room_id}")
+
+                    # Send welcome message if room is empty
+                    await self._send_welcome_message_if_empty(room_id)
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
-        """Leave any rooms this agent is no longer configured for.
-
-        Note: Agents will stay in rooms where they have thread invitations,
-        even if not configured for the room.
-        """
+        """Leave any rooms this agent is no longer configured for."""
         assert self.client is not None
-        assert self.thread_invite_manager is not None
 
         # Get all rooms we're currently in
         joined_rooms = await get_joined_rooms(self.client)
@@ -235,13 +330,8 @@ class AgentBot:
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.rooms)
 
-        # Leave rooms we're no longer configured for AND have no thread invitations
+        # Leave rooms we're no longer configured for
         for room_id in current_rooms - configured_rooms:
-            agent_threads = await self.thread_invite_manager.get_agent_threads(room_id, self.agent_name)
-            if agent_threads:
-                self.logger.info(f"Staying in room {room_id} due to {len(agent_threads)} thread invitation(s)")
-                continue
-
             if await is_dm_room(self.client, room_id):
                 self.logger.debug(f"Preserving DM room {room_id} during cleanup")
                 continue
@@ -316,10 +406,6 @@ class AgentBot:
 
         await self._set_presence_with_model_info()
 
-        # Initialize response tracker and thread invite manager
-        self.response_tracker = ResponseTracker(self.agent_name, self.storage_path)
-        self.thread_invite_manager = ThreadInviteManager(self.client)
-
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)
         self.client.add_event_callback(self._on_message, nio.RoomMessageText)
@@ -335,11 +421,9 @@ class AgentBot:
         # Router bot has additional responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
             try:
-                await cleanup_all_orphaned_bots(self.client, self.config, self.thread_invite_manager)
+                await cleanup_all_orphaned_bots(self.client, self.config)
             except Exception as e:
                 self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
-
-            asyncio.create_task(self._periodic_cleanup())  # noqa: RUF006
 
         # Note: Room joining is deferred until after invitations are handled
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
@@ -385,6 +469,49 @@ class AgentBot:
         await self.client.close()
         self.logger.info("Stopped agent bot")
 
+    async def _send_welcome_message_if_empty(self, room_id: str) -> None:
+        """Send a welcome message if the room has no messages yet.
+
+        Only called by the router agent when joining a room.
+        """
+        assert self.client is not None
+
+        # Check if room has any messages
+        response = await self.client.room_messages(
+            room_id,
+            limit=2,  # Get 2 messages to check if we already sent welcome
+            message_filter={"types": ["m.room.message"]},
+        )
+
+        # nio returns error types on failure - this is necessary
+        if not isinstance(response, nio.RoomMessagesResponse):
+            self.logger.error("Failed to check room messages", room_id=room_id, error=str(response))
+            return
+
+        # Only send welcome message if room is empty or only has our own welcome message
+        if not response.chunk:
+            # Room is completely empty
+            self.logger.info("Room is empty, sending welcome message", room_id=room_id)
+
+            # Generate and send the welcome message
+            welcome_msg = _generate_welcome_message(room_id, self.config)
+            message_content = build_message_content(welcome_msg)
+            await send_message(self.client, room_id, message_content)
+            self.logger.info("Welcome message sent", room_id=room_id)
+        elif len(response.chunk) == 1:
+            # Check if the only message is our welcome message
+            msg = response.chunk[0]
+            if (
+                hasattr(msg, "sender")
+                and msg.sender == self.agent_user.user_id
+                and hasattr(msg, "body")
+                and "Welcome to MindRoom" in msg.body
+            ):
+                self.logger.debug("Welcome message already sent", room_id=room_id)
+                return
+            # Otherwise, room has a different message, don't send welcome
+        # Room has other messages, don't send welcome
+
     async def sync_forever(self) -> None:
         """Run the sync loop for this agent."""
         assert self.client is not None
@@ -395,73 +522,100 @@ class AgentBot:
         self.logger.info("Received invite", room_id=room.room_id, sender=event.sender)
         if await join_room(self.client, room.room_id):
             self.logger.info("Joined room", room_id=room.room_id)
+            # If this is the router agent and the room is empty, send a welcome message
+            if self.agent_name == ROUTER_AGENT_NAME:
+                await self._send_welcome_message_if_empty(room.room_id)
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
+        self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
-        if event.body.rstrip().endswith(IN_PROGRESS_MARKER.strip()):
+        if event.body.endswith(IN_PROGRESS_MARKER):
             return
 
-        if (
-            event.sender == self.agent_user.user_id
-            # Allow processing of voice transcriptions the router sent on behalf of users
-            and not event.body.startswith(VOICE_PREFIX)
-        ):
+        # Skip edit events - they have m.relates_to with rel_type == "m.replace"
+        # NOTE: This means the bot won't respond to edited messages at all.
+        # Ideally, when a user edits their message, the bot would edit its response too,
+        # but this requires complex tracking of message relationships and response regeneration.
+        # For now, we ignore all edits to prevent them being treated as new messages.
+        # Users who want a new response after editing should send a new message instead.
+        event_info = EventInfo.from_event(event.source)
+        if event_info.is_edit:
+            self.logger.debug(f"Skipping edit event {event.event_id}")
             return
 
-        # Check if we should process messages in this room
-        # Process if: configured for room OR invited to threads in room
-        # 1. Room is in configured rooms list
-        # 2. Agent has been invited to threads in this room
-        # 3. Currently in a DM room and not configured for it
+        # Skip our own messages (unless voice transcription from router)
+        if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
+            return
+
+        # Check if we've already seen this message (prevents reprocessing after restart)
+        if self.response_tracker.has_responded(event.event_id):
+            self.logger.debug("Already seen message", event_id=event.event_id)
+            return
+
+        # Check if sender is authorized to interact with agents
+        is_authorized = is_authorized_sender(event.sender, self.config, room.room_id)
+        self.logger.debug(
+            f"Authorization check for {event.sender}: authorized={is_authorized}, room={room.room_id}",
+        )
+        if not is_authorized:
+            # Mark as seen even though we're not responding (prevents reprocessing after permission changes)
+            self.response_tracker.mark_responded(event.event_id)
+            self.logger.debug(f"Ignoring message from unauthorized sender: {event.sender}")
+            return
+
+        # We only receive events from rooms we're in - no need to check access
         _is_dm_room = await is_dm_room(self.client, room.room_id)
-        if not _is_dm_room and room.room_id not in self.rooms:
-            assert self.thread_invite_manager is not None
-            agent_threads = await self.thread_invite_manager.get_agent_threads(room.room_id, self.agent_name)
-            if not agent_threads:
-                # Not configured for room and no thread invitations
-                return
 
         await interactive.handle_text_response(self.client, room, event, self.agent_name)
 
-        assert self.config is not None
-        sender_agent_name = extract_agent_name(event.sender, self.config)
-        if sender_agent_name:
-            assert self.thread_invite_manager is not None
-            await self.thread_invite_manager.update_agent_activity(room.room_id, sender_agent_name)
-
-        # Try to parse as command - parser handles emoji prefixes
+        # Router handles commands exclusively
         command = command_parser.parse(event.body)
-        if command:  # ONLY router handles the command
-            if self.agent_name != ROUTER_AGENT_NAME:
-                return
-            await self._handle_command(room, event, command)
+        if command:
+            if self.agent_name == ROUTER_AGENT_NAME:
+                # Router always handles commands, even in single-agent rooms
+                # Commands like !schedule, !help, etc. need to work regardless
+                await self._handle_command(room, event, command)
             return
 
         context = await self._extract_message_context(room, event)
 
-        # Ignore messages from other agents unless we are mentioned,
-        # except when the router is posting a voice transcription (VOICE_PREFIX),
-        # which should be treated as a user-originated message.
-        is_router_voice_transcription = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
-        if sender_agent_name and not context.am_i_mentioned and not is_router_voice_transcription:
+        # Check if the sender is an agent
+        sender_agent_name = extract_agent_name(event.sender, self.config)
+
+        # Skip messages from agents unless:
+        # 1. We're mentioned
+        # 2. It's a voice transcription from router (treated as user message)
+        is_router_voice = sender_agent_name == ROUTER_AGENT_NAME and event.body.startswith(VOICE_PREFIX)
+        if sender_agent_name and not context.am_i_mentioned and not is_router_voice:
             self.logger.debug("Ignoring message from other agent (not mentioned)")
             return
 
-        # Router agent has one simple job: route messages when no specific agent is mentioned
-        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)  # Excludes router
+        # Get agents in thread (excludes router)
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
+
+        # Router: Route when no specific agent mentioned and no agents in thread
         if self.agent_name == ROUTER_AGENT_NAME:
-            # Only route if no agents have participated in the thread yet
+            # Only perform AI routing when:
+            # 1. No specific agent is mentioned
+            # 2. No agents are already in the thread
+            # 3. There's more than one agent available (routing makes sense)
             if not context.mentioned_agents and not agents_in_thread:
-                await self._handle_ai_routing(room, event, context.thread_history)
+                available_agents = get_available_agents_in_room(room, self.config)
+                if len(available_agents) == 1:
+                    # Skip routing in single-agent rooms - the agent will handle it directly
+                    self.logger.info("Skipping routing: only one agent present")
+                else:
+                    # Multiple agents available - perform AI routing
+                    await self._handle_ai_routing(room, event, context.thread_history)
+            # Router's job is done after routing/command handling/voice transcription
             return
 
-        if self._should_skip_duplicate_response(event):
-            return
-
+        # Check for team formation
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
-        form_team = await should_form_team(
+        form_team = await decide_team_formation(
+            self.matrix_id,
             context.mentioned_agents,
             agents_in_thread,
             all_mentioned_in_thread,
@@ -469,47 +623,114 @@ class AgentBot:
             message=event.body,
             config=self.config,
             is_dm_room=_is_dm_room,
+            is_thread=context.is_thread,
         )
 
-        # Dynamic team formation: only the first agent (alphabetically) handles team formation
-        if form_team.should_form_team and self.agent_name in form_team.agents:
-            team_response = await handle_team_formation(
-                agent_name=self.agent_name,
-                form_team_agents=form_team.agents,
-                form_team_mode=form_team.mode,
-                event_body=event.body,
-                room_id=room.room_id,
-                orchestrator=self.orchestrator,
-                thread_history=context.thread_history,
-                config=self.config,
-            )
-
-            if team_response is None:  # Another agent in the team will handle the response
+        # Handle team formation (only first agent alphabetically)
+        if form_team.should_form_team and self.matrix_id in form_team.agents:
+            # Determine if this agent should lead the team response
+            # Use the same ordering as decide_team_formation (by full_id)
+            first_agent = min(form_team.agents, key=lambda x: x.full_id)
+            if self.matrix_id != first_agent:
                 return
 
-            await self._send_response(room, event.event_id, team_response, context.thread_id)
-            self.response_tracker.mark_responded(event.event_id)
+            # Get model for this team in this room
+            model_name = select_model_for_team(self.agent_name, room.room_id, self.config)
+
+            # Convert MatrixID to agent names for the team
+            agent_names = [mid.agent_name(self.config) or mid.username for mid in form_team.agents]
+
+            # Decide streaming based on presence
+            use_streaming = self.enable_streaming and await should_use_streaming(
+                self.client,
+                room.room_id,
+                requester_user_id=event.sender,
+            )
+
+            if use_streaming:
+                # Show typing indicator while team generates response
+                async with typing_indicator(self.client, room.room_id):
+                    # Streaming: returns formatted text chunks for live rendering
+                    response_stream = team_response_stream(
+                        agent_ids=form_team.agents,
+                        message=event.body,
+                        orchestrator=self.orchestrator,
+                        mode=form_team.mode,
+                        thread_history=context.thread_history,
+                        model_name=model_name,
+                    )
+
+                    event_id, accumulated = await send_streaming_response(
+                        self.client,
+                        room.room_id,
+                        event.event_id,
+                        context.thread_id,
+                        self.matrix_id.domain,
+                        self.config,
+                        response_stream,
+                        streaming_cls=ReplacementStreamingResponse,
+                        header=None,
+                    )
+
+                # Handle interactive questions in team responses
+                await self._handle_interactive_question(
+                    event_id,
+                    accumulated,
+                    room.room_id,
+                    context.thread_id,
+                    event.event_id,
+                    agent_name="team",  # Or could use team name
+                )
+
+                self.response_tracker.mark_responded(event.event_id)
+            else:
+                # Show typing indicator while team generates response
+                async with typing_indicator(self.client, room.room_id):
+                    # Non-streaming: returns complete formatted response
+                    response_text = await team_response(
+                        agent_names=agent_names,
+                        mode=form_team.mode,
+                        message=event.body,
+                        orchestrator=self.orchestrator,
+                        thread_history=context.thread_history,
+                        model_name=model_name,
+                    )
+
+                event_id = await self._send_response(room, event.event_id, response_text, context.thread_id)
+
+                # Handle interactive questions in non-streaming team responses
+                if event_id:
+                    await self._handle_interactive_question(
+                        event_id,
+                        response_text,
+                        room.room_id,
+                        context.thread_id,
+                        event.event_id,
+                        agent_name="team",
+                    )
+
+                self.response_tracker.mark_responded(event.event_id)
             return
 
+        # Check if we should respond individually
         should_respond = should_agent_respond(
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,
             is_thread=context.is_thread,
             room=room,
-            is_dm_room=_is_dm_room,
-            configured_rooms=self.rooms,
             thread_history=context.thread_history,
             config=self.config,
-            is_invited_to_thread=context.is_invited_to_thread,
             mentioned_agents=context.mentioned_agents,
         )
-
-        if should_respond and not context.am_i_mentioned:
-            self.logger.info("Will respond: only agent in thread")
 
         if not should_respond:
             return
 
+        # Log if responding without mention
+        if not context.am_i_mentioned:
+            self.logger.info("Will respond: only agent in thread")
+
+        # Generate and send response
         self.logger.info("Processing", event_id=event.event_id)
         await self._generate_response(
             room_id=room.room_id,
@@ -522,8 +743,23 @@ class AgentBot:
         self.response_tracker.mark_responded(event.event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
-        """Handle reaction events for interactive questions."""
+        """Handle reaction events for interactive questions and config confirmations."""
         assert self.client is not None
+
+        # Check if sender is authorized to interact with agents
+        if not is_authorized_sender(event.sender, self.config, room.room_id):
+            self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
+            return
+
+        # First check if this is a config confirmation reaction
+        pending_change = config_confirmation.get_pending_change(event.reacts_to)
+
+        if pending_change and self.agent_name == ROUTER_AGENT_NAME:
+            # Only router handles config confirmations
+            await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
+            return
+
+        # Otherwise handle as interactive question
         result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
 
         if result:
@@ -534,7 +770,7 @@ class AgentBot:
             thread_history = []
             if thread_id:
                 thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-                if has_user_responded_after_message(thread_history, event.reacts_to, self.client.user_id):
+                if has_user_responded_after_message(thread_history, event.reacts_to, self.matrix_id):
                     self.logger.info(
                         "Ignoring reaction - agent already responded after this question",
                         reacted_to=event.reacts_to,
@@ -583,12 +819,19 @@ class AgentBot:
             return
 
         # Don't process our own voice messages
-        if event.sender == self.agent_user.user_id:
+        if event.sender == self.matrix_id.full_id:
             return
 
-        # Check if we've already responded to this voice message (e.g., after restart)
+        # Check if we've already seen this voice message (prevents reprocessing after restart)
         if self.response_tracker.has_responded(event.event_id):
             self.logger.debug("Already processed voice message", event_id=event.event_id)
+            return
+
+        # Check if sender is authorized to interact with agents
+        if not is_authorized_sender(event.sender, self.config, room.room_id):
+            # Mark as seen even though we're not responding
+            self.response_tracker.mark_responded(event.event_id)
+            self.logger.debug(f"Ignoring voice message from unauthorized sender: {event.sender}")
             return
 
         self.logger.info("Processing voice message", event_id=event.event_id, sender=event.sender)
@@ -596,13 +839,12 @@ class AgentBot:
         transcribed_message = await voice_handler.handle_voice_message(self.client, room, event, self.config)
 
         if transcribed_message:
-            is_thread, thread_id = extract_thread_info(event.source)
-
+            event_info = EventInfo.from_event(event.source)
             await self._send_response(
                 room=room,
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
-                thread_id=thread_id,
+                thread_id=event_info.thread_id,
             )
 
         # Mark the voice message as responded so we don't process it again
@@ -610,39 +852,31 @@ class AgentBot:
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
-        assert self.thread_invite_manager is not None
 
         # Check if mentions should be ignored for this message
         skip_mentions = _should_skip_mentions(event.source)
 
         if skip_mentions:
             # Don't detect mentions if the message has skip_mentions metadata
-            mentioned_agents: list[str] = []
+            mentioned_agents: list[MatrixID] = []
             am_i_mentioned = False
         else:
-            mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.agent_name, self.config)
+            mentioned_agents, am_i_mentioned = check_agent_mentioned(event.source, self.matrix_id, self.config)
 
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_name=room.name)
 
-        is_thread, thread_id = extract_thread_info(event.source)
+        event_info = EventInfo.from_event(event.source)
 
         thread_history = []
-        is_invited_to_thread = False
-        if thread_id:
-            thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
-            is_invited_to_thread = await self.thread_invite_manager.is_agent_invited_to_thread(
-                thread_id,
-                room.room_id,
-                self.agent_name,
-            )
+        if event_info.thread_id:
+            thread_history = await fetch_thread_history(self.client, room.room_id, event_info.thread_id)
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,
-            is_thread=is_thread,
-            thread_id=thread_id,
+            is_thread=event_info.is_thread,
+            thread_id=event_info.thread_id,
             thread_history=thread_history,
-            is_invited_to_thread=is_invited_to_thread,
             mentioned_agents=mentioned_agents,
         )
 
@@ -661,15 +895,17 @@ class AgentBot:
 
         session_id = create_session_id(room.room_id, thread_id)
 
-        response_text = await ai_response(
-            agent_name=self.agent_name,
-            prompt=prompt,
-            session_id=session_id,
-            storage_path=self.storage_path,
-            config=self.config,
-            thread_history=thread_history,
-            room_id=room.room_id,
-        )
+        # Show typing indicator while generating response
+        async with typing_indicator(self.client, room.room_id):
+            response_text = await ai_response(
+                agent_name=self.agent_name,
+                prompt=prompt,
+                session_id=session_id,
+                storage_path=self.storage_path,
+                config=self.config,
+                thread_history=thread_history,
+                room_id=room.room_id,
+            )
 
         if existing_event_id:
             # Edit the existing message
@@ -679,14 +915,60 @@ class AgentBot:
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(room, reply_to_event_id, response.formatted_text, thread_id)
         if event_id and response.option_map and response.options_list:
+            # For interactive questions, use the same thread root that _send_response uses:
+            # - If already in a thread, use that thread_id
+            # - If not in a thread, use reply_to_event_id (the user's message) as thread root
+            # This ensures consistency with how the bot creates threads
+            thread_root_for_registration = thread_id if thread_id else reply_to_event_id
             interactive.register_interactive_question(
                 event_id,
                 room.room_id,
-                thread_id,
+                thread_root_for_registration,
                 response.option_map,
                 self.agent_name,
             )
             await interactive.add_reaction_buttons(self.client, room.room_id, event_id, response.options_list)
+
+    async def _handle_interactive_question(
+        self,
+        event_id: str | None,
+        content: str,
+        room_id: str,
+        thread_id: str | None,
+        reply_to_event_id: str,
+        agent_name: str | None = None,
+    ) -> None:
+        """Handle interactive question registration and reactions if present.
+
+        Args:
+            event_id: The message event ID
+            content: The message content to check for interactive questions
+            room_id: The Matrix room ID
+            thread_id: Thread ID if in a thread
+            reply_to_event_id: Event being replied to
+            agent_name: Name of agent (for registration)
+
+        """
+        if not event_id or not self.client:
+            return
+
+        if interactive.should_create_interactive_question(content):
+            response = interactive.parse_and_format_interactive(content, extract_mapping=True)
+            if response.option_map and response.options_list:
+                thread_root_for_registration = thread_id if thread_id else reply_to_event_id
+                interactive.register_interactive_question(
+                    event_id,
+                    room_id,
+                    thread_root_for_registration,
+                    response.option_map,
+                    agent_name or self.agent_name,
+                )
+                await interactive.add_reaction_buttons(
+                    self.client,
+                    room_id,
+                    event_id,
+                    response.options_list,
+                )
 
     async def _process_and_respond_streaming(
         self,
@@ -703,59 +985,43 @@ class AgentBot:
             return
 
         session_id = create_session_id(room.room_id, thread_id)
-        sender_id = self.matrix_id
-
-        streaming = StreamingResponse(
-            room_id=room.room_id,
-            reply_to_event_id=reply_to_event_id,
-            thread_id=thread_id,
-            sender_domain=sender_id.domain,
-            config=self.config,
-        )
-
-        # If we're editing an existing message, set the event_id
-        if existing_event_id:
-            streaming.event_id = existing_event_id
-            streaming.accumulated_text = ""  # Start fresh
 
         try:
-            async for chunk in ai_response_streaming(
-                agent_name=self.agent_name,
-                prompt=prompt,
-                session_id=session_id,
-                storage_path=self.storage_path,
-                config=self.config,
-                thread_history=thread_history,
-                room_id=room.room_id,
-            ):
-                await streaming.update_content(chunk, self.client)
+            # Show typing indicator while generating response
+            async with typing_indicator(self.client, room.room_id):
+                response_stream = stream_agent_response(
+                    agent_name=self.agent_name,
+                    prompt=prompt,
+                    session_id=session_id,
+                    storage_path=self.storage_path,
+                    config=self.config,
+                    thread_history=thread_history,
+                    room_id=room.room_id,
+                )
 
-            await streaming.finalize(self.client)
+                event_id, accumulated = await send_streaming_response(
+                    self.client,
+                    room.room_id,
+                    reply_to_event_id,
+                    thread_id,
+                    self.matrix_id.domain,
+                    self.config,
+                    response_stream,
+                    streaming_cls=StreamingResponse,
+                    existing_event_id=existing_event_id,
+                )
 
-            if streaming.event_id:
-                self.logger.info("Sent streaming response", event_id=streaming.event_id)
-
+            # Handle interactive questions if present
+            await self._handle_interactive_question(
+                event_id,
+                accumulated,
+                room.room_id,
+                thread_id,
+                reply_to_event_id,
+            )
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
             # Don't mark as responded if streaming failed
-
-        # If the message contains an interactive question, register it and add reactions
-        if streaming.event_id and interactive.should_create_interactive_question(streaming.accumulated_text):
-            response = interactive.parse_and_format_interactive(streaming.accumulated_text, extract_mapping=True)
-            if response.option_map and response.options_list:
-                interactive.register_interactive_question(
-                    streaming.event_id,
-                    room.room_id,
-                    thread_id,
-                    response.option_map,
-                    self.agent_name,
-                )
-                await interactive.add_reaction_buttons(
-                    self.client,
-                    room.room_id,
-                    streaming.event_id,
-                    response.options_list,
-                )
 
     async def _generate_response(
         self,
@@ -785,24 +1051,22 @@ class AgentBot:
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
-        # Store memory for this agent (do this once, before generating response)
+        # Prepare session id for memory storage (store after sending response)
         session_id = create_session_id(room_id, thread_id)
-        create_background_task(
-            store_conversation_memory(
-                prompt,
-                self.agent_name,
-                self.storage_path,
-                session_id,
-                self.config,
+
+        # Dynamically determine whether to use streaming based on user presence
+        # Only check presence if streaming is globally enabled
+        use_streaming = self.enable_streaming
+        if use_streaming:
+            # Check if the user is online to decide whether to stream
+            use_streaming = await should_use_streaming(
+                self.client,
                 room_id,
-                thread_history,
-                user_id,
-            ),
-            name=f"memory_save_{self.agent_name}_{session_id}",
-        )
+                requester_user_id=user_id,
+            )
 
         # Dispatch to appropriate method
-        if self.enable_streaming:
+        if use_streaming:
             await self._process_and_respond_streaming(
                 room,
                 prompt,
@@ -820,6 +1084,24 @@ class AgentBot:
                 thread_history,
                 existing_event_id,
             )
+
+        # Store memory after response generation; ignore errors in tests/mocks
+        try:
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    self.agent_name,
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    room_id,
+                    thread_history,
+                    user_id,
+                ),
+                name=f"memory_save_{self.agent_name}_{session_id}",
+            )
+        except Exception:  # pragma: no cover
+            self.logger.debug("Skipping memory storage due to configuration error")
 
     async def _send_response(
         self,
@@ -849,14 +1131,24 @@ class AgentBot:
 
         # Always ensure we have a thread_id - use the original message as thread root if needed
         # This ensures agents always respond in threads, even when mentioned in main room
-        effective_thread_id = thread_id or get_safe_thread_root(reply_to_event) or reply_to_event_id
+        event_info = EventInfo.from_event(reply_to_event.source if reply_to_event else None)
+        effective_thread_id = thread_id or event_info.safe_thread_root or reply_to_event_id
 
-        content = create_mention_content_from_text(
+        # Get the latest message in thread for MSC3440 fallback compatibility
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            self.client,
+            room.room_id,
+            effective_thread_id,
+            reply_to_event_id,
+        )
+
+        content = format_message_with_mentions(
             self.config,
             response_text,
             sender_domain=sender_domain,
             thread_event_id=effective_thread_id,
             reply_to_event_id=reply_to_event_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
 
         # Add metadata to indicate mentions should be ignored for responses
@@ -881,7 +1173,8 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        content = create_mention_content_from_text(
+        # For edits in threads, we don't need latest_thread_event_id as this is not creating a new message
+        content = format_message_with_mentions(
             self.config,
             new_text,
             sender_domain=sender_domain,
@@ -906,41 +1199,54 @@ class AgentBot:
         # Only router agent should handle routing
         assert self.agent_name == ROUTER_AGENT_NAME
 
-        available_agents = get_available_agents_in_room(room, self.config)
+        # Use configured agents only - router should not suggest random agents
+        available_agents = get_configured_agents_for_room(room.room_id, self.config)
         if not available_agents:
-            self.logger.debug("No available agents to route to")
+            self.logger.debug("No configured agents to route to in this room")
             return
 
         self.logger.info("Handling AI routing", event_id=event.event_id)
 
-        _, thread_event_id = extract_thread_info(event.source)
+        event_info = EventInfo.from_event(event.source)
         suggested_agent = await suggest_agent_for_message(
             event.body,
             available_agents,
             self.config,
             thread_history,
-            thread_event_id,
-            room.room_id,
-            self.thread_invite_manager,
         )
-        if not suggested_agent:
-            return
 
-        # Router mentions the suggested agent and asks them to help
-        response_text = f"@{suggested_agent} could you help with this?"
+        if not suggested_agent:
+            # Send error message when routing fails
+            response_text = "⚠️ I couldn't determine which agent should help with this. Please try mentioning an agent directly with @ or rephrase your request."
+            self.logger.warning("Router failed to determine agent")
+        else:
+            # Router mentions the suggested agent and asks them to help
+            response_text = f"@{suggested_agent} could you help with this?"
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
         # If no thread exists, create one with the original message as root
+        thread_event_id = event_info.thread_id
         if not thread_event_id:
-            thread_event_id = event.event_id
+            # Check if the current event can be a thread root
+            thread_event_id = event_info.safe_thread_root or event.event_id
 
-        content = create_mention_content_from_text(
+        # Get latest thread event for MSC3440 compliance when no specific reply
+        # Note: We use event.event_id as reply_to for routing suggestions
+        latest_thread_event_id = await get_latest_thread_event_id_if_needed(
+            self.client,
+            room.room_id,
+            thread_event_id,
+            event.event_id,
+        )
+
+        content = format_message_with_mentions(
             self.config,
             response_text,
             sender_domain=sender_domain,
             thread_event_id=thread_event_id,
             reply_to_event_id=event.event_id,
+            latest_thread_event_id=latest_thread_event_id,
         )
 
         assert self.client is not None
@@ -954,7 +1260,7 @@ class AgentBot:
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912
         self.logger.info("Handling command", command_type=command.type.value)
 
-        is_thread, thread_id = extract_thread_info(event.source)
+        event_info = EventInfo.from_event(event.source)
 
         # Widget command modifies room state, so it doesn't need a thread
         if command.type == CommandType.WIDGET:
@@ -962,66 +1268,39 @@ class AgentBot:
             url = command.args.get("url")
             response_text = await handle_widget_command(client=self.client, room_id=room.room_id, url=url)
             # Send response in thread if in thread, otherwise in main room
-            await self._send_response(room, event.event_id, response_text, thread_id)
+            await self._send_response(room, event.event_id, response_text, event_info.thread_id)
             return
 
         # For commands that need thread context, use the existing thread or the event will start a new one
         # The _send_response method will automatically create a thread if needed
-        effective_thread_id = thread_id or event.event_id
+        effective_thread_id = event_info.thread_id or event_info.safe_thread_root or event.event_id
 
         response_text = ""
 
-        if command.type == CommandType.INVITE:
-            # Handle invite command
-            agent_name = command.args["agent_name"]
-            agent_domain = self.matrix_id.domain
-
-            assert self.client is not None
-            assert self.thread_invite_manager is not None
-            response_text = await handle_invite_command(
-                room_id=room.room_id,
-                thread_id=effective_thread_id,
-                agent_name=agent_name,
-                sender=event.sender,
-                agent_domain=agent_domain,
-                client=self.client,
-                thread_invite_manager=self.thread_invite_manager,
-                config=self.config,
-            )
-
-        elif command.type == CommandType.UNINVITE:
-            agent_name = command.args["agent_name"]
-            assert self.thread_invite_manager is not None
-            removed = await self.thread_invite_manager.remove_invite(effective_thread_id, room.room_id, agent_name)
-            if removed:
-                response_text = f"✅ Removed @{agent_name} from this thread."
-            else:
-                response_text = f"❌ @{agent_name} was not invited to this thread."
-
-        elif command.type == CommandType.LIST_INVITES:
-            assert self.thread_invite_manager is not None
-            response_text = await handle_list_invites_command(
-                room.room_id,
-                effective_thread_id,
-                self.thread_invite_manager,
-            )
-
-        elif command.type == CommandType.HELP:
+        if command.type == CommandType.HELP:
             topic = command.args.get("topic")
             response_text = get_command_help(topic)
 
+        elif command.type == CommandType.HI:
+            # Generate the welcome message for this room
+            response_text = _generate_welcome_message(room.room_id, self.config)
+
         elif command.type == CommandType.SCHEDULE:
             full_text = command.args["full_text"]
+
+            # Get mentioned agents from the command text
+            mentioned_agents, _ = check_agent_mentioned(event.source, None, self.config)
 
             assert self.client is not None
             task_id, response_text = await schedule_task(
                 client=self.client,
                 room_id=room.room_id,
                 thread_id=effective_thread_id,
-                agent_user_id=self.agent_user.user_id,
                 scheduled_by=event.sender,
                 full_text=full_text,
                 config=self.config,
+                room=room,
+                mentioned_agents=mentioned_agents,
             )
 
         elif command.type == CommandType.LIST_SCHEDULES:
@@ -1052,6 +1331,52 @@ class AgentBot:
                     task_id=task_id,
                 )
 
+        elif command.type == CommandType.CONFIG:
+            # Handle config command
+            args_text = command.args.get("args_text", "")
+            response_text, change_info = await handle_config_command(args_text)
+
+            # If we have change_info, this is a config set that needs confirmation
+            if change_info:
+                # Send the preview message
+                event_id = await self._send_response(
+                    room,
+                    event.event_id,
+                    response_text,
+                    event_info.thread_id,
+                    reply_to_event=event,
+                    skip_mentions=True,
+                )
+
+                if event_id:
+                    # Register the pending change
+                    config_confirmation.register_pending_change(
+                        event_id=event_id,
+                        room_id=room.room_id,
+                        thread_id=event_info.thread_id,
+                        config_path=change_info["config_path"],
+                        old_value=change_info["old_value"],
+                        new_value=change_info["new_value"],
+                        requester=event.sender,
+                    )
+
+                    # Get the pending change we just registered
+                    pending_change = config_confirmation.get_pending_change(event_id)
+
+                    # Store in Matrix state for persistence
+                    if pending_change:
+                        await config_confirmation.store_pending_change_in_matrix(
+                            self.client,
+                            event_id,
+                            pending_change,
+                        )
+
+                    # Add reaction buttons
+                    await config_confirmation.add_confirmation_reactions(self.client, room.room_id, event_id)
+
+                self.response_tracker.mark_responded(event.event_id)
+                return  # Exit early since we've handled the response
+
         elif command.type == CommandType.UNKNOWN:
             # Handle unknown commands
             response_text = "❌ Unknown command. Try !help for available commands."
@@ -1061,74 +1386,11 @@ class AgentBot:
                 room,
                 event.event_id,
                 response_text,
-                thread_id,
+                event_info.thread_id,
                 reply_to_event=event,
                 skip_mentions=True,
             )
             self.response_tracker.mark_responded(event.event_id)
-
-    async def _periodic_cleanup(self) -> None:
-        """Periodically clean up expired thread invitations."""
-        while self.running:
-            try:
-                # Wait for 1 hour between cleanups
-                await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
-
-                # Get all rooms the bot is in
-                assert self.client is not None
-                joined_rooms = await get_joined_rooms(self.client)
-                if joined_rooms is None:
-                    continue
-
-                total_removed = 0
-                for room_id in joined_rooms:
-                    try:
-                        assert self.thread_invite_manager is not None
-                        removed_count = await self.thread_invite_manager.cleanup_inactive_agents(
-                            room_id,
-                            timeout_hours=self.invitation_timeout_hours,
-                        )
-                        total_removed += removed_count
-                    except Exception as e:
-                        self.logger.exception("Failed to cleanup room", room_id=room_id, error=str(e))
-
-                if total_removed > 0:
-                    self.logger.info(f"Periodic cleanup removed {total_removed} expired agents")
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.exception("Error in periodic cleanup", error=str(e))
-
-    def _should_skip_duplicate_response(self, event: nio.RoomMessageText) -> bool:
-        """Check if we should skip responding to avoid duplicates.
-
-        This handles two cases:
-        1. We've already responded to this exact event
-        2. This is an edit of a message we've already responded to (from users)
-
-        Note: Edits from agents are filtered earlier in _on_message to avoid
-        responding to incomplete streaming messages.
-
-        Args:
-            event: The Matrix message event
-
-        Returns:
-            True if we should skip processing this message
-
-        """
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        is_edit = relates_to.get("rel_type") == "m.replace"
-
-        if is_edit:
-            original_event_id = relates_to.get("event_id")
-            if original_event_id and self.response_tracker.has_responded(original_event_id):
-                self.logger.debug("Ignoring edit of already-responded message", original_event_id=original_event_id)
-                return True
-        elif self.response_tracker.has_responded(event.event_id):
-            return True
-
-        return False
 
 
 @dataclass
@@ -1159,20 +1421,10 @@ class TeamBot(AgentBot):
             return
 
         # Get the appropriate model for this team and room
-        model_name = get_team_model(self.agent_name, room_id, self.config)
+        model_name = select_model_for_team(self.agent_name, room_id, self.config)
 
         # Convert team_mode string to TeamMode enum
         mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
-
-        # Create team response
-        response_text = await create_team_response(
-            agent_names=self.team_agents,
-            mode=mode,
-            message=prompt,
-            orchestrator=self.orchestrator,
-            thread_history=thread_history,
-            model_name=model_name,
-        )
 
         # Store memory once for the entire team (avoids duplicate LLM processing)
         session_id = create_session_id(room_id, thread_id)
@@ -1195,11 +1447,78 @@ class TeamBot(AgentBot):
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
-        if existing_event_id:
-            await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+        # Decide streaming based on presence
+        use_streaming = self.enable_streaming and await should_use_streaming(
+            self.client,
+            room_id,
+            requester_user_id=user_id,
+        )
+
+        if use_streaming and not existing_event_id:
+            # Show typing indicator while team generates streaming response
+            async with typing_indicator(self.client, room_id):
+                # Use structured team streaming with live document rebuilding
+                # Convert team agent names to MatrixID objects
+                team_matrix_ids = [
+                    MatrixID.from_username(agent_name, self.matrix_id.domain) for agent_name in self.team_agents
+                ]
+                response_stream = team_response_stream(
+                    agent_ids=team_matrix_ids,
+                    message=prompt,
+                    orchestrator=self.orchestrator,
+                    mode=mode,
+                    thread_history=thread_history,
+                    model_name=model_name,
+                )
+
+                event_id, accumulated = await send_streaming_response(
+                    self.client,
+                    room_id,
+                    reply_to_event_id,
+                    thread_id,
+                    self.matrix_id.domain,
+                    self.config,
+                    response_stream,
+                    streaming_cls=ReplacementStreamingResponse,
+                    header=None,  # team_response_stream includes header
+                )
+
+            # Handle interactive questions in team leader responses
+            await self._handle_interactive_question(
+                event_id,
+                accumulated,
+                room_id,
+                thread_id,
+                reply_to_event_id,
+                agent_name=self.agent_name,  # Team leader's name
+            )
         else:
-            # Send as regular message (not streaming for teams)
-            await self._send_response(room, reply_to_event_id, response_text, thread_id)
+            # Show typing indicator while team generates non-streaming response
+            async with typing_indicator(self.client, room_id):
+                # Fallback to non-streaming or editing existing message
+                response_text = await team_response(
+                    agent_names=self.team_agents,
+                    mode=mode,
+                    message=prompt,
+                    orchestrator=self.orchestrator,
+                    thread_history=thread_history,
+                    model_name=model_name,
+                )
+            if existing_event_id:
+                await self._edit_message(room_id, existing_event_id, response_text, thread_id)
+            else:
+                event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
+
+                # Handle interactive questions in non-streaming team leader responses
+                if event_id:
+                    await self._handle_interactive_question(
+                        event_id,
+                        response_text,
+                        room_id,
+                        thread_id,
+                        reply_to_event_id,
+                        agent_name=self.agent_name,
+                    )
 
 
 @dataclass
@@ -1210,7 +1529,7 @@ class MultiAgentOrchestrator:
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
-    _created_room_ids: dict[str, str] = field(default_factory=dict, init=False)
+    _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
 
     async def _ensure_user_account(self) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -1293,15 +1612,15 @@ class MultiAgentOrchestrator:
         # Setup rooms and have all bots join them
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
 
-        # Create sync tasks for each bot
-        sync_tasks = []
-        for bot in self.agent_bots.values():
-            # Create a task for each bot's sync loop
-            sync_task = asyncio.create_task(bot.sync_forever())
-            sync_tasks.append(sync_task)
+        # Create sync tasks for each bot with automatic restart on failure
+        for entity_name, bot in self.agent_bots.items():
+            # Create a task for each bot's sync loop with restart wrapper
+            sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+            # Store the task reference for later cancellation
+            self._sync_tasks[entity_name] = sync_task
 
         # Run all sync tasks
-        await asyncio.gather(*sync_tasks)
+        await asyncio.gather(*tuple(self._sync_tasks.values()))
 
     async def update_config(self) -> bool:  # noqa: C901, PLR0912
         """Update configuration with simplified self-managing agents.
@@ -1326,13 +1645,25 @@ class MultiAgentOrchestrator:
         existing_entities = set(self.agent_bots.keys())
         new_entities = all_new_entities - existing_entities
 
+        # Always update the orchestrator's config first
+        self.config = new_config
+
+        # Always update config for ALL existing bots (even those being restarted will get new config when recreated)
+        logger.info(
+            f"Updating config. New authorization: {new_config.authorization.global_users}",
+        )
+        for entity_name, bot in self.agent_bots.items():
+            if entity_name not in entities_to_restart:
+                bot.config = new_config
+                logger.debug(f"Updated config for {entity_name}")
+
         if not entities_to_restart and not new_entities:
-            self.config = new_config
+            # No entities to restart or create, we're done
             return False
 
         # Stop entities that need restarting
         if entities_to_restart:
-            await _stop_entities(entities_to_restart, self.agent_bots)
+            await _stop_entities(entities_to_restart, self.agent_bots, self._sync_tasks)
 
         # Update config
         self.config = new_config
@@ -1354,8 +1685,9 @@ class MultiAgentOrchestrator:
                     self.agent_bots[entity_name] = bot
                     # Agent handles its own setup (but doesn't join rooms yet)
                     await bot.start()
-                    # Start sync loop
-                    asyncio.create_task(bot.sync_forever())  # noqa: RUF006
+                    # Start sync loop with automatic restart
+                    sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+                    self._sync_tasks[entity_name] = sync_task
             # Entity was removed from config
             elif entity_name in self.agent_bots:
                 del self.agent_bots[entity_name]
@@ -1368,11 +1700,15 @@ class MultiAgentOrchestrator:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot
                 await bot.start()
-                asyncio.create_task(bot.sync_forever())  # noqa: RUF006
+                sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+                self._sync_tasks[entity_name] = sync_task
 
         # Handle removed entities (cleanup)
         removed_entities = existing_entities - all_new_entities
         for entity_name in removed_entities:
+            # Cancel sync task first
+            await _cancel_sync_task(entity_name, self._sync_tasks)
+
             if entity_name in self.agent_bots:
                 bot = self.agent_bots[entity_name]
                 await bot.cleanup()  # Agent handles its own cleanup
@@ -1394,6 +1730,10 @@ class MultiAgentOrchestrator:
     async def stop(self) -> None:
         """Stop all agent bots."""
         self.running = False
+
+        # First cancel all sync tasks
+        for entity_name in list(self._sync_tasks.keys()):
+            await _cancel_sync_task(entity_name, self._sync_tasks)
 
         # Signal all bots to stop their sync loops
         for bot in self.agent_bots.values():
@@ -1456,9 +1796,7 @@ class MultiAgentOrchestrator:
         # Directly create rooms using the router's client
         assert self.config is not None
         room_ids = await ensure_all_rooms_exist(router_bot.client, self.config)
-
-        # Store room IDs for later use
-        self._created_room_ids = room_ids
+        logger.info(f"Ensured existence of {len(room_ids)} rooms")
 
     async def _ensure_room_invitations(self) -> None:  # noqa: C901, PLR0912
         """Ensure all agents and the user are invited to their configured rooms.
@@ -1605,7 +1943,25 @@ def _create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
     )
 
 
-async def _stop_entities(entities_to_restart: set[str], agent_bots: dict[str, Any]) -> None:
+async def _cancel_sync_task(entity_name: str, sync_tasks: dict[str, asyncio.Task]) -> None:
+    """Cancel and remove a sync task for an entity."""
+    if entity_name in sync_tasks:
+        task = sync_tasks[entity_name]
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        del sync_tasks[entity_name]
+
+
+async def _stop_entities(
+    entities_to_restart: set[str],
+    agent_bots: dict[str, Any],
+    sync_tasks: dict[str, asyncio.Task],
+) -> None:
+    # Cancel sync tasks to prevent duplicates
+    for entity_name in entities_to_restart:
+        await _cancel_sync_task(entity_name, sync_tasks)
+
     stop_tasks = []
     for entity_name in entities_to_restart:
         if entity_name in agent_bots:
@@ -1617,6 +1973,43 @@ async def _stop_entities(entities_to_restart: set[str], agent_bots: dict[str, An
 
     for entity_name in entities_to_restart:
         agent_bots.pop(entity_name, None)
+
+
+async def _sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = -1) -> None:
+    """Run sync_forever with automatic restart on failure.
+
+    Args:
+        bot: The bot to run sync for
+        max_retries: Maximum number of retries (-1 for infinite)
+
+    """
+    retry_count = 0
+    while bot.running and (max_retries < 0 or retry_count < max_retries):
+        try:
+            logger.info(f"Starting sync loop for {bot.agent_name}")
+            await bot.sync_forever()
+            # If sync_forever returns normally, the bot was stopped intentionally
+            break
+        except asyncio.CancelledError:
+            # Task was cancelled, exit gracefully
+            logger.info(f"Sync task for {bot.agent_name} was cancelled")
+            break
+        except Exception:
+            retry_count += 1
+            logger.exception(f"Sync loop failed for {bot.agent_name} (retry {retry_count})")
+
+            if not bot.running:
+                # Bot was stopped, don't restart
+                break
+
+            if max_retries >= 0 and retry_count >= max_retries:
+                logger.exception(f"Max retries ({max_retries}) reached for {bot.agent_name}, giving up")
+                break
+
+            # Wait a bit before restarting to avoid rapid restarts
+            wait_time = min(60, 5 * retry_count)  # Exponential backoff, max 60 seconds
+            logger.info(f"Restarting sync loop for {bot.agent_name} in {wait_time} seconds...")
+            await asyncio.sleep(wait_time)
 
 
 async def _handle_config_change(orchestrator: MultiAgentOrchestrator, stop_watching: asyncio.Event) -> None:
@@ -1653,6 +2046,10 @@ async def main(log_level: str, storage_path: Path) -> None:
     # Set up logging with the specified level
     setup_logging(level=log_level)
 
+    # Sync API keys from environment to CredentialsManager
+    logger.info("Syncing API keys from environment to CredentialsManager...")
+    sync_env_to_credentials()
+
     # Create storage directory if it doesn't exist
     storage_path.mkdir(parents=True, exist_ok=True)
 
@@ -1672,6 +2069,16 @@ async def main(log_level: str, storage_path: Path) -> None:
 
         # Wait for either orchestrator or watcher to complete
         done, pending = await asyncio.wait({orchestrator_task, watcher_task}, return_when=asyncio.FIRST_COMPLETED)
+
+        # Check if any completed task had an exception
+        for task in done:
+            try:
+                task.result()  # This will raise if the task had an exception
+            except asyncio.CancelledError:
+                logger.info("Task was cancelled")
+            except Exception:
+                logger.exception("Task failed with exception")
+                # Don't re-raise - let cleanup happen gracefully
 
         # Cancel any pending tasks
         for task in pending:

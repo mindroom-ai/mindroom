@@ -11,8 +11,6 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
-from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD
 
@@ -33,8 +31,6 @@ def setup_test_bot(
 
     bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=storage_path)
-    bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
     # Mock orchestrator
     mock_orchestrator = MagicMock()
@@ -72,10 +68,10 @@ class TestStreamingEdits:
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     async def test_agent_ignores_edits_of_responded_messages(
         self,
-        mock_ai_response_streaming: AsyncMock,  # noqa: ARG002
+        mock_stream_agent_response: AsyncMock,  # noqa: ARG002
         mock_ai_response: AsyncMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -287,7 +283,11 @@ class TestStreamingEdits:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test that agents DO respond to user edits that add new mentions."""
+        """Test that agents DO NOT respond to user edits (even those that add mentions).
+
+        This is by design - the bot ignores all edits to prevent confusion.
+        Users should send a new message if they want a new response after editing.
+        """
         # Set up bot
         bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
@@ -339,7 +339,7 @@ class TestStreamingEdits:
             },
         }
 
-        # Process edit - calculator SHOULD respond (it's a user edit with new mention)
+        # Process edit - calculator should NOT respond (bot ignores all edits)
         await bot._on_message(mock_room, edit_event)
-        assert bot.client.room_send.call_count == 1  # type: ignore[union-attr]
-        assert mock_ai_response.call_count == 1
+        assert bot.client.room_send.call_count == 0  # type: ignore[union-attr]
+        assert mock_ai_response.call_count == 0

@@ -19,5 +19,4 @@ ADD . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
-RUN mkdir -p /app/tmp /app/logs /app/config
-CMD ["/app/.venv/bin/python", "-m", "mindroom.cli", "run", "--log-level", "INFO", "--storage-path", "/app/tmp"]
+CMD ["/app/.venv/bin/python", "-m", "mindroom.cli", "run", "--log-level", "INFO", "--storage-path", "/app/mindroom_data"]
