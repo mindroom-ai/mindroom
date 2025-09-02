@@ -32,6 +32,7 @@ services:
     # To find your gateway IP, run: docker network inspect mynetwork | jq '.[0].IPAM.Config[0].Gateway'
     # For PUBLIC deployments: Remove the entire extra_hosts section
     extra_hosts:
+      - "m-demo.localhost:172.20.0.1"
       - "m-try.mindroom.chat:172.20.0.1"
       - "m-alt.mindroom.chat:172.20.0.1"
       - "m-default.mindroom.chat:172.20.0.1"
