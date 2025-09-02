@@ -731,7 +731,8 @@ class AgentBot:
                     message_id=event.reacts_to,
                     stopped_by=event.sender,
                 )
-                # Always remove the stop button when user clicks it (whether cancelling or not)
+                # Remove the stop button immediately when user clicks it
+                # This is the only place we remove the button immediately (not in cleanup)
                 await self.stop_manager.remove_stop_button(self.client, event.reacts_to)
                 # Send a confirmation message
                 await self._send_response(room.room_id, event.reacts_to, "✅ Generation stopped", None)
@@ -1074,22 +1075,24 @@ class AgentBot:
 
         try:
             await task
-            # Remove stop button on successful completion (if it was added)
-            if message_to_track and show_stop_button:
-                await self.stop_manager.remove_stop_button(self.client, message_to_track)
         except asyncio.CancelledError:
             self.logger.info("Response cancelled by user", message_id=message_to_track)
-            # Stop button already removed when user clicked it (in _on_reaction)
-            # No need to remove it again here
+            # Stop button removed when user clicked it (in _on_reaction)
         except Exception as e:
             self.logger.exception("Error during response generation", error=str(e))
-            # Remove stop button on error (user can't cancel a failed response)
-            if message_to_track and show_stop_button:
-                await self.stop_manager.remove_stop_button(self.client, message_to_track)
             raise  # Re-raise the exception
         finally:
+            # Centralized cleanup: clear tracking and remove stop button if not already removed
             if message_to_track:
-                self.stop_manager.clear_message(message_to_track)
+                # Check if button was already removed by user click
+                tracked = self.stop_manager.tracked_messages.get(message_to_track)
+                button_already_removed = tracked is None or tracked.reaction_event_id is None
+
+                self.stop_manager.clear_message(
+                    message_to_track,
+                    client=self.client,
+                    remove_button=show_stop_button and not button_already_removed,
+                )
 
         return initial_message_id
 
@@ -1126,20 +1129,15 @@ class AgentBot:
             if existing_event_id:
                 cancelled_text = "**[Response cancelled by user]**"
                 await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
-                # Stop button already removed when user clicked it (in _on_reaction)
             raise  # Re-raise to let the outer handler know
         except Exception as e:
             self.logger.exception("Error in non-streaming response", error=str(e))
-            # Remove stop button on error (user can't cancel a failed response)
-            if existing_event_id:
-                await self.stop_manager.remove_stop_button(self.client, existing_event_id)
             raise  # Re-raise to let the outer handler know
 
         if existing_event_id:
             # Edit the existing message
             await self._edit_message(room_id, existing_event_id, response_text, thread_id)
-            # Remove stop button when response is complete
-            await self.stop_manager.remove_stop_button(self.client, existing_event_id)
+            # Stop button removal is handled by _run_cancellable_response finally block
             return existing_event_id
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1252,9 +1250,7 @@ class AgentBot:
                 reply_to_event_id,
             )
 
-            # Remove stop button when streaming is complete
-            if existing_event_id:
-                await self.stop_manager.remove_stop_button(self.client, existing_event_id)
+            # Stop button removal is handled by _run_cancellable_response finally block
 
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -1262,13 +1258,10 @@ class AgentBot:
             if existing_event_id:
                 cancelled_text = "**[Response cancelled by user]**"
                 await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
-                # Stop button already removed when user clicked it (in _on_reaction)
             raise  # Re-raise to let the outer handler know
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
-            # Remove stop button on error (user can't cancel a failed response)
-            if existing_event_id:
-                await self.stop_manager.remove_stop_button(self.client, existing_event_id)
+            # Note: Stop button removal handled by _run_cancellable_response finally block
             # Don't mark as responded if streaming failed
             return None
         else:
