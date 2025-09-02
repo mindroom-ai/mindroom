@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from . import interactive, voice_handler
+from . import config_confirmation, interactive, voice_handler
 from .agents import create_agent, get_rooms_for_entity
 from .ai import ai_response, stream_agent_response
 from .background_tasks import create_background_task, wait_for_background_tasks
@@ -303,9 +303,16 @@ class AgentBot:
                 # Only the router agent should restore scheduled tasks
                 # to avoid duplicate task instances after restart
                 if self.agent_name == ROUTER_AGENT_NAME:
-                    restored = await restore_scheduled_tasks(self.client, room_id, self.config)
-                    if restored > 0:
-                        self.logger.info(f"Restored {restored} scheduled tasks in room {room_id}")
+                    # Restore scheduled tasks
+                    restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config)
+                    if restored_tasks > 0:
+                        self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
+
+                    # Restore pending config confirmations
+                    restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
+                    if restored_configs > 0:
+                        self.logger.info(f"Restored {restored_configs} pending config changes in room {room_id}")
+
                     # Send welcome message if room is empty
                     await self._send_welcome_message_if_empty(room_id)
             else:
@@ -727,7 +734,7 @@ class AgentBot:
         self.response_tracker.mark_responded(event.event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
-        """Handle reaction events for interactive questions."""
+        """Handle reaction events for interactive questions and config confirmations."""
         assert self.client is not None
 
         # Check if sender is authorized to interact with agents
@@ -735,6 +742,15 @@ class AgentBot:
             self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
             return
 
+        # First check if this is a config confirmation reaction
+        pending_change = config_confirmation.get_pending_change(event.reacts_to)
+
+        if pending_change and self.agent_name == ROUTER_AGENT_NAME:
+            # Only router handles config confirmations
+            await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
+            return
+
+        # Otherwise handle as interactive question
         result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
 
         if result:
@@ -1232,7 +1248,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
 
-    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901
+    async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912
         self.logger.info("Handling command", command_type=command.type.value)
 
         event_info = EventInfo.from_event(event.source)
@@ -1309,7 +1325,48 @@ class AgentBot:
         elif command.type == CommandType.CONFIG:
             # Handle config command
             args_text = command.args.get("args_text", "")
-            response_text = await handle_config_command(args_text)
+            response_text, change_info = await handle_config_command(args_text)
+
+            # If we have change_info, this is a config set that needs confirmation
+            if change_info:
+                # Send the preview message
+                event_id = await self._send_response(
+                    room,
+                    event.event_id,
+                    response_text,
+                    event_info.thread_id,
+                    reply_to_event=event,
+                    skip_mentions=True,
+                )
+
+                if event_id:
+                    # Register the pending change
+                    config_confirmation.register_pending_change(
+                        event_id=event_id,
+                        room_id=room.room_id,
+                        thread_id=event_info.thread_id,
+                        config_path=change_info["config_path"],
+                        old_value=change_info["old_value"],
+                        new_value=change_info["new_value"],
+                        requester=event.sender,
+                    )
+
+                    # Get the pending change we just registered
+                    pending_change = config_confirmation.get_pending_change(event_id)
+
+                    # Store in Matrix state for persistence
+                    if pending_change:
+                        await config_confirmation.store_pending_change_in_matrix(
+                            self.client,
+                            event_id,
+                            pending_change,
+                        )
+
+                    # Add reaction buttons
+                    await config_confirmation.add_confirmation_reactions(self.client, room.room_id, event_id)
+
+                self.response_tracker.mark_responded(event.event_id)
+                return  # Exit early since we've handled the response
 
         elif command.type == CommandType.UNKNOWN:
             # Handle unknown commands
