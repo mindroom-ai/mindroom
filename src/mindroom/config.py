@@ -129,6 +129,23 @@ class VoiceConfig(BaseModel):
     )
 
 
+class AuthorizationConfig(BaseModel):
+    """Authorization configuration with fine-grained permissions."""
+
+    global_users: list[str] = Field(
+        default_factory=list,
+        description="Users with access to all rooms (e.g., '@user:example.com')",
+    )
+    room_permissions: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Room-specific user permissions. Keys are room IDs, values are lists of authorized user IDs",
+    )
+    default_room_access: bool = Field(
+        default=False,
+        description="Default permission for rooms not explicitly configured",
+    )
+
+
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -144,9 +161,9 @@ class Config(BaseModel):
         default="UTC",
         description="Timezone for displaying scheduled tasks (e.g., 'America/New_York')",
     )
-    authorized_users: list[str] = Field(
-        default_factory=list,
-        description="List of authorized Matrix user IDs that agents will respond to (e.g., '@user:example.com'). If empty, only @mindroom_user:{domain} can interact with agents.",
+    authorization: AuthorizationConfig = Field(
+        default_factory=AuthorizationConfig,
+        description="Authorization configuration with fine-grained permissions",
     )
 
     @cached_property

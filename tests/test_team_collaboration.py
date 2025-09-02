@@ -108,7 +108,9 @@ class TestTeamFormation:
         research_bot.client = AsyncMock()
         analyst_bot.client = AsyncMock()
         research_bot.response_tracker = MagicMock()
+        research_bot.response_tracker.has_responded.return_value = False
         analyst_bot.response_tracker = MagicMock()
+        analyst_bot.response_tracker.has_responded.return_value = False
 
         # Create message mentioning both agents
         message_event: dict[str, Any] = {
