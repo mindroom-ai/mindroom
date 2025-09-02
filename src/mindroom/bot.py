@@ -748,7 +748,7 @@ class AgentBot:
             return
 
         # First check if this is a stop button reaction
-        if event.key == "❌":
+        if event.key == "🛑":
             # Check if this is from a bot/agent
             sender_agent_name = extract_agent_name(event.sender, self.config)
             # Only handle stop from users, not agents

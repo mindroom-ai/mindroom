@@ -128,7 +128,7 @@ class SimpleStopManager:
                     "m.relates_to": {
                         "rel_type": "m.annotation",
                         "event_id": message_id,
-                        "key": "❌",
+                        "key": "🛑",
                     },
                 },
             )
