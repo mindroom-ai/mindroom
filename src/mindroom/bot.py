@@ -672,69 +672,89 @@ class AgentBot:
                 requester_user_id=event.sender,
             )
 
-            if use_streaming:
-                # Show typing indicator while team generates response
-                async with typing_indicator(self.client, room.room_id):
-                    # Streaming: returns formatted text chunks for live rendering
-                    response_stream = team_response_stream(
-                        agent_ids=form_team.agents,
-                        message=event.body,
-                        orchestrator=self.orchestrator,
-                        mode=form_team.mode,
-                        thread_history=context.thread_history,
-                        model_name=model_name,
-                    )
+            # Store initial_message_id in outer scope so it can be captured
+            initial_message_id = None
 
-                    event_id, accumulated = await send_streaming_response(
-                        self.client,
-                        room.room_id,
-                        event.event_id,
-                        context.thread_id,
-                        self.matrix_id.domain,
-                        self.config,
-                        response_stream,
-                        streaming_cls=ReplacementStreamingResponse,
-                        header=None,
-                    )
+            # Create async function for preformed team response
+            async def generate_preformed_team_response() -> None:
+                nonlocal initial_message_id
+                # Use the initial message created by _run_cancellable_response if created
+                message_id = initial_message_id  # Will be set by _run_cancellable_response
+                if use_streaming:
+                    # Show typing indicator while team generates response
+                    async with typing_indicator(self.client, room.room_id):
+                        # Streaming: returns formatted text chunks for live rendering
+                        response_stream = team_response_stream(
+                            agent_ids=form_team.agents,
+                            message=event.body,
+                            orchestrator=self.orchestrator,
+                            mode=form_team.mode,
+                            thread_history=context.thread_history,
+                            model_name=model_name,
+                        )
 
-                # Handle interactive questions in team responses
-                await self._handle_interactive_question(
-                    event_id,
-                    accumulated,
-                    room.room_id,
-                    context.thread_id,
-                    event.event_id,
-                    agent_name="team",  # Or could use team name
-                )
+                        event_id, accumulated = await send_streaming_response(
+                            self.client,
+                            room.room_id,
+                            message_id if message_id else event.event_id,
+                            context.thread_id,
+                            self.matrix_id.domain,
+                            self.config,
+                            response_stream,
+                            streaming_cls=ReplacementStreamingResponse,
+                            header=None,
+                            existing_event_id=message_id,
+                        )
 
-                self.response_tracker.mark_responded(event.event_id)
-            else:
-                # Show typing indicator while team generates response
-                async with typing_indicator(self.client, room.room_id):
-                    # Non-streaming: returns complete formatted response
-                    response_text = await team_response(
-                        agent_names=agent_names,
-                        mode=form_team.mode,
-                        message=event.body,
-                        orchestrator=self.orchestrator,
-                        thread_history=context.thread_history,
-                        model_name=model_name,
-                    )
-
-                event_id = await self._send_response(room, event.event_id, response_text, context.thread_id)
-
-                # Handle interactive questions in non-streaming team responses
-                if event_id:
+                    # Handle interactive questions in team responses
                     await self._handle_interactive_question(
                         event_id,
-                        response_text,
+                        accumulated,
                         room.room_id,
                         context.thread_id,
                         event.event_id,
-                        agent_name="team",
+                        agent_name="team",  # Or could use team name
                     )
+                else:
+                    # Show typing indicator while team generates response
+                    async with typing_indicator(self.client, room.room_id):
+                        # Non-streaming: returns complete formatted response
+                        response_text = await team_response(
+                            agent_names=agent_names,
+                            mode=form_team.mode,
+                            message=event.body,
+                            orchestrator=self.orchestrator,
+                            thread_history=context.thread_history,
+                            model_name=model_name,
+                        )
 
-                self.response_tracker.mark_responded(event.event_id)
+                    # Either edit the thinking message or send new
+                    if message_id:
+                        await self._edit_message(room.room_id, message_id, response_text, context.thread_id)
+                    else:
+                        event_id = await self._send_response(room, event.event_id, response_text, context.thread_id)
+                        # Handle interactive questions in non-streaming team responses
+                        if event_id:
+                            await self._handle_interactive_question(
+                                event_id,
+                                response_text,
+                                room.room_id,
+                                context.thread_id,
+                                event.event_id,
+                                agent_name="team",
+                            )
+
+            # Use unified handler for cancellation support
+            initial_message_id = await self._run_cancellable_response(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                thread_id=context.thread_id,
+                response_coroutine=generate_preformed_team_response(),
+                thinking_message="🤝 Team Response: Thinking...",
+                existing_event_id=None,
+            )
+
+            self.response_tracker.mark_responded(event.event_id)
             return
 
         # Check if we should respond individually
@@ -926,6 +946,73 @@ class AgentBot:
             thread_history=thread_history,
             mentioned_agents=mentioned_agents,
         )
+
+    async def _run_cancellable_response(
+        self,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        response_coroutine: object,  # Coroutine that generates the response
+        thinking_message: str | None = None,  # None means don't send thinking message
+        existing_event_id: str | None = None,
+    ) -> str | None:
+        """Run a response generation coroutine with cancellation support.
+
+        This unified handler provides:
+        - Optional "Thinking..." message
+        - Task cancellation via stop button
+        - Proper cleanup on completion or cancellation
+
+        Args:
+            room_id: The room to send to
+            reply_to_event_id: Event to reply to
+            thread_id: Thread ID if in thread
+            response_coroutine: Async function that generates the response
+            thinking_message: Optional thinking message to show (None to skip)
+            existing_event_id: ID of existing message to edit
+
+        Returns:
+            The initial message ID if created, None otherwise
+
+        """
+        assert self.client is not None
+        room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
+
+        # Send initial thinking message if requested and not editing
+        initial_message_id = None
+        if thinking_message and not existing_event_id:
+            initial_message_id = await self._send_response(
+                room,
+                reply_to_event_id,
+                f"{thinking_message} {IN_PROGRESS_MARKER}",
+                thread_id,
+            )
+
+        # Create cancellable task
+        task: asyncio.Task[None] = asyncio.create_task(response_coroutine)  # type: ignore[arg-type]
+
+        # Track for stop button
+        message_to_track = existing_event_id or initial_message_id
+        if message_to_track:
+            self.stop_manager.set_current(message_to_track, room_id, task, None)
+            # Use getattr with default False for compatibility with tests
+            if getattr(self.config.defaults, "show_stop_button", False):
+                self.logger.info("Adding stop button", message_id=message_to_track)
+                await self.stop_manager.add_stop_button(self.client, room_id, message_to_track)
+
+        try:
+            await task
+            # Remove stop button on successful completion
+            if message_to_track and getattr(self.config.defaults, "show_stop_button", False):
+                await self.stop_manager.remove_stop_button(self.client, message_to_track)
+        except asyncio.CancelledError:
+            self.logger.info("Response cancelled by user", message_id=message_to_track)
+            # Keep stop button visible when cancelled
+        finally:
+            if message_to_track:
+                self.stop_manager.clear_message(message_to_track)
+
+        return initial_message_id
 
     async def _process_and_respond(
         self,
@@ -1122,17 +1209,6 @@ class AgentBot:
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
-        # Send initial "Thinking..." message for stop button support (only if not editing)
-        initial_message_id = None
-        if not existing_event_id:
-            initial_message_id = await self._send_response(
-                room,
-                reply_to_event_id,
-                f"Thinking... {IN_PROGRESS_MARKER}",
-                thread_id,
-            )
-            # Note: We don't track the message here yet because we don't have the task created
-
         # Prepare session id for memory storage (store after sending response)
         session_id = create_session_id(room_id, thread_id)
 
@@ -1147,8 +1223,14 @@ class AgentBot:
                 requester_user_id=user_id,
             )
 
-        # Create async task for generation so it can be cancelled
+        # Store initial_message_id in outer scope so it can be captured
+        initial_message_id = None
+
+        # Create async function for generation
         async def generate() -> None:
+            nonlocal initial_message_id
+            # Use the initial message created by _run_cancellable_response
+            message_id = existing_event_id or initial_message_id
             if use_streaming:
                 await self._process_and_respond_streaming(
                     room,
@@ -1156,7 +1238,7 @@ class AgentBot:
                     reply_to_event_id,
                     thread_id,
                     thread_history,
-                    existing_event_id or initial_message_id,  # Edit the thinking message
+                    message_id,  # Edit the thinking message or existing
                 )
             else:
                 await self._process_and_respond(
@@ -1165,25 +1247,18 @@ class AgentBot:
                     reply_to_event_id,
                     thread_id,
                     thread_history,
-                    existing_event_id or initial_message_id,  # Edit the thinking message
+                    message_id,  # Edit the thinking message or existing
                 )
 
-        task = asyncio.create_task(generate())
-        if initial_message_id:
-            # First track the message with the task
-            self.stop_manager.set_current(initial_message_id, room_id, task, None)
-            # Then add the stop button (which will update the reaction_event_id)
-            self.logger.info("Adding stop button to initial message", message_id=initial_message_id)
-            await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
-
-        try:
-            await task
-        except asyncio.CancelledError:
-            self.logger.info("Response generation cancelled by user", message_id=initial_message_id)
-            # Keep the stop button visible when cancelled (shows it was stopped)
-        finally:
-            if initial_message_id:
-                self.stop_manager.clear_message(initial_message_id)
+        # Use unified handler for cancellation support
+        initial_message_id = await self._run_cancellable_response(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            response_coroutine=generate(),
+            thinking_message="Thinking..." if not existing_event_id else None,
+            existing_event_id=existing_event_id,
+        )
 
         # Store memory after response generation; ignore errors in tests/mocks
         try:
@@ -1519,7 +1594,7 @@ class TeamBot(AgentBot):
         """Teams don't have individual agents, return None."""
         return None
 
-    async def _generate_response(  # noqa: C901
+    async def _generate_response(
         self,
         room_id: str,
         prompt: str,
@@ -1535,17 +1610,6 @@ class TeamBot(AgentBot):
 
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
-
-        # Send initial "Thinking..." message for stop button support (only if not editing)
-        initial_message_id = None
-        if not existing_event_id:
-            initial_message_id = await self._send_response(
-                room,
-                reply_to_event_id,
-                f"🤝 Team Response: Thinking... {IN_PROGRESS_MARKER}",
-                thread_id,
-            )
-            # Note: We don't track the message here yet because we don't have the task created
 
         # Get the appropriate model for this team and room
         model_name = select_model_for_team(self.agent_name, room_id, self.config)
@@ -1577,8 +1641,14 @@ class TeamBot(AgentBot):
             requester_user_id=user_id,
         )
 
-        # Create async task for team response generation so it can be cancelled
+        # Store initial_message_id in outer scope so it can be captured
+        initial_message_id = None
+
+        # Create async function for team response generation
         async def generate_team_response() -> None:
+            nonlocal initial_message_id
+            # Use the initial message created by _run_cancellable_response
+            message_id = existing_event_id or initial_message_id
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(self.client, room_id):
@@ -1599,14 +1669,14 @@ class TeamBot(AgentBot):
                     event_id, accumulated = await send_streaming_response(
                         self.client,
                         room_id,
-                        initial_message_id if initial_message_id else reply_to_event_id,
+                        message_id if message_id else reply_to_event_id,
                         thread_id,
                         self.matrix_id.domain,
                         self.config,
                         response_stream,
                         streaming_cls=ReplacementStreamingResponse,
                         header=None,  # team_response_stream includes header
-                        existing_event_id=initial_message_id,
+                        existing_event_id=message_id,
                     )
 
                 # Handle interactive questions in team leader responses
@@ -1630,9 +1700,7 @@ class TeamBot(AgentBot):
                         thread_history=thread_history,
                         model_name=model_name,
                     )
-                if existing_event_id or initial_message_id:
-                    message_id = existing_event_id or initial_message_id
-                    assert message_id is not None  # Type guard for mypy
+                if message_id:
                     await self._edit_message(room_id, message_id, response_text, thread_id)
                 else:
                     event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
@@ -1648,25 +1716,15 @@ class TeamBot(AgentBot):
                             agent_name=self.agent_name,
                         )
 
-        task = asyncio.create_task(generate_team_response())
-        if initial_message_id:
-            # First track the message with the task
-            self.stop_manager.set_current(initial_message_id, room_id, task, None)
-            # Then add the stop button (which will update the reaction_event_id)
-            self.logger.info("Adding stop button to initial team message", message_id=initial_message_id)
-            await self.stop_manager.add_stop_button(self.client, room_id, initial_message_id)
-
-        try:
-            await task
-            # Remove stop button when team response is complete
-            if initial_message_id:
-                await self.stop_manager.remove_stop_button(self.client, initial_message_id)
-        except asyncio.CancelledError:
-            self.logger.info("Team response generation cancelled by user", message_id=initial_message_id)
-            # Keep the stop button visible when cancelled (shows it was stopped)
-        finally:
-            if initial_message_id:
-                self.stop_manager.clear_message(initial_message_id)
+        # Use unified handler for cancellation support
+        initial_message_id = await self._run_cancellable_response(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            response_coroutine=generate_team_response(),
+            thinking_message="🤝 Team Response: Thinking..." if not existing_event_id else None,
+            existing_event_id=existing_event_id,
+        )
 
 
 @dataclass
