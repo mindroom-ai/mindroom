@@ -719,8 +719,7 @@ class AgentBot:
             thread_history=context.thread_history,
             user_id=event.sender,
         )
-        if response_event_id:
-            self.response_tracker.mark_responded(event.event_id, response_event_id)
+        self.response_tracker.mark_responded(event.event_id, response_event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions."""
@@ -778,8 +777,7 @@ class AgentBot:
             )
             # Mark the original interactive question as responded
             # The response_event_id will be the same as ack_event_id since we're editing
-            if response_event_id:
-                self.response_tracker.mark_responded(event.reacts_to, response_event_id)
+            self.response_tracker.mark_responded(event.reacts_to, response_event_id)
 
     async def _on_voice_message(
         self,
@@ -820,8 +818,7 @@ class AgentBot:
                 thread_id=event_info.thread_id,
             )
             # Mark the voice message as responded with the response event ID
-            if response_event_id:
-                self.response_tracker.mark_responded(event.event_id, response_event_id)
+            self.response_tracker.mark_responded(event.event_id, response_event_id)
         else:
             # Mark as responded even if no transcription (to avoid reprocessing)
             self.response_tracker.mark_responded(event.event_id)
@@ -1023,9 +1020,6 @@ class AgentBot:
             Event ID of the response message, or None if failed
 
         """
-        if not prompt.strip():
-            return None
-
         assert self.client is not None
         room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
