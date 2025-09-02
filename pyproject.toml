@@ -36,17 +36,17 @@ dependencies = [
   "cron-descriptor>=1.4.5",
   "croniter>=6",
   "daytona",                                     # for Daytona tool
+  "ddgs",                                        # for DuckDuckGo tool
   "diskcache>=5.6.3",
   "docker",                                      # for Docker tool
   "duckdb",                                      # for DuckDB tool
-  "duckduckgo-search",                           # for DuckDuckGo tool
   "e2b-code-interpreter",                        # for E2B tool
   "elevenlabs",                                  # for ElevenLabs tool
   "exa-py",                                      # for Exa tool
   "fal-client",                                  # for Fal tool
   "fastapi[standard]>=0.116.1",                  # for widget API and future API endpoints
   "ffmpeg",                                      # for MoviePy tool
-  "firecrawl-py",                                # for Firecrawl tool
+  "firecrawl-py<3",                              # for Firecrawl tool
   "google-api-python-client>=2.178",             # for Google Calendar, Google Sheets, Gmail tools, widget API
   "google-auth>=2.40.3",                         # for Google Calendar, Google Sheets, Gmail tools, widget API
   "google-auth-httplib2>=0.2",                   # for Google Calendar, Google Sheets, Gmail tools, widget API
@@ -124,6 +124,8 @@ scripts.mindroom = "mindroom.cli:main"
 [dependency-groups]
 dev = [
   "aioresponses>=0.7.8",
+  "markdown-code-runner>=2.4",
+  "matty>=0.3",
   "mypy>=1.17",
   "pre-commit>=4.2",
   "pre-commit-uv>=4.1.4",
@@ -199,6 +201,11 @@ addopts = """
     --timeout 60
     --durations 20
 """
+markers = [
+  "requires_matrix: marks tests that require a real Matrix server connection (deselect with '-m \"not requires_matrix\"')",
+  "e2e: marks end-to-end tests",
+  "slow: marks tests as slow",
+]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -221,6 +228,11 @@ warn_unused_ignores = true
 warn_no_return = true
 strict_equality = true
 files = [ "src", "tests" ]
+exclude = [
+  # This test imports modules via the 'src.' prefix which confuses mypy's module discovery.
+  # Keeping it excluded avoids duplicate module errors when running mypy on tests.
+  "tests/test_gemini_integration.py",
+]
 
 [[tool.mypy.overrides]]
 module = "nio.*"
@@ -238,7 +250,28 @@ ignore_missing_imports = true
 module = "agno.*"
 ignore_missing_imports = true
 
-# Enable strict typing for tests too - no shortcuts!
+# Tests: enable strict typing with reasonable exceptions for test mocks
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_missing_imports = true
+disable_error_code = [
+  "no-untyped-def",     # Test functions often don't need full typing
+  "arg-type",           # Mock objects often have incompatible types
+  "assignment",         # Test fixtures often use mocks instead of real types
+  "attr-defined",       # Mocks dynamically add attributes
+  "unused-ignore",      # Some type ignores are needed conditionally
+  "dict-item",          # Test configs use dicts instead of dataclasses
+  "list-item",          # Test data often uses simplified types
+  "union-attr",         # Test error handling checks multiple types
+  "var-annotated",      # Test variables don't always need annotations
+  "return-value",       # Mock return values may differ from real types
+  "no-any-return",      # Mock functions may return Any
+  "operator",           # Test assertions may check optional types
+  "index",              # Tests check various response types
+  "type-var",           # Tests may use complex type variables
+  "comparison-overlap", # Tests may check impossible conditions for coverage
+]
 
 [tool.versioningit]
 default-version = "0.0.0"

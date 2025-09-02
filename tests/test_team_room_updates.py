@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,14 +11,14 @@ import pytest
 from mindroom.bot import MultiAgentOrchestrator
 from mindroom.config import Config
 
-from .conftest import TEST_TMP_DIR
-
 
 class TestTeamRoomUpdates:
     """Test team room configuration updates."""
 
     @pytest.mark.asyncio
-    async def test_team_room_change_triggers_restart(self) -> None:
+    @pytest.mark.requires_matrix  # Requires real Matrix server for team room management
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
+    async def test_team_room_change_triggers_restart(self, tmp_path: Path) -> None:
         """Test that changing a team's room configuration triggers a restart."""
         # Create initial config
         initial_config_data: dict[str, Any] = {
@@ -61,7 +61,7 @@ class TestTeamRoomUpdates:
                     "router": mock_router_user,
                 }
 
-                orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
+                orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
                 with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
                     mock_bot = AsyncMock()
@@ -91,7 +91,9 @@ class TestTeamRoomUpdates:
                     assert mock_create_bot.call_count == 5
 
     @pytest.mark.asyncio
-    async def test_new_team_gets_created(self) -> None:
+    @pytest.mark.requires_matrix  # Requires real Matrix server for team creation
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
+    async def test_new_team_gets_created(self, tmp_path: Path) -> None:
         """Test that a new team in config gets created."""
         # Start with no teams
         initial_config_data: dict[str, Any] = {
@@ -110,7 +112,7 @@ class TestTeamRoomUpdates:
                 mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
                 mock_ensure_users.return_value = {"router": mock_router_user}
 
-                orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
+                orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
                 with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
                     mock_bot = AsyncMock()
@@ -151,7 +153,9 @@ class TestTeamRoomUpdates:
                     assert "new_team" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
-    async def test_no_change_no_restart(self) -> None:
+    @pytest.mark.requires_matrix  # Requires real Matrix server for team configuration
+    @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
+    async def test_no_change_no_restart(self, tmp_path: Path) -> None:
         """Test that no changes in team config doesn't trigger restart."""
         config_data: dict[str, Any] = {
             "agents": {},
@@ -179,7 +183,7 @@ class TestTeamRoomUpdates:
                 mock_router_user = MagicMock(user_id="@router:localhost", agent_name="router")
                 mock_ensure_users.return_value = {"team1": mock_team_user, "router": mock_router_user}
 
-                orchestrator = MultiAgentOrchestrator(storage_path=Path(TEST_TMP_DIR))
+                orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
                 with patch("mindroom.bot.create_bot_for_entity") as mock_create_bot:
                     mock_bot = AsyncMock()

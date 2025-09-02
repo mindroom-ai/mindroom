@@ -1,5 +1,4 @@
 """Tests for agent order preservation in team formation."""
-# ruff: noqa: ANN001, ANN201
 
 from __future__ import annotations
 
@@ -7,7 +6,7 @@ import pytest
 
 from mindroom.config import AgentConfig, Config, DefaultsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.teams import TeamMode, should_form_team
+from mindroom.teams import TeamMode, decide_team_formation
 from mindroom.thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
@@ -16,7 +15,7 @@ from mindroom.thread_utils import (
 
 
 @pytest.fixture
-def mock_config():
+def mock_config() -> Config:
     """Create a mock config for testing."""
     return Config(
         defaults=DefaultsConfig(),
@@ -60,7 +59,7 @@ def mock_config():
 class TestAgentOrderPreservation:
     """Test that agent order is preserved in various functions."""
 
-    def test_get_mentioned_agents_preserves_order(self, mock_config):
+    def test_get_mentioned_agents_preserves_order(self, mock_config: Config) -> None:
         """Test that get_mentioned_agents preserves the order from user_ids."""
         mentions = {
             "user_ids": [
@@ -73,9 +72,11 @@ class TestAgentOrderPreservation:
         agents = get_mentioned_agents(mentions, mock_config)
 
         # Order should be preserved as phone, email, research
-        assert agents == ["phone", "email", "research"]
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in agents]
+        assert agent_names == ["phone", "email", "research"]
 
-    def test_get_agents_in_thread_preserves_order(self, mock_config):
+    def test_get_agents_in_thread_preserves_order(self, mock_config: Config) -> None:
         """Test that get_agents_in_thread preserves order of first participation."""
         thread_history = [
             {"sender": "@mindroom_research:localhost", "content": {"body": "Starting research"}},
@@ -88,9 +89,11 @@ class TestAgentOrderPreservation:
         agents = get_agents_in_thread(thread_history, mock_config)
 
         # Order should be: research, email, phone, analyst (in order of first appearance)
-        assert agents == ["research", "email", "phone", "analyst"]
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in agents]
+        assert agent_names == ["research", "email", "phone", "analyst"]
 
-    def test_get_agents_in_thread_excludes_router(self, mock_config):
+    def test_get_agents_in_thread_excludes_router(self, mock_config: Config) -> None:
         """Test that router agent is excluded from thread participants."""
         thread_history = [
             {"sender": "@mindroom_email:localhost", "content": {"body": "Email"}},
@@ -101,10 +104,12 @@ class TestAgentOrderPreservation:
         agents = get_agents_in_thread(thread_history, mock_config)
 
         # Router should be excluded
-        assert agents == ["email", "phone"]
-        assert ROUTER_AGENT_NAME not in agents
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in agents]
+        assert agent_names == ["email", "phone"]
+        assert ROUTER_AGENT_NAME not in agent_names
 
-    def test_get_all_mentioned_agents_preserves_order(self, mock_config):
+    def test_get_all_mentioned_agents_preserves_order(self, mock_config: Config) -> None:
         """Test that get_all_mentioned_agents_in_thread preserves order of first mention."""
         thread_history = [
             {
@@ -136,9 +141,11 @@ class TestAgentOrderPreservation:
         agents = get_all_mentioned_agents_in_thread(thread_history, mock_config)
 
         # Order should be: phone, email, research, analyst (in order of first mention)
-        assert agents == ["phone", "email", "research", "analyst"]
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in agents]
+        assert agent_names == ["phone", "email", "research", "analyst"]
 
-    def test_no_duplicates_in_mentioned_agents(self, mock_config):
+    def test_no_duplicates_in_mentioned_agents(self, mock_config: Config) -> None:
         """Test that duplicates are removed while preserving order."""
         thread_history = [
             {
@@ -170,15 +177,17 @@ class TestAgentOrderPreservation:
         agents = get_all_mentioned_agents_in_thread(thread_history, mock_config)
 
         # Should have no duplicates, order preserved from first mention
-        assert agents == ["email", "phone", "research"]
-        assert len(agents) == len(set(agents))  # No duplicates
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in agents]
+        assert agent_names == ["email", "phone", "research"]
+        assert len(agent_names) == len(set(agent_names))  # No duplicates
 
-    def test_empty_thread_returns_empty_list(self, mock_config):
+    def test_empty_thread_returns_empty_list(self, mock_config: Config) -> None:
         """Test that empty thread returns empty list."""
         assert get_agents_in_thread([], mock_config) == []
         assert get_all_mentioned_agents_in_thread([], mock_config) == []
 
-    def test_order_matters_for_coordinate_mode(self, mock_config):
+    def test_order_matters_for_coordinate_mode(self, mock_config: Config) -> None:
         """Test that order preservation is important for sequential execution."""
         # Simulate a user message: "@email @phone Send details then call"
         mentions_order1 = {
@@ -194,32 +203,42 @@ class TestAgentOrderPreservation:
         agents2 = get_mentioned_agents(mentions_order2, mock_config)
 
         # Different orders should be preserved
-        assert agents1 == ["email", "phone"]
-        assert agents2 == ["phone", "email"]
-        assert agents1 != agents2  # Order matters!
+        # Convert MatrixID objects to agent names for comparison
+        agent_names1 = [mid.agent_name(mock_config) for mid in agents1]
+        agent_names2 = [mid.agent_name(mock_config) for mid in agents2]
+        assert agent_names1 == ["email", "phone"]
+        assert agent_names2 == ["phone", "email"]
+        assert agent_names1 != agent_names2  # Order matters!
 
 
 class TestIntegrationWithTeamFormation:
     """Test integration with team formation to ensure order flows through."""
 
     @pytest.mark.asyncio
-    async def test_coordinate_mode_respects_order(self, mock_config) -> None:
+    async def test_coordinate_mode_respects_order(self, mock_config: Config) -> None:
         """Test that coordinate mode will execute agents in the preserved order."""
-        # When agents are tagged in specific order
-        tagged_agents = ["phone", "email", "research"]  # User tagged in this order
+        # When agents are tagged in specific order - use MatrixID objects
+        tagged_agents = [
+            mock_config.ids["phone"],
+            mock_config.ids["email"],
+            mock_config.ids["research"],
+        ]  # User tagged in this order
 
-        result = await should_form_team(
+        result = await decide_team_formation(
+            agent=mock_config.ids["email"],  # The agent calling this function
             tagged_agents=tagged_agents,
             agents_in_thread=[],
             all_mentioned_in_thread=[],
-            room=None,  # type: ignore[assignment]
+            room=None,
             message="Call me, then email the details, then research more info",
             config=mock_config,
             use_ai_decision=False,  # Use hardcoded logic for predictable test
         )
 
         # Agents should be in the same order as tagged
-        assert result.agents == ["phone", "email", "research"]
+        # Convert MatrixID objects to agent names for comparison
+        agent_names = [mid.agent_name(mock_config) for mid in result.agents]
+        assert agent_names == ["phone", "email", "research"]
         assert result.mode == TeamMode.COORDINATE  # Multiple tagged = coordinate
 
         # This order should flow through to team execution

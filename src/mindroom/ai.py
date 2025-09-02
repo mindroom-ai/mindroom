@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import os
-import traceback
 from typing import TYPE_CHECKING, Any
 
 import diskcache
@@ -20,10 +19,11 @@ from agno.run.response import (
     ToolCallCompletedEvent,
     ToolCallStartedEvent,
 )
-from dotenv import load_dotenv
 
 from .agents import create_agent
-from .credentials import get_credentials_manager
+from .constants import ENABLE_AI_CACHE
+from .credentials_sync import get_api_key_for_provider, get_ollama_host
+from .error_handling import get_user_friendly_error_message
 from .logging_config import get_logger
 from .memory import build_memory_enhanced_prompt
 
@@ -37,9 +37,6 @@ if TYPE_CHECKING:
     from .config import Config
 
 logger = get_logger(__name__)
-
-load_dotenv()
-ENABLE_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() == "true"
 
 
 def _extract_response_content(response: RunResponse) -> str:
@@ -96,11 +93,14 @@ def _format_tool_completed_message(event: ToolCallCompletedEvent) -> str:
 @functools.cache
 def get_cache(storage_path: Path) -> diskcache.Cache | None:
     """Get or create a cache instance for the given storage path."""
-    return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_CACHE else None
+    return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_AI_CACHE else None
 
 
 def _set_api_key_env_var(provider: str) -> None:
     """Set environment variable for a provider from CredentialsManager.
+
+    Since we sync from .env to CredentialsManager on startup,
+    this will always use the latest keys from .env.
 
     Args:
         provider: Provider name (e.g., 'openai', 'anthropic')
@@ -114,18 +114,20 @@ def _set_api_key_env_var(provider: str) -> None:
         "gemini": "GOOGLE_API_KEY",
         "google": "GOOGLE_API_KEY",
         "cerebras": "CEREBRAS_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "groq": "GROQ_API_KEY",
     }
 
     if provider not in env_vars:
         return
 
-    # Get API key from CredentialsManager
-    creds_manager = get_credentials_manager()
-    api_key = creds_manager.get_api_key(provider)
+    # Get API key from CredentialsManager (which has been synced from .env)
+    api_key = get_api_key_for_provider(provider)
 
     # Set environment variable if key exists
     if api_key:
         os.environ[env_vars[provider]] = api_key
+        logger.debug(f"Set {env_vars[provider]} from CredentialsManager")
 
 
 def get_model_instance(config: Config, model_name: str = "default") -> Model:
@@ -160,13 +162,10 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     extra_kwargs = model_config.extra_kwargs or {}
 
     if provider == "ollama":
-        # For Ollama, also check CredentialsManager for host configuration
-        creds_manager = get_credentials_manager()
-        ollama_creds = creds_manager.load_credentials("ollama")
-        if ollama_creds and "host" in ollama_creds:
-            host = ollama_creds["host"]
-        else:
-            host = model_config.host or "http://localhost:11434"
+        # Priority: model config > env/CredentialsManager > default
+        # This allows per-model host configuration in config.yaml
+        host = model_config.host or get_ollama_host() or "http://localhost:11434"
+        logger.debug(f"Using Ollama host: {host}")
         return Ollama(id=model_id, host=host, **extra_kwargs)
     if provider == "openai":
         return OpenAIChat(id=model_id, **extra_kwargs)
@@ -246,7 +245,7 @@ async def _prepare_agent_and_prompt(
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
     full_prompt = _build_full_prompt(enhanced_prompt, thread_history)
     logger.info("Preparing agent and prompt", agent=agent_name, full_prompt=full_prompt)
-    agent = create_agent(agent_name, storage_path, config)
+    agent = create_agent(agent_name, config)
     return agent, full_prompt
 
 
@@ -275,6 +274,8 @@ async def ai_response(
 
     """
     logger.info("AI request", agent=agent_name)
+
+    # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
     try:
         agent, full_prompt = await _prepare_agent_and_prompt(
             agent_name,
@@ -284,23 +285,22 @@ async def ai_response(
             config,
             thread_history,
         )
-
-        response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
-        response_text = _extract_response_content(response)
     except Exception as e:
-        # AI models can fail for various reasons (network, API limits, etc)
-        logger.exception("Error generating AI response for agent %s", agent_name)
-        logger.exception(f"Full error details - Type: {type(e).__name__}, Agent: {agent_name}, Storage: {storage_path}")
-        logger.exception(
-            f"Session ID: {session_id}, Thread history length: {len(thread_history) if thread_history else 0}",
-        )
-        logger.exception(f"Traceback:\n{traceback.format_exc()}")
-        return f"Sorry, I encountered an error trying to generate a response: {e}"
-    else:
-        return response_text
+        logger.exception("Error preparing agent", agent=agent_name)
+        return get_user_friendly_error_message(e, agent_name)
+
+    # Execute the AI call - this can fail for network, rate limits, etc.
+    try:
+        response = await _cached_agent_run(agent, full_prompt, session_id, agent_name, storage_path)
+    except Exception as e:
+        logger.exception("Error generating AI response", agent=agent_name)
+        return get_user_friendly_error_message(e, agent_name)
+
+    # Extract response content - this shouldn't fail
+    return _extract_response_content(response)
 
 
-async def ai_response_streaming(  # noqa: C901
+async def stream_agent_response(  # noqa: C901, PLR0912
     agent_name: str,
     prompt: str,
     session_id: str,
@@ -329,15 +329,22 @@ async def ai_response_streaming(  # noqa: C901
     """
     logger.info("AI streaming request", agent=agent_name)
 
-    agent, full_prompt = await _prepare_agent_and_prompt(
-        agent_name,
-        prompt,
-        storage_path,
-        room_id,
-        config,
-        thread_history,
-    )
+    # Prepare agent and prompt - this can fail if agent creation fails
+    try:
+        agent, full_prompt = await _prepare_agent_and_prompt(
+            agent_name,
+            prompt,
+            storage_path,
+            room_id,
+            config,
+            thread_history,
+        )
+    except Exception as e:
+        logger.exception("Error preparing agent for streaming", agent=agent_name)
+        yield get_user_friendly_error_message(e, agent_name)
+        return
 
+    # Check cache (this shouldn't fail)
     cache = get_cache(storage_path)
     if cache is not None:
         model = agent.model
@@ -352,8 +359,16 @@ async def ai_response_streaming(  # noqa: C901
 
     full_response = ""
 
+    # Execute the streaming AI call - this can fail for network, rate limits, etc.
     try:
         stream_generator = await agent.arun(full_prompt, session_id=session_id, stream=True)
+    except Exception as e:
+        logger.exception("Error starting streaming AI response")
+        yield get_user_friendly_error_message(e, agent_name)
+        return
+
+    # Process the stream events
+    try:
         async for event in stream_generator:
             if isinstance(event, RunResponseContentEvent) and event.content:
                 chunk_text = str(event.content)
@@ -371,11 +386,9 @@ async def ai_response_streaming(  # noqa: C901
                     yield result_msg
             else:
                 logger.warning(f"Unhandled event type: {type(event).__name__} - {event}")
-
     except Exception as e:
-        logger.exception("Error generating streaming AI response")
-        error_message = f"Sorry, I encountered an error trying to generate a response: {e}"
-        yield error_message
+        logger.exception("Error during streaming AI response")
+        yield get_user_friendly_error_message(e, agent_name)
         return
 
     if cache is not None and full_response:

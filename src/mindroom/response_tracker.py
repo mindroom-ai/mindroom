@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .constants import TRACKING_DIR
 from .logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -29,16 +30,14 @@ class ResponseTracker:
     """Track which event IDs have been responded to by an agent."""
 
     agent_name: str
-    base_path: Path
+    base_path: Path = TRACKING_DIR
     _responded_events: dict[str, float] = field(default_factory=dict, init=False)
     _responses_file: Path = field(init=False)
-    _store_path: Path = field(init=False)
 
     def __post_init__(self) -> None:
         """Initialize paths and load existing responses."""
-        self._store_path = self.base_path / "response_tracking" / self.agent_name
-        self._store_path.mkdir(parents=True, exist_ok=True)
-        self._responses_file = self._store_path / "responded_events.json"
+        self.base_path.mkdir(parents=True, exist_ok=True)
+        self._responses_file = self.base_path / f"{self.agent_name}_responded.json"
         self._responded_events = self._load_responded_events()
         # Perform automatic cleanup on initialization
         self.cleanup_old_events()

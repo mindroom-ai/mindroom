@@ -8,15 +8,34 @@ codebase.
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Agent names
 ROUTER_AGENT_NAME = "router"
 
 # Default path to agents configuration file
 DEFAULT_AGENTS_CONFIG = Path(__file__).parent.parent.parent / "config.yaml"
 
-# Use storage path if available, otherwise current directory
-STORAGE_PATH = os.getenv("STORAGE_PATH", ".")
-MATRIX_STATE_FILE = Path(STORAGE_PATH) / "matrix_state.yaml"
+STORAGE_PATH = os.getenv("STORAGE_PATH", "mindroom_data")
+STORAGE_PATH_OBJ = Path(STORAGE_PATH)
+
+# Specific files and directories
+MATRIX_STATE_FILE = STORAGE_PATH_OBJ / "matrix_state.yaml"
+SESSIONS_DIR = STORAGE_PATH_OBJ / "sessions"
+TRACKING_DIR = STORAGE_PATH_OBJ / "tracking"
+MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
+CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
+ENCRYPTION_KEYS_DIR = STORAGE_PATH_OBJ / "encryption_keys"
 
 # Other constants
 VOICE_PREFIX = "🎤 "
+ENABLE_STREAMING = os.getenv("MINDROOM_ENABLE_STREAMING", "true").lower() != "false"
+ENABLE_AI_CACHE = os.getenv("ENABLE_AI_CACHE", "true").lower() != "false"
+
+# Matrix
+MATRIX_HOMESERVER = os.getenv("MATRIX_HOMESERVER", "http://localhost:8008")
+# (for federation setups where hostname != server_name)
+MATRIX_SERVER_NAME = os.getenv("MATRIX_SERVER_NAME", None)
+MATRIX_SSL_VERIFY = os.getenv("MATRIX_SSL_VERIFY", "true").lower() != "false"

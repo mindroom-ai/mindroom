@@ -13,19 +13,19 @@ def test_command_parser_with_voice_emoji() -> None:
     assert command.type == CommandType.SCHEDULE
     assert command.args["full_text"] == "in 10 minutes turn off lights"
 
-    # Microphone emoji with invite command
-    command = command_parser.parse("🎤 !invite calculator")
+    # Microphone emoji with help command
+    command = command_parser.parse("🎤 !help schedule")
     assert command is not None
-    assert command.type == CommandType.INVITE
-    assert command.args["agent_name"] == "calculator"
+    assert command.type == CommandType.HELP
+    assert command.args["topic"] == "schedule"
 
 
 def test_command_parser_without_emoji() -> None:
     """Test that normal commands still work."""
-    command = command_parser.parse("!invite calculator")
+    command = command_parser.parse("!help")
     assert command is not None
-    assert command.type == CommandType.INVITE
-    assert command.args["agent_name"] == "calculator"
+    assert command.type == CommandType.HELP
+    assert command.args["topic"] is None
 
     command = command_parser.parse("!schedule tomorrow meeting")
     assert command is not None
@@ -40,5 +40,5 @@ def test_non_commands_with_emoji() -> None:
     assert command is None
 
     # Voice emoji with text that looks like a command but isn't
-    command = command_parser.parse("🎤 invite someone to the party")
+    command = command_parser.parse("🎤 help with something")
     assert command is None

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import nio
 
 from mindroom.logging_config import get_logger
+from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
 from .client import check_and_set_avatar, create_room, join_room, matrix_client
 from .identity import MatrixID, extract_server_name_from_homeserver
@@ -16,6 +18,19 @@ if TYPE_CHECKING:
     from mindroom.config import Config
 
 logger = get_logger(__name__)
+
+
+def room_key_to_name(room_key: str) -> str:
+    """Convert a room key to a human-readable room name.
+
+    Args:
+        room_key: The room key (e.g., 'dev', 'analysis_room')
+
+    Returns:
+        Human-readable room name (e.g., 'Dev', 'Analysis Room')
+
+    """
+    return room_key.replace("_", " ").title()
 
 
 def load_rooms() -> dict[str, MatrixRoom]:
@@ -85,9 +100,10 @@ def get_room_alias_from_id(room_id: str) -> str | None:
     return None
 
 
-async def ensure_room_exists(
+async def ensure_room_exists(  # noqa: C901
     client: nio.AsyncClient,
     room_key: str,
+    config: Config,
     room_name: str | None = None,
     power_users: list[str] | None = None,
 ) -> str | None:
@@ -96,6 +112,7 @@ async def ensure_room_exists(
     Args:
         client: Matrix client to use for room creation
         room_key: The room key/alias (without domain)
+        config: Configuration with agent settings for topic generation
         room_name: Display name for the room (defaults to room_key with underscores replaced)
         power_users: List of user IDs to grant power levels to
 
@@ -118,12 +135,16 @@ async def ensure_room_exists(
         # Update our state if needed
         if room_key not in existing_rooms or existing_rooms[room_key].room_id != room_id:
             if room_name is None:
-                room_name = room_key.replace("_", " ").title()
+                room_name = room_key_to_name(room_key)
             add_room(room_key, room_id, full_alias, room_name)
             logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
 
         # Try to join the room
         if await join_room(client, room_id):
+            # For existing rooms, ensure they have a topic set
+            if room_name is None:
+                room_name = room_key_to_name(room_key)
+            await ensure_room_has_topic(client, room_id, room_key, room_name, config)
             return str(room_id)
         # Room exists but we can't join - this means the room was created
         # but this user isn't a member. Return the room ID anyway since
@@ -139,15 +160,17 @@ async def ensure_room_exists(
 
     # Create the room
     if room_name is None:
-        room_name = room_key.replace("_", " ").title()
+        room_name = room_key_to_name(room_key)
 
-    logger.info(f"Creating room {room_key}")
+    # Generate a contextual topic for the room using AI
+    topic = await generate_room_topic_ai(room_key, room_name, config)
+    logger.info(f"Creating room {room_key} with topic: {topic}")
 
     created_room_id = await create_room(
         client=client,
         name=room_name,
         alias=room_key,
-        topic=f"Mindroom {room_name}",
+        topic=topic,
         power_users=power_users or [],
     )
 
@@ -158,8 +181,6 @@ async def ensure_room_exists(
 
         # Set room avatar if available (for newly created rooms)
         # Note: Avatars can also be updated later using scripts/generate_avatars.py
-        from pathlib import Path  # noqa: PLC0415
-
         avatar_path = Path(__file__).parent.parent.parent.parent / "avatars" / "rooms" / f"{room_key}.png"
         if avatar_path.exists():
             if await check_and_set_avatar(client, avatar_path, room_id=created_room_id):
@@ -200,12 +221,13 @@ async def ensure_all_rooms_exist(
             continue
 
         # Get power users for this room
-        power_users = get_agent_ids_for_room(room_key, config, client.homeserver)
+        power_users = get_agent_ids_for_room(room_key, config)
 
         # Ensure room exists
         room_id = await ensure_room_exists(
             client=client,
             room_key=room_key,
+            config=config,
             power_users=power_users,
         )
 
@@ -215,10 +237,7 @@ async def ensure_all_rooms_exist(
     return room_ids
 
 
-async def ensure_user_in_rooms(
-    homeserver: str,
-    room_ids: dict[str, str],
-) -> None:
+async def ensure_user_in_rooms(homeserver: str, room_ids: dict[str, str]) -> None:
     """Ensure the user account is a member of all specified rooms.
 
     Args:

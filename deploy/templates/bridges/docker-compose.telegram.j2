@@ -1,0 +1,18 @@
+services:
+  telegram:
+    container_name: {{ instance_name }}-telegram-bridge
+    image: dock.mau.dev/mautrix/telegram:latest
+    networks:
+      - {{ instance_name }}_mindroom-network
+      - mynetwork
+    ports:
+      - "{{ port }}:29317"
+    restart: unless-stopped
+    volumes:
+      - {{ data_dir }}/data:/data
+
+networks:
+  {{ instance_name }}_mindroom-network:
+    external: true
+  mynetwork:
+    external: true

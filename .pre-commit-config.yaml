@@ -25,10 +25,17 @@ repos:
         entry: .venv/bin/mypy
         language: system
         types: [python]
-        files: ^src/|^matrix-ai-minimal/
+        files: ^(src/|tests/)
         exclude: docs/source/conf.py
         pass_filenames: false
-        args: [src]
+        args: [src, tests]
+
+      - id: update-readme-docs
+        name: Update README documentation
+        entry: .venv/bin/markdown-code-runner README.md
+        language: system
+        pass_filenames: false
+        files: ^(src/mindroom/commands\.py|README\.md)$
 
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.6.0"

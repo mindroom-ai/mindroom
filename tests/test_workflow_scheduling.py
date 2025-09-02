@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-from mindroom.scheduling import schedule_task
-from mindroom.workflow_scheduling import (
+from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
     WorkflowParseError,
     execute_scheduled_workflow,
     parse_workflow_schedule,
+    schedule_task,
 )
 
 
@@ -92,8 +92,8 @@ class TestScheduledWorkflow:
 class TestParseWorkflowSchedule:
     """Test parse_workflow_schedule function."""
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_parse_research_email_workflow(
         self,
         mock_agent_class: Mock,
@@ -117,6 +117,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "Every Monday at 9am, research AI news and email me a summary",
             config=mock_config,
+            available_agents=["research", "email_assistant"],
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -125,8 +126,8 @@ class TestParseWorkflowSchedule:
         assert "@research" in result.message
         assert "@email_assistant" in result.message
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_parse_simple_reminder(
         self,
         mock_agent_class: Mock,
@@ -148,14 +149,15 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "ping me in 5 minutes to check the deployment",
             config=mock_config,
+            available_agents=["general"],  # At least one agent required
         )
 
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "once"
         assert result.message == "Check the deployment status"
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_parse_daily_task(self, mock_agent_class: Mock, mock_get_model: Mock, mock_config: MagicMock) -> None:  # noqa: ARG002
         """Test parsing daily recurring task."""
         mock_agent = AsyncMock()
@@ -172,6 +174,7 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "Daily at 9am, give me a market analysis",
             config=mock_config,
+            available_agents=["finance"],  # Finance agent available
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -179,8 +182,8 @@ class TestParseWorkflowSchedule:
         assert result.cron_schedule.to_cron_string() == "0 9 * * *"
         assert "@finance" in result.message
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_parse_error_handling(
         self,
         mock_agent_class: Mock,
@@ -195,11 +198,55 @@ class TestParseWorkflowSchedule:
         result = await parse_workflow_schedule(
             "Schedule something",
             config=mock_config,
+            available_agents=["general"],  # At least one agent required
         )
 
         assert isinstance(result, WorkflowParseError)
         assert "Error parsing schedule" in result.error
         assert result.suggestion is not None
+
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
+    async def test_parse_missing_fields_fallbacks(
+        self,
+        mock_agent_class: Mock,
+        mock_get_model: Mock,  # noqa: ARG002
+        mock_config: MagicMock,
+    ) -> None:
+        """Missing execute_at/cron_schedule fields get sensible defaults."""
+        mock_agent = AsyncMock()
+
+        # once without execute_at
+        resp_once = MagicMock()
+        resp_once.content = ScheduledWorkflow(
+            schedule_type="once",
+            execute_at=None,
+            message="Check",
+            description="Check later",
+        )
+
+        # cron without cron_schedule
+        resp_cron = MagicMock()
+        resp_cron.content = ScheduledWorkflow(
+            schedule_type="cron",
+            cron_schedule=None,
+            message="Daily",
+            description="Daily task",
+        )
+
+        # Alternate responses
+        mock_agent.arun.side_effect = [resp_once, resp_cron]
+        mock_agent_class.return_value = mock_agent
+
+        result_once = await parse_workflow_schedule("remind me later", mock_config, ["general"])
+        assert isinstance(result_once, ScheduledWorkflow)
+        assert result_once.schedule_type == "once"
+        assert result_once.execute_at is not None
+
+        result_cron = await parse_workflow_schedule("every day", mock_config, ["general"])
+        assert isinstance(result_cron, ScheduledWorkflow)
+        assert result_cron.schedule_type == "cron"
+        assert result_cron.cron_schedule is not None
 
 
 @pytest.mark.asyncio
@@ -224,7 +271,7 @@ class TestExecuteScheduledWorkflow:
 
         # Verify message was sent
 
-        with patch("mindroom.workflow_scheduling.send_message", new=AsyncMock()) as mock_send:
+        with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
             await execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_called_once()
 
@@ -249,7 +296,7 @@ class TestExecuteScheduledWorkflow:
             room_id="!room:server",
         )
 
-        with patch("mindroom.workflow_scheduling.send_message", new=AsyncMock()) as mock_send:
+        with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
             await execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_called_once()
 
@@ -275,7 +322,7 @@ class TestExecuteScheduledWorkflow:
         # Mock send_message to raise an error only on the first call
         mock_send = AsyncMock(side_effect=[Exception("Send failed"), None])
 
-        with patch("mindroom.workflow_scheduling.send_message", new=mock_send):
+        with patch("mindroom.scheduling.send_message", new=mock_send):
             # Should not raise, but log error
             await execute_scheduled_workflow(client, workflow, config)
 
@@ -299,7 +346,7 @@ class TestExecuteScheduledWorkflow:
             room_id=None,  # No room ID
         )
 
-        with patch("mindroom.workflow_scheduling.send_message", new=AsyncMock()) as mock_send:
+        with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
             await execute_scheduled_workflow(client, workflow, config)
             mock_send.assert_not_called()
 
@@ -348,15 +395,40 @@ class TestIntegrationWithScheduling:
             description="Daily AI research",
         )
 
+        # Create a proper config with the research agent configured for the room
+        import nio  # noqa: PLC0415
+
+        from mindroom.config import AgentConfig, Config, RouterConfig  # noqa: PLC0415
+
+        config = Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Research agent",
+                    rooms=["!room:server"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        # Create a mock room with research agent using the correct MatrixID
+        room = nio.MatrixRoom("!room:server", "@bot:server")
+        research_matrix_id = config.ids["research"].full_id
+        room.users[research_matrix_id] = nio.RoomMember(
+            user_id=research_matrix_id,
+            display_name="Research",
+            avatar_url=None,
+        )
+
         with patch("mindroom.scheduling.run_cron_task", new=AsyncMock()):
             task_id, message = await schedule_task(
                 client=client,
                 room_id="!room:server",
                 thread_id="$thread123",
-                agent_user_id="@bot:server",
                 scheduled_by="@user:server",
                 full_text="Daily at 9am, research AI news",
-                config=MagicMock(),
+                config=config,
+                room=room,
             )
 
             assert task_id is not None

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -11,14 +11,12 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
-from mindroom.thread_invites import ThreadInviteManager
 
-from .conftest import TEST_PASSWORD, TEST_TMP_DIR
+from .conftest import TEST_PASSWORD
 
 
 @pytest.mark.asyncio
-async def test_unknown_command_in_main_room() -> None:
+async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     """Test that unknown commands get a helpful error response in main room."""
     # Create config
     config = Config(
@@ -44,7 +42,7 @@ async def test_unknown_command_in_main_room() -> None:
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -52,13 +50,16 @@ async def test_unknown_command_in_main_room() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
-    bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
     room.name = "Test Room"
+    room.users = {
+        "@mindroom_router:localhost": None,
+        "@mindroom_general:localhost": None,
+        "@user:localhost": None,
+    }
 
     event = MagicMock(spec=nio.RoomMessageText)
     event.event_id = "$test_event"
@@ -108,7 +109,7 @@ async def test_unknown_command_in_main_room() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_command_in_thread() -> None:
+async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     """Test that unknown commands get a helpful error response when in a thread."""
     # Create config
     config = Config(
@@ -134,7 +135,7 @@ async def test_unknown_command_in_thread() -> None:
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -142,13 +143,16 @@ async def test_unknown_command_in_thread() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
-    bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
     room.name = "Test Room"
+    room.users = {
+        "@mindroom_router:localhost": None,
+        "@mindroom_general:localhost": None,
+        "@user:localhost": None,
+    }
 
     # Create an event that's already in a thread
     event = MagicMock(spec=nio.RoomMessageText)
@@ -220,7 +224,7 @@ async def test_unknown_command_in_thread() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_command_with_reply() -> None:
+async def test_unknown_command_with_reply(tmp_path: Path) -> None:
     """Test that unknown commands work when replying to another message."""
     # Create config
     config = Config(
@@ -246,7 +250,7 @@ async def test_unknown_command_with_reply() -> None:
     bot = AgentBot(
         agent_user=agent_user,
         config=config,
-        storage_path=Path(TEST_TMP_DIR),
+        storage_path=tmp_path,
         enable_streaming=False,
         rooms=["!test:localhost"],  # Make sure bot knows it's in this room
     )
@@ -254,13 +258,16 @@ async def test_unknown_command_with_reply() -> None:
     # Mock client and initialize required components
     bot.client = AsyncMock()
     bot.client.user_id = "@mindroom_router:localhost"
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=Path(TEST_TMP_DIR))
-    bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
     # Create mock room and event
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:localhost"
     room.name = "Test Room"
+    room.users = {
+        "@mindroom_router:localhost": None,
+        "@mindroom_general:localhost": None,
+        "@user:localhost": None,
+    }
 
     # Create an event that's a reply to another message
     event = MagicMock(spec=nio.RoomMessageText)

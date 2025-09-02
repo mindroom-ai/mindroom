@@ -16,8 +16,10 @@ from mindroom.api.credentials import router as credentials_router
 from mindroom.api.google_integration import router as google_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
 from mindroom.api.integrations import router as integrations_router
+from mindroom.api.matrix_operations import router as matrix_router
 from mindroom.api.tools import router as tools_router
 from mindroom.config import Config
+from mindroom.credentials_sync import sync_env_to_credentials
 
 # Load environment variables from .env file
 # Look for .env in the widget directory (parent of backend)
@@ -100,6 +102,7 @@ app.include_router(credentials_router)
 app.include_router(google_router)
 app.include_router(homeassistant_router)
 app.include_router(integrations_router)
+app.include_router(matrix_router)
 app.include_router(tools_router)
 
 
@@ -114,6 +117,10 @@ async def startup_event() -> None:
     """Initialize the application."""
     print(f"Loading config from: {CONFIG_PATH}")
     print(f"Config exists: {CONFIG_PATH.exists()}")
+
+    # Sync API keys from environment to CredentialsManager
+    print("Syncing API keys from environment to CredentialsManager...")
+    sync_env_to_credentials()
 
 
 @app.on_event("shutdown")

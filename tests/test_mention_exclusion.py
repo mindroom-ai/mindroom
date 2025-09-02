@@ -49,11 +49,6 @@ async def test_agent_ignores_user_message_mentioning_other_agents() -> None:
     general_bot.response_tracker = Mock()
     general_bot.response_tracker.has_responded = Mock(return_value=False)
 
-    # Mock thread invite manager
-    general_bot.thread_invite_manager = AsyncMock()
-    general_bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
-    general_bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
-
     # Create a test room
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_general:localhost")
 
@@ -124,11 +119,6 @@ async def test_agent_responds_when_mentioned_along_with_others() -> None:
     general_bot.response_tracker = Mock()
     general_bot.response_tracker.has_responded = Mock(return_value=False)
 
-    # Mock thread invite manager
-    general_bot.thread_invite_manager = AsyncMock()
-    general_bot.thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
-    general_bot.thread_invite_manager.is_agent_invited_to_thread = AsyncMock(return_value=False)
-
     # Create a test room
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_general:localhost")
 
@@ -157,9 +147,9 @@ async def test_agent_responds_when_mentioned_along_with_others() -> None:
     with patch("mindroom.bot.fetch_thread_history") as mock_fetch_history:
         mock_fetch_history.return_value = []
 
-        # Mock should_form_team to return False (no team formation)
-        with patch("mindroom.bot.should_form_team") as mock_should_form_team:
-            mock_should_form_team.return_value = Mock(should_form_team=False, agents=[], mode=None)
+        # Mock decide_team_formation to return False (no team formation)
+        with patch("mindroom.bot.decide_team_formation") as mock_decide_team_formation:
+            mock_decide_team_formation.return_value = Mock(decide_team_formation=False, agents=[], mode=None)
 
             # Mock the generate_response method to track if it's called
             with patch.object(general_bot, "_generate_response") as mock_generate:

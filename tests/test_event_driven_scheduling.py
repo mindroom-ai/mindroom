@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from mindroom.workflow_scheduling import (
+from mindroom.scheduling import (
     CronSchedule,
     ScheduledWorkflow,
     parse_workflow_schedule,
@@ -40,8 +40,8 @@ def mock_config() -> MagicMock:
 class TestEventDrivenScheduling:
     """Test event-driven scheduling conversions."""
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_email_urgent_event(
         self,
         mock_agent_class: MagicMock,
@@ -69,6 +69,7 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "If I get an email about 'urgent', call me",
             mock_config,
+            available_agents=["email_assistant", "phone_agent"],
         )
 
         # Verify the result is a workflow (not an error)
@@ -82,8 +83,8 @@ class TestEventDrivenScheduling:
         assert "if" in call_args.lower()
         assert "polling" in call_args.lower()
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_bitcoin_price_event(
         self,
         mock_agent_class: MagicMock,
@@ -110,14 +111,15 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "When Bitcoin drops below $40k, notify me",
             mock_config,
+            available_agents=["crypto_agent", "notification_agent"],  # Agents for this workflow
         )
 
         # Verify
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_server_monitoring_event(
         self,
         mock_agent_class: MagicMock,
@@ -144,14 +146,15 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "If server CPU goes above 80%, scale up",
             mock_config,
+            available_agents=["monitoring_agent", "ops_agent"],
         )
 
         # Verify
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_build_failure_event(
         self,
         mock_agent_class: MagicMock,
@@ -178,14 +181,15 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "When the build fails, create a ticket",
             mock_config,
+            available_agents=["ci_agent", "ticket_agent"],
         )
 
         # Verify
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_reddit_mention_event(
         self,
         mock_agent_class: MagicMock,
@@ -212,14 +216,15 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "When someone mentions our product on Reddit, analyze it",
             mock_config,
+            available_agents=["reddit_agent", "analyst"],
         )
 
         # Verify
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_boss_email_immediate_event(
         self,
         mock_agent_class: MagicMock,
@@ -246,14 +251,15 @@ class TestEventDrivenScheduling:
         result = await parse_workflow_schedule(
             "Whenever I get an email from my boss, notify me immediately",
             mock_config,
+            available_agents=["email_assistant", "notification_agent"],
         )
 
         # Verify
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "cron"
 
-    @patch("mindroom.workflow_scheduling.get_model_instance")
-    @patch("mindroom.workflow_scheduling.Agent")
+    @patch("mindroom.scheduling.get_model_instance")
+    @patch("mindroom.scheduling.Agent")
     async def test_prompt_includes_event_examples(
         self,
         mock_agent_class: MagicMock,
@@ -281,6 +287,7 @@ class TestEventDrivenScheduling:
         await parse_workflow_schedule(
             "Test request",
             mock_config,
+            available_agents=["test_agent"],  # Need at least one agent
         )
 
         # Verify the prompt contains event-driven guidance

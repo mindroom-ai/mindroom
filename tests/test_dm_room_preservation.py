@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path  # noqa: TC003
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,14 +13,14 @@ from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
-from tests.conftest import TEST_PASSWORD, TEST_TMP_DIR
+from tests.conftest import TEST_PASSWORD
 
 
 @pytest.mark.asyncio
 class TestDMPreservationDuringCleanup:
     """Test that DM rooms are preserved during various cleanup operations."""
 
-    async def test_agent_cleanup_preserves_dm_rooms(self) -> None:
+    async def test_agent_cleanup_preserves_dm_rooms(self, tmp_path: Path) -> None:
         """Test that AgentBot.cleanup() preserves DM rooms when DMs are enabled."""
         # Create config with DMs enabled
         config = Config(
@@ -42,7 +43,7 @@ class TestDMPreservationDuringCleanup:
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=TEST_TMP_DIR,
+            storage_path=tmp_path,
             config=config,
             rooms=["!regular:server", "!another:server"],
         )
@@ -76,7 +77,7 @@ class TestDMPreservationDuringCleanup:
             bot.logger.debug.assert_any_call("Preserving DM room !dm:server during cleanup")
             bot.logger.debug.assert_any_call("Preserving DM room !otherdm:server during cleanup")
 
-    async def test_agent_cleanup_leaves_all_rooms(self) -> None:
+    async def test_agent_cleanup_leaves_all_rooms(self, tmp_path: Path) -> None:
         """Test that AgentBot.cleanup() leaves all non-DM rooms."""
         # Create config
         config = Config(
@@ -99,7 +100,7 @@ class TestDMPreservationDuringCleanup:
 
         bot = AgentBot(
             agent_user=agent_user,
-            storage_path=TEST_TMP_DIR,
+            storage_path=tmp_path,
             config=config,
             rooms=["!configured:server"],  # Only one configured room
         )
@@ -127,7 +128,7 @@ class TestDMPreservationDuringCleanup:
             assert "!unconfigured1:server" in leave_calls
             assert "!unconfigured2:server" in leave_calls
 
-    async def test_orphaned_bot_cleanup_skips_dm_rooms(self) -> None:
+    async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path) -> None:  # noqa: ARG002
         """Test that orphaned bot cleanup skips DM rooms (unconfigured rooms) when DM mode is enabled."""
         client = AsyncMock()
         config = Config(
@@ -138,8 +139,6 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
-        thread_invite_manager = MagicMock()
-
         # Mock a room with no configured bots (DM room)
         with patch(
             "mindroom.config.Config.get_configured_bots_for_room",
@@ -149,7 +148,6 @@ class TestDMPreservationDuringCleanup:
                 client,
                 "!dm:server",
                 config,
-                thread_invite_manager,
             )
 
             # Should not kick anyone from DM room
@@ -157,7 +155,7 @@ class TestDMPreservationDuringCleanup:
             # Should not even try to kick
             assert not client.room_kick.called
 
-    async def test_orphaned_bot_cleanup_processes_regular_rooms(self) -> None:
+    async def test_orphaned_bot_cleanup_processes_regular_rooms(self, tmp_path: Path) -> None:  # noqa: ARG002
         """Test that orphaned bot cleanup processes rooms when DM mode is disabled."""
         client = AsyncMock()
         config = Config(
@@ -168,9 +166,6 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
-        thread_invite_manager = MagicMock()
-        thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
-
         # Mock room members - includes an orphaned bot
         members = ["@user:server", "@mindroom_orphaned:server", "@mindroom_configured_agent:server"]
 
@@ -194,7 +189,6 @@ class TestDMPreservationDuringCleanup:
                 client,
                 "!regular:server",
                 config,
-                thread_invite_manager,
             )
 
             # Should kick the orphaned bot
@@ -205,7 +199,7 @@ class TestDMPreservationDuringCleanup:
                 reason="Bot no longer configured for this room",
             )
 
-    async def test_cleanup_all_orphaned_bots_respects_dm_rooms(self) -> None:
+    async def test_cleanup_all_orphaned_bots_respects_dm_rooms(self, tmp_path: Path) -> None:  # noqa: ARG002
         """Test that cleanup_all_orphaned_bots respects DM rooms when DM mode is enabled."""
         client = AsyncMock()
         config = Config(
@@ -216,7 +210,6 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
-        thread_invite_manager = MagicMock()
 
         # Mock joined rooms - mix of configured and DM rooms
         joined_rooms = ["!configured:server", "!dm:server", "!another_dm:server"]
@@ -248,9 +241,7 @@ class TestDMPreservationDuringCleanup:
             patch("mindroom.room_cleanup.is_dm_room", side_effect=mock_is_dm_room),
         ):
             client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
-            thread_invite_manager.get_agent_threads = AsyncMock(return_value=[])
-
-            result = await cleanup_all_orphaned_bots(client, config, thread_invite_manager)
+            result = await cleanup_all_orphaned_bots(client, config)
 
             # Should process configured room but skip DM rooms
             assert "!configured:server" in result

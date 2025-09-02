@@ -15,8 +15,6 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
-from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD
 
@@ -29,12 +27,12 @@ class TestRoutingIntegration:
     """Integration tests for routing behavior with multiple agents."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     @patch("mindroom.bot.suggest_agent_for_message")
     async def test_real_scenario_research_channel(
         self,
         mock_suggest_agent: AsyncMock,
-        mock_ai_response_streaming: AsyncMock,
+        mock_stream_agent_response: AsyncMock,
         tmp_path: Path,
     ) -> None:
         """Test the exact scenario reported: MindRoomResearch mentioned in research channel.
@@ -47,7 +45,7 @@ class TestRoutingIntegration:
         async def streaming_generator() -> AsyncIterator[str]:
             yield "I am MindRoomResearch and I can help with research tasks"
 
-        mock_ai_response_streaming.return_value = streaming_generator()
+        mock_stream_agent_response.return_value = streaming_generator()
 
         # Create agents
         research_agent = AgentMatrixUser(
@@ -84,13 +82,11 @@ class TestRoutingIntegration:
             config=config,
         )
 
-        news_bot = AgentBot(news_agent, tmp_path, rooms=["!research:localhost"], enable_streaming=True, config=config)
+        news_bot = AgentBot(news_agent, tmp_path, config, rooms=["!research:localhost"], enable_streaming=True)
 
         # Mock clients
         for bot in [research_bot, news_bot]:
             bot.client = AsyncMock()
-            bot.response_tracker = ResponseTracker(bot.agent_name, base_path=tmp_path)
-            bot.thread_invite_manager = ThreadInviteManager(bot.client)
 
             # Mock orchestrator
             mock_orchestrator = MagicMock()

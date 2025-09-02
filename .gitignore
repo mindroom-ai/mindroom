@@ -176,6 +176,9 @@ cython_debug/
 agent_storage/
 *.db
 
+# MindRoom data directory (persistent state)
+mindroom_data/
+
 # Temporary files
 tmp/
 temp/
@@ -190,6 +193,9 @@ logs/
 
 # Matrix state files (contain sensitive data)
 matrix_state.yaml
+
+# Matrix encryption keys (contain sensitive data)
+.nio_store/
 
 # Vite cache
 frontend/.vite/
@@ -220,3 +226,4 @@ frontend/node_modules/
 deploy/instances.json
 deploy/.env.*
 deploy/instance_data/
+deploy/bridge_instances.json

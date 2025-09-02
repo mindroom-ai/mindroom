@@ -14,7 +14,6 @@ from .matrix.identity import MatrixID
 
 if TYPE_CHECKING:
     from .config import Config
-    from .thread_invites import ThreadInviteManager
 
 logger = get_logger(__name__)
 
@@ -28,25 +27,19 @@ class AgentSuggestion(BaseModel):
 
 async def suggest_agent_for_message(
     message: str,
-    available_agents: list[str],
+    available_agents: list[MatrixID],
     config: Config,
     thread_context: list[dict[str, Any]] | None = None,
-    thread_id: str | None = None,
-    room_id: str | None = None,
-    thread_invite_manager: ThreadInviteManager | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message."""
     try:
-        # If we have a thread_id and room_id, include invited agents
-        if thread_id and room_id and thread_invite_manager:
-            invited_agents = await thread_invite_manager.get_thread_agents(thread_id, room_id)
-            # Combine available and invited agents (deduplicated)
-            all_agents = list(set(available_agents + invited_agents))
-        else:
-            all_agents = available_agents
+        # The available_agents list already contains only configured agents
+        agent_names = [mid.agent_name(config) for mid in available_agents]
+
         # Build agent descriptions
         agent_descriptions = []
-        for agent_name in all_agents:
+        for agent_name in agent_names:
+            assert agent_name is not None
             description = describe_agent(agent_name, config)
             agent_descriptions.append(f"{agent_name}:\n  {description}")
 
@@ -101,13 +94,13 @@ Choose the most appropriate agent based on their role, tools, and instructions."
             return None
 
         # The AI should only suggest agents from the available list
-        if suggestion.agent_name not in all_agents:
-            logger.warning("AI suggested invalid agent", suggested=suggestion.agent_name, available=all_agents)
+        if suggestion.agent_name not in agent_names:
+            logger.warning("AI suggested invalid agent", suggested=suggestion.agent_name, available=agent_names)
             return None
 
         logger.info("Routing decision", agent=suggestion.agent_name, reason=suggestion.reasoning)
-    except (KeyError, ValueError) as e:
-        # Only catch specific errors that we expect from AI response parsing
+    except Exception as e:
+        # Log error and return None - the router will fall back to not routing
         logger.exception("Routing failed", error=str(e))
         return None
     else:

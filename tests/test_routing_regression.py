@@ -14,10 +14,8 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config import AgentConfig, Config, ModelConfig
+from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.response_tracker import ResponseTracker
-from mindroom.thread_invites import ThreadInviteManager
 
 from .conftest import TEST_PASSWORD
 
@@ -30,14 +28,14 @@ def setup_test_bot(
     storage_path: Path,
     room_id: str,
     enable_streaming: bool = False,
+    config: Config | None = None,
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
-    config = Config.from_yaml()
+    if config is None:
+        config = Config.from_yaml()
 
     bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()
-    bot.response_tracker = ResponseTracker(bot.agent_name, base_path=storage_path)
-    bot.thread_invite_manager = ThreadInviteManager(bot.client)
     return bot
 
 
@@ -146,6 +144,24 @@ class TestRoutingRegression:
         """Test that router DOES activate when no agents are mentioned."""
         test_room_id = "!research:localhost"
 
+        # Create test config with agents configured for the test room
+        test_config = Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="MindRoomResearch",
+                    rooms=[test_room_id],  # Configured for test room
+                ),
+                "news": AgentConfig(
+                    display_name="MindRoomNews",
+                    rooms=[test_room_id],  # Configured for test room
+                ),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+
         # Create router agent
         router_agent = AgentMatrixUser(
             agent_name="router",
@@ -154,14 +170,14 @@ class TestRoutingRegression:
             user_id="@mindroom_router:localhost",
         )
 
-        # Set up router bot
-        router_bot = setup_test_bot(router_agent, tmp_path, test_room_id)
+        # Set up router bot with test config
+        router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
 
-        # Set up research bot
-        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
+        # Set up research bot with test config
+        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id, config=test_config)
 
-        # Set up news bot
-        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)
+        # Set up news bot with test config
+        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id, config=test_config)
 
         # Mock AI responses
         mock_ai_response.return_value = "I can help with that!"
@@ -237,27 +253,34 @@ class TestRoutingRegression:
         )
         mock_from_yaml.return_value = mock_config
 
+        # Get the actual domain from config
+        domain = mock_config.domain
+
+        # Update mock agents to use the correct domain
+        mock_research_agent.user_id = f"@mindroom_research:{domain}"
+        mock_news_agent.user_id = f"@mindroom_news:{domain}"
+
         # Mock get_model_instance to return a mock model
         mock_model = MagicMock()
         mock_get_model_instance.return_value = mock_model
 
         test_room_id = "!research:localhost"
 
-        # Set up both bots
-        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
+        # Set up both bots with the same config
+        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id, config=mock_config)
+        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id, config=mock_config)
 
-        # Mock orchestrator for research bot
+        # Create a shared orchestrator with both bots properly configured
         mock_orchestrator = MagicMock()
-        mock_agent_bot = MagicMock()
-        mock_agent_bot.agent = MagicMock()
-        mock_orchestrator.agent_bots = {"research": mock_agent_bot, "news": mock_agent_bot}
-        mock_orchestrator.current_config = research_bot.config
-        mock_orchestrator.config = research_bot.config  # This is what teams.py uses
+        mock_orchestrator.agent_bots = {
+            "research": research_bot,
+            "news": news_bot,
+        }
+        mock_orchestrator.current_config = mock_config
+        mock_orchestrator.config = mock_config  # This is what teams.py uses
+
+        # Set the orchestrator on both bots
         research_bot.orchestrator = mock_orchestrator
-
-        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id)
-
-        # Mock orchestrator for news bot
         news_bot.orchestrator = mock_orchestrator
 
         # Mock AI responses and team response
@@ -277,13 +300,13 @@ class TestRoutingRegression:
 
         # User mentions BOTH agents
         message_event = MagicMock(spec=nio.RoomMessageText)
-        message_event.sender = "@user:localhost"
-        message_event.body = "@mindroom_research:localhost and @mindroom_news:localhost, what do you think?"
+        message_event.sender = f"@user:{domain}"
+        message_event.body = f"@mindroom_research:{domain} and @mindroom_news:{domain}, what do you think?"
         message_event.event_id = "$user_msg_789"
         message_event.source = {
             "content": {
-                "body": "@mindroom_research:localhost and @mindroom_news:localhost, what do you think?",
-                "m.mentions": {"user_ids": ["@mindroom_research:localhost", "@mindroom_news:localhost"]},
+                "body": f"@mindroom_research:{domain} and @mindroom_news:{domain}, what do you think?",
+                "m.mentions": {"user_ids": [f"@mindroom_research:{domain}", f"@mindroom_news:{domain}"]},
             },
         }
 

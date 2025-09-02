@@ -10,7 +10,6 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.thread_invites import ThreadInviteManager
 from mindroom.thread_utils import get_agents_in_thread
 
 from .conftest import TEST_PASSWORD
@@ -100,18 +99,18 @@ class TestTeamFormation:
         # Create bots
         config = Config(router=RouterConfig(model="default"))
 
-        research_bot = AgentBot(mock_research_agent, tmp_path, rooms=[team_room_id], config=config)
+        research_bot = AgentBot(mock_research_agent, tmp_path, config, rooms=[team_room_id])
         config = Config(router=RouterConfig(model="default"))
 
-        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, rooms=[team_room_id], config=config)
+        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, config, rooms=[team_room_id])
 
         # Setup bots
         research_bot.client = AsyncMock()
         analyst_bot.client = AsyncMock()
         research_bot.response_tracker = MagicMock()
+        research_bot.response_tracker.has_responded.return_value = False
         analyst_bot.response_tracker = MagicMock()
-        research_bot.thread_invite_manager = ThreadInviteManager(research_bot.client)
-        analyst_bot.thread_invite_manager = ThreadInviteManager(analyst_bot.client)
+        analyst_bot.response_tracker.has_responded.return_value = False
 
         # Create message mentioning both agents
         message_event: dict[str, Any] = {
@@ -177,19 +176,20 @@ class TestTeamFormation:
 
         # Verify both agents are in thread
         agents_in_thread = get_agents_in_thread(thread_history, self.config)
-        assert "code" in agents_in_thread
-        assert "security" in agents_in_thread
-        assert len(agents_in_thread) == 2
+        agent_names = [mid.agent_name(self.config) for mid in agents_in_thread]
+        assert "code" in agent_names
+        assert "security" in agent_names
+        assert len(agent_names) == 2
 
 
 class TestTeamCollaboration:
     """Test team collaboration behaviors."""
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.ai_response_streaming")
+    @patch("mindroom.bot.stream_agent_response")
     async def test_team_coordinate_mode(
         self,
-        mock_ai_response_streaming: AsyncMock,  # noqa: ARG002
+        mock_stream_agent_response: AsyncMock,  # noqa: ARG002
         mock_research_agent: AgentMatrixUser,  # noqa: ARG002
         mock_analyst_agent: AgentMatrixUser,  # noqa: ARG002
         team_room_id: str,  # noqa: ARG002
@@ -313,7 +313,8 @@ class TestTeamResponseBehavior:
         # No mentions in follow-up would cause single agent to continue
 
         agents_in_thread = get_agents_in_thread(thread_history, self.config)
-        assert agents_in_thread == ["code"]
+        agent_names = [mid.agent_name(self.config) for mid in agents_in_thread]
+        assert agent_names == ["code"]
         # Single agent should continue responding
 
     @pytest.mark.asyncio
@@ -372,9 +373,10 @@ class TestTeamResponseBehavior:
         ]
 
         agents = get_agents_in_thread(thread_with_both, self.config)
+        agent_names = [mid.agent_name(self.config) for mid in agents]
         assert len(agents) == 2
-        assert "research" in agents
-        assert "analyst" in agents
+        assert "research" in agent_names
+        assert "analyst" in agent_names
 
 
 class TestTeamEdgeCases:
@@ -461,7 +463,7 @@ class TestRouterTeamFormation:
         import nio  # noqa: PLC0415
 
         from mindroom.config import AgentConfig, Config, ModelConfig  # noqa: PLC0415
-        from mindroom.teams import should_form_team  # noqa: PLC0415
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
         config = Config(
             agents={
@@ -477,7 +479,8 @@ class TestRouterTeamFormation:
         room.users = {"@mindroom_agent1:localhost": None, "@mindroom_agent2:localhost": None}
 
         # Test DM room with multiple agents and no mentions
-        result = await should_form_team(
+        result = await decide_team_formation(
+            agent=config.ids["agent1"],
             tagged_agents=[],  # No agents mentioned
             agents_in_thread=[],  # No agents have spoken yet
             all_mentioned_in_thread=[],  # No mentions in thread
@@ -490,11 +493,13 @@ class TestRouterTeamFormation:
 
         # Should form a team with both agents
         assert result.should_form_team is True
-        assert sorted(result.agents) == ["agent1", "agent2"]
+        agent_names = sorted([mid.agent_name(config) for mid in result.agents])
+        assert agent_names == ["agent1", "agent2"]
 
         # Test DM room with single agent (should not form team)
         room.users = {"@mindroom_agent1:localhost": None}
-        result = await should_form_team(
+        result = await decide_team_formation(
+            agent=config.ids["agent1"],
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
@@ -506,4 +511,49 @@ class TestRouterTeamFormation:
         )
 
         # Should not form a team with single agent
+        assert result.should_form_team is False
+
+    @pytest.mark.asyncio
+    async def test_dm_room_thread_single_agent_no_team(self) -> None:
+        """In a DM with multiple agents, a thread with a single agent should not form a team."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.config import AgentConfig, Config, ModelConfig  # noqa: PLC0415
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                "general": AgentConfig(display_name="General", role="General"),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+
+        # DM room with multiple agents
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!dm:localhost"
+        room.users = {
+            config.ids["calculator"].full_id: None,
+            config.ids["general"].full_id: None,
+        }
+
+        # Thread has only calculator participating so far
+        agents_in_thread = [config.ids["calculator"]]
+
+        # Should NOT form a team inside a thread with a single agent
+        result = await decide_team_formation(
+            agent=config.ids["calculator"],
+            tagged_agents=[],
+            agents_in_thread=agents_in_thread,
+            all_mentioned_in_thread=[],
+            message="Follow-up without mentions",
+            config=config,
+            is_dm_room=True,
+            is_thread=True,
+            room=room,
+            use_ai_decision=False,
+        )
+
         assert result.should_form_team is False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator  # noqa: TC003
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,7 +26,7 @@ class TestMemoryIntegration:
         return mock
 
     @pytest.fixture
-    def mock_memory_functions(self) -> AsyncMock:
+    def mock_memory_functions(self) -> Generator[AsyncMock, None, None]:
         """Mock memory enhancement function."""
         with patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock) as mock_build:
             # Set up async side effects
@@ -125,9 +126,8 @@ class TestMemoryIntegration:
                 config=config,
             )
 
-            # Should return error message
-            assert "Sorry, I encountered an error" in response
-            assert "Model error" in response
+            # Should return user-friendly error message with the actual error
+            assert "Error: Model error" in response
 
     @pytest.mark.asyncio
     async def test_memory_persistence_across_calls(self, tmp_path: Path, config: Config) -> None:

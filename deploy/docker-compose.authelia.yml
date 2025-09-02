@@ -1,0 +1,42 @@
+# Authelia - Modern authentication server for Traefik
+# Active development, great documentation, production-ready
+
+services:
+  authelia:
+    image: authelia/authelia:latest
+    container_name: ${INSTANCE_NAME:-mindroom}-authelia
+    restart: unless-stopped
+    expose:
+      - 9091
+    volumes:
+      - ${DATA_DIR}/authelia:/config
+    environment:
+      - TZ=${TZ:-UTC}
+    networks:
+      - mindroom-network
+      - mynetwork
+    labels:
+      - traefik.enable=true
+      # Authelia endpoint
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-authelia.rule=Host(`auth-${INSTANCE_DOMAIN}`)
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-authelia.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-authelia.tls=true
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-authelia.tls.certresolver=porkbun
+      - traefik.http.services.${INSTANCE_NAME:-mindroom}-authelia.loadbalancer.server.port=9091
+
+      # Middleware for forward auth
+      - traefik.http.middlewares.${INSTANCE_NAME:-mindroom}-auth.forwardauth.address=http://${INSTANCE_NAME:-mindroom}-authelia:9091/api/verify?rd=https://auth-${INSTANCE_DOMAIN}
+      - traefik.http.middlewares.${INSTANCE_NAME:-mindroom}-auth.forwardauth.trustForwardHeader=true
+      - traefik.http.middlewares.${INSTANCE_NAME:-mindroom}-auth.forwardauth.authResponseHeaders=Remote-User,Remote-Groups,Remote-Name,Remote-Email
+
+  # Apply auth middleware to frontend
+  frontend:
+    labels:
+      # Add auth middleware to the frontend router
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.middlewares=${INSTANCE_NAME:-mindroom}-auth
+
+networks:
+  mindroom-network:
+    driver: bridge
+  mynetwork:
+    external: true

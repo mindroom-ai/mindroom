@@ -17,7 +17,7 @@ class TestDMDetection:
 
     def setup_method(self) -> None:
         """Clear the cache before each test."""
-        rooms._CACHE.clear()
+        rooms.DM_ROOM_CACHE.clear()
 
     async def test_detects_dm_room_with_is_direct_flag(self) -> None:
         """Test that a room with is_direct=true in member state is detected as DM."""

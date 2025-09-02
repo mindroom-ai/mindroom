@@ -6,6 +6,7 @@
     "dev": "vite",
     "dev:docker": "vite --host",
     "preview:docker": "vite preview --host 0.0.0.0",
+    "prebuild": "node scripts/generate-icon-imports.cjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",

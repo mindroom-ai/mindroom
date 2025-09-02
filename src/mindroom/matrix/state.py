@@ -52,6 +52,7 @@ class MatrixState(BaseModel):
         # Use Pydantic's model_dump with custom serializer for datetime
         data = self.model_dump(mode="json")
 
+        MATRIX_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with MATRIX_STATE_FILE.open("w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 

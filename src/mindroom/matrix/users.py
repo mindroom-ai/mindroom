@@ -1,6 +1,7 @@
 """Matrix user account management for agents."""
 
 from dataclasses import dataclass
+from functools import cached_property
 
 import nio
 
@@ -9,7 +10,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 
 from .client import login, register_user
-from .identity import MatrixID, extract_server_name_from_homeserver, parse_matrix_id
+from .identity import MatrixID, extract_server_name_from_homeserver
 from .state import MatrixState
 
 logger = get_logger(__name__)
@@ -19,7 +20,7 @@ def extract_domain_from_user_id(user_id: str) -> str:
     """Extract domain from a Matrix user ID like "@user:example.com"."""
     if not user_id.startswith("@") or ":" not in user_id:
         return "localhost"
-    return parse_matrix_id(user_id).domain
+    return MatrixID.parse(user_id).domain
 
 
 @dataclass
@@ -31,6 +32,11 @@ class AgentMatrixUser:
     display_name: str
     password: str
     access_token: str | None = None
+
+    @cached_property
+    def matrix_id(self) -> MatrixID:
+        """MatrixID object from user_id."""
+        return MatrixID.parse(self.user_id)
 
 
 def get_agent_credentials(agent_name: str) -> dict[str, str] | None:
@@ -115,7 +121,7 @@ async def create_agent_user(
         # If user already exists, that's fine
         error_msg = str(e) if e else ""
         logger.debug(f"ValueError when registering {username}: {error_msg}")
-        if "already exists" not in error_msg:
+        if "already exists" not in error_msg and "RegisterErrorResponse" not in error_msg:
             raise
 
     return AgentMatrixUser(
@@ -145,6 +151,7 @@ async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.
     return client
 
 
+# TODO: Check, this seems unused!
 async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, AgentMatrixUser]:
     """Ensure all configured agents and teams have Matrix user accounts.
 
@@ -184,7 +191,7 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
             logger.info(f"Ensured Matrix user for agent: {agent_name} -> {agent_user.user_id}")
         except Exception:
             # Continue with other agents even if one fails
-            logger.exception("Failed to create Matrix user for agent %s", agent_name)
+            logger.exception("Failed to create Matrix user for agent", agent_name=agent_name)
 
     # Create team users
     for team_name, team_config in config.teams.items():
@@ -198,6 +205,6 @@ async def ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, A
             logger.info(f"Ensured Matrix user for team: {team_name} -> {team_user.user_id}")
         except Exception:
             # Continue with other teams even if one fails
-            logger.exception("Failed to create Matrix user for team %s", team_name)
+            logger.exception("Failed to create Matrix user for team", team_name=team_name)
 
     return agent_users

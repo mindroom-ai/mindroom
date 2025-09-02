@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
 from mindroom.config import Config
-from mindroom.workflow_scheduling import CronSchedule, ScheduledWorkflow, parse_workflow_schedule
+from mindroom.scheduling import CronSchedule, ScheduledWorkflow, parse_workflow_schedule
 
 
 class TestDynamicConfigUpdate:
@@ -19,7 +19,7 @@ class TestDynamicConfigUpdate:
         """Test that when config is updated, all existing bots get the new config."""
         # Create initial config with just one agent
         initial_config = Config(
-            agents={
+            agents={  # type: ignore[arg-type]
                 "general": {
                     "display_name": "GeneralAgent",
                     "role": "General assistant",
@@ -27,7 +27,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
         )
 
         # Create orchestrator and set initial config
@@ -42,7 +42,7 @@ class TestDynamicConfigUpdate:
 
         # Create updated config with a new agent
         updated_config = Config(
-            agents={
+            agents={  # type: ignore[arg-type]
                 "general": {
                     "display_name": "GeneralAgent",
                     "role": "General assistant",
@@ -56,7 +56,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
         )
 
         # Mock the from_yaml method to return our updated config
@@ -95,7 +95,7 @@ class TestDynamicConfigUpdate:
         """Test that scheduling commands work correctly with dynamically added agents."""
         # Update config to add callagent
         updated_config = Config(
-            agents={
+            agents={  # type: ignore[arg-type]
                 "email_assistant": {
                     "display_name": "EmailAssistant",
                     "role": "Email assistant",
@@ -109,14 +109,14 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "test", "id": "test-model"}},  # type: ignore[arg-type]
         )
 
         # Test that parse_workflow_schedule correctly recognizes the new agent
         request = "whenever i get an email with title urgent, notify @callagent to send me a text"
 
         # Mock the AI model to return a proper workflow
-        with patch("mindroom.workflow_scheduling.get_model_instance") as mock_get_model:
+        with patch("mindroom.scheduling.get_model_instance") as mock_get_model:
             mock_agent = MagicMock()
             mock_response = MagicMock()
 
@@ -139,11 +139,15 @@ class TestDynamicConfigUpdate:
             mock_model = MagicMock()
             mock_get_model.return_value = mock_model
 
-            with patch("mindroom.workflow_scheduling.Agent") as mock_agent_class:
+            with patch("mindroom.scheduling.Agent") as mock_agent_class:
                 mock_agent_class.return_value = mock_agent
 
                 # Parse with the updated config
-                result = await parse_workflow_schedule(request, updated_config)
+                result = await parse_workflow_schedule(
+                    request,
+                    updated_config,
+                    available_agents=["email_assistant", "callagent"],  # Both agents available
+                )
 
                 # Verify the workflow was parsed correctly and includes both agents
                 assert hasattr(result, "message")
