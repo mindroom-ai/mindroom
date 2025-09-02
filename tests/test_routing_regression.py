@@ -318,7 +318,7 @@ class TestRoutingRegression:
         # The alphabetically first agent (news) handles team formation
         # The other agent (research) does not respond individually
         assert research_bot.client.room_send.call_count == 0  # type: ignore[union-attr]  # No individual response
-        assert news_bot.client.room_send.call_count == 3  # type: ignore[union-attr]  # Team response with stop button
+        assert news_bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # Team response (single message)
         assert mock_team_arun.call_count == 1  # Team formed once
 
     @pytest.mark.asyncio

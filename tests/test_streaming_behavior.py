@@ -320,14 +320,14 @@ class TestStreamingBehavior:
         assert streaming.accumulated_text == "Hello "
 
         # Should send initial message
-        assert mock_client.room_send.call_count == 3  # initial + reaction + final
+        assert mock_client.room_send.call_count == 1
         assert streaming.event_id == "$stream_123"
 
         # Add more content immediately (should not trigger update yet)
         await streaming.update_content("world", mock_client)
         assert streaming.accumulated_text == "Hello world"
         # Should NOT send edit because not enough time has passed
-        assert mock_client.room_send.call_count == 3  # initial + reaction + final
+        assert mock_client.room_send.call_count == 1
 
         # Simulate time passing (lower interval to speed up test)
         streaming.update_interval = 0.05
