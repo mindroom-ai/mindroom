@@ -1584,11 +1584,20 @@ class AgentBot:
             self.logger.debug("Agent should not respond to edited message")
             return
 
+        # Extract the actual edited content (without the "* " prefix)
+        # For edits, the real content is in m.new_content.body
+        edited_content = event.body  # Default to event.body
+        if event.source and "content" in event.source:
+            new_content = event.source["content"].get("m.new_content", {})
+            if "body" in new_content:
+                edited_content = new_content["body"]
+                self.logger.debug(f"Using edited content from m.new_content: {edited_content}")
+
         # Generate new response using the cancellable framework
         # This allows users to cancel regenerations just like original responses
         await self._generate_response(
             room_id=room.room_id,
-            prompt=event.body,
+            prompt=edited_content,  # Use the actual edited content
             reply_to_event_id=event_info.original_event_id,  # Use original for context
             thread_id=context.thread_id,
             thread_history=context.thread_history,
