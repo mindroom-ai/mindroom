@@ -83,15 +83,14 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         bot.client = client
 
         # Setup room and thread context
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+        room_id = "!test:localhost"
 
         user_message_id = "$user_original_message"
         thread_id = user_message_id  # The original thread root
 
         # Call the streaming response handler
         await bot._process_and_respond_streaming(
-            room=room,
+            room_id,
             prompt="Test prompt",
             reply_to_event_id=user_message_id,
             thread_id=thread_id,
@@ -170,15 +169,15 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         bot.client = client
 
         # Setup room and thread context
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+
+        room_id = "!test:localhost"
 
         user_message_id = "$user_thread_start"
         thread_id = user_message_id  # The original thread root
 
         # Call the non-streaming response handler
         await bot._process_and_respond(
-            room=room,
+            room_id=room_id,
             prompt="Test prompt",
             reply_to_event_id=user_message_id,
             thread_id=thread_id,
@@ -262,12 +261,11 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         bot.client = client
 
         # Setup room without thread context
-        room = MagicMock()
-        room.room_id = "!test:localhost"
+        room_id = "!test:localhost"
 
         # Call without thread_id
         await bot._process_and_respond_streaming(
-            room=room,
+            room_id=room_id,
             prompt="Test prompt",
             reply_to_event_id="$some_message",
             thread_id=None,  # No thread

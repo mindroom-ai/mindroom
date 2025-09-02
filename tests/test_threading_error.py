@@ -137,7 +137,7 @@ class TestThreadingBehavior:
             mock_generate.assert_called_once()
 
             # Now simulate the response being sent
-            await bot._send_response(room, event.event_id, "I can help you with that!", None)
+            await bot._send_response(room.room_id, event.event_id, "I can help you with that!", None)
 
         # Verify the bot sent a response
         bot.client.room_send.assert_called_once()  # type: ignore[union-attr]
@@ -469,7 +469,7 @@ class TestThreadingBehavior:
 
             # Now simulate the response being sent
             await bot._send_response(
-                room,
+                room.room_id,
                 event.event_id,
                 "I can help with that complex question!",
                 "$thread_root:localhost",

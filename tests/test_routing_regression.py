@@ -121,7 +121,7 @@ class TestRoutingRegression:
 
         # Process with research bot - SHOULD respond
         await research_bot._on_message(mock_room, message_event)
-        assert research_bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # thinking + final
+        assert research_bot.client.room_send.call_count == 3  # type: ignore[union-attr]  # thinking + 🛑 + final
         assert mock_ai_response.call_count == 1
 
         # Process with news bot - should NOT respond and NOT use router
@@ -382,5 +382,5 @@ class TestRoutingRegression:
         await research_bot._on_message(mock_room, router_message)
 
         # Research bot SHOULD respond
-        assert research_bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # thinking + final
+        assert research_bot.client.room_send.call_count == 3  # type: ignore[union-attr]  # thinking + 🛑 + final
         assert mock_ai_response.call_count == 1

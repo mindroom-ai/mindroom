@@ -84,7 +84,7 @@ async def test_send_response_with_skip_mentions() -> None:
             # Call the actual _send_response method with skip_mentions=True
             await AgentBot._send_response(
                 bot,
-                room=room,
+                room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 response_text="✅ Scheduled. Will notify @email_agent",
                 thread_id=None,
