@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.bot import AgentBot, MultiAgentOrchestrator
-from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
+from mindroom.config import AgentConfig, Config, ModelConfig, RouterConfig, TeamConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 
@@ -45,6 +45,13 @@ def initial_config() -> Config:
                 rooms=["room3"],
             ),
         },
+        models={
+            "default": ModelConfig(
+                provider="ollama",
+                id="llama3.2",
+                host="http://localhost:11434",
+            ),
+        },
     )
 
 
@@ -75,6 +82,13 @@ def updated_config() -> Config:
                 role="Test team",
                 agents=["agent1", "agent2", "agent3"],  # Added agent3
                 rooms=["room3", "room6"],  # Added room6
+            ),
+        },
+        models={
+            "default": ModelConfig(
+                provider="ollama",
+                id="llama3.2",
+                host="http://localhost:11434",
             ),
         },
     )
@@ -442,6 +456,12 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
+
+    # Mock topic generation to avoid calling AI
+    async def mock_generate_room_topic_ai(room_key: str, room_name: str, config: Config) -> str:  # noqa: ARG001
+        return f"Test topic for {room_name}"
+
+    monkeypatch.setattr("mindroom.topic_generator.generate_room_topic_ai", mock_generate_room_topic_ai)
 
     # Create orchestrator
     # Mock start/sync at class level so newly created bots during update_config don't perform real login/sync
