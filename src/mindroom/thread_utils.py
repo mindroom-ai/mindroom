@@ -230,12 +230,13 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
     return mentioned_agents
 
 
-def is_authorized_sender(sender_id: str, config: Config) -> bool:
+def is_authorized_sender(sender_id: str, config: Config, room_id: str) -> bool:
     """Check if a sender is authorized to interact with agents.
 
     Args:
         sender_id: Matrix ID of the message sender
         config: Application configuration
+        room_id: Room ID for permission checks
 
     Returns:
         True if the sender is authorized, False otherwise
@@ -252,12 +253,16 @@ def is_authorized_sender(sender_id: str, config: Config) -> bool:
         # Agent is either in config.agents, config.teams, or is the router
         return agent_name in config.agents or agent_name in config.teams or agent_name == ROUTER_AGENT_NAME
 
-    # If no authorized_users configured, only mindroom_user is allowed (already checked above)
-    if not config.authorized_users:
-        return False
+    # Check global authorized users (they have access to all rooms)
+    if sender_id in config.authorization.global_users:
+        return True
 
-    # Check if sender is in the authorized users list
-    return sender_id in config.authorized_users
+    # Check room-specific permissions
+    if room_id in config.authorization.room_permissions:
+        return sender_id in config.authorization.room_permissions[room_id]
+
+    # Use default access for rooms not explicitly configured
+    return config.authorization.default_room_access
 
 
 def should_agent_respond(

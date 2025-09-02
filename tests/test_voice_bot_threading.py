@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -25,7 +27,8 @@ def mock_router_bot() -> AgentBot:
         access_token=TEST_ACCESS_TOKEN,
     )
     config = Config.from_yaml()
-    bot = AgentBot(agent_user=agent_user, storage_path=MagicMock(), config=config, rooms=["!test:server"])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
     bot.logger = MagicMock()
     bot._send_response = AsyncMock()  # type: ignore[method-assign]
