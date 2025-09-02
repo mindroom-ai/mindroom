@@ -6,6 +6,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import nio
+
 if TYPE_CHECKING:
     from nio import AsyncClient
 
@@ -60,7 +62,7 @@ class StopManager:
     def clear_message(
         self,
         message_id: str,
-        client: AsyncClient | None = None,
+        client: AsyncClient,
         remove_button: bool = True,
         delay: float = 5.0,
     ) -> None:
@@ -68,7 +70,7 @@ class StopManager:
 
         Args:
             message_id: The message ID to clear
-            client: Matrix client for removing stop button (required if remove_button=True)
+            client: Matrix client for removing stop button
             remove_button: Whether to remove the stop button (default True)
             delay: Seconds to wait before clearing (default 5.0)
 
@@ -76,7 +78,7 @@ class StopManager:
 
         async def delayed_clear() -> None:
             """Clear the message and remove stop button after a delay."""
-            if remove_button and client and message_id in self.tracked_messages:
+            if remove_button and message_id in self.tracked_messages:
                 tracked = self.tracked_messages[message_id]
                 if tracked.reaction_event_id:
                     logger.info("Removing stop button in cleanup", message_id=message_id)
@@ -157,7 +159,7 @@ class StopManager:
                     },
                 },
             )
-            if hasattr(response, "event_id"):
+            if isinstance(response, nio.RoomSendResponse):
                 event_id = str(response.event_id)
                 logger.info("Stop button added successfully", reaction_event_id=event_id, message_id=message_id)
                 # Update the tracked message with the reaction event ID
