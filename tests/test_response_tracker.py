@@ -28,8 +28,8 @@ class TestResponseTracker:
         tracker = ResponseTracker("test_agent", base_path=temp_dir)
 
         assert tracker.agent_name == "test_agent"
-        assert isinstance(tracker._responded_events, dict)
-        assert len(tracker._responded_events) == 0
+        assert isinstance(tracker._responses, dict)
+        assert len(tracker._responses) == 0
 
     def test_has_responded_empty(self, temp_dir: Path) -> None:
         """Test has_responded when no events have been tracked."""
@@ -50,10 +50,10 @@ class TestResponseTracker:
 
         # Now it should be marked as responded
         assert tracker.has_responded("event123")
-        assert "event123" in tracker._responded_events
+        assert "event123" in tracker._responses
 
         # Check timestamp is reasonable
-        timestamp = tracker._responded_events["event123"]
+        timestamp = tracker._responses["event123"]["timestamp"]
         assert before_time <= timestamp <= after_time
 
     def test_persistence(self, temp_dir: Path) -> None:
@@ -69,11 +69,11 @@ class TestResponseTracker:
 
         assert tracker2.has_responded("event1")
         assert tracker2.has_responded("event2")
-        assert len(tracker2._responded_events) == 2
+        assert len(tracker2._responses) == 2
 
         # Timestamps should be preserved
-        assert tracker1._responded_events["event1"] == tracker2._responded_events["event1"]
-        assert tracker1._responded_events["event2"] == tracker2._responded_events["event2"]
+        assert tracker1._responses["event1"]["timestamp"] == tracker2._responses["event1"]["timestamp"]
+        assert tracker1._responses["event2"]["timestamp"] == tracker2._responses["event2"]["timestamp"]
 
     def test_cleanup_by_count(self, temp_dir: Path) -> None:
         """Test cleanup keeps most recent events by count."""
@@ -82,15 +82,18 @@ class TestResponseTracker:
         # Add events with known timestamps
         base_time = time.time()
         for i in range(20):
-            tracker._responded_events[f"event{i:03d}"] = base_time + i
+            tracker._responses[f"event{i:03d}"] = {
+                "timestamp": base_time + i,
+                "response_id": None,
+            }
 
-        assert len(tracker._responded_events) == 20
+        assert len(tracker._responses) == 20
 
         # Cleanup with max 10
         tracker.cleanup_old_events(max_events=10)
 
         # Should keep only the last 10 (most recent by timestamp)
-        assert len(tracker._responded_events) == 10
+        assert len(tracker._responses) == 10
         assert tracker.has_responded("event019")  # Latest should be kept
         assert tracker.has_responded("event010")  # 10th most recent
         assert not tracker.has_responded("event009")  # Should be removed
@@ -104,19 +107,25 @@ class TestResponseTracker:
 
         # Add some old events (40 days old)
         for i in range(5):
-            tracker._responded_events[f"old_event{i}"] = current_time - (40 * 24 * 60 * 60)
+            tracker._responses[f"old_event{i}"] = {
+                "timestamp": current_time - (40 * 24 * 60 * 60),
+                "response_id": None,
+            }
 
         # Add some recent events
         for i in range(5):
-            tracker._responded_events[f"new_event{i}"] = current_time - (10 * 24 * 60 * 60)
+            tracker._responses[f"new_event{i}"] = {
+                "timestamp": current_time - (10 * 24 * 60 * 60),
+                "response_id": None,
+            }
 
-        assert len(tracker._responded_events) == 10
+        assert len(tracker._responses) == 10
 
         # Cleanup with 30 day max age
         tracker.cleanup_old_events(max_events=100, max_age_days=30)
 
         # Should keep only the recent events
-        assert len(tracker._responded_events) == 5
+        assert len(tracker._responses) == 5
         for i in range(5):
             assert tracker.has_responded(f"new_event{i}")
             assert not tracker.has_responded(f"old_event{i}")
@@ -133,8 +142,14 @@ class TestResponseTracker:
 
         # Add some events
         current_time = time.time()
-        tracker._responded_events["old_event"] = current_time - (48 * 60 * 60)  # 48 hours ago
-        tracker._responded_events["new_event"] = current_time - (1 * 60 * 60)  # 1 hour ago
+        tracker._responses["old_event"] = {
+            "timestamp": current_time - (48 * 60 * 60),  # 48 hours ago
+            "response_id": None,
+        }
+        tracker._responses["new_event"] = {
+            "timestamp": current_time - (1 * 60 * 60),  # 1 hour ago
+            "response_id": None,
+        }
 
         stats = tracker.get_stats()
         assert stats["total"] == 2
@@ -161,9 +176,9 @@ class TestResponseTracker:
             thread.join()
 
         # All events should be marked
-        assert len(tracker._responded_events) == 100
+        assert len(tracker._responses) == 100
 
         # Verify file is valid JSON
         with tracker._responses_file.open() as f:
             data = json.load(f)
-            assert len(data["events"]) == 100
+            assert len(data) == 100
