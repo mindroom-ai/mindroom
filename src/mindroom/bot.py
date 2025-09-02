@@ -661,16 +661,6 @@ class AgentBot:
             if self.matrix_id != first_agent:
                 return
 
-            # Get model for this team in this room
-            model_name = select_model_for_team(self.agent_name, room.room_id, self.config)
-
-            # Decide streaming based on presence
-            use_streaming = self.enable_streaming and await should_use_streaming(
-                self.client,
-                room.room_id,
-                requester_user_id=event.sender,
-            )
-
             # Use the shared team response helper
             await self._generate_team_response_helper(
                 room_id=room.room_id,
@@ -679,9 +669,8 @@ class AgentBot:
                 message=event.body,
                 team_agents=form_team.agents,
                 team_mode=form_team.mode,
-                model_name=model_name,
                 thread_history=context.thread_history,
-                use_streaming=use_streaming,
+                requester_user_id=event.sender,
                 existing_event_id=None,
             )
 
@@ -886,9 +875,8 @@ class AgentBot:
         message: str,
         team_agents: list[MatrixID],
         team_mode: str,
-        model_name: str | None,
         thread_history: list[dict],
-        use_streaming: bool,
+        requester_user_id: str,
         existing_event_id: str | None = None,
     ) -> str | None:
         """Generate a team response (shared between preformed teams and TeamBot).
@@ -896,6 +884,16 @@ class AgentBot:
         Returns the initial message ID if created, None otherwise.
         """
         assert self.client is not None
+
+        # Get the appropriate model for this team and room
+        model_name = select_model_for_team(self.agent_name, room_id, self.config)
+
+        # Decide streaming based on presence
+        use_streaming = self.enable_streaming and await should_use_streaming(
+            self.client,
+            room_id,
+            requester_user_id=requester_user_id,
+        )
 
         # Convert mode string to TeamMode enum
         mode = TeamMode.COORDINATE if team_mode == "coordinate" else TeamMode.COLLABORATE
@@ -1666,9 +1664,6 @@ class TeamBot(AgentBot):
 
         assert self.client is not None
 
-        # Get the appropriate model for this team and room
-        model_name = select_model_for_team(self.agent_name, room_id, self.config)
-
         # Store memory once for the entire team (avoids duplicate LLM processing)
         session_id = create_session_id(room_id, thread_id)
         # Convert MatrixID list to agent names for memory storage
@@ -1688,13 +1683,6 @@ class TeamBot(AgentBot):
         )
         self.logger.info(f"Storing memory for team: {agent_names}")
 
-        # Decide streaming based on presence
-        use_streaming = self.enable_streaming and await should_use_streaming(
-            self.client,
-            room_id,
-            requester_user_id=user_id,
-        )
-
         # Use the shared team response helper
         await self._generate_team_response_helper(
             room_id=room_id,
@@ -1703,9 +1691,8 @@ class TeamBot(AgentBot):
             message=prompt,
             team_agents=self.team_agents,
             team_mode=self.team_mode,
-            model_name=model_name,
             thread_history=thread_history,
-            use_streaming=use_streaming,
+            requester_user_id=user_id or "",
             existing_event_id=existing_event_id,
         )
 
