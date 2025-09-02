@@ -782,6 +782,7 @@ class AgentBot:
             # Thread history already fetched above, no need to fetch again
 
             # Generate the response, editing the acknowledgment message
+            # Note: existing_event_id is only used for interactive questions to edit the acknowledgment
             prompt = f"The user selected: {selected_value}"
             await self._generate_response(
                 room_id=room.room_id,
@@ -789,7 +790,7 @@ class AgentBot:
                 reply_to_event_id=event.reacts_to,
                 thread_id=thread_id,
                 thread_history=thread_history,
-                existing_event_id=ack_event_id,  # Edit the acknowledgment
+                existing_event_id=ack_event_id,  # Edit the acknowledgment instead of creating new message
                 user_id=event.sender,
             )
             # Mark the original interactive question as responded
@@ -1241,6 +1242,7 @@ class AgentBot:
             thread_id: Thread ID if in a thread
             thread_history: Thread history for context
             existing_event_id: If provided, edit this message instead of sending a new one
+                             (only used for interactive question responses)
             user_id: User ID of the sender for identifying user messages in history
 
         """
