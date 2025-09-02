@@ -66,9 +66,6 @@ class StopManager:
     ) -> None:
         """Clear tracking for a specific message and optionally remove stop button.
 
-        This is the centralized cleanup method that handles both tracking cleanup
-        and stop button removal after a message is done being generated.
-
         Args:
             message_id: The message ID to clear
             client: Matrix client for removing stop button (required if remove_button=True)
@@ -176,10 +173,7 @@ class StopManager:
         return None
 
     async def remove_stop_button(self, client: AsyncClient, message_id: str | None = None) -> None:
-        """Remove the stop button reaction immediately.
-
-        This is used when the user clicks the stop button to provide immediate feedback.
-        The centralized cleanup (clear_message) handles removal in all other cases.
+        """Remove the stop button reaction immediately when user clicks it.
 
         Args:
             client: The Matrix client

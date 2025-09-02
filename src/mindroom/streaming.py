@@ -60,7 +60,6 @@ class StreamingResponse:
     async def finalize(self, client: nio.AsyncClient) -> None:
         """Send final message update."""
         await self._send_or_edit_message(client, is_final=True)
-        # Stop button removal is handled centrally in _run_cancellable_response
 
     async def _send_or_edit_message(self, client: nio.AsyncClient, is_final: bool = False) -> None:
         """Send new message or edit existing one."""

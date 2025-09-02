@@ -731,8 +731,7 @@ class AgentBot:
                     message_id=event.reacts_to,
                     stopped_by=event.sender,
                 )
-                # Remove the stop button immediately when user clicks it
-                # This is the only place we remove the button immediately (not in cleanup)
+                # Remove the stop button immediately for user feedback
                 await self.stop_manager.remove_stop_button(self.client, event.reacts_to)
                 # Send a confirmation message
                 await self._send_response(room.room_id, event.reacts_to, "✅ Generation stopped", None)
@@ -1077,14 +1076,12 @@ class AgentBot:
             await task
         except asyncio.CancelledError:
             self.logger.info("Response cancelled by user", message_id=message_to_track)
-            # Stop button removed when user clicked it (in _on_reaction)
         except Exception as e:
             self.logger.exception("Error during response generation", error=str(e))
             raise  # Re-raise the exception
         finally:
-            # Centralized cleanup: clear tracking and remove stop button if not already removed
+            # Clean up tracking and stop button
             if message_to_track:
-                # Check if button was already removed by user click
                 tracked = self.stop_manager.tracked_messages.get(message_to_track)
                 button_already_removed = tracked is None or tracked.reaction_event_id is None
 
@@ -1137,7 +1134,6 @@ class AgentBot:
         if existing_event_id:
             # Edit the existing message
             await self._edit_message(room_id, existing_event_id, response_text, thread_id)
-            # Stop button removal is handled by _run_cancellable_response finally block
             return existing_event_id
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -1250,8 +1246,6 @@ class AgentBot:
                 reply_to_event_id,
             )
 
-            # Stop button removal is handled by _run_cancellable_response finally block
-
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
             self.logger.info("Streaming cancelled by user", message_id=existing_event_id)
@@ -1261,7 +1255,6 @@ class AgentBot:
             raise  # Re-raise to let the outer handler know
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
-            # Note: Stop button removal handled by _run_cancellable_response finally block
             # Don't mark as responded if streaming failed
             return None
         else:
