@@ -207,7 +207,7 @@ class TestStreamingBehavior:
                 mock_extract.return_value = "helper"
                 await calc_bot._on_message(mock_room, final_event)
 
-        assert calc_bot.client.room_send.call_count == 3  # initial + reaction + final
+        assert calc_bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
 
     @pytest.mark.asyncio
@@ -263,7 +263,7 @@ class TestStreamingBehavior:
 
         # Process initial message - calculator SHOULD respond
         await calc_bot._on_message(mock_room, initial_event)
-        assert calc_bot.client.room_send.call_count == 3  # initial + reaction + final
+        assert calc_bot.client.room_send.call_count == 2  # thinking + final
         assert mock_ai_response.call_count == 1
 
         # Reset mocks

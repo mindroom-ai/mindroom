@@ -745,12 +745,17 @@ class AgentBot:
                             )
 
             # Use unified handler for cancellation support
+            # Send thinking message only when not streaming (streaming has its own initial message)
+            thinking_msg = None
+            if not use_streaming:
+                thinking_msg = "🤝 Team Response: Thinking..."
+
             initial_message_id = await self._run_cancellable_response(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=context.thread_id,
                 response_coroutine=generate_preformed_team_response(),
-                thinking_message="🤝 Team Response: Thinking...",
+                thinking_message=thinking_msg,
                 existing_event_id=None,
             )
 
@@ -991,19 +996,19 @@ class AgentBot:
         # Create cancellable task
         task: asyncio.Task[None] = asyncio.create_task(response_coroutine)  # type: ignore[arg-type]
 
-        # Track for stop button
+        # Track for stop button (only if we have a message to track)
         message_to_track = existing_event_id or initial_message_id
         if message_to_track:
             self.stop_manager.set_current(message_to_track, room_id, task, None)
-            # Use getattr with default False for compatibility with tests
-            if getattr(self.config.defaults, "show_stop_button", False):
+            # Add stop button if configured
+            if self.config.defaults.show_stop_button:
                 self.logger.info("Adding stop button", message_id=message_to_track)
                 await self.stop_manager.add_stop_button(self.client, room_id, message_to_track)
 
         try:
             await task
             # Remove stop button on successful completion
-            if message_to_track and getattr(self.config.defaults, "show_stop_button", False):
+            if message_to_track and self.config.defaults.show_stop_button:
                 await self.stop_manager.remove_stop_button(self.client, message_to_track)
         except asyncio.CancelledError:
             self.logger.info("Response cancelled by user", message_id=message_to_track)
@@ -1251,16 +1256,22 @@ class AgentBot:
                 )
 
         # Use unified handler for cancellation support
+        # Send "Thinking..." only when not streaming (streaming has its own initial message)
+        thinking_msg = None
+        if not existing_event_id and not use_streaming:
+            thinking_msg = "Thinking..."
+
         initial_message_id = await self._run_cancellable_response(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
             response_coroutine=generate(),
-            thinking_message="Thinking..." if not existing_event_id else None,
+            thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
         )
 
         # Store memory after response generation; ignore errors in tests/mocks
+        # TODO: Remove try-except and fix tests
         try:
             create_background_task(
                 store_conversation_memory(
@@ -1717,12 +1728,17 @@ class TeamBot(AgentBot):
                         )
 
         # Use unified handler for cancellation support
+        # Send thinking message only when not streaming (streaming has its own initial message)
+        thinking_msg = None
+        if not existing_event_id and not use_streaming:
+            thinking_msg = "🤝 Team Response: Thinking..."
+
         initial_message_id = await self._run_cancellable_response(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
             response_coroutine=generate_team_response(),
-            thinking_message="🤝 Team Response: Thinking..." if not existing_event_id else None,
+            thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
         )
 

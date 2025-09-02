@@ -134,8 +134,8 @@ async def test_agent_processes_direct_mention(
                     room_id=test_room_id,
                 )
 
-                # Verify message was sent (initial message + reaction + updates)
-                assert bot.client.room_send.call_count == 3  # type: ignore[union-attr]
+                # Verify message was sent (thinking + final)
+                assert bot.client.room_send.call_count == 2  # type: ignore[union-attr]
                 call_args = bot.client.room_send.call_args  # type: ignore[union-attr]
                 assert call_args[1]["room_id"] == test_room_id
                 # Check the final message content
@@ -354,7 +354,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             # Should form team and send team response when multiple agents in thread
             mock_ai.assert_not_called()
             mock_team_arun.assert_called_once()
-            bot.client.room_send.assert_called_once()  # type: ignore[union-attr]  # Team response sent
+            assert bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # Team response (thinking + final)
 
         # Reset mocks for Test 3
         bot.client.room_send.reset_mock()  # type: ignore[union-attr]

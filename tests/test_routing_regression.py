@@ -121,7 +121,7 @@ class TestRoutingRegression:
 
         # Process with research bot - SHOULD respond
         await research_bot._on_message(mock_room, message_event)
-        assert research_bot.client.room_send.call_count == 3  # type: ignore[union-attr]  # initial + reaction + final
+        assert research_bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # thinking + final
         assert mock_ai_response.call_count == 1
 
         # Process with news bot - should NOT respond and NOT use router
@@ -318,7 +318,7 @@ class TestRoutingRegression:
         # The alphabetically first agent (news) handles team formation
         # The other agent (research) does not respond individually
         assert research_bot.client.room_send.call_count == 0  # type: ignore[union-attr]  # No individual response
-        assert news_bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # Team response (single message)
+        assert news_bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # Team response (thinking + final)
         assert mock_team_arun.call_count == 1  # Team formed once
 
     @pytest.mark.asyncio
@@ -382,5 +382,5 @@ class TestRoutingRegression:
         await research_bot._on_message(mock_room, router_message)
 
         # Research bot SHOULD respond
-        assert research_bot.client.room_send.call_count == 3  # type: ignore[union-attr]  # initial + reaction + final
+        assert research_bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # thinking + final
         assert mock_ai_response.call_count == 1

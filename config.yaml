@@ -263,6 +263,7 @@ defaults:
   add_history_to_messages: true
   markdown: true
   num_history_runs: 5
+  show_stop_button: false
 memory:
   embedder:
     config:

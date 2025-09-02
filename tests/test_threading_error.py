@@ -200,8 +200,8 @@ class TestThreadingBehavior:
             # Process the message
             await bot._on_message(room, event)
 
-        # Verify the bot sent messages (initial + reaction + final)
-        assert bot.client.room_send.call_count == 3  # type: ignore[union-attr]
+        # Verify the bot sent messages (thinking + final)
+        assert bot.client.room_send.call_count == 2  # type: ignore[union-attr]
 
         # Check the initial message (first call)
         first_call = bot.client.room_send.call_args_list[0]  # type: ignore[union-attr]
