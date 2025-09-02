@@ -106,7 +106,7 @@ class TestStreamingEdits:
 
         # Process initial message - bot should respond
         await bot._on_message(mock_room, initial_event)
-        assert bot.client.room_send.call_count == 1  # type: ignore[union-attr]
+        assert bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # thinking + final
         assert mock_ai_response.call_count == 1
 
         # Reset mocks
@@ -204,7 +204,7 @@ class TestStreamingEdits:
 
         # Process new message - bot SHOULD respond
         await bot._on_message(mock_room, new_event)
-        assert bot.client.room_send.call_count == 1  # type: ignore[union-attr]
+        assert bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # thinking + final
         assert mock_ai_response.call_count == 1
 
     @pytest.mark.asyncio

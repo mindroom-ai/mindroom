@@ -65,12 +65,14 @@ class TestRoutingRegression:
     """Regression tests for routing behavior."""
 
     @pytest.mark.asyncio
+    @patch("mindroom.bot.is_user_online")
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.suggest_agent_for_message")
     async def test_router_does_not_respond_when_agent_mentioned(
         self,
         mock_suggest_agent: AsyncMock,
         mock_ai_response: AsyncMock,
+        mock_is_user_online: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,
         tmp_path: Path,
@@ -81,6 +83,9 @@ class TestRoutingRegression:
         agent would respond to the same message.
         """
         test_room_id = "!research:localhost"
+
+        # Mock user as online for stop button to show
+        mock_is_user_online.return_value = True
 
         # Set up research bot (the one being mentioned)
         research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id)
@@ -121,7 +126,7 @@ class TestRoutingRegression:
 
         # Process with research bot - SHOULD respond
         await research_bot._on_message(mock_room, message_event)
-        assert research_bot.client.room_send.call_count == 1  # type: ignore[union-attr]
+        assert research_bot.client.room_send.call_count == 3  # type: ignore[union-attr]  # thinking + 🛑 + final
         assert mock_ai_response.call_count == 1
 
         # Process with news bot - should NOT respond and NOT use router
@@ -217,7 +222,7 @@ class TestRoutingRegression:
         # Router SHOULD have been called
         mock_suggest_agent.assert_called_once()
         # Router bot should send the routing message
-        assert router_bot.client.room_send.call_count == 1  # type: ignore[union-attr]
+        assert router_bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # Router doesn't use stop button
 
         # Process with other bots - they should not do anything
         await research_bot._on_message(mock_room, message_event)
@@ -318,14 +323,16 @@ class TestRoutingRegression:
         # The alphabetically first agent (news) handles team formation
         # The other agent (research) does not respond individually
         assert research_bot.client.room_send.call_count == 0  # type: ignore[union-attr]  # No individual response
-        assert news_bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # Team response
+        assert news_bot.client.room_send.call_count == 2  # type: ignore[union-attr]  # Team response (thinking + final)
         assert mock_team_arun.call_count == 1  # Team formed once
 
     @pytest.mark.asyncio
+    @patch("mindroom.bot.is_user_online")
     @patch("mindroom.bot.ai_response")
     async def test_router_message_has_completion_marker(
         self,
         mock_ai_response: AsyncMock,
+        mock_is_user_online: AsyncMock,
         mock_research_agent: AgentMatrixUser,
         mock_news_agent: AgentMatrixUser,  # noqa: ARG002
         tmp_path: Path,
@@ -336,6 +343,9 @@ class TestRoutingRegression:
         that agent ignores it.
         """
         test_room_id = "!research:localhost"
+
+        # Mock user as online for stop button to show
+        mock_is_user_online.return_value = True
 
         # Create router agent
         router_agent = AgentMatrixUser(
@@ -382,5 +392,5 @@ class TestRoutingRegression:
         await research_bot._on_message(mock_room, router_message)
 
         # Research bot SHOULD respond
-        assert research_bot.client.room_send.call_count == 1  # type: ignore[union-attr]
+        assert research_bot.client.room_send.call_count == 3  # type: ignore[union-attr]  # thinking + 🛑 + final
         assert mock_ai_response.call_count == 1

@@ -403,7 +403,7 @@ async def handle_confirmation_reaction(
 
     # Send the response
     await bot._send_response(
-        room,
+        room.room_id,
         event.reacts_to,  # Reply to the confirmation message
         response_text,
         pending_change.thread_id,

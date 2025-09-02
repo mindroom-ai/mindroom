@@ -14,6 +14,7 @@ import pytest
 
 from mindroom.bot import TeamBot
 from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 
 from .conftest import TEST_PASSWORD
@@ -57,12 +58,14 @@ class TestTeamRoomMembership:
 
         # Create the team bot with configured rooms
         config = Config(router=RouterConfig(model="default"))
+        # Convert agent names to MatrixID objects
+        team_matrix_ids = [MatrixID.from_username("agent1", config.domain)]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             rooms=["!test_room:localhost"],
-            team_agents=["agent1"],
+            team_agents=team_matrix_ids,
             team_mode="round_robin",
             team_model=None,
             enable_streaming=False,
@@ -107,12 +110,14 @@ class TestTeamRoomMembership:
 
         # Create the team bot with no configured rooms
         config = Config(router=RouterConfig(model="default"))
+        # Convert agent names to MatrixID objects
+        team_matrix_ids = [MatrixID.from_username("agent1", config.domain)]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             rooms=[],  # No configured rooms
-            team_agents=["agent1"],
+            team_agents=team_matrix_ids,
             team_mode="round_robin",
             team_model=None,
             enable_streaming=False,

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 @pytest.mark.e2e  # Mark as end-to-end test
 @pytest.mark.requires_matrix  # Requires real Matrix server for streaming e2e test
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
+@patch("mindroom.bot.is_user_online")
 @patch("mindroom.matrix.users.ensure_all_agent_users")
 @patch("mindroom.bot.login_agent_user")
 @patch("mindroom.bot.AgentBot.ensure_user_account")
@@ -32,9 +33,13 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     mock_ensure_user: AsyncMock,
     mock_login: AsyncMock,
     mock_ensure_all: AsyncMock,
+    mock_is_user_online: AsyncMock,
     tmp_path: Path,
 ) -> None:
     """End-to-end test that agents don't respond to streaming edits from other agents."""
+    # Mock user as online for stop button to show
+    mock_is_user_online.return_value = True
+
     # Mock ensure_all_agent_users to return proper user objects
 
     mock_agents = {
@@ -319,11 +324,16 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         await asyncio.sleep(0.1)
 
         # Verify calculator responded to the final message
-        assert len(calc_events) == 1, "Calculator should respond to final message"
-        calc_response = calc_events[0]
+        assert len(calc_events) == 3, "Calculator should respond to final message (initial + reaction + final)"
+        # Check the final message (third one, after initial and reaction)
+        calc_response = calc_events[2]  # The final edited message
         assert calc_response["type"] == "m.room.message"
         content_dict = calc_response.get("content", {})
-        body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
+        # For edited messages, check m.new_content
+        if "m.new_content" in content_dict:
+            body = content_dict["m.new_content"].get("body", "")
+        else:
+            body = content_dict.get("body", "") if isinstance(content_dict, dict) else ""
         assert "4" in body
 
     finally:

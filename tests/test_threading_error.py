@@ -137,7 +137,7 @@ class TestThreadingBehavior:
             mock_generate.assert_called_once()
 
             # Now simulate the response being sent
-            await bot._send_response(room, event.event_id, "I can help you with that!", None)
+            await bot._send_response(room.room_id, event.event_id, "I can help you with that!", None)
 
         # Verify the bot sent a response
         bot.client.room_send.assert_called_once()  # type: ignore[union-attr]
@@ -195,22 +195,21 @@ class TestThreadingBehavior:
         with (
             patch("mindroom.bot.interactive.handle_text_response", AsyncMock(return_value=None)),
             patch("mindroom.bot.ai_response", AsyncMock(return_value="OK")),
+            patch("mindroom.bot.get_latest_thread_event_id_if_needed", AsyncMock(return_value="latest_thread_event")),
         ):
             # Process the message
             await bot._on_message(room, event)
 
-        # Verify the bot sent a response
-        bot.client.room_send.assert_called_once()  # type: ignore[union-attr]
+        # Verify the bot sent messages (thinking + final)
+        assert bot.client.room_send.call_count == 2  # type: ignore[union-attr]
 
-        # Check the content
-        call_args = bot.client.room_send.call_args  # type: ignore[union-attr]
-        content = call_args.kwargs["content"]
-
-        # The response should be in the same thread
-        assert "m.relates_to" in content
-        assert content["m.relates_to"]["rel_type"] == "m.thread"
-        assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
-        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$thread_msg:localhost"
+        # Check the initial message (first call)
+        first_call = bot.client.room_send.call_args_list[0]  # type: ignore[union-attr]
+        initial_content = first_call.kwargs["content"]
+        assert "m.relates_to" in initial_content
+        assert initial_content["m.relates_to"]["rel_type"] == "m.thread"
+        assert initial_content["m.relates_to"]["event_id"] == "$thread_root:localhost"
+        assert initial_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$thread_msg:localhost"
 
     @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
@@ -470,7 +469,7 @@ class TestThreadingBehavior:
 
             # Now simulate the response being sent
             await bot._send_response(
-                room,
+                room.room_id,
                 event.event_id,
                 "I can help with that complex question!",
                 "$thread_root:localhost",
