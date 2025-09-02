@@ -1567,11 +1567,6 @@ class AgentBot:
         # When: User asks question → Router suggests agent → Agent responds → User edits
         # The agent won't regenerate because it's not mentioned in the edited message.
         # Proper fix would require tracking response chains (user → router → agent).
-        #
-        # KNOWN LIMITATION: If the user edits their message while the agent is still
-        # generating a response, there's no cancellation mechanism. The original response
-        # will complete and be sent, then the regeneration will edit it. This can lead to
-        # confusing behavior where the user briefly sees the old response before it updates.
         should_respond = should_agent_respond(
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,
