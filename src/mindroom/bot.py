@@ -901,15 +901,8 @@ class AgentBot:
         # Convert MatrixID list to agent names for non-streaming APIs
         agent_names = [mid.agent_name(self.config) or mid.username for mid in team_agents]
 
-        # Store initial_message_id in outer scope so it can be captured
-        initial_message_id = None
-
-        # Create async function for team response generation
-        async def generate_team_response() -> None:
-            nonlocal initial_message_id
-            # Use the initial message created by _run_cancellable_response if created
-            message_id = existing_event_id or initial_message_id
-
+        # Create async function for team response generation that takes message_id as parameter
+        async def generate_team_response(message_id: str | None) -> None:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(self.client, room_id):
@@ -925,7 +918,7 @@ class AgentBot:
                     event_id, accumulated = await send_streaming_response(
                         self.client,
                         room_id,
-                        message_id if message_id else reply_to_event_id,
+                        reply_to_event_id,
                         thread_id,
                         self.matrix_id.domain,
                         self.config,
@@ -979,32 +972,30 @@ class AgentBot:
                         )
 
         # Use unified handler for cancellation support
-        # Send thinking message only when not streaming (streaming has its own initial message)
+        # Always send thinking message unless we're editing an existing message
         thinking_msg = None
-        if not existing_event_id and not use_streaming:
+        if not existing_event_id:
             thinking_msg = "🤝 Team Response: Thinking..."
 
-        initial_message_id = await self._run_cancellable_response(
+        return await self._run_cancellable_response(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
-            response_coroutine=generate_team_response(),
+            response_function=generate_team_response,
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
         )
-
-        return initial_message_id
 
     async def _run_cancellable_response(
         self,
         room_id: str,
         reply_to_event_id: str,
         thread_id: str | None,
-        response_coroutine: object,  # Coroutine that generates the response
+        response_function: object,  # Function that generates the response (takes message_id)
         thinking_message: str | None = None,  # None means don't send thinking message
         existing_event_id: str | None = None,
     ) -> str | None:
-        """Run a response generation coroutine with cancellation support.
+        """Run a response generation function with cancellation support.
 
         This unified handler provides:
         - Optional "Thinking..." message
@@ -1015,7 +1006,7 @@ class AgentBot:
             room_id: The room to send to
             reply_to_event_id: Event to reply to
             thread_id: Thread ID if in thread
-            response_coroutine: Async function that generates the response
+            response_function: Async function that generates the response (takes message_id parameter)
             thinking_message: Optional thinking message to show (None to skip)
             existing_event_id: ID of existing message to edit
 
@@ -1035,8 +1026,11 @@ class AgentBot:
                 thread_id,
             )
 
-        # Create cancellable task
-        task: asyncio.Task[None] = asyncio.create_task(response_coroutine)  # type: ignore[arg-type]
+        # Determine which message ID to use
+        message_id = existing_event_id or initial_message_id
+
+        # Create cancellable task by calling the function with the message ID
+        task: asyncio.Task[None] = asyncio.create_task(response_function(message_id))  # type: ignore[operator]
 
         # Track for stop button (only if we have a message to track)
         message_to_track = existing_event_id or initial_message_id
@@ -1263,20 +1257,10 @@ class AgentBot:
         use_streaming = self.enable_streaming
         if use_streaming:
             # Check if the user is online to decide whether to stream
-            use_streaming = await should_use_streaming(
-                self.client,
-                room_id,
-                requester_user_id=user_id,
-            )
+            use_streaming = await should_use_streaming(self.client, room_id, requester_user_id=user_id)
 
-        # Store initial_message_id in outer scope so it can be captured
-        initial_message_id = None
-
-        # Create async function for generation
-        async def generate() -> None:
-            nonlocal initial_message_id
-            # Use the initial message created by _run_cancellable_response
-            message_id = existing_event_id or initial_message_id
+        # Create async function for generation that takes message_id as parameter
+        async def generate(message_id: str | None) -> None:
             if use_streaming:
                 await self._process_and_respond_streaming(
                     room_id,
@@ -1297,16 +1281,16 @@ class AgentBot:
                 )
 
         # Use unified handler for cancellation support
-        # Send "Thinking..." only when not streaming (streaming has its own initial message)
+        # Always send "Thinking..." message unless we're editing an existing message
         thinking_msg = None
-        if not existing_event_id and not use_streaming:
+        if not existing_event_id:
             thinking_msg = "Thinking..."
 
-        initial_message_id = await self._run_cancellable_response(
+        await self._run_cancellable_response(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
-            response_coroutine=generate(),
+            response_function=generate,
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
         )
