@@ -269,9 +269,13 @@ class Config(BaseModel):
         # Router uses router model
         if entity_name == ROUTER_AGENT_NAME:
             return self.router.model
-        # Teams use their configured model or default
+        # Teams use their configured model (required to have one)
         if entity_name in self.teams:
-            return self.teams[entity_name].model or "default"
+            model = self.teams[entity_name].model
+            if model is None:
+                msg = f"Team {entity_name} has no model configured"
+                raise ValueError(msg)
+            return model
         # Regular agents use their configured model
         if entity_name in self.agents:
             return self.agents[entity_name].model

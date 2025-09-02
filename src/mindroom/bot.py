@@ -1655,6 +1655,7 @@ class MultiAgentOrchestrator:
         for entity_name, bot in self.agent_bots.items():
             if entity_name not in entities_to_restart:
                 bot.config = new_config
+                await bot._set_presence_with_model_info()
                 logger.debug(f"Updated config for {entity_name}")
 
         if not entities_to_restart and not new_entities:
@@ -1664,15 +1665,6 @@ class MultiAgentOrchestrator:
         # Stop entities that need restarting
         if entities_to_restart:
             await _stop_entities(entities_to_restart, self.agent_bots, self._sync_tasks)
-
-        # Update config
-        self.config = new_config
-
-        # Update config for all existing bots that aren't being restarted
-        for entity_name, bot in self.agent_bots.items():
-            if entity_name not in entities_to_restart:
-                bot.config = new_config
-                await bot._set_presence_with_model_info()
 
         # Recreate entities that need restarting using self-management
         for entity_name in entities_to_restart:

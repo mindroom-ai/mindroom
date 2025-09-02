@@ -19,7 +19,7 @@ async def set_presence_status(
     client: nio.AsyncClient,
     status_msg: str,
     presence: str = "online",
-) -> bool:
+) -> None:
     """Set presence status for a Matrix user.
 
     Args:
@@ -27,18 +27,13 @@ async def set_presence_status(
         status_msg: The status message to display
         presence: The presence state (online, offline, unavailable)
 
-    Returns:
-        True if successful, False otherwise
-
     """
     response = await client.set_presence(presence, status_msg)
 
     if isinstance(response, nio.PresenceSetResponse):
         logger.info(f"Set presence status: {status_msg}")
-        return True
-
-    logger.warning(f"Failed to set presence: {response}")
-    return False
+    else:
+        logger.warning(f"Failed to set presence: {response}")
 
 
 def build_agent_status_message(
@@ -86,13 +81,7 @@ def build_agent_status_message(
             status_parts.append(f"🔧 {len(agent_config.tools)} tools available")
 
     # Join all parts with separators
-    status_msg = " | ".join(status_parts)
-
-    # Limit total length to avoid API limits (usually 256 chars)
-    if len(status_msg) > 250:
-        status_msg = status_msg[:247] + "..."
-
-    return status_msg
+    return " | ".join(status_parts)
 
 
 async def is_user_online(
