@@ -101,6 +101,32 @@ logger = get_logger(__name__)
 SYNC_TIMEOUT_MS = 30000
 
 
+def _create_task_wrapper(callback: object) -> object:
+    """Create a wrapper that runs the callback as a background task.
+
+    This ensures the sync loop is never blocked by event processing,
+    allowing the bot to handle new events (like stop reactions) while
+    processing messages.
+    """
+
+    async def wrapper(*args: object, **kwargs: object) -> None:
+        # Create the task but don't await it - let it run in background
+        async def error_handler() -> None:
+            try:
+                await callback(*args, **kwargs)  # type: ignore[operator]
+            except asyncio.CancelledError:
+                # Task was cancelled, this is expected during shutdown
+                pass
+            except Exception:
+                # Log the exception with full traceback
+                logger.exception("Error in event callback")
+
+        # Create task with error handling
+        _task = asyncio.create_task(error_handler())  # noqa: RUF006
+
+    return wrapper
+
+
 def _format_agent_description(agent_name: str, config: Config) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
@@ -405,14 +431,14 @@ class AgentBot:
 
         # Register event callbacks - wrap them to run as background tasks
         # This ensures the sync loop is never blocked, allowing stop reactions to work
-        self.client.add_event_callback(self._create_task_wrapper(self._on_invite), nio.InviteEvent)
-        self.client.add_event_callback(self._create_task_wrapper(self._on_message), nio.RoomMessageText)
-        self.client.add_event_callback(self._create_task_wrapper(self._on_reaction), nio.ReactionEvent)
+        self.client.add_event_callback(_create_task_wrapper(self._on_invite), nio.InviteEvent)
+        self.client.add_event_callback(_create_task_wrapper(self._on_message), nio.RoomMessageText)
+        self.client.add_event_callback(_create_task_wrapper(self._on_reaction), nio.ReactionEvent)
 
         # Register voice message callbacks (only for router agent to avoid duplicates)
         if self.agent_name == ROUTER_AGENT_NAME:
-            self.client.add_event_callback(self._create_task_wrapper(self._on_voice_message), nio.RoomMessageAudio)
-            self.client.add_event_callback(self._create_task_wrapper(self._on_voice_message), nio.RoomEncryptedAudio)
+            self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomMessageAudio)
+            self.client.add_event_callback(_create_task_wrapper(self._on_voice_message), nio.RoomEncryptedAudio)
 
         self.running = True
 
@@ -514,21 +540,6 @@ class AgentBot:
         """Run the sync loop for this agent."""
         assert self.client is not None
         await self.client.sync_forever(timeout=SYNC_TIMEOUT_MS, full_state=True)
-
-    def _create_task_wrapper(self, callback: object) -> object:
-        """Create a wrapper that runs the callback as a background task.
-
-        This ensures the sync loop is never blocked by event processing,
-        allowing the bot to handle new events (like stop reactions) while
-        processing messages.
-        """
-
-        async def wrapper(*args: object, **kwargs: object) -> None:
-            # Create the task but don't await it - let it run in background
-            # Store reference to avoid GC issues but we don't need to track it
-            _task = asyncio.create_task(callback(*args, **kwargs))  # type: ignore[operator]  # noqa: RUF006
-
-        return wrapper
 
     async def _on_invite(self, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
         assert self.client is not None
