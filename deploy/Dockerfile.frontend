@@ -23,6 +23,8 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 
 # Build frontend
 FROM frontend-deps as frontend-build
+# Copy the tools_metadata.json file needed for icon generation
+COPY src/mindroom/tools_metadata.json /app/src/mindroom/tools_metadata.json
 COPY frontend .
 RUN pnpm run build
 
