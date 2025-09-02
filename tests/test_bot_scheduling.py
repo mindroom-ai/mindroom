@@ -293,6 +293,7 @@ class TestBotTaskRestoration:
             with (
                 patch("mindroom.matrix.users.login") as mock_login,
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
+                patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
                 mock_client = AsyncMock()
                 mock_login.return_value = mock_client
