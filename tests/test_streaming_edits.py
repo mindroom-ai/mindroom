@@ -69,14 +69,14 @@ class TestStreamingEdits:
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.stream_agent_response")
-    async def test_agent_ignores_edits_of_responded_messages(
+    async def test_agent_regenerates_on_user_edits(
         self,
         mock_stream_agent_response: AsyncMock,  # noqa: ARG002
         mock_ai_response: AsyncMock,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Test that agents don't respond to edits of messages they already responded to."""
+        """Test that agents regenerate their response when users edit messages."""
         # Set up bot
         bot = setup_test_bot(mock_agent_user, tmp_path, "!test:localhost", config=self.config)
 
@@ -133,10 +133,11 @@ class TestStreamingEdits:
             },
         }
 
-        # Process edit - bot should NOT respond again
+        # Process edit - bot SHOULD regenerate its response
         await bot._on_message(mock_room, edit_event1)
-        assert bot.client.room_send.call_count == 0  # type: ignore[union-attr]
-        assert mock_ai_response.call_count == 0
+        # Bot should regenerate: 1 call for thinking message (non-streaming, editing existing)
+        assert bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # thinking message only
+        assert mock_ai_response.call_count == 1  # AI should be called again for regeneration
 
         # Edit event 2 - another streaming update
         edit_event2 = MagicMock()
@@ -158,10 +159,14 @@ class TestStreamingEdits:
             },
         }
 
-        # Process second edit - bot should still NOT respond
+        # Reset mocks again
+        bot.client.room_send.reset_mock()  # type: ignore[union-attr]
+        mock_ai_response.reset_mock()
+
+        # Process second edit - bot should regenerate again
         await bot._on_message(mock_room, edit_event2)
-        assert bot.client.room_send.call_count == 0  # type: ignore[union-attr]
-        assert mock_ai_response.call_count == 0
+        assert bot.client.room_send.call_count == 1  # type: ignore[union-attr]  # thinking message only
+        assert mock_ai_response.call_count == 1  # AI should be called again
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.ai_response")
