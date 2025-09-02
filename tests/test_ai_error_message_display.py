@@ -71,9 +71,6 @@ class TestAIErrorDisplay:
             assert "Authentication failed" in text
             assert "API key" in text
 
-            # Verify stop button was removed after completion
-            bot.stop_manager.remove_stop_button.assert_called_once_with(bot.client, "$thinking_msg")
-
     @pytest.mark.asyncio
     async def test_streaming_error_updates_message(self, tmp_path: Path) -> None:
         """Test that when streaming AI fails, the message is updated with the error."""
@@ -132,9 +129,6 @@ class TestAIErrorDisplay:
 
                 # Verify send_streaming_response was called with the error stream
                 mock_send_streaming.assert_called_once()
-
-                # Verify stop button was removed after completion
-                bot.stop_manager.remove_stop_button.assert_called_once_with(bot.client, "$thinking_msg")
 
     @pytest.mark.asyncio
     async def test_cancellation_shows_cancelled_message(self, tmp_path: Path) -> None:

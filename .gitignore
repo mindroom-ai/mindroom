@@ -208,6 +208,9 @@ GMAIL_SETUP.md
 google_token.json
 token.json
 
+# Response tracking files (should be in mindroom_data/tracking/)
+*_responded.json
+
 # Frontend test files
 frontend/test-*.js
 frontend/test-*.html

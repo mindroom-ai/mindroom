@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     import nio
 
     from .config import Config
-    from .stop import StopManager
 
 from .matrix.client import get_latest_thread_event_id_if_needed
 
@@ -58,18 +57,9 @@ class StreamingResponse:
             await self._send_or_edit_message(client)
             self.last_update = current_time
 
-    async def finalize(
-        self,
-        client: nio.AsyncClient,
-        stop_manager: StopManager | None = None,
-        message_id: str | None = None,
-    ) -> None:
+    async def finalize(self, client: nio.AsyncClient) -> None:
         """Send final message update."""
         await self._send_or_edit_message(client, is_final=True)
-        # Remove stop button when streaming is complete
-        if stop_manager and (message_id or self.event_id):
-            logger.info("Finalizing streaming response, removing stop button", message_id=message_id or self.event_id)
-            await stop_manager.remove_stop_button(client, message_id or self.event_id)
 
     async def _send_or_edit_message(self, client: nio.AsyncClient, is_final: bool = False) -> None:
         """Send new message or edit existing one."""

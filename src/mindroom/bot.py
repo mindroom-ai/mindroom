@@ -561,25 +561,11 @@ class AgentBot:
         if event.body.endswith(IN_PROGRESS_MARKER):
             return
 
-        # Skip edit events - they have m.relates_to with rel_type == "m.replace"
-        # NOTE: This means the bot won't respond to edited messages at all.
-        # Ideally, when a user edits their message, the bot would edit its response too,
-        # but this requires complex tracking of message relationships and response regeneration.
-        # For now, we ignore all edits to prevent them being treated as new messages.
-        # Users who want a new response after editing should send a new message instead.
-        event_info = EventInfo.from_event(event.source)
-        if event_info.is_edit:
-            self.logger.debug(f"Skipping edit event {event.event_id}")
-            return
-
         # Skip our own messages (unless voice transcription from router)
         if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
             return
 
-        # Check if we've already seen this message (prevents reprocessing after restart)
-        if self.response_tracker.has_responded(event.event_id):
-            self.logger.debug("Already seen message", event_id=event.event_id)
-            return
+        event_info = EventInfo.from_event(event.source)
 
         # Check if sender is authorized to interact with agents
         is_authorized = is_authorized_sender(event.sender, self.config, room.room_id)
@@ -588,8 +574,20 @@ class AgentBot:
         )
         if not is_authorized:
             # Mark as seen even though we're not responding (prevents reprocessing after permission changes)
-            self.response_tracker.mark_responded(event.event_id)
+            # Only mark non-edit events as responded
+            if not event_info.is_edit:
+                self.response_tracker.mark_responded(event.event_id)
             self.logger.debug(f"Ignoring message from unauthorized sender: {event.sender}")
+            return
+
+        # Handle edit events
+        if event_info.is_edit:
+            await self._handle_message_edit(room, event, event_info)
+            return
+
+        # Check if we've already seen this message (prevents reprocessing after restart)
+        if self.response_tracker.has_responded(event.event_id):
+            self.logger.debug("Already seen message", event_id=event.event_id)
             return
 
         # We only receive events from rooms we're in - no need to check access
@@ -662,7 +660,7 @@ class AgentBot:
                 return
 
             # Use the shared team response helper
-            await self._generate_team_response_helper(
+            response_event_id = await self._generate_team_response_helper(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=context.thread_id,
@@ -674,7 +672,7 @@ class AgentBot:
                 existing_event_id=None,
             )
 
-            self.response_tracker.mark_responded(event.event_id)
+            self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
 
         # Check if we should respond individually
@@ -697,7 +695,7 @@ class AgentBot:
 
         # Generate and send response
         self.logger.info("Processing", event_id=event.event_id)
-        await self._generate_response(
+        response_event_id = await self._generate_response(
             room_id=room.room_id,
             prompt=event.body,
             reply_to_event_id=event.event_id,
@@ -705,7 +703,7 @@ class AgentBot:
             thread_history=context.thread_history,
             user_id=event.sender,
         )
-        self.response_tracker.mark_responded(event.event_id)
+        self.response_tracker.mark_responded(event.event_id, response_event_id)
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> None:
         """Handle reaction events for interactive questions, stop functionality, and config confirmations."""
@@ -731,6 +729,8 @@ class AgentBot:
                     message_id=event.reacts_to,
                     stopped_by=event.sender,
                 )
+                # Remove the stop button immediately for user feedback
+                await self.stop_manager.remove_stop_button(self.client, event.reacts_to)
                 # Send a confirmation message
                 await self._send_response(room.room_id, event.reacts_to, "✅ Generation stopped", None)
                 return
@@ -782,7 +782,7 @@ class AgentBot:
             # Generate the response, editing the acknowledgment message
             # Note: existing_event_id is only used for interactive questions to edit the acknowledgment
             prompt = f"The user selected: {selected_value}"
-            await self._generate_response(
+            response_event_id = await self._generate_response(
                 room_id=room.room_id,
                 prompt=prompt,
                 reply_to_event_id=event.reacts_to,
@@ -792,7 +792,7 @@ class AgentBot:
                 user_id=event.sender,
             )
             # Mark the original interactive question as responded
-            self.response_tracker.mark_responded(event.reacts_to)
+            self.response_tracker.mark_responded(event.reacts_to, response_event_id)
 
     async def _on_voice_message(
         self,
@@ -826,15 +826,16 @@ class AgentBot:
 
         if transcribed_message:
             event_info = EventInfo.from_event(event.source)
-            await self._send_response(
+            response_event_id = await self._send_response(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 response_text=transcribed_message,
                 thread_id=event_info.thread_id,
             )
-
-        # Mark the voice message as responded so we don't process it again
-        self.response_tracker.mark_responded(event.event_id)
+            self.response_tracker.mark_responded(event.event_id, response_event_id)
+        else:
+            # Mark as responded to avoid reprocessing
+            self.response_tracker.mark_responded(event.event_id)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
         assert self.client is not None
@@ -1069,15 +1070,21 @@ class AgentBot:
 
         try:
             await task
-            # Remove stop button on successful completion (if it was added)
-            if message_to_track and show_stop_button:
-                await self.stop_manager.remove_stop_button(self.client, message_to_track)
         except asyncio.CancelledError:
             self.logger.info("Response cancelled by user", message_id=message_to_track)
-            # Keep stop button visible when cancelled
+        except Exception as e:
+            self.logger.exception("Error during response generation", error=str(e))
+            raise
         finally:
             if message_to_track:
-                self.stop_manager.clear_message(message_to_track)
+                tracked = self.stop_manager.tracked_messages.get(message_to_track)
+                button_already_removed = tracked is None or tracked.reaction_event_id is None
+
+                self.stop_manager.clear_message(
+                    message_to_track,
+                    client=self.client,
+                    remove_button=show_stop_button and not button_already_removed,
+                )
 
         return initial_message_id
 
@@ -1089,10 +1096,10 @@ class AgentBot:
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Process a message and send a response (non-streaming)."""
         if not prompt.strip():
-            return
+            return None
 
         session_id = create_session_id(room_id, thread_id)
 
@@ -1114,15 +1121,15 @@ class AgentBot:
             if existing_event_id:
                 cancelled_text = "**[Response cancelled by user]**"
                 await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
-                # Don't remove stop button when cancelled
-            raise  # Re-raise to let the outer handler know
+            raise
+        except Exception as e:
+            self.logger.exception("Error in non-streaming response", error=str(e))
+            raise
 
         if existing_event_id:
             # Edit the existing message
             await self._edit_message(room_id, existing_event_id, response_text, thread_id)
-            # Remove stop button when response is complete
-            await self.stop_manager.remove_stop_button(self.client, existing_event_id)
-            return
+            return existing_event_id
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(room_id, reply_to_event_id, response.formatted_text, thread_id)
@@ -1140,6 +1147,8 @@ class AgentBot:
                 self.agent_name,
             )
             await interactive.add_reaction_buttons(self.client, room_id, event_id, response.options_list)
+
+        return event_id
 
     async def _handle_interactive_question(
         self,
@@ -1190,11 +1199,11 @@ class AgentBot:
         thread_id: str | None,
         thread_history: list[dict],
         existing_event_id: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Process a message and send a response (streaming)."""
         assert self.client is not None
         if not prompt.strip():
-            return
+            return None
 
         session_id = create_session_id(room_id, thread_id)
 
@@ -1232,21 +1241,19 @@ class AgentBot:
                 reply_to_event_id,
             )
 
-            # Remove stop button when streaming is complete
-            if existing_event_id:
-                await self.stop_manager.remove_stop_button(self.client, existing_event_id)
-
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
             self.logger.info("Streaming cancelled by user", message_id=existing_event_id)
             if existing_event_id:
                 cancelled_text = "**[Response cancelled by user]**"
                 await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
-                # Don't remove stop button when cancelled
-            raise  # Re-raise to let the outer handler know
+            raise
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
             # Don't mark as responded if streaming failed
+            return None
+        else:
+            return event_id
 
     async def _generate_response(
         self,
@@ -1257,7 +1264,7 @@ class AgentBot:
         thread_history: list[dict],
         existing_event_id: str | None = None,
         user_id: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Generate and send/edit a response using AI.
 
         Args:
@@ -1270,10 +1277,10 @@ class AgentBot:
                              (only used for interactive question responses)
             user_id: User ID of the sender for identifying user messages in history
 
-        """
-        if not prompt.strip():
-            return
+        Returns:
+            Event ID of the response message, or None if failed
 
+        """
         assert self.client is not None
 
         # Prepare session id for memory storage (store after sending response)
@@ -1313,7 +1320,7 @@ class AgentBot:
         if not existing_event_id:
             thinking_msg = "Thinking..."
 
-        await self._run_cancellable_response(
+        event_id = await self._run_cancellable_response(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
@@ -1341,6 +1348,8 @@ class AgentBot:
             )
         except Exception:  # pragma: no cover
             self.logger.debug("Skipping memory storage due to configuration error")
+
+        return event_id
 
     async def _send_response(
         self,
@@ -1508,6 +1517,81 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
         else:
             self.logger.error("Failed to route to agent", agent=suggested_agent)
+
+    async def _handle_message_edit(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageText,
+        event_info: EventInfo,
+    ) -> None:
+        """Handle an edited message by regenerating the agent's response.
+
+        Args:
+            room: The Matrix room
+            event: The edited message event
+            event_info: Information about the edit event
+
+        """
+        if not event_info.original_event_id:
+            self.logger.debug("Edit event has no original event ID")
+            return
+
+        # Skip edits from other agents
+        sender_agent_name = extract_agent_name(event.sender, self.config)
+        if sender_agent_name:
+            self.logger.debug(f"Ignoring edit from other agent: {sender_agent_name}")
+            return
+
+        response_event_id = self.response_tracker.get_response_event_id(event_info.original_event_id)
+        if not response_event_id:
+            self.logger.debug(f"No previous response found for edited message {event_info.original_event_id}")
+            return
+
+        self.logger.info(
+            "Regenerating response for edited message",
+            original_event_id=event_info.original_event_id,
+            response_event_id=response_event_id,
+        )
+
+        context = await self._extract_message_context(room, event)
+
+        # Check if we should respond to the edited message
+        # KNOWN LIMITATION: This doesn't work correctly for the router suggestion case.
+        # When: User asks question → Router suggests agent → Agent responds → User edits
+        # The agent won't regenerate because it's not mentioned in the edited message.
+        # Proper fix would require tracking response chains (user → router → agent).
+        should_respond = should_agent_respond(
+            agent_name=self.agent_name,
+            am_i_mentioned=context.am_i_mentioned,
+            is_thread=context.is_thread,
+            room=room,
+            thread_history=context.thread_history,
+            config=self.config,
+            mentioned_agents=context.mentioned_agents,
+        )
+
+        if not should_respond:
+            self.logger.debug("Agent should not respond to edited message")
+            return
+
+        # These keys must be present according to MSC2676
+        # https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/2676-message-editing.md
+        edited_content = event.source["content"]["m.new_content"]["body"]
+
+        # Generate new response
+        await self._generate_response(
+            room_id=room.room_id,
+            prompt=edited_content,
+            reply_to_event_id=event_info.original_event_id,
+            thread_id=context.thread_id,
+            thread_history=context.thread_history,
+            existing_event_id=response_event_id,
+            user_id=event.sender,
+        )
+
+        # Update the response tracker
+        self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
+        self.logger.info("Successfully regenerated response for edited message")
 
     async def _handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageText, command: Command) -> None:  # noqa: C901, PLR0912
         self.logger.info("Handling command", command_type=command.type.value)
