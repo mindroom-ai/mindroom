@@ -565,23 +565,22 @@ class AgentBot:
         if event.sender == self.matrix_id.full_id and not event.body.startswith(VOICE_PREFIX):
             return
 
-        # Parse event info once
         event_info = EventInfo.from_event(event.source)
 
-        # Check if sender is authorized to interact with agents (do this early, before any processing)
+        # Check if sender is authorized to interact with agents
         is_authorized = is_authorized_sender(event.sender, self.config, room.room_id)
         self.logger.debug(
             f"Authorization check for {event.sender}: authorized={is_authorized}, room={room.room_id}",
         )
         if not is_authorized:
             # Mark as seen even though we're not responding (prevents reprocessing after permission changes)
-            # Only mark non-edit events as responded (edits don't have their own event_id to track)
+            # Only mark non-edit events as responded
             if not event_info.is_edit:
                 self.response_tracker.mark_responded(event.event_id)
             self.logger.debug(f"Ignoring message from unauthorized sender: {event.sender}")
             return
 
-        # Handle edit events - regenerate response if the edited message had one
+        # Handle edit events
         if event_info.is_edit:
             await self._handle_message_edit(room, event, event_info)
             return
@@ -673,7 +672,6 @@ class AgentBot:
                 existing_event_id=None,
             )
 
-            # Mark as responded with the response event ID for edit tracking
             self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
 
@@ -794,7 +792,6 @@ class AgentBot:
                 user_id=event.sender,
             )
             # Mark the original interactive question as responded
-            # The response_event_id will be the same as ack_event_id since we're editing
             self.response_tracker.mark_responded(event.reacts_to, response_event_id)
 
     async def _on_voice_message(
@@ -835,10 +832,9 @@ class AgentBot:
                 response_text=transcribed_message,
                 thread_id=event_info.thread_id,
             )
-            # Mark the voice message as responded with the response event ID
             self.response_tracker.mark_responded(event.event_id, response_event_id)
         else:
-            # Mark as responded even if no transcription (to avoid reprocessing)
+            # Mark as responded to avoid reprocessing
             self.response_tracker.mark_responded(event.event_id)
 
     async def _extract_message_context(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> MessageContext:
@@ -1078,9 +1074,8 @@ class AgentBot:
             self.logger.info("Response cancelled by user", message_id=message_to_track)
         except Exception as e:
             self.logger.exception("Error during response generation", error=str(e))
-            raise  # Re-raise the exception
+            raise
         finally:
-            # Clean up tracking and stop button
             if message_to_track:
                 tracked = self.stop_manager.tracked_messages.get(message_to_track)
                 button_already_removed = tracked is None or tracked.reaction_event_id is None
@@ -1126,10 +1121,10 @@ class AgentBot:
             if existing_event_id:
                 cancelled_text = "**[Response cancelled by user]**"
                 await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
-            raise  # Re-raise to let the outer handler know
+            raise
         except Exception as e:
             self.logger.exception("Error in non-streaming response", error=str(e))
-            raise  # Re-raise to let the outer handler know
+            raise
 
         if existing_event_id:
             # Edit the existing message
@@ -1252,7 +1247,7 @@ class AgentBot:
             if existing_event_id:
                 cancelled_text = "**[Response cancelled by user]**"
                 await self._edit_message(room_id, existing_event_id, cancelled_text, thread_id)
-            raise  # Re-raise to let the outer handler know
+            raise
         except Exception as e:
             self.logger.exception("Error in streaming response", error=str(e))
             # Don't mark as responded if streaming failed
@@ -1541,13 +1536,12 @@ class AgentBot:
             self.logger.debug("Edit event has no original event ID")
             return
 
-        # Skip edits from other agents (e.g., streaming edits)
+        # Skip edits from other agents
         sender_agent_name = extract_agent_name(event.sender, self.config)
         if sender_agent_name:
             self.logger.debug(f"Ignoring edit from other agent: {sender_agent_name}")
             return
 
-        # Check if we had responded to the original message
         response_event_id = self.response_tracker.get_response_event_id(event_info.original_event_id)
         if not response_event_id:
             self.logger.debug(f"No previous response found for edited message {event_info.original_event_id}")
@@ -1559,7 +1553,6 @@ class AgentBot:
             response_event_id=response_event_id,
         )
 
-        # Extract message context for the edited message
         context = await self._extract_message_context(room, event)
 
         # Check if we should respond to the edited message
@@ -1581,28 +1574,26 @@ class AgentBot:
             self.logger.debug("Agent should not respond to edited message")
             return
 
-        # Extract the actual edited content (without the "* " prefix)
-        # For edits, the real content is in m.new_content.body
-        edited_content = event.body  # Default to event.body
+        # Extract the actual edited content from m.new_content.body
+        edited_content = event.body
         if event.source and "content" in event.source:
             new_content = event.source["content"].get("m.new_content", {})
             if "body" in new_content:
                 edited_content = new_content["body"]
                 self.logger.debug(f"Using edited content from m.new_content: {edited_content}")
 
-        # Generate new response using the cancellable framework
-        # This allows users to cancel regenerations just like original responses
+        # Generate new response
         await self._generate_response(
             room_id=room.room_id,
-            prompt=edited_content,  # Use the actual edited content
-            reply_to_event_id=event_info.original_event_id,  # Use original for context
+            prompt=edited_content,
+            reply_to_event_id=event_info.original_event_id,
             thread_id=context.thread_id,
             thread_history=context.thread_history,
-            existing_event_id=response_event_id,  # Edit the existing response
+            existing_event_id=response_event_id,
             user_id=event.sender,
         )
 
-        # Update the response tracker (keep the same mapping, just update timestamp)
+        # Update the response tracker
         self.response_tracker.mark_responded(event_info.original_event_id, response_event_id)
         self.logger.info("Successfully regenerated response for edited message")
 

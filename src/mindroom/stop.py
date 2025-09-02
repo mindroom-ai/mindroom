@@ -76,7 +76,6 @@ class StopManager:
 
         async def delayed_clear() -> None:
             """Clear the message and remove stop button after a delay."""
-            # Remove stop button first if requested and it exists
             if remove_button and client and message_id in self.tracked_messages:
                 tracked = self.tracked_messages[message_id]
                 if tracked.reaction_event_id:
@@ -87,12 +86,10 @@ class StopManager:
                             event_id=tracked.reaction_event_id,
                             reason="Response completed",
                         )
-                        # Clear the reaction ID to avoid double removal
                         tracked.reaction_event_id = None
                     except Exception as e:
                         logger.warning(f"Failed to remove stop button in cleanup: {e}")
 
-            # Then wait and clear tracking
             await asyncio.sleep(delay)
             if message_id in self.tracked_messages:
                 logger.info("Clearing tracked message after delay", message_id=message_id, delay=delay)
@@ -194,7 +191,6 @@ class StopManager:
                         event_id=tracked.reaction_event_id,
                         reason="User clicked stop",
                     )
-                    # Clear the reaction ID to prevent double removal in cleanup
                     tracked.reaction_event_id = None
                     logger.info("Stop button removed successfully")
                 except Exception as e:
