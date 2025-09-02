@@ -5,6 +5,7 @@
 ./deploy.py create test-2 --matrix tuwunel --domain test-2.mindroom.chat
 ./deploy.py create test-3 --matrix tuwunel --domain test-3.mindroom.chat
 ./deploy.py create test-4 --matrix tuwunel --domain test-4.mindroom.chat
+./deploy.py create test-5 --matrix tuwunel --domain test-5.mindroom.chat
 
 ./deploy.py start alt
 ./deploy.py start default
@@ -13,3 +14,4 @@
 ./deploy.py start --only-matrix test-2
 ./deploy.py start --only-matrix test-3
 ./deploy.py start --only-matrix test-4
+./deploy.py start --only-matrix test-5
