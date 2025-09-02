@@ -90,7 +90,7 @@ class TestResponseTracker:
         assert len(tracker._responses) == 20
 
         # Cleanup with max 10
-        tracker.cleanup_old_events(max_events=10)
+        tracker._cleanup_old_events(max_events=10)
 
         # Should keep only the last 10 (most recent by timestamp)
         assert len(tracker._responses) == 10
@@ -122,39 +122,13 @@ class TestResponseTracker:
         assert len(tracker._responses) == 10
 
         # Cleanup with 30 day max age
-        tracker.cleanup_old_events(max_events=100, max_age_days=30)
+        tracker._cleanup_old_events(max_events=100, max_age_days=30)
 
         # Should keep only the recent events
         assert len(tracker._responses) == 5
         for i in range(5):
             assert tracker.has_responded(f"new_event{i}")
             assert not tracker.has_responded(f"old_event{i}")
-
-    def test_get_stats(self, temp_dir: Path) -> None:
-        """Test getting statistics about tracked responses."""
-        tracker = ResponseTracker("test_stats", base_path=temp_dir)
-
-        # Empty tracker
-        stats = tracker.get_stats()
-        assert stats["total"] == 0
-        assert stats["oldest_age_hours"] == 0
-        assert stats["newest_age_hours"] == 0
-
-        # Add some events
-        current_time = time.time()
-        tracker._responses["old_event"] = {
-            "timestamp": current_time - (48 * 60 * 60),  # 48 hours ago
-            "response_id": None,
-        }
-        tracker._responses["new_event"] = {
-            "timestamp": current_time - (1 * 60 * 60),  # 1 hour ago
-            "response_id": None,
-        }
-
-        stats = tracker.get_stats()
-        assert stats["total"] == 2
-        assert 47 < stats["oldest_age_hours"] < 49
-        assert 0.9 < stats["newest_age_hours"] < 1.1
 
     def test_concurrent_access(self, temp_dir: Path) -> None:
         """Test that file locking prevents corruption during concurrent writes."""

@@ -6,7 +6,7 @@ import fcntl
 import json
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from .constants import TRACKING_DIR
 from .logging_config import get_logger
@@ -39,26 +39,7 @@ class ResponseTracker:
         self._responses_file = self.base_path / f"{self.agent_name}_responded.json"
         self._load_responses()
         # Perform automatic cleanup on initialization
-        self.cleanup_old_events()
-
-    def _load_responses(self) -> None:
-        """Load the responses from disk."""
-        if not self._responses_file.exists():
-            self._responses = {}
-            return
-
-        with self._responses_file.open() as f:
-            data = json.load(f)
-            self._responses = data
-
-    def _save_responses(self) -> None:
-        """Save the responses to disk using file locking."""
-        with self._responses_file.open("w") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                json.dump(self._responses, f, indent=2)
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        self._cleanup_old_events()
 
     def has_responded(self, event_id: str) -> bool:
         """Check if we've already responded to this event.
@@ -100,20 +81,26 @@ class ResponseTracker:
         record = self._responses.get(user_event_id)
         return record["response_id"] if record else None
 
-    def remove_response_mapping(self, user_event_id: str) -> None:
-        """Remove the response mapping for a user event.
+    def _load_responses(self) -> None:
+        """Load the responses from disk."""
+        if not self._responses_file.exists():
+            self._responses = {}
+            return
 
-        Args:
-            user_event_id: The user's message event ID to remove
+        with self._responses_file.open() as f:
+            data = json.load(f)
+            self._responses = data
 
-        """
-        if user_event_id in self._responses:
-            # Keep the timestamp but clear the response_id
-            self._responses[user_event_id]["response_id"] = None
-            self._save_responses()
-            logger.debug(f"Removed response mapping for event {user_event_id}")
+    def _save_responses(self) -> None:
+        """Save the responses to disk using file locking."""
+        with self._responses_file.open("w") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                json.dump(self._responses, f, indent=2)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
-    def cleanup_old_events(self, max_events: int = 10000, max_age_days: int = 30) -> None:
+    def _cleanup_old_events(self, max_events: int = 10000, max_age_days: int = 30) -> None:
         """Remove old events based on count and age.
 
         Args:
@@ -139,24 +126,3 @@ class ResponseTracker:
 
         self._save_responses()
         logger.info(f"Cleaned up old events for {self.agent_name}, keeping {len(self._responses)} events")
-
-    def get_stats(self) -> dict[str, Any]:
-        """Get statistics about tracked responses.
-
-        Returns:
-            Dictionary with stats like total count, oldest event age, etc.
-
-        """
-        if not self._responses:
-            return {"total": 0, "oldest_age_hours": 0, "newest_age_hours": 0}
-
-        current_time = time.time()
-        timestamps = [record["timestamp"] for record in self._responses.values()]
-        oldest = min(timestamps)
-        newest = max(timestamps)
-
-        return {
-            "total": len(self._responses),
-            "oldest_age_hours": (current_time - oldest) / 3600,
-            "newest_age_hours": (current_time - newest) / 3600,
-        }

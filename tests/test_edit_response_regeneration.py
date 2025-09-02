@@ -410,16 +410,6 @@ async def test_response_tracker_mapping_persistence(tmp_path: Path) -> None:
     assert tracker2.get_response_event_id(user_event_1) == response_event_1
     assert tracker2.get_response_event_id(user_event_2) == response_event_2
 
-    # Test removal
-    tracker2.remove_response_mapping(user_event_1)
-    assert tracker2.get_response_event_id(user_event_1) is None
-    assert tracker2.get_response_event_id(user_event_2) == response_event_2
-
-    # Verify removal persists
-    tracker3 = ResponseTracker(agent_name="test_agent", base_path=tmp_path)
-    assert tracker3.get_response_event_id(user_event_1) is None
-    assert tracker3.get_response_event_id(user_event_2) == response_event_2
-
 
 @pytest.mark.asyncio
 async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:

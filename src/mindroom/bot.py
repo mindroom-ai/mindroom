@@ -1574,13 +1574,9 @@ class AgentBot:
             self.logger.debug("Agent should not respond to edited message")
             return
 
-        # Extract the actual edited content from m.new_content.body
-        edited_content = event.body
-        if event.source and "content" in event.source:
-            new_content = event.source["content"].get("m.new_content", {})
-            if "body" in new_content:
-                edited_content = new_content["body"]
-                self.logger.debug(f"Using edited content from m.new_content: {edited_content}")
+        # These keys must be present according to MSC2676
+        # https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/2676-message-editing.md
+        edited_content = event.source["content"]["m.new_content"]["body"]
 
         # Generate new response
         await self._generate_response(
