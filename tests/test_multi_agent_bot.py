@@ -234,6 +234,7 @@ class TestAgentBot:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
+    @patch("mindroom.bot.get_latest_thread_event_id_if_needed")
     @patch("mindroom.bot.ai_response")
     @patch("mindroom.bot.stream_agent_response")
     @patch("mindroom.bot.fetch_thread_history")
@@ -244,6 +245,7 @@ class TestAgentBot:
         mock_fetch_history: AsyncMock,
         mock_stream_agent_response: AsyncMock,
         mock_ai_response: AsyncMock,
+        mock_get_latest_thread: AsyncMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -260,6 +262,8 @@ class TestAgentBot:
         mock_fetch_history.return_value = []
         # Mock the presence check to return same value as enable_streaming
         mock_should_use_streaming.return_value = enable_streaming
+        # Mock get_latest_thread_event_id_if_needed
+        mock_get_latest_thread.return_value = "latest_thread_event"
 
         config = Config.from_yaml()
 

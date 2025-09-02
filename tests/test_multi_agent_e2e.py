@@ -134,8 +134,8 @@ async def test_agent_processes_direct_mention(
                     room_id=test_room_id,
                 )
 
-                # Verify message was sent (streaming makes 2 calls)
-                assert bot.client.room_send.call_count == 2  # type: ignore[union-attr]
+                # Verify message was sent (initial message + reaction + updates)
+                assert bot.client.room_send.call_count == 3  # type: ignore[union-attr]
                 call_args = bot.client.room_send.call_args  # type: ignore[union-attr]
                 assert call_args[1]["room_id"] == test_room_id
                 # Check the final message content
