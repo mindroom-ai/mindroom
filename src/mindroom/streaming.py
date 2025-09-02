@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     import nio
 
     from .config import Config
-    from .simple_stop import SimpleStopManager
+    from .stop import StopManager
 
 from .matrix.client import get_latest_thread_event_id_if_needed
 
@@ -61,7 +61,7 @@ class StreamingResponse:
     async def finalize(
         self,
         client: nio.AsyncClient,
-        stop_manager: SimpleStopManager | None = None,
+        stop_manager: StopManager | None = None,
         message_id: str | None = None,
     ) -> None:
         """Send final message update."""

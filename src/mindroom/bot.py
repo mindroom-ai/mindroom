@@ -64,7 +64,7 @@ from .scheduling import (
     restore_scheduled_tasks,
     schedule_task,
 )
-from .simple_stop import SimpleStopManager
+from .stop import StopManager
 from .streaming import (
     IN_PROGRESS_MARKER,
     ReplacementStreamingResponse,
@@ -269,7 +269,7 @@ class AgentBot:
     running: bool = field(default=False, init=False)
     enable_streaming: bool = field(default=True)  # Enable/disable streaming responses
     orchestrator: MultiAgentOrchestrator = field(init=False)  # Reference to orchestrator
-    stop_manager: SimpleStopManager = field(default_factory=SimpleStopManager, init=False)  # Stop button manager
+    stop_manager: StopManager = field(default_factory=StopManager, init=False)  # Stop button manager
 
     @property
     def agent_name(self) -> str:
@@ -400,7 +400,7 @@ class AgentBot:
         await self._set_avatar_if_available()
 
         # Initialize stop manager
-        self.stop_manager = SimpleStopManager()
+        self.stop_manager = StopManager()
 
         # Register event callbacks
         self.client.add_event_callback(self._on_invite, nio.InviteEvent)

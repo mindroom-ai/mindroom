@@ -24,8 +24,8 @@ class TrackedMessage:
     reaction_event_id: str | None = None
 
 
-class SimpleStopManager:
-    """Minimal manager for handling stop reactions."""
+class StopManager:
+    """Manager for handling stop reactions."""
 
     def __init__(self) -> None:
         """Initialize the stop manager."""
@@ -33,7 +33,7 @@ class SimpleStopManager:
         self.tracked_messages: dict[str, TrackedMessage] = {}
         # Keep references to cleanup tasks
         self.cleanup_tasks: list[asyncio.Task] = []
-        logger.info("SimpleStopManager initialized")
+        logger.info("StopManager initialized")
 
     def set_current(
         self,
