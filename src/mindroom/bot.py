@@ -252,12 +252,14 @@ def create_bot_for_entity(
     if entity_name in config.teams:
         team_config = config.teams[entity_name]
         rooms = resolve_room_aliases(team_config.rooms)
+        # Convert agent names to MatrixID objects
+        team_matrix_ids = [MatrixID.from_username(agent_name, config.domain) for agent_name in team_config.agents]
         return TeamBot(
             agent_user=agent_user,
             storage_path=storage_path,
             config=config,
             rooms=rooms,
-            team_agents=team_config.agents,
+            team_agents=team_matrix_ids,
             team_mode=team_config.mode,
             team_model=team_config.model,
             enable_streaming=True,
@@ -553,7 +555,7 @@ class AgentBot:
         else:
             self.logger.error("Failed to join room", room_id=room.room_id)
 
-    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def _on_message(self, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:  # noqa: C901, PLR0911, PLR0912
         self.logger.info("Received message", event_id=event.event_id, room_id=room.room_id, sender=event.sender)
         assert self.client is not None
         if event.body.endswith(IN_PROGRESS_MARKER):
@@ -662,9 +664,6 @@ class AgentBot:
             # Get model for this team in this room
             model_name = select_model_for_team(self.agent_name, room.room_id, self.config)
 
-            # Convert MatrixID to agent names for the team
-            agent_names = [mid.agent_name(self.config) or mid.username for mid in form_team.agents]
-
             # Decide streaming based on presence
             use_streaming = self.enable_streaming and await should_use_streaming(
                 self.client,
@@ -672,90 +671,17 @@ class AgentBot:
                 requester_user_id=event.sender,
             )
 
-            # Store initial_message_id in outer scope so it can be captured
-            initial_message_id = None
-
-            # Create async function for preformed team response
-            async def generate_preformed_team_response() -> None:
-                nonlocal initial_message_id
-                # Use the initial message created by _run_cancellable_response if created
-                message_id = initial_message_id  # Will be set by _run_cancellable_response
-                if use_streaming:
-                    # Show typing indicator while team generates response
-                    async with typing_indicator(self.client, room.room_id):
-                        # Streaming: returns formatted text chunks for live rendering
-                        response_stream = team_response_stream(
-                            agent_ids=form_team.agents,
-                            message=event.body,
-                            orchestrator=self.orchestrator,
-                            mode=form_team.mode,
-                            thread_history=context.thread_history,
-                            model_name=model_name,
-                        )
-
-                        event_id, accumulated = await send_streaming_response(
-                            self.client,
-                            room.room_id,
-                            message_id if message_id else event.event_id,
-                            context.thread_id,
-                            self.matrix_id.domain,
-                            self.config,
-                            response_stream,
-                            streaming_cls=ReplacementStreamingResponse,
-                            header=None,
-                            existing_event_id=message_id,
-                        )
-
-                    # Handle interactive questions in team responses
-                    await self._handle_interactive_question(
-                        event_id,
-                        accumulated,
-                        room.room_id,
-                        context.thread_id,
-                        event.event_id,
-                        agent_name="team",  # Or could use team name
-                    )
-                else:
-                    # Show typing indicator while team generates response
-                    async with typing_indicator(self.client, room.room_id):
-                        # Non-streaming: returns complete formatted response
-                        response_text = await team_response(
-                            agent_names=agent_names,
-                            mode=form_team.mode,
-                            message=event.body,
-                            orchestrator=self.orchestrator,
-                            thread_history=context.thread_history,
-                            model_name=model_name,
-                        )
-
-                    # Either edit the thinking message or send new
-                    if message_id:
-                        await self._edit_message(room.room_id, message_id, response_text, context.thread_id)
-                    else:
-                        event_id = await self._send_response(room, event.event_id, response_text, context.thread_id)
-                        # Handle interactive questions in non-streaming team responses
-                        if event_id:
-                            await self._handle_interactive_question(
-                                event_id,
-                                response_text,
-                                room.room_id,
-                                context.thread_id,
-                                event.event_id,
-                                agent_name="team",
-                            )
-
-            # Use unified handler for cancellation support
-            # Send thinking message only when not streaming (streaming has its own initial message)
-            thinking_msg = None
-            if not use_streaming:
-                thinking_msg = "🤝 Team Response: Thinking..."
-
-            initial_message_id = await self._run_cancellable_response(
+            # Use the shared team response helper
+            await self._generate_team_response_helper(
                 room_id=room.room_id,
                 reply_to_event_id=event.event_id,
                 thread_id=context.thread_id,
-                response_coroutine=generate_preformed_team_response(),
-                thinking_message=thinking_msg,
+                message=event.body,
+                team_agents=form_team.agents,
+                team_mode=form_team.mode,
+                model_name=model_name,
+                thread_history=context.thread_history,
+                use_streaming=use_streaming,
                 existing_event_id=None,
             )
 
@@ -951,6 +877,125 @@ class AgentBot:
             thread_history=thread_history,
             mentioned_agents=mentioned_agents,
         )
+
+    async def _generate_team_response_helper(
+        self,
+        room_id: str,
+        reply_to_event_id: str,
+        thread_id: str | None,
+        message: str,
+        team_agents: list[MatrixID],
+        team_mode: str,
+        model_name: str | None,
+        thread_history: list[dict],
+        use_streaming: bool,
+        existing_event_id: str | None = None,
+    ) -> str | None:
+        """Generate a team response (shared between preformed teams and TeamBot).
+
+        Returns the initial message ID if created, None otherwise.
+        """
+        assert self.client is not None
+
+        # Convert mode string to TeamMode enum
+        mode = TeamMode.COORDINATE if team_mode == "coordinate" else TeamMode.COLLABORATE
+
+        # Convert MatrixID list to agent names for non-streaming APIs
+        agent_names = [mid.agent_name(self.config) or mid.username for mid in team_agents]
+
+        # Store initial_message_id in outer scope so it can be captured
+        initial_message_id = None
+
+        # Create async function for team response generation
+        async def generate_team_response() -> None:
+            nonlocal initial_message_id
+            # Use the initial message created by _run_cancellable_response if created
+            message_id = existing_event_id or initial_message_id
+
+            if use_streaming and not existing_event_id:
+                # Show typing indicator while team generates streaming response
+                async with typing_indicator(self.client, room_id):
+                    response_stream = team_response_stream(
+                        agent_ids=team_agents,
+                        message=message,
+                        orchestrator=self.orchestrator,
+                        mode=mode,
+                        thread_history=thread_history,
+                        model_name=model_name,
+                    )
+
+                    event_id, accumulated = await send_streaming_response(
+                        self.client,
+                        room_id,
+                        message_id if message_id else reply_to_event_id,
+                        thread_id,
+                        self.matrix_id.domain,
+                        self.config,
+                        response_stream,
+                        streaming_cls=ReplacementStreamingResponse,
+                        header=None,
+                        existing_event_id=message_id,
+                    )
+
+                # Handle interactive questions in team responses
+                await self._handle_interactive_question(
+                    event_id,
+                    accumulated,
+                    room_id,
+                    thread_id,
+                    reply_to_event_id,
+                    agent_name="team",
+                )
+            else:
+                # Show typing indicator while team generates non-streaming response
+                async with typing_indicator(self.client, room_id):
+                    response_text = await team_response(
+                        agent_names=agent_names,
+                        mode=mode,
+                        message=message,
+                        orchestrator=self.orchestrator,
+                        thread_history=thread_history,
+                        model_name=model_name,
+                    )
+
+                # Either edit the thinking message or send new
+                if message_id:
+                    await self._edit_message(room_id, message_id, response_text, thread_id)
+                else:
+                    assert self.client is not None
+                    event_id = await self._send_response(
+                        nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id),
+                        reply_to_event_id,
+                        response_text,
+                        thread_id,
+                    )
+                    # Handle interactive questions in non-streaming team responses
+                    if event_id:
+                        await self._handle_interactive_question(
+                            event_id,
+                            response_text,
+                            room_id,
+                            thread_id,
+                            reply_to_event_id,
+                            agent_name="team",
+                        )
+
+        # Use unified handler for cancellation support
+        # Send thinking message only when not streaming (streaming has its own initial message)
+        thinking_msg = None
+        if not existing_event_id and not use_streaming:
+            thinking_msg = "🤝 Team Response: Thinking..."
+
+        initial_message_id = await self._run_cancellable_response(
+            room_id=room_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_id=thread_id,
+            response_coroutine=generate_team_response(),
+            thinking_message=thinking_msg,
+            existing_event_id=existing_event_id,
+        )
+
+        return initial_message_id
 
     async def _run_cancellable_response(
         self,
@@ -1596,7 +1641,7 @@ class AgentBot:
 class TeamBot(AgentBot):
     """A bot that represents a team of agents working together."""
 
-    team_agents: list[str] = field(default_factory=list)
+    team_agents: list[MatrixID] = field(default_factory=list)
     team_mode: str = field(default="coordinate")
     team_model: str | None = field(default=None)
 
@@ -1620,20 +1665,18 @@ class TeamBot(AgentBot):
             return
 
         assert self.client is not None
-        room = nio.MatrixRoom(room_id=room_id, own_user_id=self.client.user_id)
 
         # Get the appropriate model for this team and room
         model_name = select_model_for_team(self.agent_name, room_id, self.config)
 
-        # Convert team_mode string to TeamMode enum
-        mode = TeamMode.COORDINATE if self.team_mode == "coordinate" else TeamMode.COLLABORATE
-
         # Store memory once for the entire team (avoids duplicate LLM processing)
         session_id = create_session_id(room_id, thread_id)
+        # Convert MatrixID list to agent names for memory storage
+        agent_names = [mid.agent_name(self.config) or mid.username for mid in self.team_agents]
         create_background_task(
             store_conversation_memory(
                 prompt,
-                self.team_agents,  # Pass list of agents for team storage
+                agent_names,  # Pass list of agent names for team storage
                 self.storage_path,
                 session_id,
                 self.config,
@@ -1643,7 +1686,7 @@ class TeamBot(AgentBot):
             ),
             name=f"memory_save_team_{session_id}",
         )
-        self.logger.info(f"Storing memory for team: {self.team_agents}")
+        self.logger.info(f"Storing memory for team: {agent_names}")
 
         # Decide streaming based on presence
         use_streaming = self.enable_streaming and await should_use_streaming(
@@ -1652,93 +1695,17 @@ class TeamBot(AgentBot):
             requester_user_id=user_id,
         )
 
-        # Store initial_message_id in outer scope so it can be captured
-        initial_message_id = None
-
-        # Create async function for team response generation
-        async def generate_team_response() -> None:
-            nonlocal initial_message_id
-            # Use the initial message created by _run_cancellable_response
-            message_id = existing_event_id or initial_message_id
-            if use_streaming and not existing_event_id:
-                # Show typing indicator while team generates streaming response
-                async with typing_indicator(self.client, room_id):
-                    # Use structured team streaming with live document rebuilding
-                    # Convert team agent names to MatrixID objects
-                    team_matrix_ids = [
-                        MatrixID.from_username(agent_name, self.matrix_id.domain) for agent_name in self.team_agents
-                    ]
-                    response_stream = team_response_stream(
-                        agent_ids=team_matrix_ids,
-                        message=prompt,
-                        orchestrator=self.orchestrator,
-                        mode=mode,
-                        thread_history=thread_history,
-                        model_name=model_name,
-                    )
-
-                    event_id, accumulated = await send_streaming_response(
-                        self.client,
-                        room_id,
-                        message_id if message_id else reply_to_event_id,
-                        thread_id,
-                        self.matrix_id.domain,
-                        self.config,
-                        response_stream,
-                        streaming_cls=ReplacementStreamingResponse,
-                        header=None,  # team_response_stream includes header
-                        existing_event_id=message_id,
-                    )
-
-                # Handle interactive questions in team leader responses
-                await self._handle_interactive_question(
-                    event_id,
-                    accumulated,
-                    room_id,
-                    thread_id,
-                    reply_to_event_id,
-                    agent_name=self.agent_name,  # Team leader's name
-                )
-            else:
-                # Show typing indicator while team generates non-streaming response
-                async with typing_indicator(self.client, room_id):
-                    # Fallback to non-streaming or editing existing message
-                    response_text = await team_response(
-                        agent_names=self.team_agents,
-                        mode=mode,
-                        message=prompt,
-                        orchestrator=self.orchestrator,
-                        thread_history=thread_history,
-                        model_name=model_name,
-                    )
-                if message_id:
-                    await self._edit_message(room_id, message_id, response_text, thread_id)
-                else:
-                    event_id = await self._send_response(room, reply_to_event_id, response_text, thread_id)
-
-                    # Handle interactive questions in non-streaming team leader responses
-                    if event_id:
-                        await self._handle_interactive_question(
-                            event_id,
-                            response_text,
-                            room_id,
-                            thread_id,
-                            reply_to_event_id,
-                            agent_name=self.agent_name,
-                        )
-
-        # Use unified handler for cancellation support
-        # Send thinking message only when not streaming (streaming has its own initial message)
-        thinking_msg = None
-        if not existing_event_id and not use_streaming:
-            thinking_msg = "🤝 Team Response: Thinking..."
-
-        initial_message_id = await self._run_cancellable_response(
+        # Use the shared team response helper
+        await self._generate_team_response_helper(
             room_id=room_id,
             reply_to_event_id=reply_to_event_id,
             thread_id=thread_id,
-            response_coroutine=generate_team_response(),
-            thinking_message=thinking_msg,
+            message=prompt,
+            team_agents=self.team_agents,
+            team_mode=self.team_mode,
+            model_name=model_name,
+            thread_history=thread_history,
+            use_streaming=use_streaming,
             existing_event_id=existing_event_id,
         )
 
