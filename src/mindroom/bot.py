@@ -49,7 +49,7 @@ from .matrix.identity import (
 )
 from .matrix.mentions import format_message_with_mentions
 from .matrix.message_builder import build_message_content
-from .matrix.presence import build_agent_status_message, set_presence_status, should_use_streaming
+from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
 from .matrix.typing import typing_indicator
@@ -779,8 +779,6 @@ class AgentBot:
                 self.logger.error("Failed to send acknowledgment for reaction")
                 return
 
-            # Thread history already fetched above, no need to fetch again
-
             # Generate the response, editing the acknowledgment message
             # Note: existing_event_id is only used for interactive questions to edit the acknowledgment
             prompt = f"The user selected: {selected_value}"
@@ -985,6 +983,7 @@ class AgentBot:
             response_function=generate_team_response,
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
+            user_id=requester_user_id,
         )
 
     async def _run_cancellable_response(
@@ -995,12 +994,13 @@ class AgentBot:
         response_function: object,  # Function that generates the response (takes message_id)
         thinking_message: str | None = None,  # None means don't send thinking message
         existing_event_id: str | None = None,
+        user_id: str | None = None,  # User ID for presence check
     ) -> str | None:
         """Run a response generation function with cancellation support.
 
         This unified handler provides:
         - Optional "Thinking..." message
-        - Task cancellation via stop button
+        - Task cancellation via stop button (when user is online)
         - Proper cleanup on completion or cancellation
 
         Args:
@@ -1010,6 +1010,7 @@ class AgentBot:
             response_function: Async function that generates the response (takes message_id parameter)
             thinking_message: Thinking message to show (only used when existing_event_id is None)
             existing_event_id: ID of existing message to edit (for interactive questions)
+            user_id: User ID for checking if they're online (for stop button decision)
 
         Returns:
             The initial message ID if created, None otherwise
@@ -1043,17 +1044,33 @@ class AgentBot:
 
         # Track for stop button (only if we have a message to track)
         message_to_track = existing_event_id or initial_message_id
+        show_stop_button = False  # Default to not showing
+
         if message_to_track:
             self.stop_manager.set_current(message_to_track, room_id, task, None)
-            # Add stop button if configured
-            if self.config.defaults.show_stop_button:
+
+            # Add stop button if configured AND user is online
+            # This uses the same logic as streaming to determine if user is online
+            show_stop_button = self.config.defaults.show_stop_button
+            if show_stop_button and user_id:
+                # Check if user is online - same logic as streaming decision
+                user_is_online = await is_user_online(self.client, user_id)
+                show_stop_button = user_is_online
+                self.logger.info(
+                    "Stop button decision",
+                    message_id=message_to_track,
+                    user_online=user_is_online,
+                    show_button=show_stop_button,
+                )
+
+            if show_stop_button:
                 self.logger.info("Adding stop button", message_id=message_to_track)
                 await self.stop_manager.add_stop_button(self.client, room_id, message_to_track)
 
         try:
             await task
-            # Remove stop button on successful completion
-            if message_to_track and self.config.defaults.show_stop_button:
+            # Remove stop button on successful completion (if it was added)
+            if message_to_track and show_stop_button:
                 await self.stop_manager.remove_stop_button(self.client, message_to_track)
         except asyncio.CancelledError:
             self.logger.info("Response cancelled by user", message_id=message_to_track)
@@ -1303,6 +1320,7 @@ class AgentBot:
             response_function=generate,
             thinking_message=thinking_msg,
             existing_event_id=existing_event_id,
+            user_id=user_id,
         )
 
         # Store memory after response generation; ignore errors in tests/mocks
