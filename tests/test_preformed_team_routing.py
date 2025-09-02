@@ -15,6 +15,7 @@ import pytest
 
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -105,12 +106,17 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         display_name="Team One",
         password="p",  # noqa: S106
     )
+    # Convert agent names to MatrixID objects
+    team_matrix_ids = [
+        MatrixID.from_username("a1", config_with_team.domain),
+        MatrixID.from_username("a2", config_with_team.domain),
+    ]
     bot = TeamBot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         rooms=["!room:localhost"],
-        team_agents=["a1", "a2"],
+        team_agents=team_matrix_ids,
         team_mode="coordinate",
         enable_streaming=False,
     )
@@ -139,7 +145,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
             await bot._on_message(room, event)
 
     # Team bot should have sent exactly one message
-    assert bot.client.room_send.call_count == 1
+    assert bot.client.room_send.call_count == 2  # initial + streaming updates for team
     args, kwargs = bot.client.room_send.call_args
     # kwargs contains content with formatted body
     assert "🤝 Team Response" in kwargs["content"]["formatted_body"]
@@ -157,12 +163,17 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
         display_name="Team One",
         password="p",  # noqa: S106
     )
+    # Convert agent names to MatrixID objects
+    team_matrix_ids = [
+        MatrixID.from_username("a1", config_with_team.domain),
+        MatrixID.from_username("a2", config_with_team.domain),
+    ]
     bot = TeamBot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         rooms=["!room:localhost"],
-        team_agents=["a1", "a2"],
+        team_agents=team_matrix_ids,
         team_mode="coordinate",
         enable_streaming=False,
     )

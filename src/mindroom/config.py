@@ -38,6 +38,7 @@ class DefaultsConfig(BaseModel):
     num_history_runs: int = Field(default=5, description="Default number of history runs")
     markdown: bool = Field(default=True, description="Default markdown setting")
     add_history_to_messages: bool = Field(default=True, description="Default history setting")
+    show_stop_button: bool = Field(default=False, description="Whether to automatically show stop button on messages")
 
 
 class EmbedderConfig(BaseModel):
