@@ -1275,10 +1275,6 @@ class AgentBot:
             self.logger.debug("Edit event has no original event ID")
             return
 
-        # Skip our own edits
-        if event.sender == self.matrix_id.full_id:
-            return
-
         # Skip edits from other agents (e.g., streaming edits)
         sender_agent_name = extract_agent_name(event.sender, self.config)
         if sender_agent_name:
