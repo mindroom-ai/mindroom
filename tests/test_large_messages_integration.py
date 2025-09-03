@@ -27,16 +27,15 @@ class MockClient:
         response.event_id = f"$event_{len(self.messages_sent)}"
         return response
 
-    async def upload(self, **kwargs) -> object:  # noqa: ANN003, ARG002
-        """Mock file upload."""
+    async def upload(self, **kwargs) -> tuple:  # noqa: ANN003, ARG002
+        """Mock file upload - returns tuple like nio."""
         if not self.should_upload_succeed:
             msg = "Upload failed"
             raise Exception(msg)  # noqa: TRY002
 
-        class Response:
-            content_uri = f"mxc://server/file_{len(self.messages_sent)}"
-
-        return Response()
+        # Create a mock UploadResponse
+        response = nio.UploadResponse.from_dict({"content_uri": f"mxc://server/file_{len(self.messages_sent)}"})
+        return response, None  # nio returns (response, encryption_dict)
 
 
 class MockConfig:

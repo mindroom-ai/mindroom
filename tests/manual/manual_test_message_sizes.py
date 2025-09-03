@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-"""Test different message sizes to see attachment behavior."""
+"""Test different message sizes to see attachment behavior.
+
+This is a manual test script, not part of the automated test suite.
+Run it manually with: python tests/manual/test_message_sizes.py
+"""
 
 import asyncio
 import os
