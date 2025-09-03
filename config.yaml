@@ -11,7 +11,7 @@ agents:
     - Provide clear explanations of MindRoom features and capabilities
     - Test agent configurations when requested
     - Help users understand how agents, teams, and tools work together
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Expert MindRoom agent builder that helps create and configure custom AI agents with deep knowledge of the system
     rooms:
@@ -27,7 +27,7 @@ agents:
     - Provide structured insights.
     - Consider multiple perspectives.
     - Make evidence-based recommendations.
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Provide analytical insights and recommendations.
     rooms:
@@ -41,7 +41,7 @@ agents:
     - Show your work step by step.
     - Explain the mathematical concepts when helpful.
     - Double-check calculations for accuracy.
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Solve mathematical problems.
     rooms:
@@ -60,7 +60,7 @@ agents:
     - Handle phone numbers in international format when possible
     - Be concise and clear in SMS messages due to character limits
     - For calls, prepare a brief script of what will be communicated
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Manage phone calls and SMS messages through Twilio integration.
     rooms:
@@ -78,7 +78,7 @@ agents:
     - Be careful with shell commands - explain what they do
     - Always read files before modifying them
     - Follow the project's existing style and conventions
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Generate code, manage files, and execute shell commands.
     rooms:
@@ -97,7 +97,7 @@ agents:
     - Identify patterns and trends in data.
     - Provide actionable insights and recommendations.
     - Handle missing or inconsistent data appropriately.
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Analyze data, create visualizations, and provide insights.
     rooms:
@@ -141,7 +141,7 @@ agents:
     - Explain financial concepts clearly.
     - Include relevant disclaimers about investment advice.
     - Present data in a clear, organized format.
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Analyze financial data, stock information, and perform calculations.
     rooms:
@@ -159,7 +159,7 @@ agents:
     - Remember context from the conversation.
     - Be conversational and friendly.
     - Ask clarifying questions when needed.
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: A general-purpose assistant that provides helpful, conversational responses to users.
     rooms:
@@ -178,7 +178,7 @@ agents:
     - List available devices when asked about what you can control
     - Provide clear status updates after performing actions
     - Group related actions together for efficiency
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Control and monitor smart home devices through Home Assistant
     rooms:
@@ -235,7 +235,7 @@ agents:
     - Provide security best practices.
     - Identify potential vulnerabilities.
     - Suggest mitigation strategies.
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Analyze security aspects and provide recommendations.
     rooms:
@@ -251,7 +251,7 @@ agents:
     - Provide clear output and error messages.
     - Suggest safer alternatives when appropriate.
     - Remember the user's working directory context.
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Execute shell commands and manage system operations.
     rooms:
@@ -280,7 +280,7 @@ agents:
     - Gebruik Nederlandse uitdrukkingen en culturele elementen die geschikt zijn voor Nederlandse kinderen
     - Maak de verhalen warm, gezellig en vertrouwd voor Nederlandse gezinnen
     markdown: true
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Je bent Sleepy Paws, een magische verhalenverteller die zachte dierenaventuren creëert met de tweelingbroertjes
       Tom de Tijger en Leo de Leeuw. Je specialiseert je in verhalen voor 2-jarigen met eenvoudige Nederlandse woordenschat,
@@ -298,7 +298,7 @@ agents:
     - Use bullet points for clarity when appropriate.
     - Indicate the level of detail in your summary.
     - Preserve important quotes or specific data points.
-    model: default
+    model: sonnet
     num_history_runs: 5
     role: Summarize long texts and extract key information.
     rooms:
@@ -326,8 +326,9 @@ memory:
     provider: ollama
 models:
   default:
-    id: claude-sonnet-4-20250514
-    provider: anthropic
+    id: devstral:24b
+    provider: ollama
+    host: http://192.168.1.143:11434
   deepseek:
     id: deepseek-ai/deepseek-chat:free
     provider: openrouter
@@ -404,7 +405,7 @@ voice:
     # api_key: your-api-key-here  # Optional, uses OPENAI_API_KEY env var by default
     # host: http://localhost:8080  # For self-hosted STT services
   intelligence:
-    model: default  # Model for command recognition
+    model: sonnet  # Model for command recognition
     confidence_threshold: 0.7
 
 # Authorization configuration with fine-grained permissions
