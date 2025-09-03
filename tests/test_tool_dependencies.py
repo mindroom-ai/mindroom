@@ -125,6 +125,7 @@ def test_all_tool_dependencies_in_pyproject() -> None:  # noqa: C901, PLR0912, P
                 "google-auth": ["google-auth", "google_auth"],
                 "google-auth-oauthlib": ["google-auth-oauthlib", "google_auth_oauthlib"],
                 "google-auth-httplib2": ["google-auth-httplib2", "google_auth_httplib2"],
+                "yaml": ["pyyaml", "yaml"],  # yaml module is provided by pyyaml package
             }
 
             # Check if it's in the mappings

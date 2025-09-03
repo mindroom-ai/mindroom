@@ -327,6 +327,14 @@ class Config(BaseModel):
         """
         path = config_path or DEFAULT_AGENTS_CONFIG
         config_dict = self.model_dump(exclude_none=True)
-        with Path(path).open("w") as f:
-            yaml.dump(config_dict, f, default_flow_style=False, sort_keys=True)
+        with Path(path).open("w", encoding="utf-8") as f:
+            yaml.dump(
+                config_dict,
+                f,
+                default_flow_style=False,
+                sort_keys=True,
+                allow_unicode=True,  # Preserve Unicode characters like ë
+                width=120,  # Wider lines to reduce wrapping
+                encoding="utf-8",
+            )
         logger.info(f"Saved configuration to {path}")
