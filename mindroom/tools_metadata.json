@@ -837,6 +837,37 @@
       "config_fields": [
         {
           "default": null,
+          "description": "Path to the configuration file (uses default if not specified)",
+          "label": "Configuration Path",
+          "name": "config_path",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
+      "dependencies": [
+        "agno",
+        "pydantic",
+        "yaml"
+      ],
+      "description": "Build and manage MindRoom agents with expert knowledge of the system",
+      "display_name": "Config Manager",
+      "docs_url": "https://github.com/mindroom-ai/mindroom",
+      "helper_text": null,
+      "icon": "Settings",
+      "icon_color": "text-purple-500",
+      "name": "config_manager",
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "default": null,
           "description": "Confluence instance URL (can also be set via CONFLUENCE_URL env var)",
           "label": "Confluence URL",
           "name": "url",

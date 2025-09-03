@@ -2157,7 +2157,27 @@ def _get_changed_agents(config: Config | None, new_config: Config, agent_bots: d
     for agent_name in all_agents:
         old_agent = config.agents.get(agent_name)
         new_agent = new_config.agents.get(agent_name)
-        if old_agent != new_agent and (agent_name in agent_bots or new_agent is not None):
+
+        # Compare agents using model_dump with exclude_none=True to match how configs are saved
+        # This prevents false positives when None values are involved
+        if old_agent and new_agent:
+            # Both exist - compare their non-None values (matching save_to_yaml behavior)
+            old_dict = old_agent.model_dump(exclude_none=True)
+            new_dict = new_agent.model_dump(exclude_none=True)
+            agents_differ = old_dict != new_dict
+        else:
+            # One is None - they definitely differ
+            agents_differ = old_agent != new_agent
+
+        # Only restart if this specific agent's configuration has changed
+        # (not just global config changes like authorization)
+        if agents_differ and (agent_name in agent_bots or new_agent is not None):
+            if old_agent and new_agent:
+                logger.debug(f"Agent {agent_name} configuration changed, will restart")
+            elif new_agent:
+                logger.info(f"Agent {agent_name} is new, will start")
+            else:
+                logger.info(f"Agent {agent_name} was removed, will stop")
             changed.add(agent_name)
 
     return changed
@@ -2173,7 +2193,16 @@ def _get_changed_teams(config: Config | None, new_config: Config, agent_bots: di
     for team_name in all_teams:
         old_team = config.teams.get(team_name)
         new_team = new_config.teams.get(team_name)
-        if old_team != new_team and (team_name in agent_bots or new_team is not None):
+
+        # Compare teams using model_dump with exclude_none=True to match how configs are saved
+        if old_team and new_team:
+            old_dict = old_team.model_dump(exclude_none=True)
+            new_dict = new_team.model_dump(exclude_none=True)
+            teams_differ = old_dict != new_dict
+        else:
+            teams_differ = old_team != new_team
+
+        if teams_differ and (team_name in agent_bots or new_team is not None):
             changed.add(team_name)
 
     return changed

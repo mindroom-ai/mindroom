@@ -23,6 +23,7 @@ from .cal_com import cal_com_tools
 from .calculator import calculator_tools
 from .cartesia import cartesia_tools
 from .composio import composio_tools
+from .config_manager import config_manager_tools
 from .confluence import confluence_tools
 from .crawl4ai import crawl4ai_tools
 from .csv import csv_tools
@@ -113,6 +114,7 @@ __all__ = [
     "calculator_tools",
     "cartesia_tools",
     "composio_tools",
+    "config_manager_tools",
     "confluence_tools",
     "crawl4ai_tools",
     "csv_tools",
