@@ -46,7 +46,7 @@ def is_edit_message(content: dict[str, Any]) -> bool:
 
 
 def create_preview(text: str, max_bytes: int) -> str:
-    """Create a maximum-size preview that breaks at natural boundaries.
+    """Create a preview that fits within byte limit.
 
     Args:
         text: The full text to preview
@@ -56,41 +56,49 @@ def create_preview(text: str, max_bytes: int) -> str:
         Preview text that fits within the byte limit
 
     """
-    # Start with a safe estimate (UTF-8 can be up to 4 bytes per char)
-    preview = text[: max_bytes // 2]
+    # Reserve space for continuation indicator
+    indicator = "\n\n[Message continues...]"
+    indicator_bytes = len(indicator.encode("utf-8"))
 
-    # Extend until we approach the limit
-    while len(preview) < len(text):
-        # Try adding more characters
-        test_preview = text[: len(preview) + 100]
-        if len(test_preview.encode("utf-8")) > max_bytes:
+    # If text fits entirely, return as-is
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+
+    # Binary search for the maximum valid UTF-8 substring
+    # Account for the indicator from the start
+    target_bytes = max_bytes - indicator_bytes
+
+    # Start with a reasonable estimate
+    left, right = 0, min(len(text), target_bytes)
+    best_pos = 0
+
+    while left <= right:
+        mid = (left + right) // 2
+        try:
+            # Check if this position creates valid UTF-8
+            test_bytes = text[:mid].encode("utf-8")
+            if len(test_bytes) <= target_bytes:
+                best_pos = mid
+                left = mid + 1
+            else:
+                right = mid - 1
+        except UnicodeEncodeError:
+            # Shouldn't happen with valid input
+            right = mid - 1
+
+    preview = text[:best_pos]
+
+    # Try to break at a natural boundary (paragraph or sentence)
+    for separator in ["\n\n", ". ", "\n"]:
+        pos = preview.rfind(separator)
+        if pos > best_pos * 0.7:  # At least 70% of max size
+            preview = preview[: pos + len(separator)].rstrip()
             break
-        preview = test_preview
 
-    # Ensure we don't exceed the byte limit
-    while len(preview.encode("utf-8")) > max_bytes:
-        preview = preview[:-10]  # Trim 10 chars at a time
-
-    # If we truncated, find a natural break point
-    if len(preview) < len(text):
-        # Try to break at paragraph, sentence, or word boundary
-        for separator in ["\n\n", ". ", "\n", " "]:
-            pos = preview.rfind(separator)
-            if pos > max_bytes * 0.7:  # At least 70% of max size
-                preview = preview[: pos + len(separator)].rstrip()
-                break
-
-        # Add continuation indicator
-        indicator = "\n\n[Message continues...]"
-        # Ensure indicator fits
-        while len((preview + indicator).encode("utf-8")) > max_bytes:
-            preview = preview[:-20]
-        preview += indicator
-
-    return preview
+    return preview + indicator
 
 
-async def upload_text_as_mxc(  # noqa: C901, PLR0912
+async def upload_text_as_mxc(
     client: nio.AsyncClient,
     text: str,
     room_id: str | None = None,
@@ -145,46 +153,31 @@ async def upload_text_as_mxc(  # noqa: C901, PLR0912
         return io.BytesIO(upload_data)
 
     try:
-        upload_result = await client.upload(
+        # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
+        upload_result, encryption_dict = await client.upload(
             data_provider=data_provider,
             content_type="application/octet-stream" if room_encrypted else "text/plain",
             filename="message.txt.enc" if room_encrypted else "message.txt",
             filesize=len(upload_data),
         )
 
-        # Handle response
-        if isinstance(upload_result, tuple):
-            upload_response, error = upload_result
-            if error:
-                logger.error(f"Upload error: {error}")
-                return None, None
-        else:
-            upload_response = upload_result
+        # Check if upload was successful
+        if not isinstance(upload_result, nio.UploadResponse):
+            logger.error(f"Failed to upload text: {upload_result}")
+            return None, None
 
-        if not isinstance(upload_response, nio.UploadResponse):
-            # Check if it's a test/mock response with content_uri
-            if hasattr(upload_response, "content_uri") and upload_response.content_uri:
-                mxc_uri = str(upload_response.content_uri)
-            else:
-                logger.error(f"Failed to upload text: {upload_response}")
-                return None, None
-        else:
-            if not upload_response.content_uri:
-                logger.error("Upload response missing content_uri")
-                return None, None
-            mxc_uri = str(upload_response.content_uri)
+        if not upload_result.content_uri:
+            logger.error("Upload response missing content_uri")
+            return None, None
 
-        # Set the URL in the file info
-        if room_encrypted:
-            file_info["url"] = mxc_uri
-        else:
-            file_info["url"] = mxc_uri
-
-        return mxc_uri, file_info  # noqa: TRY300
+        mxc_uri = str(upload_result.content_uri)
+        file_info["url"] = mxc_uri
 
     except Exception:
         logger.exception("Failed to upload text")
         return None, None
+    else:
+        return mxc_uri, file_info
 
 
 async def prepare_large_message(
@@ -209,7 +202,8 @@ async def prepare_large_message(
         Original content (if small) or modified content with preview and MXC reference
 
     """
-    # Determine the appropriate size limit
+    # Edit messages roughly double in size due to m.new_content structure
+    # which includes both the edit wrapper and the actual new content
     is_edit = is_edit_message(content)
     size_limit = EDIT_MESSAGE_LIMIT if is_edit else NORMAL_MESSAGE_LIMIT
 

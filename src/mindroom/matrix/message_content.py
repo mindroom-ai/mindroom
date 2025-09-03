@@ -60,15 +60,11 @@ async def get_full_message_body(
             return body
 
         # Download the full content
-        try:
-            full_text = await download_mxc_text(client, mxc_url, content.get("file"))
-            if full_text:
-                return full_text
-            logger.warning("Failed to download large message, returning preview")
-            return body  # noqa: TRY300
-        except Exception:
-            logger.exception("Error downloading large message, returning preview")
-            return body
+        full_text = await download_mxc_text(client, mxc_url, content.get("file"))
+        if full_text:
+            return full_text
+        logger.warning("Failed to download large message, returning preview")
+        return body
 
     # Regular message or no custom metadata
     return body
@@ -132,11 +128,12 @@ async def download_mxc_text(  # noqa: PLR0911
 
         # Decode to text
         try:
-            text: str = text_bytes.decode("utf-8")
-            return text  # noqa: TRY300
+            decoded_text: str = text_bytes.decode("utf-8")
         except UnicodeDecodeError:
             logger.exception("Downloaded content is not valid UTF-8 text")
             return None
+        else:
+            return decoded_text
 
     except Exception:
         logger.exception("Error downloading MXC content")

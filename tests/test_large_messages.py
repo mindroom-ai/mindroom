@@ -1,5 +1,6 @@
 """Tests for large message handling."""
 
+import nio
 import pytest
 
 from mindroom.matrix.large_messages import (
@@ -96,15 +97,14 @@ async def test_prepare_large_message_passthrough() -> None:
 async def test_prepare_large_message_truncation() -> None:
     """Test that large messages get truncated with MXC upload."""
 
-    # Mock client with upload
+    # Mock client with upload - nio returns tuple
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
 
-        async def upload(self, **kwargs) -> object:  # noqa: ANN003, ARG002
-            class Response:
-                content_uri = "mxc://server/file123"
-
-            return Response()
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003, ARG002
+            # Create a mock UploadResponse
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file123"})
+            return response, None  # nio returns (response, encryption_dict)
 
     client = MockClient()
 
@@ -144,15 +144,14 @@ async def test_prepare_large_message_truncation() -> None:
 async def test_prepare_edit_message() -> None:
     """Test that edit messages use lower size threshold."""
 
-    # Mock client with upload
+    # Mock client with upload - nio returns tuple
     class MockClient:
         rooms: dict = {}  # noqa: RUF012
 
-        async def upload(self, **kwargs) -> object:  # noqa: ANN003, ARG002
-            class Response:
-                content_uri = "mxc://server/file456"
-
-            return Response()
+        async def upload(self, **kwargs) -> tuple:  # noqa: ANN003, ARG002
+            # Create a mock UploadResponse
+            response = nio.UploadResponse.from_dict({"content_uri": "mxc://server/file456"})
+            return response, None  # nio returns (response, encryption_dict)
 
     client = MockClient()
 
