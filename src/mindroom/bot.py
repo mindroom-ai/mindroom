@@ -48,7 +48,6 @@ from .matrix.identity import (
     extract_server_name_from_homeserver,
 )
 from .matrix.mentions import format_message_with_mentions
-from .matrix.message_builder import build_message_content
 from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
@@ -526,7 +525,12 @@ class AgentBot:
 
             # Generate and send the welcome message
             welcome_msg = _generate_welcome_message(room_id, self.config)
-            message_content = build_message_content(welcome_msg)
+            # Use format_message_with_mentions to properly parse and tag agent mentions
+            message_content = format_message_with_mentions(
+                self.config,
+                welcome_msg,
+                sender_domain=self.matrix_id.domain,
+            )
             await send_message(self.client, room_id, message_content)
             self.logger.info("Welcome message sent", room_id=room_id)
         elif len(response.chunk) == 1:
