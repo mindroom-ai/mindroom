@@ -6,13 +6,20 @@ including handling large messages that are stored as MXC attachments.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import nio
+from nio import crypto
 
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# MXC download cache - stores (content, timestamp) tuples
+# Key: mxc_url, Value: (content, timestamp)
+_mxc_cache: dict[str, tuple[str, float]] = {}
+_cache_ttl = 3600.0  # 1 hour TTL
 
 
 async def get_full_message_body(
@@ -70,12 +77,12 @@ async def get_full_message_body(
     return body
 
 
-async def download_mxc_text(  # noqa: PLR0911
+async def download_mxc_text(  # noqa: PLR0911, C901
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
 ) -> str | None:
-    """Download text content from an MXC URL.
+    """Download text content from an MXC URL with caching.
 
     Args:
         client: Matrix client
@@ -86,6 +93,16 @@ async def download_mxc_text(  # noqa: PLR0911
         The downloaded text content, or None if download failed
 
     """
+    # Check cache first
+    current_time = time.time()
+    if mxc_url in _mxc_cache:
+        content, timestamp = _mxc_cache[mxc_url]
+        if current_time - timestamp < _cache_ttl:
+            logger.debug(f"Cache hit for MXC URL: {mxc_url}")
+            return content
+        # Expired, remove from cache
+        del _mxc_cache[mxc_url]
+
     try:
         # Parse MXC URL
         if not mxc_url.startswith("mxc://"):
@@ -111,8 +128,6 @@ async def download_mxc_text(  # noqa: PLR0911
         if file_info and "key" in file_info:
             # Decrypt the content
             try:
-                from nio import crypto  # noqa: PLC0415
-
                 decrypted = crypto.attachments.decrypt_attachment(
                     response.body,
                     file_info["key"],
@@ -132,7 +147,16 @@ async def download_mxc_text(  # noqa: PLR0911
         except UnicodeDecodeError:
             logger.exception("Downloaded content is not valid UTF-8 text")
             return None
+
         else:
+            # Cache the result
+            _mxc_cache[mxc_url] = (decoded_text, time.time())
+            logger.debug(f"Cached MXC content for: {mxc_url}")
+
+            # Clean old entries if cache is getting large
+            if len(_mxc_cache) > 100:
+                _clean_expired_cache()
+
             return decoded_text
 
     except Exception:
@@ -201,3 +225,13 @@ async def resolve_full_content(
     message_data.pop("_preview_body", None)
 
     return message_data
+
+
+def _clean_expired_cache() -> None:
+    """Remove expired entries from the MXC cache."""
+    current_time = time.time()
+    expired_keys = [key for key, (_, timestamp) in _mxc_cache.items() if current_time - timestamp >= _cache_ttl]
+    for key in expired_keys:
+        del _mxc_cache[key]
+    if expired_keys:
+        logger.debug(f"Cleaned {len(expired_keys)} expired cache entries")
