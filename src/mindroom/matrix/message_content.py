@@ -23,7 +23,7 @@ _cache_ttl = 3600.0  # 1 hour TTL
 
 
 async def get_full_message_body(
-    event: nio.RoomMessageText | dict[str, Any],
+    message_data: dict[str, Any],
     client: nio.AsyncClient | None = None,
 ) -> str:
     """Extract the full message body, handling large message attachments.
@@ -32,20 +32,15 @@ async def get_full_message_body(
     For large messages with attachments, downloads and returns the full content.
 
     Args:
-        event: Either a RoomMessageText event or a dict with message data
+        message_data: Dict with message data including 'body' and 'content' keys
         client: Optional Matrix client for downloading attachments
 
     Returns:
         The full message body text
 
     """
-    # Handle dict format (from fetch_thread_history)
-    if isinstance(event, dict):
-        content = event.get("content", {})
-        body = str(event.get("body", ""))
-    else:
-        content = event.source.get("content", {})
-        body = str(event.body)
+    content = message_data.get("content", {})
+    body = str(message_data.get("body", ""))
 
     # Check if this is a large message with our custom metadata
     if "io.mindroom.long_text" in content:
@@ -257,7 +252,9 @@ async def extract_and_resolve_message(
 
     # Check if this is a large message and resolve if we have a client
     if client and "io.mindroom.long_text" in data["content"]:
-        data["body"] = await get_full_message_body(data, client)
+        full_body = await get_full_message_body(data, client)
+        if full_body:
+            data["body"] = full_body
 
     return data
 

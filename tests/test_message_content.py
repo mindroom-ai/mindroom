@@ -22,18 +22,8 @@ class TestGetFullMessageBody:
         clear_mxc_cache()
 
     @pytest.mark.asyncio
-    async def test_regular_message_from_event(self) -> None:
-        """Test extracting body from a regular RoomMessageText event."""
-        event = MagicMock(spec=nio.RoomMessageText)
-        event.body = "Hello world"
-        event.source = {"content": {"msgtype": "m.text", "body": "Hello world"}}
-
-        result = await get_full_message_body(event)
-        assert result == "Hello world"
-
-    @pytest.mark.asyncio
-    async def test_regular_message_from_dict(self) -> None:
-        """Test extracting body from a dict message."""
+    async def test_regular_message(self) -> None:
+        """Test extracting body from a regular message dict."""
         message = {
             "body": "Test message",
             "content": {"msgtype": "m.text", "body": "Test message"},
