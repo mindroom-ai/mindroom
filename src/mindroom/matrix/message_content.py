@@ -270,3 +270,8 @@ def _clean_expired_cache() -> None:
         del _mxc_cache[key]
     if expired_keys:
         logger.debug(f"Cleaned {len(expired_keys)} expired cache entries")
+
+
+def clear_mxc_cache() -> None:
+    """Clear the entire MXC cache. Useful for testing."""
+    _mxc_cache.clear()

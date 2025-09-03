@@ -6,6 +6,7 @@ import nio
 import pytest
 
 from mindroom.matrix.message_content import (
+    clear_mxc_cache,
     download_mxc_text,
     extract_message_data,
     get_full_message_body,
@@ -15,6 +16,10 @@ from mindroom.matrix.message_content import (
 
 class TestGetFullMessageBody:
     """Tests for get_full_message_body function."""
+
+    def setup_method(self) -> None:
+        """Clear cache before each test."""
+        clear_mxc_cache()
 
     @pytest.mark.asyncio
     async def test_regular_message_from_event(self) -> None:
@@ -116,6 +121,10 @@ class TestGetFullMessageBody:
 class TestDownloadMxcText:
     """Tests for download_mxc_text function."""
 
+    def setup_method(self) -> None:
+        """Clear cache before each test."""
+        clear_mxc_cache()
+
     @pytest.mark.asyncio
     async def test_invalid_mxc_url(self) -> None:
         """Test handling of invalid MXC URL."""
@@ -153,6 +162,10 @@ class TestDownloadMxcText:
 
 class TestExtractMessageData:
     """Tests for extract_message_data function."""
+
+    def setup_method(self) -> None:
+        """Clear cache before each test."""
+        clear_mxc_cache()
 
     def test_extract_regular_message(self) -> None:
         """Test extracting data from regular message."""
@@ -214,6 +227,10 @@ class TestExtractMessageData:
 
 class TestResolveFullContent:
     """Tests for resolve_full_content function."""
+
+    def setup_method(self) -> None:
+        """Clear cache before each test."""
+        clear_mxc_cache()
 
     @pytest.mark.asyncio
     async def test_resolve_regular_message(self) -> None:

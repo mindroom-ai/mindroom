@@ -17,6 +17,7 @@ from mindroom.logging_config import get_logger
 from .event_info import EventInfo
 from .identity import MatrixID, extract_server_name_from_homeserver
 from .large_messages import prepare_large_message
+from .message_content import extract_and_resolve_message
 
 logger = get_logger(__name__)
 
@@ -451,8 +452,6 @@ async def fetch_thread_history(
         List of messages in chronological order, each containing sender, body, timestamp, and event_id
 
     """
-    from .message_content import extract_and_resolve_message  # noqa: PLC0415
-
     messages = []
     from_token = None
     root_message_found = False
