@@ -525,13 +525,13 @@ class AgentBot:
 
             # Generate and send the welcome message
             welcome_msg = _generate_welcome_message(room_id, self.config)
-            # Use format_message_with_mentions to properly parse and tag agent mentions
-            message_content = format_message_with_mentions(
-                self.config,
-                welcome_msg,
-                sender_domain=self.matrix_id.domain,
+            await self._send_response(
+                room_id=room_id,
+                reply_to_event_id=None,
+                response_text=welcome_msg,
+                thread_id=None,
+                skip_mentions=True,
             )
-            await send_message(self.client, room_id, message_content)
             self.logger.info("Welcome message sent", room_id=room_id)
         elif len(response.chunk) == 1:
             # Check if the only message is our welcome message
