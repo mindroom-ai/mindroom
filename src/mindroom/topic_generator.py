@@ -8,7 +8,8 @@ import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.ai import get_model_instance
+from mindroom.ai import _cached_agent_run, get_model_instance
+from mindroom.constants import STORAGE_PATH_OBJ
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -87,7 +88,14 @@ Generate the topic:"""
         response_model=RoomTopic,
     )
 
-    response = await agent.arun(prompt, session_id=f"topic_{room_key}")
+    session_id = f"topic_{room_key}"
+    response = await _cached_agent_run(
+        agent=agent,
+        full_prompt=prompt,
+        session_id=session_id,
+        agent_name="TopicGenerator",
+        storage_path=STORAGE_PATH_OBJ,
+    )
     content = response.content
     assert isinstance(content, RoomTopic)  # Type narrowing for mypy
     return content.topic
