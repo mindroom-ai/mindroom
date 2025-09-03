@@ -113,12 +113,26 @@ async def test_prepare_large_message_truncation() -> None:
     content = {"body": large_text, "msgtype": "m.text"}
     result = await prepare_large_message(client, "!room:server", content)
 
-    # Should have metadata
-    assert "io.mindroom.long_text" in result
-    assert "mxc" in result["io.mindroom.long_text"]
-    assert result["io.mindroom.long_text"]["size"] == 100000
+    # Should be an m.file message
+    assert result["msgtype"] == "m.file"
+    assert "filename" in result
+    assert result["filename"] == "message.txt"
 
-    # Body should be truncated
+    # Should have file info
+    assert "info" in result or "file" in result
+    if "info" in result:
+        assert result["info"]["mimetype"] == "text/plain"
+        assert result["info"]["size"] == 100000
+
+    # Should have URL
+    assert "url" in result or "file" in result
+
+    # Should have custom metadata
+    assert "io.mindroom.long_text" in result
+    assert result["io.mindroom.long_text"]["original_size"] == 100000
+    assert result["io.mindroom.long_text"]["is_complete_text"] is True
+
+    # Body should be truncated preview
     assert len(result["body"]) < len(large_text)
     assert "[Message continues...]" in result["body"]
 
@@ -154,9 +168,11 @@ async def test_prepare_edit_message() -> None:
     result = await prepare_large_message(client, "!room:server", edit_content)
 
     # Should be processed due to edit limit
-    assert "io.mindroom.long_text" in result
+    # For edits, the structure is different - check for m.new_content
+    assert "m.new_content" in result
+    assert result["m.new_content"]["msgtype"] == "m.file"
+    assert "io.mindroom.long_text" in result["m.new_content"]
 
-    # Both body and m.new_content should be truncated
+    # Body should have preview
     assert len(result["body"]) < len("* " + text)
-    assert len(result["m.new_content"]["body"]) < len(text)
     assert "[Message continues...]" in result["m.new_content"]["body"]

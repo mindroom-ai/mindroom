@@ -6,7 +6,6 @@ uploading the full text as an MXC attachment while maximizing the preview size.
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 from typing import Any
@@ -104,13 +103,13 @@ async def upload_text_as_mxc(  # noqa: C901, PLR0912
         room_id: Optional room ID to check for encryption
 
     Returns:
-        Tuple of (mxc_uri, metadata_dict) or (None, None) on failure
+        Tuple of (mxc_uri, file_info_dict) or (None, None) on failure
 
     """
     text_bytes = text.encode("utf-8")
-    metadata = {
+    file_info = {
         "size": len(text_bytes),
-        "sha256": hashlib.sha256(text_bytes).hexdigest(),
+        "mimetype": "text/plain",
     }
 
     # Check if room is encrypted
@@ -125,13 +124,15 @@ async def upload_text_as_mxc(  # noqa: C901, PLR0912
             encrypted_data = crypto.attachments.encrypt_attachment(text_bytes)
             upload_data = encrypted_data["data"]
 
-            # Store encryption info in metadata
-            metadata["file"] = {
+            # Store encryption info for the file
+            file_info = {
                 "url": "",  # Will be set after upload
                 "key": encrypted_data["key"],
                 "iv": encrypted_data["iv"],
                 "hashes": encrypted_data["hashes"],
                 "v": "v2",
+                "mimetype": "text/plain",
+                "size": len(text_bytes),
             }
         except Exception:
             logger.exception("Failed to encrypt attachment")
@@ -173,15 +174,13 @@ async def upload_text_as_mxc(  # noqa: C901, PLR0912
                 return None, None
             mxc_uri = str(upload_response.content_uri)
 
-        # Set the URL in the encrypted file metadata
-        if room_encrypted and "file" in metadata:
-            file_dict = metadata["file"]
-            assert isinstance(file_dict, dict)
-            file_dict["url"] = mxc_uri
+        # Set the URL in the file info
+        if room_encrypted:
+            file_info["url"] = mxc_uri
         else:
-            metadata["mxc"] = mxc_uri
+            file_info["url"] = mxc_uri
 
-        return mxc_uri, metadata  # noqa: TRY300
+        return mxc_uri, file_info  # noqa: TRY300
 
     except Exception:
         logger.exception("Failed to upload text")
@@ -235,8 +234,8 @@ async def prepare_large_message(
     logger.info(f"Message too large ({current_size} bytes), uploading to MXC")
 
     # Upload the full text
-    mxc_uri, metadata = await upload_text_as_mxc(client, full_text, room_id)
-    if not mxc_uri or not metadata:
+    mxc_uri, file_info = await upload_text_as_mxc(client, full_text, room_id)
+    if not mxc_uri or not file_info:
         logger.error("Failed to upload large message, sending truncated version")
         # Fall back to truncated message
         preview = create_preview(full_text, size_limit - 5000)
@@ -247,33 +246,54 @@ async def prepare_large_message(
         return content
 
     # Calculate how much space we have for preview
-    # Account for the metadata we'll add
-    metadata_size = len(json.dumps({"io.mindroom.long_text": metadata}).encode("utf-8"))
-    available_for_preview = size_limit - metadata_size - 3000  # Extra safety margin
+    # We'll be sending an m.file message, so account for the file attachment structure
+    # The structure adds: filename, url, info object, custom metadata
+    attachment_overhead = 5000  # Conservative estimate for attachment JSON structure
+    available_for_preview = size_limit - attachment_overhead
 
     # Create maximum-size preview
     preview = create_preview(full_text, available_for_preview)
 
-    # Modify the content with preview and metadata
-    modified_content = content.copy()
+    # Create a standard m.file message with preview body
+    modified_content = {
+        "msgtype": "m.file",
+        "body": preview,  # Preview text for immediate readability
+        "filename": "message.txt",
+        "info": file_info,
+    }
 
-    # Add our metadata
-    modified_content["io.mindroom.long_text"] = metadata
-
-    # Replace text with preview
-    if is_edit and "m.new_content" in modified_content:
-        # For edits, update both places
-        modified_content["body"] = "* " + preview
-        modified_content["m.new_content"]["body"] = preview
-        if full_html:
-            # For safety, use plain preview for HTML too
-            modified_content["formatted_body"] = modified_content["body"]
-            modified_content["m.new_content"]["formatted_body"] = preview
+    # Add the file URL (either encrypted or plain)
+    if "url" in file_info and room_id and room_id in client.rooms and client.rooms[room_id].encrypted:
+        # For encrypted rooms, use 'file' key
+        modified_content["file"] = file_info
     else:
-        modified_content["body"] = preview
-        if full_html:
-            modified_content["formatted_body"] = preview
+        # For unencrypted rooms, use 'url' key
+        modified_content["url"] = file_info.get("url", mxc_uri)
 
-    logger.info(f"Large message prepared: {len(full_text)} bytes -> {len(preview)} preview + MXC")
+    # Add custom metadata to signal this is a long text message
+    # Future custom clients can use this to render as inline text instead of attachment
+    modified_content["io.mindroom.long_text"] = {
+        "version": 1,
+        "original_size": len(full_text),
+        "preview_size": len(preview),
+        "is_complete_text": True,
+    }
+
+    # Preserve thread/reply relationships if they exist
+    if "m.relates_to" in content:
+        modified_content["m.relates_to"] = content["m.relates_to"]
+
+    # Handle edit messages specially
+    if is_edit and "m.new_content" in content:
+        # For edits, we need to wrap everything in the edit structure
+        edit_content = {
+            "msgtype": "m.text",  # Edit message type
+            "body": f"* {preview}",
+            "m.new_content": modified_content,
+            "m.relates_to": content.get("m.relates_to", {}),
+        }
+        modified_content = edit_content
+
+    logger.info(f"Large message prepared: {len(full_text)} bytes -> {len(preview)} preview + MXC attachment")
 
     return modified_content

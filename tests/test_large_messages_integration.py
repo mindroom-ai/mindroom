@@ -82,14 +82,21 @@ async def test_regular_message_over_limit() -> None:
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
 
-    # Should have truncated body
+    # Should be an m.file message
+    assert sent_content["msgtype"] == "m.file"
+    assert sent_content["filename"] == "message.txt"
+
+    # Should have truncated body preview
     assert len(sent_content["body"]) < len(large_text)
     assert "[Message continues...]" in sent_content["body"]
 
     # Should have metadata
     assert "io.mindroom.long_text" in sent_content
-    assert "mxc" in sent_content["io.mindroom.long_text"]
-    assert sent_content["io.mindroom.long_text"]["size"] == 100000
+    assert sent_content["io.mindroom.long_text"]["original_size"] == 100000
+    assert sent_content["io.mindroom.long_text"]["is_complete_text"] is True
+
+    # Should have file URL
+    assert "url" in sent_content or "file" in sent_content
 
 
 @pytest.mark.asyncio
@@ -107,7 +114,10 @@ async def test_edit_message_with_lower_threshold() -> None:
     sent_content = client.messages_sent[0][2]
 
     # Should be truncated due to edit limit
-    assert "io.mindroom.long_text" in sent_content
+    # For edits, check m.new_content
+    assert "m.new_content" in sent_content
+    assert sent_content["m.new_content"]["msgtype"] == "m.file"
+    assert "io.mindroom.long_text" in sent_content["m.new_content"]
     assert len(sent_content["m.new_content"]["body"]) < len(text)
 
 
@@ -182,6 +192,7 @@ async def test_streaming_initial_message_over_limit() -> None:
     # Should have sent with large message handling
     assert len(client.messages_sent) == 1
     sent_content = client.messages_sent[0][2]
+    assert sent_content["msgtype"] == "m.file"
     assert len(sent_content["body"]) < 60000
     assert "io.mindroom.long_text" in sent_content
 
@@ -221,7 +232,9 @@ async def test_streaming_edit_grows_over_limit() -> None:
     edit_content = client.messages_sent[1][2]
 
     # Edit should have large message handling
-    assert "io.mindroom.long_text" in edit_content
+    assert "m.new_content" in edit_content
+    assert edit_content["m.new_content"]["msgtype"] == "m.file"
+    assert "io.mindroom.long_text" in edit_content["m.new_content"]
     assert len(edit_content["m.new_content"]["body"]) < 35000
 
 
@@ -264,7 +277,15 @@ async def test_streaming_multiple_edits_with_growth() -> None:
     # Last two should have large message handling
     for i in [-2, -1]:
         content = client.messages_sent[i][2]
-        assert "io.mindroom.long_text" in content, f"Message {i} should have large message handling"
+        # These are edits, so check m.new_content
+        if "m.new_content" in content:
+            assert content["m.new_content"]["msgtype"] == "m.file"
+            assert "io.mindroom.long_text" in content["m.new_content"], (
+                f"Message {i} should have large message handling"
+            )
+        else:
+            assert content["msgtype"] == "m.file"
+            assert "io.mindroom.long_text" in content, f"Message {i} should have large message handling"
 
 
 @pytest.mark.asyncio
@@ -297,6 +318,7 @@ async def test_streaming_with_thread_context() -> None:
     assert relates_to.get("event_id") == "$thread_root" or relates_to.get("rel_type") == "m.thread"
 
     # Should have large message handling
+    assert sent_content["msgtype"] == "m.file"
     assert "io.mindroom.long_text" in sent_content
 
 
@@ -340,9 +362,9 @@ async def test_message_with_formatted_body() -> None:
 
     result = await prepare_large_message(client, "!room:server", content)
 
-    # Should truncate both
+    # Should be an m.file message with truncated preview
+    assert result["msgtype"] == "m.file"
     assert len(result["body"]) < len(large_text)
-    assert len(result["formatted_body"]) < len(large_html)
     assert "io.mindroom.long_text" in result
 
 
@@ -369,6 +391,7 @@ async def test_streaming_finalize() -> None:
     sent_content = client.messages_sent[0][2]
 
     # Should have large message handling
+    assert sent_content["msgtype"] == "m.file"
     assert "io.mindroom.long_text" in sent_content
     # Should not have in-progress marker in final
     assert "⋯" not in sent_content["body"]
