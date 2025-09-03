@@ -1,11 +1,11 @@
 """Integration tests for large message handling with streaming and regular messages."""
-# ruff: noqa: ANN201, ANN001, ANN003, ANN204, ARG002, PLC0415, TRY002, TRY003, EM101
 
 from unittest.mock import MagicMock
 
 import nio
 import pytest
 
+from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.large_messages import NORMAL_MESSAGE_LIMIT, prepare_large_message
 from mindroom.streaming import StreamingResponse
 
@@ -13,12 +13,12 @@ from mindroom.streaming import StreamingResponse
 class MockClient:
     """Mock Matrix client for testing."""
 
-    def __init__(self, should_upload_succeed=True):
+    def __init__(self, should_upload_succeed: bool = True) -> None:
         self.rooms = {}
         self.messages_sent = []
         self.should_upload_succeed = should_upload_succeed
 
-    async def room_send(self, room_id, message_type, content):
+    async def room_send(self, room_id: str, message_type: str, content: dict) -> MagicMock:  # noqa: ARG002
         """Mock sending a message."""
         self.messages_sent.append(("send", room_id, content))
 
@@ -27,10 +27,11 @@ class MockClient:
         response.event_id = f"$event_{len(self.messages_sent)}"
         return response
 
-    async def upload(self, **kwargs):
+    async def upload(self, **kwargs) -> object:  # noqa: ANN003, ARG002
         """Mock file upload."""
         if not self.should_upload_succeed:
-            raise Exception("Upload failed")
+            msg = "Upload failed"
+            raise Exception(msg)  # noqa: TRY002
 
         class Response:
             content_uri = f"mxc://server/file_{len(self.messages_sent)}"
@@ -41,7 +42,7 @@ class MockClient:
 class MockConfig:
     """Mock config for testing."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.agents = {}
 
 
@@ -51,10 +52,8 @@ class MockConfig:
 
 
 @pytest.mark.asyncio
-async def test_regular_message_under_limit():
+async def test_regular_message_under_limit() -> None:
     """Test that regular messages under the limit pass through unchanged."""
-    from mindroom.matrix.client import send_message
-
     client = MockClient()
 
     # Small message
@@ -70,10 +69,8 @@ async def test_regular_message_under_limit():
 
 
 @pytest.mark.asyncio
-async def test_regular_message_over_limit():
+async def test_regular_message_over_limit() -> None:
     """Test that large regular messages get uploaded to MXC."""
-    from mindroom.matrix.client import send_message
-
     client = MockClient()
 
     # Large message (100KB)
@@ -96,10 +93,8 @@ async def test_regular_message_over_limit():
 
 
 @pytest.mark.asyncio
-async def test_edit_message_with_lower_threshold():
+async def test_edit_message_with_lower_threshold() -> None:
     """Test that edit messages use the lower size threshold."""
-    from mindroom.matrix.client import edit_message
-
     client = MockClient()
 
     # Message that's under normal limit but over edit limit (30KB)
@@ -117,7 +112,7 @@ async def test_edit_message_with_lower_threshold():
 
 
 @pytest.mark.asyncio
-async def test_upload_failure_fallback():
+async def test_upload_failure_fallback() -> None:
     """Test that when upload fails, we fall back to truncated message."""
     client = MockClient(should_upload_succeed=False)
 
@@ -140,7 +135,7 @@ async def test_upload_failure_fallback():
 
 
 @pytest.mark.asyncio
-async def test_streaming_initial_message_under_limit():
+async def test_streaming_initial_message_under_limit() -> None:
     """Test streaming with initial message under limit."""
     client = MockClient()
     config = MockConfig()
@@ -164,7 +159,7 @@ async def test_streaming_initial_message_under_limit():
 
 
 @pytest.mark.asyncio
-async def test_streaming_initial_message_over_limit():
+async def test_streaming_initial_message_over_limit() -> None:
     """Test streaming with initial message over limit."""
     client = MockClient()
     config = MockConfig()
@@ -192,7 +187,7 @@ async def test_streaming_initial_message_over_limit():
 
 
 @pytest.mark.asyncio
-async def test_streaming_edit_grows_over_limit():
+async def test_streaming_edit_grows_over_limit() -> None:
     """Test streaming where edit grows beyond limit."""
     client = MockClient()
     config = MockConfig()
@@ -231,7 +226,7 @@ async def test_streaming_edit_grows_over_limit():
 
 
 @pytest.mark.asyncio
-async def test_streaming_multiple_edits_with_growth():
+async def test_streaming_multiple_edits_with_growth() -> None:
     """Test streaming with multiple edits as message grows."""
     client = MockClient()
     config = MockConfig()
@@ -273,7 +268,7 @@ async def test_streaming_multiple_edits_with_growth():
 
 
 @pytest.mark.asyncio
-async def test_streaming_with_thread_context():
+async def test_streaming_with_thread_context() -> None:
     """Test that streaming preserves thread context with large messages."""
     client = MockClient()
     config = MockConfig()
@@ -311,7 +306,7 @@ async def test_streaming_with_thread_context():
 
 
 @pytest.mark.asyncio
-async def test_message_exactly_at_limit():
+async def test_message_exactly_at_limit() -> None:
     """Test message that's exactly at the size limit."""
     client = MockClient()
 
@@ -329,7 +324,7 @@ async def test_message_exactly_at_limit():
 
 
 @pytest.mark.asyncio
-async def test_message_with_formatted_body():
+async def test_message_with_formatted_body() -> None:
     """Test that formatted_body is handled correctly."""
     client = MockClient()
 
@@ -352,7 +347,7 @@ async def test_message_with_formatted_body():
 
 
 @pytest.mark.asyncio
-async def test_streaming_finalize():
+async def test_streaming_finalize() -> None:
     """Test that streaming finalize properly handles large messages."""
     client = MockClient()
     config = MockConfig()

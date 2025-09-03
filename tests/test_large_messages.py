@@ -1,5 +1,4 @@
 """Tests for large message handling."""
-# ruff: noqa: ANN201, RUF012, ANN202, ANN003, ARG002
 
 import pytest
 
@@ -12,7 +11,7 @@ from mindroom.matrix.large_messages import (
 )
 
 
-def test_calculate_event_size():
+def test_calculate_event_size() -> None:
     """Test event size calculation."""
     # Small message
     content = {"body": "Hello", "msgtype": "m.text"}
@@ -27,7 +26,7 @@ def test_calculate_event_size():
     assert size < 55000  # Text + overhead
 
 
-def test_is_edit_message():
+def test_is_edit_message() -> None:
     """Test edit message detection."""
     # Regular message
     regular = {"body": "Hello", "msgtype": "m.text"}
@@ -50,7 +49,7 @@ def test_is_edit_message():
     assert is_edit_message(edit2)
 
 
-def test_create_preview():
+def test_create_preview() -> None:
     """Test preview creation."""
     # Short text - no truncation
     short_text = "Hello world"
@@ -72,12 +71,12 @@ def test_create_preview():
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_passthrough():
+async def test_prepare_large_message_passthrough() -> None:
     """Test that small messages pass through unchanged."""
 
     # Mock client
     class MockClient:
-        rooms = {}
+        rooms: dict = {}  # noqa: RUF012
 
     client = MockClient()
 
@@ -94,14 +93,14 @@ async def test_prepare_large_message_passthrough():
 
 
 @pytest.mark.asyncio
-async def test_prepare_large_message_truncation():
+async def test_prepare_large_message_truncation() -> None:
     """Test that large messages get truncated with MXC upload."""
 
     # Mock client with upload
     class MockClient:
-        rooms = {}
+        rooms: dict = {}  # noqa: RUF012
 
-        async def upload(self, **kwargs):
+        async def upload(self, **kwargs) -> object:  # noqa: ANN003, ARG002
             class Response:
                 content_uri = "mxc://server/file123"
 
@@ -128,14 +127,14 @@ async def test_prepare_large_message_truncation():
 
 
 @pytest.mark.asyncio
-async def test_prepare_edit_message():
+async def test_prepare_edit_message() -> None:
     """Test that edit messages use lower size threshold."""
 
     # Mock client with upload
     class MockClient:
-        rooms = {}
+        rooms: dict = {}  # noqa: RUF012
 
-        async def upload(self, **kwargs):
+        async def upload(self, **kwargs) -> object:  # noqa: ANN003, ARG002
             class Response:
                 content_uri = "mxc://server/file456"
 
