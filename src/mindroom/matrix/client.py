@@ -16,6 +16,8 @@ from mindroom.logging_config import get_logger
 
 from .event_info import EventInfo
 from .identity import MatrixID, extract_server_name_from_homeserver
+from .large_messages import prepare_large_message
+from .message_content import extract_and_resolve_message
 
 logger = get_logger(__name__)
 
@@ -407,6 +409,9 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
 async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
     """Send a message to a Matrix room.
 
+    Automatically handles large messages that exceed the Matrix event size limit
+    by uploading the full content as MXC and sending a maximum-size preview.
+
     Args:
         client: Authenticated Matrix client
         room_id: The room ID to send the message to
@@ -416,6 +421,9 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
         The event ID of the sent message, or None if sending failed
 
     """
+    # Handle large messages if needed
+    content = await prepare_large_message(client, room_id, content)
+
     response = await client.room_send(
         room_id=room_id,
         message_type="m.room.message",
@@ -426,17 +434,6 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
         return str(response.event_id)
     logger.error(f"Failed to send message to {room_id}: {response}")
     return None
-
-
-def _extract_message_data(event: nio.RoomMessageText) -> dict[str, Any]:
-    """Extract message data from a RoomMessageText event."""
-    return {
-        "sender": event.sender,
-        "body": event.body,
-        "timestamp": event.server_timestamp,
-        "event_id": event.event_id,
-        "content": event.source.get("content", {}),
-    }
 
 
 async def fetch_thread_history(
@@ -480,13 +477,15 @@ async def fetch_thread_history(
         for event in response.chunk:
             if isinstance(event, nio.RoomMessageText):
                 if event.event_id == thread_id and not root_message_found:
-                    messages.append(_extract_message_data(event))
+                    message_data = await extract_and_resolve_message(event, client)
+                    messages.append(message_data)
                     root_message_found = True
                     thread_messages_found += 1
                 else:
                     event_info = EventInfo.from_event(event.source)
                     if event_info.is_thread and event_info.thread_id == thread_id:
-                        messages.append(_extract_message_data(event))
+                        message_data = await extract_and_resolve_message(event, client)
+                        messages.append(message_data)
                         thread_messages_found += 1
 
         if not response.end or thread_messages_found == 0:
@@ -593,6 +592,9 @@ async def edit_message(
 ) -> str | None:
     """Edit an existing Matrix message.
 
+    Automatically handles large messages that exceed the Matrix event size limit
+    by uploading the full content as MXC and sending a maximum-size preview.
+
     Args:
         client: The Matrix client
         room_id: The room ID where the message is
@@ -613,6 +615,7 @@ async def edit_message(
         "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
     }
 
+    # send_message will handle large messages, including the lower threshold for edits
     return await send_message(client, room_id, edit_content)
 
 
