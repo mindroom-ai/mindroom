@@ -22,7 +22,7 @@ _mxc_cache: dict[str, tuple[str, float]] = {}
 _cache_ttl = 3600.0  # 1 hour TTL
 
 
-async def get_full_message_body(
+async def _get_full_message_body(
     message_data: dict[str, Any],
     client: nio.AsyncClient | None = None,
 ) -> str:
@@ -62,7 +62,7 @@ async def get_full_message_body(
             return body
 
         # Download the full content
-        full_text = await download_mxc_text(client, mxc_url, content.get("file"))
+        full_text = await _download_mxc_text(client, mxc_url, content.get("file"))
         if full_text:
             return full_text
         logger.warning("Failed to download large message, returning preview")
@@ -72,7 +72,7 @@ async def get_full_message_body(
     return body
 
 
-async def download_mxc_text(  # noqa: PLR0911, C901
+async def _download_mxc_text(  # noqa: PLR0911, C901
     client: nio.AsyncClient,
     mxc_url: str,
     file_info: dict[str, Any] | None = None,
@@ -189,7 +189,7 @@ async def extract_and_resolve_message(
 
     # Check if this is a large message and resolve if we have a client
     if client and "io.mindroom.long_text" in data["content"]:
-        data["body"] = await get_full_message_body(data, client)
+        data["body"] = await _get_full_message_body(data, client)
 
     return data
 

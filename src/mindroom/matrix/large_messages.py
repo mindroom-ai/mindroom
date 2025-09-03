@@ -22,7 +22,7 @@ NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
 
 
-def calculate_event_size(content: dict[str, Any]) -> int:
+def _calculate_event_size(content: dict[str, Any]) -> int:
     """Calculate the approximate size of a Matrix event.
 
     Args:
@@ -38,14 +38,14 @@ def calculate_event_size(content: dict[str, Any]) -> int:
     return len(canonical.encode("utf-8")) + 2000
 
 
-def is_edit_message(content: dict[str, Any]) -> bool:
+def _is_edit_message(content: dict[str, Any]) -> bool:
     """Check if this is an edit message."""
     return "m.new_content" in content or (
         "m.relates_to" in content and content.get("m.relates_to", {}).get("rel_type") == "m.replace"
     )
 
 
-def create_preview(text: str, max_bytes: int) -> str:
+def _create_preview(text: str, max_bytes: int) -> str:
     """Create a preview that fits within byte limit.
 
     Args:
@@ -89,7 +89,7 @@ def create_preview(text: str, max_bytes: int) -> str:
     return text[:best_pos] + indicator
 
 
-async def upload_text_as_mxc(
+async def _upload_text_as_mxc(
     client: nio.AsyncClient,
     text: str,
     room_id: str | None = None,
@@ -195,11 +195,11 @@ async def prepare_large_message(
     """
     # Edit messages roughly double in size due to m.new_content structure
     # which includes both the edit wrapper and the actual new content
-    is_edit = is_edit_message(content)
+    is_edit = _is_edit_message(content)
     size_limit = EDIT_MESSAGE_LIMIT if is_edit else NORMAL_MESSAGE_LIMIT
 
     # Calculate current size
-    current_size = calculate_event_size(content)
+    current_size = _calculate_event_size(content)
 
     # If it fits, return unchanged
     if current_size <= size_limit:
@@ -211,7 +211,7 @@ async def prepare_large_message(
     logger.info(f"Message too large ({current_size} bytes), uploading to MXC")
 
     # Upload the full text
-    mxc_uri, file_info = await upload_text_as_mxc(client, full_text, room_id)
+    mxc_uri, file_info = await _upload_text_as_mxc(client, full_text, room_id)
 
     # Calculate how much space we have for preview
     # We'll be sending an m.file message, so account for the file attachment structure
@@ -220,7 +220,7 @@ async def prepare_large_message(
     available_for_preview = size_limit - attachment_overhead
 
     # Create maximum-size preview
-    preview = create_preview(full_text, available_for_preview)
+    preview = _create_preview(full_text, available_for_preview)
 
     # Create a standard m.file message with preview body
     modified_content = {

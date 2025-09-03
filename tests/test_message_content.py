@@ -6,14 +6,14 @@ import nio
 import pytest
 
 from mindroom.matrix.message_content import (
+    _download_mxc_text,
+    _get_full_message_body,
     clear_mxc_cache,
-    download_mxc_text,
-    get_full_message_body,
 )
 
 
 class TestGetFullMessageBody:
-    """Tests for get_full_message_body function."""
+    """Tests for _get_full_message_body function."""
 
     def setup_method(self) -> None:
         """Clear cache before each test."""
@@ -27,7 +27,7 @@ class TestGetFullMessageBody:
             "content": {"msgtype": "m.text", "body": "Test message"},
         }
 
-        result = await get_full_message_body(message)
+        result = await _get_full_message_body(message)
         assert result == "Test message"
 
     @pytest.mark.asyncio
@@ -46,7 +46,7 @@ class TestGetFullMessageBody:
             },
         }
 
-        result = await get_full_message_body(message)
+        result = await _get_full_message_body(message)
         assert result == "Preview text..."
 
     @pytest.mark.asyncio
@@ -73,7 +73,7 @@ class TestGetFullMessageBody:
             },
         }
 
-        result = await get_full_message_body(message, client)
+        result = await _get_full_message_body(message, client)
         assert result == "Full message content that is very long"
         client.download.assert_called_once_with("server", "file123")
 
@@ -101,13 +101,13 @@ class TestGetFullMessageBody:
         }
 
         # For now, just verify it tries to get the URL from file info
-        result = await get_full_message_body(message, client)
+        result = await _get_full_message_body(message, client)
         # Without proper crypto mocking, it will return preview
         assert result == "Preview..."
 
 
 class TestDownloadMxcText:
-    """Tests for download_mxc_text function."""
+    """Tests for _download_mxc_text function."""
 
     def setup_method(self) -> None:
         """Clear cache before each test."""
@@ -117,14 +117,14 @@ class TestDownloadMxcText:
     async def test_invalid_mxc_url(self) -> None:
         """Test handling of invalid MXC URL."""
         client = AsyncMock()
-        result = await download_mxc_text(client, "http://not-mxc-url")
+        result = await _download_mxc_text(client, "http://not-mxc-url")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_malformed_mxc_url(self) -> None:
         """Test handling of malformed MXC URL."""
         client = AsyncMock()
-        result = await download_mxc_text(client, "mxc://no-media-id")
+        result = await _download_mxc_text(client, "mxc://no-media-id")
         assert result is None
 
     @pytest.mark.asyncio
@@ -135,7 +135,7 @@ class TestDownloadMxcText:
         response.body = b"Downloaded text content"
         client.download.return_value = response
 
-        result = await download_mxc_text(client, "mxc://server/media123")
+        result = await _download_mxc_text(client, "mxc://server/media123")
         assert result == "Downloaded text content"
 
     @pytest.mark.asyncio
@@ -144,5 +144,5 @@ class TestDownloadMxcText:
         client = AsyncMock()
         client.download.return_value = MagicMock(spec=nio.DownloadError)
 
-        result = await download_mxc_text(client, "mxc://server/media123")
+        result = await _download_mxc_text(client, "mxc://server/media123")
         assert result is None
