@@ -7,8 +7,7 @@ These tests ensure that mentioning a predefined team:
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,6 +16,9 @@ from mindroom.bot import AgentBot, TeamBot
 from mindroom.config import AgentConfig, Config, RouterConfig, TeamConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -63,7 +65,7 @@ def _mock_event_with_team_mention(team_user_id: str, body: str = "@team please h
 
 
 @pytest.mark.asyncio
-async def test_router_does_not_route_when_preformed_team_is_mentioned(config_with_team: Config) -> None:
+async def test_router_does_not_route_when_preformed_team_is_mentioned(config_with_team: Config, tmp_path: Path) -> None:
     """Router must not route if the message mentions a predefined team."""
     # Router bot setup
     # Use config-derived IDs to match domain in this environment
@@ -73,7 +75,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
         display_name="Router",
         password="p",  # noqa: S106
     )
-    router = AgentBot(router_user, Path(), config_with_team)
+    router = AgentBot(router_user, tmp_path, config_with_team)
     router.client = AsyncMock()
 
     # Room has router + team + two agents and the human user
