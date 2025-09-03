@@ -12,7 +12,6 @@ from . import interactive
 from .ai import _format_tool_completed_message, _format_tool_started_message
 from .logging_config import get_logger
 from .matrix.client import edit_message, send_message
-from .matrix.large_messages import EDIT_MESSAGE_LIMIT, NORMAL_MESSAGE_LIMIT
 from .matrix.mentions import format_message_with_mentions
 
 if TYPE_CHECKING:
@@ -43,37 +42,18 @@ class StreamingResponse:
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
     update_interval: float = 1.0
-    update_interval_large: float = 10.0  # Slower updates when creating attachments
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
         self.accumulated_text += new_chunk
 
-    def _get_update_interval(self) -> float:
-        """Determine update interval based on message size.
-
-        Returns a longer interval when the message will require an attachment,
-        to reduce redundant file uploads during streaming.
-        """
-        # Estimate size with the progress marker that would be added
-        test_text = self.accumulated_text + IN_PROGRESS_MARKER
-        size_estimate = len(test_text.encode("utf-8")) + 2000  # Add overhead estimate
-
-        # Determine which limit applies based on whether this is an edit
-        is_edit = self.event_id is not None
-        size_limit = EDIT_MESSAGE_LIMIT if is_edit else NORMAL_MESSAGE_LIMIT
-
-        # Use longer interval if we're over the limit
-        return self.update_interval_large if size_estimate > size_limit else self.update_interval
-
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
         self._update(new_chunk)
 
-        interval = self._get_update_interval()
         current_time = time.time()
-        if current_time - self.last_update >= interval:
+        if current_time - self.last_update >= self.update_interval:
             await self._send_or_edit_message(client)
             self.last_update = current_time
 
