@@ -50,23 +50,28 @@ class StreamingResponse:
         """Append new chunk to accumulated text."""
         self.accumulated_text += new_chunk
 
+    def _get_update_interval(self) -> float:
+        """Determine update interval based on message size.
+
+        Returns a longer interval when the message will require an attachment,
+        to reduce redundant file uploads during streaming.
+        """
+        # Estimate size with the progress marker that would be added
+        test_text = self.accumulated_text + IN_PROGRESS_MARKER
+        size_estimate = len(test_text.encode("utf-8")) + 2000  # Add overhead estimate
+
+        # Determine which limit applies based on whether this is an edit
+        is_edit = self.event_id is not None
+        size_limit = EDIT_MESSAGE_LIMIT if is_edit else NORMAL_MESSAGE_LIMIT
+
+        # Use longer interval if we're over the limit
+        return self.update_interval_large if size_estimate > size_limit else self.update_interval
+
     async def update_content(self, new_chunk: str, client: nio.AsyncClient) -> None:
         """Add new content and potentially update the message."""
         self._update(new_chunk)
 
-        # Use longer interval if message is large (will require attachment)
-        # Check size with the progress marker that would be added
-        test_text = self.accumulated_text + IN_PROGRESS_MARKER
-        size_estimate = len(test_text.encode("utf-8")) + 2000  # Add overhead estimate
-
-        # Determine which limit applies and which interval to use
-        if self.event_id is None:
-            # First message - use normal limit
-            interval = self.update_interval_large if size_estimate > NORMAL_MESSAGE_LIMIT else self.update_interval
-        else:
-            # Edit - use edit limit
-            interval = self.update_interval_large if size_estimate > EDIT_MESSAGE_LIMIT else self.update_interval
-
+        interval = self._get_update_interval()
         current_time = time.time()
         if current_time - self.last_update >= interval:
             await self._send_or_edit_message(client)
