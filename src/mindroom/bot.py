@@ -173,7 +173,8 @@ def _generate_welcome_message(room_id: str, config: Config) -> str:
 
         description = _format_agent_description(agent_name, config)
         # Always show the agent, with or without description
-        agent_entry = f"• **@{agent_name}**"
+        # Use the username with mindroom_ prefix (but without domain) for proper mention parsing
+        agent_entry = f"• **@{agent_id.username}**"
         if description:
             agent_entry += f": {description}"
         agent_list.append(agent_entry)
