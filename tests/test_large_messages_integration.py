@@ -87,7 +87,7 @@ async def test_regular_message_over_limit() -> None:
 
     # Should have truncated body preview
     assert len(sent_content["body"]) < len(large_text)
-    assert "[Message continues...]" in sent_content["body"]
+    assert "[Message continues in attached file]" in sent_content["body"]
 
     # Should have metadata
     assert "io.mindroom.long_text" in sent_content
@@ -134,7 +134,7 @@ async def test_upload_failure_fallback() -> None:
 
     # Should have truncated but no metadata
     assert len(result["body"]) < len(large_text)
-    assert "[Message continues...]" in result["body"]
+    assert "[Message continues in attached file]" in result["body"]
     assert "io.mindroom.long_text" not in result
 
 

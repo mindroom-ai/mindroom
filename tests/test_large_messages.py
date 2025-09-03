@@ -61,14 +61,14 @@ def test_create_preview() -> None:
     long_text = "Hello world. " * 1000
     preview = create_preview(long_text, 1000)
     assert len(preview.encode("utf-8")) <= 1000
-    assert "[Message continues...]" in preview
+    assert "[Message continues in attached file]" in preview
 
     # Test natural break points
     paragraph_text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph." * 100
     preview = create_preview(paragraph_text, 500)
     assert len(preview.encode("utf-8")) <= 500
     # Should break at paragraph boundary
-    assert preview.count("\n\n") >= 1 or "[Message continues...]" in preview
+    assert preview.count("\n\n") >= 1 or "[Message continues in attached file]" in preview
 
 
 @pytest.mark.asyncio
@@ -134,7 +134,7 @@ async def test_prepare_large_message_truncation() -> None:
 
     # Body should be truncated preview
     assert len(result["body"]) < len(large_text)
-    assert "[Message continues...]" in result["body"]
+    assert "[Message continues in attached file]" in result["body"]
 
     # Preview should fit in limit
     assert calculate_event_size(result) <= NORMAL_MESSAGE_LIMIT
@@ -174,4 +174,4 @@ async def test_prepare_edit_message() -> None:
 
     # Body should have preview
     assert len(result["body"]) < len("* " + text)
-    assert "[Message continues...]" in result["m.new_content"]["body"]
+    assert "[Message continues in attached file]" in result["m.new_content"]["body"]

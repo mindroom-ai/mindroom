@@ -57,7 +57,7 @@ def create_preview(text: str, max_bytes: int) -> str:
 
     """
     # Reserve space for continuation indicator
-    indicator = "\n\n[Message continues...]"
+    indicator = "\n\n[Message continues in attached file]"
     indicator_bytes = len(indicator.encode("utf-8"))
 
     # If text fits entirely, return as-is

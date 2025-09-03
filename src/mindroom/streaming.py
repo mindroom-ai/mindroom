@@ -12,6 +12,7 @@ from . import interactive
 from .ai import _format_tool_completed_message, _format_tool_started_message
 from .logging_config import get_logger
 from .matrix.client import edit_message, send_message
+from .matrix.large_messages import EDIT_MESSAGE_LIMIT, NORMAL_MESSAGE_LIMIT
 from .matrix.mentions import format_message_with_mentions
 
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ class StreamingResponse:
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
     update_interval: float = 1.0
+    update_interval_large: float = 10.0  # Slower updates when creating attachments
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
 
     def _update(self, new_chunk: str) -> None:
@@ -52,8 +54,21 @@ class StreamingResponse:
         """Add new content and potentially update the message."""
         self._update(new_chunk)
 
+        # Use longer interval if message is large (will require attachment)
+        # Check size with the progress marker that would be added
+        test_text = self.accumulated_text + IN_PROGRESS_MARKER
+        size_estimate = len(test_text.encode("utf-8")) + 2000  # Add overhead estimate
+
+        # Determine which limit applies and which interval to use
+        if self.event_id is None:
+            # First message - use normal limit
+            interval = self.update_interval_large if size_estimate > NORMAL_MESSAGE_LIMIT else self.update_interval
+        else:
+            # Edit - use edit limit
+            interval = self.update_interval_large if size_estimate > EDIT_MESSAGE_LIMIT else self.update_interval
+
         current_time = time.time()
-        if current_time - self.last_update >= self.update_interval:
+        if current_time - self.last_update >= interval:
             await self._send_or_edit_message(client)
             self.last_update = current_time
 

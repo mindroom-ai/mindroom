@@ -145,7 +145,7 @@ The attachment contains the full message content.
 This is a very large message that definitely requires attachment handling.
 This simulates a comprehensive AI response with extensive detail.
 
-You should see a preview with [Message continues...] and a file attachment.
+You should see a preview with [Message continues in attached file] and a file attachment.
 
 Key points about large messages:
 1. Preview shows first ~50KB of content
