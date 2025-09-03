@@ -227,6 +227,41 @@ async def resolve_full_content(
     return message_data
 
 
+async def extract_and_resolve_message(
+    event: nio.RoomMessageText,
+    client: nio.AsyncClient | None = None,
+) -> dict[str, Any]:
+    """Extract message data and resolve large message content if needed.
+
+    This is a convenience function that combines extraction and resolution
+    of large message content in a single call.
+
+    Args:
+        event: The Matrix event to extract data from
+        client: Optional Matrix client for downloading attachments
+
+    Returns:
+        Dict with sender, body, timestamp, event_id, and content fields.
+        If the message is large and client is provided, body will contain
+        the full text from the attachment.
+
+    """
+    # Extract basic message data
+    data = {
+        "sender": event.sender,
+        "body": event.body,
+        "timestamp": event.server_timestamp,
+        "event_id": event.event_id,
+        "content": event.source.get("content", {}),
+    }
+
+    # Check if this is a large message and resolve if we have a client
+    if client and "io.mindroom.long_text" in data["content"]:
+        data["body"] = await get_full_message_body(data, client)
+
+    return data
+
+
 def _clean_expired_cache() -> None:
     """Remove expired entries from the MXC cache."""
     current_time = time.time()
