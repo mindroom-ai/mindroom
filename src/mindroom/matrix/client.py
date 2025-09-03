@@ -16,6 +16,7 @@ from mindroom.logging_config import get_logger
 
 from .event_info import EventInfo
 from .identity import MatrixID, extract_server_name_from_homeserver
+from .large_messages import prepare_large_message
 
 logger = get_logger(__name__)
 
@@ -407,6 +408,9 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
 async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str, Any]) -> str | None:
     """Send a message to a Matrix room.
 
+    Automatically handles large messages that exceed the Matrix event size limit
+    by uploading the full content as MXC and sending a maximum-size preview.
+
     Args:
         client: Authenticated Matrix client
         room_id: The room ID to send the message to
@@ -416,6 +420,9 @@ async def send_message(client: nio.AsyncClient, room_id: str, content: dict[str,
         The event ID of the sent message, or None if sending failed
 
     """
+    # Handle large messages if needed
+    content = await prepare_large_message(client, room_id, content)
+
     response = await client.room_send(
         room_id=room_id,
         message_type="m.room.message",
@@ -593,6 +600,9 @@ async def edit_message(
 ) -> str | None:
     """Edit an existing Matrix message.
 
+    Automatically handles large messages that exceed the Matrix event size limit
+    by uploading the full content as MXC and sending a maximum-size preview.
+
     Args:
         client: The Matrix client
         room_id: The room ID where the message is
@@ -613,6 +623,7 @@ async def edit_message(
         "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
     }
 
+    # send_message will handle large messages, including the lower threshold for edits
     return await send_message(client, room_id, edit_content)
 
 
