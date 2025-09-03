@@ -86,16 +86,7 @@ def create_preview(text: str, max_bytes: int) -> str:
             # Shouldn't happen with valid input
             right = mid - 1
 
-    preview = text[:best_pos]
-
-    # Try to break at a natural boundary (paragraph or sentence)
-    for separator in ["\n\n", ". ", "\n"]:
-        pos = preview.rfind(separator)
-        if pos > best_pos * 0.7:  # At least 70% of max size
-            preview = preview[: pos + len(separator)].rstrip()
-            break
-
-    return preview + indicator
+    return text[:best_pos] + indicator
 
 
 async def upload_text_as_mxc(
@@ -215,29 +206,12 @@ async def prepare_large_message(
         return content
 
     # Extract the text to upload (handle both regular and edit messages)
-    if is_edit and "m.new_content" in content:
-        full_text = content["m.new_content"].get("body", "")
-        full_html = content["m.new_content"].get("formatted_body", "")
-    else:
-        full_text = content.get("body", "")
-        full_html = content.get("formatted_body", "")
-
-    if not full_text:
-        return content  # Nothing to do
+    full_text = content["m.new_content"]["body"] if is_edit and "m.new_content" in content else content["body"]
 
     logger.info(f"Message too large ({current_size} bytes), uploading to MXC")
 
     # Upload the full text
     mxc_uri, file_info = await upload_text_as_mxc(client, full_text, room_id)
-    if not mxc_uri or not file_info:
-        logger.error("Failed to upload large message, sending truncated version")
-        # Fall back to truncated message
-        preview = create_preview(full_text, size_limit - 5000)
-        content["body"] = preview
-        if full_html:
-            # Simple truncation for HTML (proper HTML truncation would need parsing)
-            content["formatted_body"] = preview  # Use plain preview for safety
-        return content
 
     # Calculate how much space we have for preview
     # We'll be sending an m.file message, so account for the file attachment structure
@@ -257,12 +231,12 @@ async def prepare_large_message(
     }
 
     # Add the file URL (either encrypted or plain)
-    if "url" in file_info and room_id and room_id in client.rooms and client.rooms[room_id].encrypted:
+    if room_id and room_id in client.rooms and client.rooms[room_id].encrypted:
         # For encrypted rooms, use 'file' key
         modified_content["file"] = file_info
     else:
         # For unencrypted rooms, use 'url' key
-        modified_content["url"] = file_info.get("url", mxc_uri)
+        modified_content["url"] = mxc_uri
 
     # Add custom metadata to signal this is a long text message
     # Future custom clients can use this to render as inline text instead of attachment

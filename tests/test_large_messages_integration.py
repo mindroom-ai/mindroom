@@ -120,24 +120,6 @@ async def test_edit_message_with_lower_threshold() -> None:
     assert len(sent_content["m.new_content"]["body"]) < len(text)
 
 
-@pytest.mark.asyncio
-async def test_upload_failure_fallback() -> None:
-    """Test that when upload fails, we fall back to truncated message."""
-    client = MockClient(should_upload_succeed=False)
-
-    # Large message
-    large_text = "z" * 100000
-    content = {"body": large_text, "msgtype": "m.text"}
-
-    # Prepare should handle the failure gracefully
-    result = await prepare_large_message(client, "!room:server", content)
-
-    # Should have truncated but no metadata
-    assert len(result["body"]) < len(large_text)
-    assert "[Message continues in attached file]" in result["body"]
-    assert "io.mindroom.long_text" not in result
-
-
 # ============================================================================
 # Streaming Tests
 # ============================================================================

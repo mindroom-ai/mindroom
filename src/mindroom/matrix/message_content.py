@@ -159,69 +159,6 @@ async def download_mxc_text(  # noqa: PLR0911, C901
         return None
 
 
-def extract_message_data(
-    event: nio.RoomMessageText,
-    include_full_content: bool = True,
-    client: nio.AsyncClient | None = None,  # noqa: ARG001
-) -> dict[str, Any]:
-    """Extract message data from a RoomMessageText event.
-
-    This is a replacement for _extract_message_data that can optionally
-    include the full message content for large messages.
-
-    Args:
-        event: The Matrix event to extract data from
-        include_full_content: Whether to attempt to get full content for large messages
-        client: Optional Matrix client for downloading attachments
-
-    Returns:
-        Dict with sender, body, timestamp, event_id, and content fields
-
-    """
-    data = {
-        "sender": event.sender,
-        "body": event.body,
-        "timestamp": event.server_timestamp,
-        "event_id": event.event_id,
-        "content": event.source.get("content", {}),
-    }
-
-    # Mark if this needs full content retrieval
-    if include_full_content and "io.mindroom.long_text" in data["content"]:
-        data["_needs_full_content"] = True
-        data["_preview_body"] = event.body
-
-    return data
-
-
-async def resolve_full_content(
-    message_data: dict[str, Any],
-    client: nio.AsyncClient,
-) -> dict[str, Any]:
-    """Resolve full content for a message that needs it.
-
-    Args:
-        message_data: Message data dict from extract_message_data
-        client: Matrix client for downloading attachments
-
-    Returns:
-        Updated message data with full body content
-
-    """
-    if not message_data.get("_needs_full_content"):
-        return message_data
-
-    # Get the full body
-    full_body = await get_full_message_body(message_data, client)
-
-    # Update the message data
-    message_data["body"] = full_body
-    message_data.pop("_needs_full_content", None)
-    message_data.pop("_preview_body", None)
-
-    return message_data
-
-
 async def extract_and_resolve_message(
     event: nio.RoomMessageText,
     client: nio.AsyncClient | None = None,
@@ -252,9 +189,7 @@ async def extract_and_resolve_message(
 
     # Check if this is a large message and resolve if we have a client
     if client and "io.mindroom.long_text" in data["content"]:
-        full_body = await get_full_message_body(data, client)
-        if full_body:
-            data["body"] = full_body
+        data["body"] = await get_full_message_body(data, client)
 
     return data
 
