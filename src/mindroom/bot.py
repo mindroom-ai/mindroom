@@ -32,6 +32,7 @@ from .matrix.client import (
     _latest_thread_event_id,
     check_and_set_avatar,
     edit_message,
+    fetch_thread_history,
     get_joined_rooms,
     get_latest_thread_event_id_if_needed,
     get_room_members,
@@ -48,7 +49,6 @@ from .matrix.identity import (
 )
 from .matrix.mentions import format_message_with_mentions
 from .matrix.message_builder import build_message_content
-from .matrix.message_content import fetch_thread_history_with_full_content
 from .matrix.presence import build_agent_status_message, is_user_online, set_presence_status, should_use_streaming
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, is_dm_room, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
@@ -759,7 +759,7 @@ class AgentBot:
             # Check if we should process this reaction
             thread_history = []
             if thread_id:
-                thread_history = await fetch_thread_history_with_full_content(self.client, room.room_id, thread_id)
+                thread_history = await fetch_thread_history(self.client, room.room_id, thread_id)
                 if has_user_responded_after_message(thread_history, event.reacts_to, self.matrix_id):
                     self.logger.info(
                         "Ignoring reaction - agent already responded after this question",
@@ -860,11 +860,7 @@ class AgentBot:
 
         thread_history = []
         if event_info.thread_id:
-            thread_history = await fetch_thread_history_with_full_content(
-                self.client,
-                room.room_id,
-                event_info.thread_id,
-            )
+            thread_history = await fetch_thread_history(self.client, room.room_id, event_info.thread_id)
 
         return MessageContext(
             am_i_mentioned=am_i_mentioned,

@@ -446,7 +446,7 @@ def _extract_message_data(event: nio.RoomMessageText) -> dict[str, Any]:
     }
 
 
-async def fetch_thread_history(
+async def fetch_thread_history(  # noqa: C901
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -462,6 +462,8 @@ async def fetch_thread_history(
         List of messages in chronological order, each containing sender, body, timestamp, and event_id
 
     """
+    from .message_content import get_full_message_body  # noqa: PLC0415
+
     messages = []
     from_token = None
     root_message_found = False
@@ -487,13 +489,21 @@ async def fetch_thread_history(
         for event in response.chunk:
             if isinstance(event, nio.RoomMessageText):
                 if event.event_id == thread_id and not root_message_found:
-                    messages.append(_extract_message_data(event))
+                    message_data = _extract_message_data(event)
+                    # Check if this is a large message and get full content
+                    if message_data.get("content", {}).get("io.mindroom.long_text"):
+                        message_data["body"] = await get_full_message_body(message_data, client)
+                    messages.append(message_data)
                     root_message_found = True
                     thread_messages_found += 1
                 else:
                     event_info = EventInfo.from_event(event.source)
                     if event_info.is_thread and event_info.thread_id == thread_id:
-                        messages.append(_extract_message_data(event))
+                        message_data = _extract_message_data(event)
+                        # Check if this is a large message and get full content
+                        if message_data.get("content", {}).get("io.mindroom.long_text"):
+                            message_data["body"] = await get_full_message_body(message_data, client)
+                        messages.append(message_data)
                         thread_messages_found += 1
 
         if not response.end or thread_messages_found == 0:

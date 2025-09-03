@@ -204,36 +204,3 @@ async def resolve_full_content(
     message_data.pop("_preview_body", None)
 
     return message_data
-
-
-async def fetch_thread_history_with_full_content(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_id: str,
-) -> list[dict[str, Any]]:
-    """Fetch thread history with full content for large messages.
-
-    This is a wrapper around fetch_thread_history that ensures
-    large message attachments are downloaded and included.
-
-    Args:
-        client: The Matrix client instance
-        room_id: The room ID to fetch messages from
-        thread_id: The thread root event ID
-
-    Returns:
-        List of messages with full content in chronological order
-
-    """
-    from .client import fetch_thread_history  # noqa: PLC0415
-
-    # Get the thread history with preview content
-    messages = await fetch_thread_history(client, room_id, thread_id)
-
-    # Resolve full content for any large messages
-    for msg in messages:
-        if "content" in msg and "io.mindroom.long_text" in msg["content"]:
-            full_body = await get_full_message_body(msg, client)
-            msg["body"] = full_body
-
-    return messages

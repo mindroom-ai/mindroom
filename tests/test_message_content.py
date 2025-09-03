@@ -8,7 +8,6 @@ import pytest
 from mindroom.matrix.message_content import (
     download_mxc_text,
     extract_message_data,
-    fetch_thread_history_with_full_content,
     get_full_message_body,
     resolve_full_content,
 )
@@ -252,72 +251,3 @@ class TestResolveFullContent:
         assert result["body"] == "Full content here"
         assert "_needs_full_content" not in result
         assert "_preview_body" not in result
-
-
-class TestFetchThreadHistoryWithFullContent:
-    """Tests for fetch_thread_history_with_full_content function."""
-
-    @pytest.mark.asyncio
-    async def test_fetch_with_no_large_messages(self, monkeypatch) -> None:  # noqa: ANN001
-        """Test fetching thread with no large messages."""
-
-        # Mock the original fetch_thread_history
-        async def mock_fetch(client, room_id, thread_id):  # noqa: ANN001, ANN202, ARG001
-            return [
-                {"body": "Message 1", "content": {"msgtype": "m.text"}},
-                {"body": "Message 2", "content": {"msgtype": "m.text"}},
-            ]
-
-        monkeypatch.setattr(
-            "mindroom.matrix.client.fetch_thread_history",
-            mock_fetch,
-        )
-
-        client = AsyncMock()
-        result = await fetch_thread_history_with_full_content(
-            client,
-            "!room:server",
-            "$thread",
-        )
-
-        assert len(result) == 2
-        assert result[0]["body"] == "Message 1"
-        assert result[1]["body"] == "Message 2"
-
-    @pytest.mark.asyncio
-    async def test_fetch_with_large_messages(self, monkeypatch) -> None:  # noqa: ANN001
-        """Test fetching thread with large messages."""
-
-        # Mock the original fetch_thread_history
-        async def mock_fetch(client, room_id, thread_id):  # noqa: ANN001, ANN202, ARG001
-            return [
-                {"body": "Regular message", "content": {"msgtype": "m.text"}},
-                {
-                    "body": "Preview...",
-                    "content": {
-                        "msgtype": "m.file",
-                        "io.mindroom.long_text": {"version": 1},
-                        "url": "mxc://server/file123",
-                    },
-                },
-            ]
-
-        monkeypatch.setattr(
-            "mindroom.matrix.client.fetch_thread_history",
-            mock_fetch,
-        )
-
-        client = AsyncMock()
-        response = MagicMock(spec=nio.DownloadResponse)
-        response.body = b"Full large message content"
-        client.download.return_value = response
-
-        result = await fetch_thread_history_with_full_content(
-            client,
-            "!room:server",
-            "$thread",
-        )
-
-        assert len(result) == 2
-        assert result[0]["body"] == "Regular message"
-        assert result[1]["body"] == "Full large message content"
