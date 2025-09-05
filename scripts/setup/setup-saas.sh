@@ -16,7 +16,10 @@ if [ ! -f "$PROJECT_ROOT/.env" ]; then
     exit 1
 fi
 
+# Safer way to load .env file that handles edge cases
+set -a  # automatically export all variables
 source "$PROJECT_ROOT/.env"
+set +a  # turn off automatic export
 
 # Colors for output
 GREEN='\033[0;32m'
