@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Declarative setup for Supabase and Stripe for MindRoom SaaS platform
 
 set -e
@@ -29,31 +29,38 @@ echo ""
 
 # Check if Supabase CLI is installed
 if ! command -v supabase &> /dev/null; then
-    echo "Installing Supabase CLI..."
-    npm install -g supabase
+    echo "⚠️  Supabase CLI not found. Please install it manually:"
+    echo "    npm install -g supabase"
+    echo ""
+    echo "Skipping Supabase setup for now..."
+    SKIP_SUPABASE=true
 fi
 
 # Initialize Supabase if not already done
-cd supabase
-if [ ! -f "config.toml" ]; then
-    echo "Initializing Supabase..."
-    supabase init
+if [ -z "$SKIP_SUPABASE" ]; then
+    cd supabase
+    if [ ! -f "config.toml" ]; then
+        echo "Initializing Supabase..."
+        supabase init
+    fi
+
+    # Link to remote project
+    echo "Linking to Supabase project..."
+    supabase link --project-ref "$SUPABASE_PROJECT_ID" 2>/dev/null || true
+
+    # Push migrations to remote database
+    echo "Running database migrations..."
+    supabase db push --include-all
+
+    # Deploy Edge Functions
+    echo "Deploying Edge Functions..."
+    supabase functions deploy --no-verify-jwt 2>/dev/null || echo "No functions to deploy"
+
+    cd ..
+    echo -e "${GREEN}✅ Supabase setup complete!${NC}"
+else
+    echo -e "${YELLOW}⚠️  Supabase setup skipped (CLI not available)${NC}"
 fi
-
-# Link to remote project
-echo "Linking to Supabase project..."
-supabase link --project-ref "$SUPABASE_PROJECT_ID" 2>/dev/null || true
-
-# Push migrations to remote database
-echo "Running database migrations..."
-supabase db push --include-all
-
-# Deploy Edge Functions
-echo "Deploying Edge Functions..."
-supabase functions deploy --no-verify-jwt 2>/dev/null || echo "No functions to deploy"
-
-cd ..
-echo -e "${GREEN}✅ Supabase setup complete!${NC}"
 echo ""
 
 # ===========================
@@ -214,6 +221,8 @@ EOF
 
 # Run the Stripe setup script
 echo "Creating Stripe products..."
+export STRIPE_SECRET_KEY
+export PLATFORM_DOMAIN
 python /tmp/setup_stripe_products.py
 
 echo ""
@@ -263,12 +272,15 @@ ON CONFLICT DO NOTHING;
 EOF
 
 # Apply test data to Supabase
-echo "Inserting test data..."
-cd supabase
-supabase db push --include-seed || echo "Test data may already exist"
-cd ..
-
-echo -e "${GREEN}✅ Test data created!${NC}"
+if [ -z "$SKIP_SUPABASE" ]; then
+    echo "Inserting test data..."
+    cd supabase
+    supabase db push --include-seed || echo "Test data may already exist"
+    cd ..
+    echo -e "${GREEN}✅ Test data created!${NC}"
+else
+    echo -e "${YELLOW}⚠️  Test data insertion skipped (Supabase CLI not available)${NC}"
+fi
 echo ""
 
 # ===========================
