@@ -2,6 +2,8 @@
 
 Terraform configuration for deploying the MindRoom SaaS platform on Hetzner Cloud.
 
+> **Quick Start:** Copy `terraform.tfvars.example` to `terraform.tfvars` and follow the detailed instructions inside.
+
 ## Architecture Overview
 
 The infrastructure consists of:
@@ -53,41 +55,33 @@ ssh-keygen -t rsa -b 4096 -f ssh/dokku_provisioner -N ""
 ### 2. Configure Variables
 
 ```bash
-# Copy example file
+# Copy the example configuration file
 cp terraform.tfvars.example terraform.tfvars
 
-# Edit with your values
+# Edit with your actual values
 nano terraform.tfvars
 ```
 
-Required values:
-```hcl
-# Hetzner Cloud
-hcloud_token = "YOUR_HETZNER_API_TOKEN"
+The `terraform.tfvars.example` file contains:
+- ✅ All required and optional variables
+- 📝 Detailed comments explaining each setting
+- 🔗 Direct links to where to get API keys
+- 💡 Recommendations for server sizing
+- 🔒 Security best practices
 
-# Porkbun DNS (get from https://porkbun.com/account/api)
-porkbun_api_key    = "YOUR_PORKBUN_API_KEY"
-porkbun_secret_key = "YOUR_PORKBUN_SECRET_KEY"
-domain = "mindroom.chat"
+**Key configurations to set:**
 
-# Get from Supabase project settings
-supabase_url = "https://xxxxx.supabase.co"
-supabase_anon_key = "eyJ..."
-supabase_service_key = "eyJ..."
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `hcloud_token` | ✅ Yes | Hetzner Cloud API token |
+| `supabase_*` | ✅ Yes | Supabase project credentials |
+| `stripe_*` | ✅ Yes | Stripe API keys |
+| `domain` | ✅ Yes | Your domain name |
+| `porkbun_*` | Optional | For automatic DNS setup |
+| `admin_ips` | Optional* | SSH access IPs (*strongly recommended) |
+| `server_type` | Optional | Adjust based on expected load |
 
-# Get from Stripe dashboard
-stripe_secret_key = "sk_live_..."
-stripe_publishable_key = "pk_live_..."
-stripe_webhook_secret = "whsec_..."
-
-# After creating products in Stripe
-stripe_price_starter = "price_..."
-stripe_price_professional = "price_..."
-stripe_price_enterprise = "price_..."
-
-# Your IP for SSH access (important for security!)
-admin_ips = ["YOUR.IP.ADD.RESS/32"]
-```
+See `terraform.tfvars.example` for the complete configuration guide.
 
 ### 3. Deploy Infrastructure
 
