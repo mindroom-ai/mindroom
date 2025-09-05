@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 export const config = {
   supabaseUrl: import.meta.env.VITE_SUPABASE_URL || '',
   supabaseServiceKey: import.meta.env.VITE_SUPABASE_SERVICE_KEY || '',
