@@ -1,3 +1,43 @@
+# ===========================================
+# DNS Provider Configuration (Porkbun)
+# ===========================================
+
+variable "porkbun_api_key" {
+  description = "Porkbun API key for DNS management (leave empty to skip DNS automation)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "porkbun_secret_key" {
+  description = "Porkbun secret key for DNS management (leave empty to skip DNS automation)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "enable_matrix_federation" {
+  description = "Enable Matrix federation DNS records"
+  type        = bool
+  default     = true
+}
+
+variable "enable_email" {
+  description = "Enable email-related DNS records (MX, SPF)"
+  type        = bool
+  default     = false
+}
+
+variable "mx_server" {
+  description = "Mail server for MX records (if email is enabled)"
+  type        = string
+  default     = "mail.example.com"
+}
+
+# ===========================================
+# Hetzner Cloud Configuration
+# ===========================================
+
 variable "hcloud_token" {
   description = "Hetzner Cloud API Token"
   type        = string

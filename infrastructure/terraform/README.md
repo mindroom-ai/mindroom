@@ -62,7 +62,12 @@ nano terraform.tfvars
 
 Required values:
 ```hcl
+# Hetzner Cloud
 hcloud_token = "YOUR_HETZNER_API_TOKEN"
+
+# Porkbun DNS (get from https://porkbun.com/account/api)
+porkbun_api_key    = "YOUR_PORKBUN_API_KEY"
+porkbun_secret_key = "YOUR_PORKBUN_SECRET_KEY"
 domain = "mindroom.chat"
 
 # Get from Supabase project settings
@@ -102,7 +107,20 @@ terraform output -json > outputs.json
 
 ### 4. Configure DNS
 
-After deployment, configure these DNS records:
+#### Option A: Automatic DNS Management with Porkbun (Recommended)
+
+If you're using Porkbun, DNS records are automatically created when you run `terraform apply`.
+
+To get your Porkbun API credentials:
+1. Log in to [Porkbun](https://porkbun.com)
+2. Go to Account → API Access
+3. Enable API access for your domain
+4. Generate API keys
+5. Add them to your `terraform.tfvars`
+
+#### Option B: Manual DNS Configuration
+
+If not using Porkbun or using another DNS provider, configure these records manually:
 
 ```
 # Main domain
@@ -121,6 +139,23 @@ AAAA  *.mindroom.chat            <dokku_server_ipv6>
 
 # Matrix federation (optional)
 A     *.m.mindroom.chat          <dokku_server_ip>
+```
+
+Get the IP addresses from Terraform outputs:
+```bash
+terraform output dns_instructions
+```
+
+#### Check DNS Status (if using Porkbun automation)
+
+```bash
+# View configured DNS records
+terraform output dns_records_created
+
+# Verify DNS propagation
+dig +short mindroom.chat
+dig +short app.mindroom.chat
+dig +short customer.mindroom.chat  # Should resolve to Dokku server
 ```
 
 ### 5. Verify Deployment

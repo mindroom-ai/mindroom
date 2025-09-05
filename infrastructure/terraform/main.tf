@@ -14,6 +14,10 @@ terraform {
       source  = "hashicorp/local"
       version = "~> 2.4"
     }
+    porkbun = {
+      source  = "cullenmcdermott/porkbun"
+      version = "~> 0.2"
+    }
   }
 
   # Optional: Use Terraform Cloud for state management
@@ -375,7 +379,7 @@ output "dokku_admin_password" {
 output "dns_instructions" {
   value = <<-EOT
 
-    Please configure the following DNS records for ${var.domain}:
+    ${var.porkbun_api_key != "" ? "✅ DNS records are being automatically managed via Porkbun!" : "Please configure the following DNS records:"}
 
     # Main domain
     A     ${var.domain}                    ${hcloud_server.platform.ipv4_address}
@@ -395,7 +399,7 @@ output "dns_instructions" {
     A     *.m.${var.domain}                ${hcloud_server.dokku.ipv4_address}
 
   EOT
-  description = "DNS records to configure"
+  description = "DNS records to configure (or status if using Porkbun)"
 }
 
 # Save outputs to file for automation
