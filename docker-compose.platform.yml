@@ -6,16 +6,13 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.admin-dashboard
+      args:
+        VITE_SUPABASE_URL: ${SUPABASE_URL}
+        VITE_SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+        VITE_STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
     container_name: mindroom-admin-dashboard
     ports:
       - "3001:80"
-    environment:
-      - NODE_ENV=production
-      - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
-      - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
-      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
-      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
-      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
     networks:
       - mindroom-platform
     restart: unless-stopped
