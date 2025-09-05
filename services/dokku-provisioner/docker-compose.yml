@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  dokku-provisioner:
+    build: .
+    container_name: mindroom-dokku-provisioner
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DOKKU_HOST=${DOKKU_HOST}
+      - DOKKU_USER=${DOKKU_USER:-dokku}
+      - DOKKU_PORT=${DOKKU_PORT:-22}
+      - BASE_DOMAIN=${BASE_DOMAIN:-mindroom.chat}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - MINDROOM_BACKEND_IMAGE=${MINDROOM_BACKEND_IMAGE:-mindroom/backend:latest}
+      - MINDROOM_FRONTEND_IMAGE=${MINDROOM_FRONTEND_IMAGE:-mindroom/frontend:latest}
+      - INSTANCE_DATA_BASE=${INSTANCE_DATA_BASE:-/var/lib/dokku/data/storage}
+    volumes:
+      - ./ssh:/app/ssh:ro  # Mount SSH keys
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - dokku-storage:/var/lib/dokku/data/storage  # Shared storage for instances
+    networks:
+      - mindroom-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dokku-provisioner.rule=Host(`provisioner.${BASE_DOMAIN:-mindroom.chat}`)"
+      - "traefik.http.services.dokku-provisioner.loadbalancer.server.port=8002"
+
+  # Optional: PostgreSQL for local testing
+  postgres-test:
+    image: postgres:15-alpine
+    container_name: mindroom-provisioner-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=provisioner
+      - POSTGRES_PASSWORD=provisioner_pass
+      - POSTGRES_DB=provisioner
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - mindroom-network
+    profiles:
+      - test
+
+  # Optional: Redis for local caching
+  redis-test:
+    image: redis:7-alpine
+    container_name: mindroom-provisioner-cache
+    restart: unless-stopped
+    networks:
+      - mindroom-network
+    profiles:
+      - test
+
+networks:
+  mindroom-network:
+    driver: bridge
+
+volumes:
+  dokku-storage:
+    driver: local
+  postgres-data:
+    driver: local

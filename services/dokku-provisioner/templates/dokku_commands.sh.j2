@@ -1,0 +1,76 @@
+#!/bin/bash
+# Dokku provisioning commands for {{ app_name }}
+# Generated at {{ timestamp }}
+
+set -e
+
+echo "Starting provisioning for {{ app_name }}"
+
+# Create main app and sub-apps
+dokku apps:create {{ app_name }}
+dokku apps:create {{ app_name }}-backend
+dokku apps:create {{ app_name }}-frontend
+{% if enable_matrix %}
+dokku apps:create {{ app_name }}-matrix
+{% endif %}
+
+# Create and link PostgreSQL database
+dokku postgres:create {{ app_name }}-db
+dokku postgres:link {{ app_name }}-db {{ app_name }}-backend
+
+# Create and link Redis cache
+dokku redis:create {{ app_name }}-redis
+dokku redis:link {{ app_name }}-redis {{ app_name }}-backend
+
+# Set environment variables for backend
+{% for key, value in backend_env_vars.items() %}
+dokku config:set {{ app_name }}-backend {{ key }}="{{ value }}"
+{% endfor %}
+
+# Set environment variables for frontend
+{% for key, value in frontend_env_vars.items() %}
+dokku config:set {{ app_name }}-frontend {{ key }}="{{ value }}"
+{% endfor %}
+
+# Set resource limits
+dokku resource:limit {{ app_name }}-backend --memory {{ memory_limit }}
+dokku resource:limit {{ app_name }}-backend --cpu {{ cpu_limit }}
+dokku resource:limit {{ app_name }}-frontend --memory {{ memory_limit }}
+dokku resource:limit {{ app_name }}-frontend --cpu {{ cpu_limit }}
+
+# Create persistent storage
+dokku storage:mount {{ app_name }}-backend {{ storage_path }}/backend:/app/mindroom_data
+dokku storage:mount {{ app_name }}-backend {{ storage_path }}/config.yaml:/app/config/config.yaml
+
+# Set domains
+{% for domain in backend_domains %}
+dokku domains:add {{ app_name }}-backend {{ domain }}
+{% endfor %}
+
+{% for domain in frontend_domains %}
+dokku domains:add {{ app_name }}-frontend {{ domain }}
+{% endfor %}
+
+{% if enable_matrix %}
+# Matrix server setup
+{% for domain in matrix_domains %}
+dokku domains:add {{ app_name }}-matrix {{ domain }}
+{% endfor %}
+{% endif %}
+
+# Deploy images
+dokku git:from-image {{ app_name }}-backend {{ backend_image }}
+dokku git:from-image {{ app_name }}-frontend {{ frontend_image }}
+
+{% if enable_matrix %}
+dokku git:from-image {{ app_name }}-matrix {{ matrix_image }}
+{% endif %}
+
+# Enable SSL certificates
+dokku letsencrypt:enable {{ app_name }}-backend
+dokku letsencrypt:enable {{ app_name }}-frontend
+{% if enable_matrix %}
+dokku letsencrypt:enable {{ app_name }}-matrix
+{% endif %}
+
+echo "Provisioning complete for {{ app_name }}!"
