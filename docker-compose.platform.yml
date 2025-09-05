@@ -32,7 +32,7 @@ services:
       dockerfile: deploy/Dockerfile.customer-portal
     container_name: mindroom-customer-portal
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
       - NODE_ENV=production
       - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
