@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  stripe-handler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mindroom-stripe-handler
+    ports:
+      - "3005:3005"
+    environment:
+      - NODE_ENV=development
+      - PORT=3005
+    env_file:
+      - .env
+    volumes:
+      # Mount source code for development with hot reload
+      - ./src:/app/src:ro
+      - ./dist:/app/dist
+    networks:
+      - mindroom-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3005/health', (r) => r.statusCode === 200 ? process.exit(0) : process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "com.mindroom.service=stripe-handler"
+      - "com.mindroom.description=Handles Stripe webhooks for subscription management"
+
+  # Optional: Stripe CLI for local webhook testing
+  stripe-cli:
+    image: stripe/stripe-cli:latest
+    container_name: mindroom-stripe-cli
+    command: listen --forward-to http://stripe-handler:3005/webhooks/stripe --skip-verify
+    environment:
+      - STRIPE_API_KEY=${STRIPE_SECRET_KEY}
+    networks:
+      - mindroom-network
+    depends_on:
+      - stripe-handler
+    profiles:
+      - development
+    labels:
+      - "com.mindroom.service=stripe-cli"
+      - "com.mindroom.description=Forwards Stripe webhooks to local handler"
+
+  # Optional: Mock provisioner for local testing
+  mock-provisioner:
+    image: mockserver/mockserver:latest
+    container_name: mindroom-mock-provisioner
+    ports:
+      - "8002:1080"
+    environment:
+      - MOCKSERVER_LOG_LEVEL=INFO
+      - MOCKSERVER_INITIALIZATION_JSON_PATH=/config/expectations.json
+    volumes:
+      - ./tests/mocks/provisioner.json:/config/expectations.json:ro
+    networks:
+      - mindroom-network
+    profiles:
+      - testing
+    labels:
+      - "com.mindroom.service=mock-provisioner"
+      - "com.mindroom.description=Mock Dokku provisioner for testing"
+
+networks:
+  mindroom-network:
+    driver: bridge
+    name: mindroom-network
+
+# Usage:
+# Development with Stripe CLI webhook forwarding:
+#   docker-compose --profile development up
+#
+# Testing with mock services:
+#   docker-compose --profile testing up
+#
+# Production-like:
+#   docker-compose up

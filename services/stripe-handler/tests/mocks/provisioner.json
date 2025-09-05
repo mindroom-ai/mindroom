@@ -1,0 +1,70 @@
+[
+  {
+    "httpRequest": {
+      "method": "POST",
+      "path": "/provision"
+    },
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": ["application/json"]
+      },
+      "body": {
+        "appName": "mr-test-app-1234",
+        "subdomain": "mr-test-1234",
+        "frontendUrl": "https://mr-test-1234.mindroom.chat",
+        "backendUrl": "https://api-mr-test-1234.mindroom.chat",
+        "status": "success",
+        "message": "Instance provisioned successfully"
+      }
+    }
+  },
+  {
+    "httpRequest": {
+      "method": "DELETE",
+      "path": "/deprovision"
+    },
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": ["application/json"]
+      },
+      "body": {
+        "status": "success",
+        "message": "Instance deprovisioned successfully"
+      }
+    }
+  },
+  {
+    "httpRequest": {
+      "method": "PUT",
+      "path": "/update-limits"
+    },
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": ["application/json"]
+      },
+      "body": {
+        "status": "success",
+        "message": "Resource limits updated successfully"
+      }
+    }
+  },
+  {
+    "httpRequest": {
+      "method": "GET",
+      "path": "/health"
+    },
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": ["application/json"]
+      },
+      "body": {
+        "status": "healthy",
+        "service": "dokku-provisioner"
+      }
+    }
+  }
+]
