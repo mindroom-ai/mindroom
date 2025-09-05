@@ -5,9 +5,12 @@
   "main": "index.js",
   "scripts": {
     "test": "node tests/run-tests.js",
+    "test:subscription": "node tests/subscription-flow.test.js",
+    "test:all": "npm run test && npm run test:subscription",
     "test:playwright": "playwright test",
     "test:admin": "playwright test --project=admin-dashboard",
-    "test:customer": "playwright test --project=customer-portal"
+    "test:customer": "playwright test --project=customer-portal",
+    "setup:stripe": "node scripts/setup-stripe-products.js"
   },
   "keywords": [],
   "author": "",
