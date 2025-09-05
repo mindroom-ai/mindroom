@@ -8,7 +8,7 @@ services:
       dockerfile: deploy/Dockerfile.admin-dashboard
     container_name: mindroom-admin-dashboard
     ports:
-      - "3001:3001"
+      - "3001:80"
     environment:
       - NODE_ENV=production
       - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
@@ -20,7 +20,7 @@ services:
       - mindroom-platform
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
       interval: 30s
       timeout: 3s
       retries: 3
