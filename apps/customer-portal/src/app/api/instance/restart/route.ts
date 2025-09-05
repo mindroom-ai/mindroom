@@ -38,8 +38,9 @@ export async function POST(request: Request) {
       .update({
         status: 'provisioning',
         updated_at: new Date().toISOString()
-      })
+      } as any)
       .eq('id', instanceId)
+      .select()
 
     if (error) {
       throw error
@@ -53,7 +54,7 @@ export async function POST(request: Request) {
         .update({
           status: 'running',
           updated_at: new Date().toISOString()
-        })
+        } as any)
         .eq('id', instanceId)
     }, 5000) // Simulate 5 second restart
 

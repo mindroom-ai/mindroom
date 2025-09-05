@@ -1,0 +1,46 @@
+# Multi-stage build for customer portal
+FROM node:20-slim AS base
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN npm install -g pnpm
+
+# Dependencies stage
+FROM base AS deps
+WORKDIR /app
+COPY apps/customer-portal/package.json apps/customer-portal/pnpm-lock.yaml ./
+# Use cache mount for pnpm store to speed up builds
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+# Build stage
+FROM deps AS builder
+WORKDIR /app
+COPY apps/customer-portal/ ./
+# Build Next.js app
+RUN pnpm run build
+
+# Production stage
+FROM node:20-slim AS final
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN npm install -g pnpm
+WORKDIR /app
+
+# Copy built application
+COPY --from=builder /app/.next /app/.next
+COPY --from=builder /app/public /app/public
+COPY --from=builder /app/package.json /app/package.json
+COPY --from=builder /app/pnpm-lock.yaml /app/pnpm-lock.yaml
+COPY --from=builder /app/next.config.ts /app/next.config.ts
+
+# Install only production dependencies
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile --production
+
+# Expose port
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3000/api/health || exit 1
+
+# Start Next.js in production mode
+CMD ["pnpm", "start"]
