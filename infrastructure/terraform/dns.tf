@@ -8,19 +8,22 @@ provider "porkbun" {
   secret_key = var.porkbun_secret_key
 }
 
-# Check if Porkbun is configured
-locals {
-  dns_enabled = var.porkbun_api_key != "" && var.porkbun_secret_key != ""
-}
-
 # ===========================================
 # DNS Records for MindRoom Platform
+# ===========================================
+#
+# IMPORTANT: Terraform will only manage the records defined below.
+# Your existing DNS records will NOT be deleted or modified unless
+# they have the exact same name/type combination as defined here.
+#
+# If you have existing records that conflict (e.g., existing A record
+# for your domain), you can:
+# 1. Import them: terraform import porkbun_dns_record.main_a <record_id>
+# 2. Or delete them manually in Porkbun before running terraform apply
 # ===========================================
 
 # Main domain A record
 resource "porkbun_dns_record" "main_a" {
-  count = local.dns_enabled ? 1 : 0
-
   domain  = var.domain
   name    = ""
   type    = "A"
@@ -30,8 +33,6 @@ resource "porkbun_dns_record" "main_a" {
 
 # Main domain AAAA record (IPv6)
 resource "porkbun_dns_record" "main_aaaa" {
-  count = local.dns_enabled ? 1 : 0
-
   domain  = var.domain
   name    = ""
   type    = "AAAA"
@@ -46,7 +47,7 @@ locals {
 
 # A records for platform services
 resource "porkbun_dns_record" "platform_a" {
-  for_each = local.dns_enabled ? toset(local.platform_subdomains) : []
+  for_each = toset(local.platform_subdomains)
 
   domain  = var.domain
   name    = each.value
@@ -57,7 +58,7 @@ resource "porkbun_dns_record" "platform_a" {
 
 # AAAA records for platform services (IPv6)
 resource "porkbun_dns_record" "platform_aaaa" {
-  for_each = local.dns_enabled ? toset(local.platform_subdomains) : []
+  for_each = toset(local.platform_subdomains)
 
   domain  = var.domain
   name    = each.value
@@ -68,8 +69,6 @@ resource "porkbun_dns_record" "platform_aaaa" {
 
 # Wildcard A record for customer instances
 resource "porkbun_dns_record" "wildcard_a" {
-  count = local.dns_enabled ? 1 : 0
-
   domain  = var.domain
   name    = "*"
   type    = "A"
@@ -79,8 +78,6 @@ resource "porkbun_dns_record" "wildcard_a" {
 
 # Wildcard AAAA record for customer instances (IPv6)
 resource "porkbun_dns_record" "wildcard_aaaa" {
-  count = local.dns_enabled ? 1 : 0
-
   domain  = var.domain
   name    = "*"
   type    = "AAAA"
@@ -90,7 +87,7 @@ resource "porkbun_dns_record" "wildcard_aaaa" {
 
 # Matrix federation wildcard (optional)
 resource "porkbun_dns_record" "matrix_wildcard_a" {
-  count = local.dns_enabled && var.enable_matrix_federation ? 1 : 0
+  count = var.enable_matrix_federation ? 1 : 0
 
   domain  = var.domain
   name    = "*.m"
@@ -100,7 +97,7 @@ resource "porkbun_dns_record" "matrix_wildcard_a" {
 }
 
 resource "porkbun_dns_record" "matrix_wildcard_aaaa" {
-  count = local.dns_enabled && var.enable_matrix_federation ? 1 : 0
+  count = var.enable_matrix_federation ? 1 : 0
 
   domain  = var.domain
   name    = "*.m"
@@ -111,19 +108,18 @@ resource "porkbun_dns_record" "matrix_wildcard_aaaa" {
 
 # Optional: MX records for email
 resource "porkbun_dns_record" "mx" {
-  count = local.dns_enabled && var.enable_email ? 1 : 0
+  count = var.enable_email ? 1 : 0
 
   domain   = var.domain
   name     = ""
   type     = "MX"
-  content  = var.mx_server
+  content  = "10 ${var.mx_server}"
   ttl      = "3600"
-  priority = "10"
 }
 
 # Optional: SPF record for email
 resource "porkbun_dns_record" "spf" {
-  count = local.dns_enabled && var.enable_email ? 1 : 0
+  count = var.enable_email ? 1 : 0
 
   domain  = var.domain
   name    = ""
@@ -137,14 +133,13 @@ resource "porkbun_dns_record" "spf" {
 # ===========================================
 
 output "dns_records_created" {
-  value = local.dns_enabled ? {
+  value = {
     status          = "✅ DNS records automatically configured via Porkbun"
     main_domain     = "${var.domain} → ${hcloud_server.platform.ipv4_address}"
     wildcard        = "*.${var.domain} → ${hcloud_server.dokku.ipv4_address}"
     platform_apps   = [for subdomain in local.platform_subdomains : "${subdomain}.${var.domain} → ${hcloud_server.platform.ipv4_address}"]
     ipv6_configured = true
-  } : {
-    status = "⚠️ Porkbun DNS automation disabled - configure DNS manually"
+    note            = "Only records defined in dns.tf are managed. Other DNS records remain untouched."
   }
-  description = "DNS records status"
+  description = "DNS records managed by Terraform"
 }

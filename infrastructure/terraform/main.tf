@@ -400,6 +400,7 @@ output "dns_instructions" {
 
   EOT
   description = "DNS records to configure (or status if using Porkbun)"
+  sensitive   = true
 }
 
 # Save outputs to file for automation

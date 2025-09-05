@@ -3,17 +3,15 @@
 # ===========================================
 
 variable "porkbun_api_key" {
-  description = "Porkbun API key for DNS management (leave empty to skip DNS automation)"
+  description = "Porkbun API key for DNS management"
   type        = string
   sensitive   = true
-  default     = ""
 }
 
 variable "porkbun_secret_key" {
-  description = "Porkbun secret key for DNS management (leave empty to skip DNS automation)"
+  description = "Porkbun secret key for DNS management"
   type        = string
   sensitive   = true
-  default     = ""
 }
 
 variable "enable_matrix_federation" {
@@ -92,7 +90,7 @@ variable "platform_volume_size" {
 variable "ssh_public_key_path" {
   description = "Path to SSH public key for admin access"
   type        = string
-  default     = "~/.ssh/id_rsa.pub"
+  default     = "~/.ssh/id_ed25519.pub"
 }
 
 variable "dokku_provisioner_key_path" {
@@ -141,12 +139,6 @@ variable "supabase_service_key" {
   sensitive   = true
 }
 
-variable "supabase_anon_key" {
-  description = "Supabase anonymous key"
-  type        = string
-  sensitive   = false
-}
-
 # Stripe Configuration
 variable "stripe_secret_key" {
   description = "Stripe secret key"
@@ -154,41 +146,8 @@ variable "stripe_secret_key" {
   sensitive   = true
 }
 
-variable "stripe_publishable_key" {
-  description = "Stripe publishable key"
-  type        = string
-  sensitive   = false
-}
-
 variable "stripe_webhook_secret" {
   description = "Stripe webhook endpoint secret"
   type        = string
-  sensitive   = true
-}
-
-# Price IDs from Stripe
-variable "stripe_price_starter" {
-  description = "Stripe price ID for starter tier"
-  type        = string
-  default     = ""
-}
-
-variable "stripe_price_professional" {
-  description = "Stripe price ID for professional tier"
-  type        = string
-  default     = ""
-}
-
-variable "stripe_price_enterprise" {
-  description = "Stripe price ID for enterprise tier"
-  type        = string
-  default     = ""
-}
-
-# Email Configuration (optional)
-variable "resend_api_key" {
-  description = "Resend API key for email sending"
-  type        = string
-  default     = ""
   sensitive   = true
 }

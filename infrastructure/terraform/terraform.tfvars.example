@@ -24,8 +24,7 @@ hcloud_token = "YOUR_HETZNER_API_TOKEN"
 # Supabase Configuration (https://supabase.com)
 # Get from: Project Settings → API
 supabase_url         = "https://YOUR_PROJECT.supabase.co"
-supabase_anon_key    = "eyJ..."  # Your anon/public key
-supabase_service_key = "eyJ..."  # Your service_role/secret key
+supabase_service_key = "eyJ..."  # Your service_role/secret key (keep this secret!)
 
 # Stripe Configuration (https://stripe.com)
 # Get from: Dashboard → Developers → API keys
@@ -33,15 +32,16 @@ stripe_secret_key    = "sk_live_..."  # Or sk_test_ for testing
 stripe_webhook_secret = "whsec_..."    # From Webhooks → Signing secret
 
 # ===========================================
-# OPTIONAL: DNS Automation (Porkbun)
+# REQUIRED: DNS Management (Porkbun)
 # ===========================================
-# Leave empty to skip automatic DNS configuration
+# IMPORTANT: Only the specific records defined in dns.tf will be managed.
+# Your existing DNS records (MX, TXT, other subdomains) will NOT be touched.
 
 # Get from: https://porkbun.com/account/api
 # 1. Enable API access for your domain
 # 2. Generate API key pair
-porkbun_api_key    = ""  # e.g., "pk1_..."
-porkbun_secret_key = ""  # e.g., "sk1_..."
+porkbun_api_key    = "YOUR_PORKBUN_API_KEY"  # e.g., "pk1_..."
+porkbun_secret_key = "YOUR_PORKBUN_SECRET_KEY"  # e.g., "sk1_..."
 
 # ===========================================
 # OPTIONAL: Infrastructure Customization
@@ -89,8 +89,8 @@ admin_ips = [
   "::/0"                          # WARNING: Allows SSH from anywhere IPv6 (remove in production!)
 ]
 
-# SSH key paths (uses your default key if not changed)
-ssh_public_key_path = "~/.ssh/id_rsa.pub"  # Your SSH public key for server access
+# SSH key paths (uses your default ED25519 key if not changed)
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"  # Your SSH public key for server access
 
 # Dokku provisioner keys (auto-generated if not exists)
 dokku_provisioner_key_path         = "ssh/dokku_provisioner.pub"
@@ -117,9 +117,9 @@ mx_server = "mail.example.com"
 # 2. [ ] Set hcloud_token (required)
 # 3. [ ] Set Supabase credentials (required)
 # 4. [ ] Set Stripe credentials (required)
-# 5. [ ] Set your domain name
-# 6. [ ] (Optional) Set Porkbun API keys for automatic DNS
-# 7. [ ] (Optional) Restrict admin_ips to your IP addresses
+# 5. [ ] Set Porkbun API keys for DNS management
+# 6. [ ] Set your domain name
+# 7. [ ] Restrict admin_ips to your IP addresses (strongly recommended)
 # 8. [ ] (Optional) Adjust server sizes based on expected load
 #
 # Then run:
