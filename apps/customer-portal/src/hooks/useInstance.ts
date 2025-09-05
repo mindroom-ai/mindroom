@@ -1,0 +1,110 @@
+'use client'
+
+import { useEffect, useState } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import { useAuth } from './useAuth'
+
+export interface Instance {
+  id: string
+  subscription_id: string
+  subdomain: string
+  status: 'provisioning' | 'running' | 'failed' | 'stopped'
+  frontend_url: string | null
+  backend_url: string | null
+  created_at: string
+  updated_at: string
+}
+
+export function useInstance() {
+  const [instance, setInstance] = useState<Instance | null>(null)
+  const [loading, setLoading] = useState(true)
+  const { user } = useAuth()
+  const supabase = createClient()
+
+  useEffect(() => {
+    if (!user) {
+      setLoading(false)
+      return
+    }
+
+    // Get user's instance through their subscription
+    const fetchInstance = async () => {
+      try {
+        // First get the user's subscription
+        const { data: subscription } = await supabase
+          .from('subscriptions')
+          .select('id')
+          .eq('account_id', user.id)
+          .single()
+
+        if (subscription) {
+          // Then get the instance for that subscription
+          const { data: instanceData } = await supabase
+            .from('instances')
+            .select('*')
+            .eq('subscription_id', subscription.id)
+            .single()
+
+          if (instanceData) {
+            setInstance(instanceData)
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching instance:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchInstance()
+
+    // Subscribe to changes
+    const subscription = supabase
+      .channel('instance-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'instances',
+        },
+        (payload) => {
+          if (payload.new && (payload.new as Instance).subscription_id === user.id) {
+            setInstance(payload.new as Instance)
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      subscription.unsubscribe()
+    }
+  }, [user, supabase])
+
+  const restartInstance = async () => {
+    if (!instance) return
+
+    try {
+      const response = await fetch('/api/instance/restart', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ instanceId: instance.id }),
+      })
+
+      if (response.ok) {
+        // Update local state to show provisioning
+        setInstance(prev => prev ? { ...prev, status: 'provisioning' } : null)
+      }
+    } catch (error) {
+      console.error('Error restarting instance:', error)
+    }
+  }
+
+  return {
+    instance,
+    loading,
+    restartInstance,
+  }
+}
