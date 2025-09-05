@@ -16,16 +16,8 @@ if [ ! -f "$PROJECT_ROOT/.env" ]; then
     exit 1
 fi
 
-# Check if uvx is available for dotenv loading
-if command -v uvx &> /dev/null; then
-    # Use uvx with python-dotenv for robust .env loading
-    eval $(uvx --from "python-dotenv[cli]" dotenv list --format=shell)
-else
-    # Fallback to simple sourcing
-    set -a  # automatically export all variables
-    source "$PROJECT_ROOT/.env"
-    set +a  # turn off automatic export
-fi
+# Load environment variables using uvx and python-dotenv
+eval $(uvx --from "python-dotenv[cli]" dotenv list --format=shell)
 
 # Colors for output
 GREEN='\033[0;32m'
