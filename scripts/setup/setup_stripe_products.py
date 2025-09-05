@@ -2,14 +2,20 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["stripe"]
+# dependencies = ["stripe", "python-dotenv"]
 # ///
 """Set up Stripe products and pricing for MindRoom SaaS platform."""
 
 import os
 import sys
+from pathlib import Path
 
 import stripe
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+env_path = Path(__file__).parent.parent.parent / ".env"
+load_dotenv(env_path)
 
 # Configure Stripe
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")

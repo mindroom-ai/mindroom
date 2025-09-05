@@ -2,13 +2,19 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["stripe"]
+# dependencies = ["stripe", "python-dotenv"]
 # ///
 """Test script for Stripe connection and product listing."""
 
 import os
+from pathlib import Path
 
 import stripe
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(env_path)
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 

@@ -16,10 +16,16 @@ if [ ! -f "$PROJECT_ROOT/.env" ]; then
     exit 1
 fi
 
-# Safer way to load .env file that handles edge cases
-set -a  # automatically export all variables
-source "$PROJECT_ROOT/.env"
-set +a  # turn off automatic export
+# Check if uvx is available for dotenv loading
+if command -v uvx &> /dev/null; then
+    # Use uvx with python-dotenv for robust .env loading
+    eval $(uvx --from "python-dotenv[cli]" dotenv list --format=shell)
+else
+    # Fallback to simple sourcing
+    set -a  # automatically export all variables
+    source "$PROJECT_ROOT/.env"
+    set +a  # turn off automatic export
+fi
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -78,15 +84,9 @@ echo ""
 
 # Run the Stripe setup script
 echo "Creating Stripe products..."
-export STRIPE_SECRET_KEY
-export PLATFORM_DOMAIN
 
-# Check if UV is available and use it, otherwise fall back to python
-if command -v uv &> /dev/null; then
-    "$SCRIPT_DIR/setup_stripe_products.py"
-else
-    python "$SCRIPT_DIR/setup_stripe_products.py"
-fi
+# The Python script loads .env itself with python-dotenv
+"$SCRIPT_DIR/setup_stripe_products.py"
 
 echo ""
 echo -e "${GREEN}✅ Stripe products created!${NC}"
