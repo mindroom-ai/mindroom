@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "create-admin": "node ../../scripts/create-admin-user.js"
   },
   "dependencies": {
     "react": "^18.2.0",

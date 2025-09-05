@@ -29,6 +29,11 @@ docker --version
 docker compose version
 ```
 
+3. Install dependencies for admin user creation:
+```bash
+npm install @supabase/supabase-js dotenv
+```
+
 ### Starting All Services
 
 To run all platform services together:
@@ -39,7 +44,14 @@ docker compose -f docker-compose.platform.yml up --build
 
 # Run in detached mode (background)
 docker compose -f docker-compose.platform.yml up -d --build
+
+# Create admin user (run after services are up)
+node scripts/create-admin-user.js
 ```
+
+The default admin credentials (from .env):
+- Email: `admin@mindroom.test`
+- Password: `AdminPass123!`
 
 ### Individual Service Management
 
