@@ -215,6 +215,9 @@ token.json
 frontend/test-*.js
 frontend/test-*.html
 
+# Node.js
+node_modules/
+
 # Node.js logs
 pnpm-debug.log*
 yarn-debug.log*

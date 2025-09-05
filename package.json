@@ -1,0 +1,19 @@
+{
+  "name": "mindroom-2",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node tests/run-tests.js",
+    "test:playwright": "playwright test",
+    "test:admin": "playwright test --project=admin-dashboard",
+    "test:customer": "playwright test --project=customer-portal"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.14.0",
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}
