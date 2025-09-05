@@ -1,0 +1,177 @@
+# Platform Services for MindRoom Multi-Tenant Deployment
+# This file defines core services shared across all customer instances
+version: '3.8'
+
+services:
+  # PostgreSQL database for account management
+  platform-postgres:
+    image: postgres:16-alpine
+    container_name: mindroom-platform-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: mindroom_platform
+      POSTGRES_USER: ${PLATFORM_DB_USER:-mindroom}
+      POSTGRES_PASSWORD: ${PLATFORM_DB_PASSWORD:-changeme}
+    ports:
+      - "${PLATFORM_DB_PORT:-5432}:5432"
+    volumes:
+      - platform-postgres-data:/var/lib/postgresql/data
+      - ./platform/database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - platform-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for session management and caching
+  platform-redis:
+    image: redis:7-alpine
+    container_name: mindroom-platform-redis
+    restart: always
+    command: redis-server --requirepass ${PLATFORM_REDIS_PASSWORD:-changeme}
+    ports:
+      - "${PLATFORM_REDIS_PORT:-6379}:6379"
+    volumes:
+      - platform-redis-data:/data
+    networks:
+      - platform-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Authentication Service
+  auth-service:
+    build:
+      context: ./platform/auth-service
+      dockerfile: Dockerfile
+    container_name: mindroom-auth-service
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://${PLATFORM_DB_USER:-mindroom}:${PLATFORM_DB_PASSWORD:-changeme}@platform-postgres:5432/mindroom_platform
+      REDIS_URL: redis://:${PLATFORM_REDIS_PASSWORD:-changeme}@platform-redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-changeme}
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRATION_MINUTES: ${JWT_EXPIRATION_MINUTES:-30}
+      REFRESH_TOKEN_EXPIRATION_DAYS: ${REFRESH_TOKEN_EXPIRATION_DAYS:-7}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,https://admin.mindroom.chat}
+    ports:
+      - "${AUTH_SERVICE_PORT:-8001}:8000"
+    depends_on:
+      platform-postgres:
+        condition: service_healthy
+      platform-redis:
+        condition: service_healthy
+    networks:
+      - platform-network
+      - mynetwork
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.auth-service.rule=Host(`auth.${PLATFORM_DOMAIN:-mindroom.local}`)
+      - traefik.http.routers.auth-service.entrypoints=websecure
+      - traefik.http.routers.auth-service.tls=true
+      - traefik.http.routers.auth-service.tls.certresolver=porkbun
+      - traefik.http.services.auth-service.loadbalancer.server.port=8000
+
+  # Instance Manager Service
+  instance-manager:
+    build:
+      context: ./platform/instance-manager
+      dockerfile: Dockerfile
+    container_name: mindroom-instance-manager
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://${PLATFORM_DB_USER:-mindroom}:${PLATFORM_DB_PASSWORD:-changeme}@platform-postgres:5432/mindroom_platform
+      REDIS_URL: redis://:${PLATFORM_REDIS_PASSWORD:-changeme}@platform-redis:6379/1
+      DOCKER_HOST: ${DOCKER_HOST:-unix:///var/run/docker.sock}
+      INSTANCE_BASE_DIR: ${INSTANCE_BASE_DIR:-/data/instances}
+      TRAEFIK_NETWORK: mynetwork
+      BASE_DOMAIN: ${BASE_DOMAIN:-mindroom.chat}
+      REGISTRY_URL: ${REGISTRY_URL:-git.nijho.lt/basnijholt}
+    ports:
+      - "${INSTANCE_MANAGER_PORT:-8002}:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${INSTANCE_BASE_DIR:-/data/instances}:/data/instances
+    depends_on:
+      platform-postgres:
+        condition: service_healthy
+      platform-redis:
+        condition: service_healthy
+    networks:
+      - platform-network
+      - mynetwork
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.instance-manager.rule=Host(`instances.${PLATFORM_DOMAIN:-mindroom.local}`)
+      - traefik.http.routers.instance-manager.entrypoints=websecure
+      - traefik.http.routers.instance-manager.tls=true
+      - traefik.http.routers.instance-manager.tls.certresolver=porkbun
+      - traefik.http.services.instance-manager.loadbalancer.server.port=8000
+
+  # Billing Service (placeholder for now)
+  billing-service:
+    build:
+      context: ./platform/billing-service
+      dockerfile: Dockerfile
+    container_name: mindroom-billing-service
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://${PLATFORM_DB_USER:-mindroom}:${PLATFORM_DB_PASSWORD:-changeme}@platform-postgres:5432/mindroom_platform
+      REDIS_URL: redis://:${PLATFORM_REDIS_PASSWORD:-changeme}@platform-redis:6379/2
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_changeme}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_changeme}
+    ports:
+      - "${BILLING_SERVICE_PORT:-8003}:8000"
+    depends_on:
+      platform-postgres:
+        condition: service_healthy
+      platform-redis:
+        condition: service_healthy
+    networks:
+      - platform-network
+      - mynetwork
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.billing-service.rule=Host(`billing.${PLATFORM_DOMAIN:-mindroom.local}`)
+      - traefik.http.routers.billing-service.entrypoints=websecure
+      - traefik.http.routers.billing-service.tls=true
+      - traefik.http.routers.billing-service.tls.certresolver=porkbun
+      - traefik.http.services.billing-service.loadbalancer.server.port=8000
+
+  # Admin Portal (placeholder for now)
+  admin-portal:
+    build:
+      context: ./platform/admin-portal
+      dockerfile: Dockerfile
+    container_name: mindroom-admin-portal
+    restart: always
+    environment:
+      REACT_APP_AUTH_SERVICE_URL: https://auth.${PLATFORM_DOMAIN:-mindroom.local}
+      REACT_APP_INSTANCE_MANAGER_URL: https://instances.${PLATFORM_DOMAIN:-mindroom.local}
+      REACT_APP_BILLING_SERVICE_URL: https://billing.${PLATFORM_DOMAIN:-mindroom.local}
+    ports:
+      - "${ADMIN_PORTAL_PORT:-3001}:3000"
+    networks:
+      - platform-network
+      - mynetwork
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.admin-portal.rule=Host(`admin.${PLATFORM_DOMAIN:-mindroom.local}`)
+      - traefik.http.routers.admin-portal.entrypoints=websecure
+      - traefik.http.routers.admin-portal.tls=true
+      - traefik.http.routers.admin-portal.tls.certresolver=porkbun
+      - traefik.http.services.admin-portal.loadbalancer.server.port=3000
+
+volumes:
+  platform-postgres-data:
+  platform-redis-data:
+
+networks:
+  platform-network:
+    driver: bridge
+  mynetwork:
+    external: true
