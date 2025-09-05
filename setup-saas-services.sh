@@ -172,8 +172,10 @@ def setup_webhook_endpoint():
     for endpoint in endpoints.data:
         if endpoint.url == webhook_url:
             print(f"  Found existing webhook: {webhook_url}")
-            print(f"  Webhook secret: {endpoint.secret}")
-            return endpoint.secret
+            print(f"  Webhook ID: {endpoint.id}")
+            print(f"  Note: Webhook secret cannot be retrieved for existing endpoints.")
+            print(f"  Check your .env file for STRIPE_WEBHOOK_SECRET or recreate the webhook.")
+            return None
 
     # Create new endpoint
     endpoint = stripe.WebhookEndpoint.create(
@@ -209,7 +211,10 @@ if __name__ == "__main__":
         for tier, price_id in price_ids.items():
             env_var = f"STRIPE_PRICE_{tier.upper()}"
             print(f"{env_var}={price_id}")
-        print(f"STRIPE_WEBHOOK_SECRET={webhook_secret}")
+        if webhook_secret:
+            print(f"STRIPE_WEBHOOK_SECRET={webhook_secret}")
+        else:
+            print("# STRIPE_WEBHOOK_SECRET already exists (check your .env file)")
 
     except stripe.error.StripeError as e:
         print(f"❌ Stripe Error: {e}")
