@@ -1,3 +1,9 @@
+#!/usr/bin/env -S uv run --script
+#
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["stripe"]
+# ///
 """Test script for Stripe connection and product listing."""
 
 import os
