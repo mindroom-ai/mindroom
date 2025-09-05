@@ -232,3 +232,4 @@ deploy/instance_data/
 deploy/bridge_instances.json
 terraform.tfstate
 apps/admin-dashboard/.next/
+.vite/
