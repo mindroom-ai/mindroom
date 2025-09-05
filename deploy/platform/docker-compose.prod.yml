@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # Use managed services in production:
+  # - Supabase Cloud for database/auth
+  # - Stripe webhooks point to public URL
+  # - Redis from cloud provider
+
+  # Stripe handler (production)
+  stripe-handler:
+    image: ${REGISTRY}/mindroom-stripe-handler:${VERSION:-latest}
+    restart: always
+    environment:
+      PORT: 3005
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      DOKKU_PROVISIONER_URL: http://dokku-provisioner:8002
+    networks:
+      - platform-network
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.stripe-handler.rule=Host(`webhooks.${PLATFORM_DOMAIN}`)
+      - traefik.http.routers.stripe-handler.entrypoints=websecure
+      - traefik.http.routers.stripe-handler.tls=true
+
+  # Dokku provisioner (production)
+  dokku-provisioner:
+    image: ${REGISTRY}/mindroom-dokku-provisioner:${VERSION:-latest}
+    restart: always
+    environment:
+      DOKKU_HOST: ${DOKKU_HOST}
+      DOKKU_USER: dokku
+      DOKKU_SSH_KEY_PATH: /run/secrets/dokku_key
+      BASE_DOMAIN: ${BASE_DOMAIN}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+    secrets:
+      - dokku_key
+    networks:
+      - platform-network
+
+  # Customer portal (production)
+  customer-portal:
+    image: ${REGISTRY}/mindroom-customer-portal:${VERSION:-latest}
+    restart: always
+    environment:
+      # Next.js needs build-time env vars
+      NODE_ENV: production
+    networks:
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.customer-portal.rule=Host(`app.${PLATFORM_DOMAIN}`)
+      - traefik.http.routers.customer-portal.entrypoints=websecure
+      - traefik.http.routers.customer-portal.tls=true
+
+  # Admin dashboard (production)
+  admin-dashboard:
+    image: ${REGISTRY}/mindroom-admin-dashboard:${VERSION:-latest}
+    restart: always
+    environment:
+      NODE_ENV: production
+    networks:
+      - platform-network
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.admin-dashboard.rule=Host(`admin.${PLATFORM_DOMAIN}`)
+      - traefik.http.routers.admin-dashboard.entrypoints=websecure
+      - traefik.http.routers.admin-dashboard.tls=true
+      # Add IP whitelist for admin
+      - traefik.http.middlewares.admin-ipwhitelist.ipwhitelist.sourcerange=10.0.0.0/8,192.168.0.0/16
+
+secrets:
+  dokku_key:
+    external: true
+
+networks:
+  platform-network:
+    driver: overlay
+  traefik-public:
+    external: true
