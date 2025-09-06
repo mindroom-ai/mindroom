@@ -1,0 +1,5 @@
+apiVersion: v2
+name: mindroom-matrix
+description: Minimal MindRoom with Matrix (Synapse + SQLite)
+type: application
+version: 0.1.0

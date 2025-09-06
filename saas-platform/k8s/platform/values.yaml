@@ -1,0 +1,25 @@
+# Default values for platform services
+environment: staging
+domain: mindroom.chat  # Base domain (subdomains: app, admin, api, webhooks)
+
+# Image settings
+registry: git.nijho.lt/basnijholt
+imageTag: amd64
+
+# Replicas
+replicas: 1
+
+# These should be overridden in values-staging.yaml and values-prod.yaml
+supabase:
+  url: ""
+  anonKey: ""
+  serviceKey: ""
+
+stripe:
+  publishableKey: ""
+  secretKey: ""
+  webhookSecret: ""
+
+# Gitea registry auth
+gitea:
+  token: ""

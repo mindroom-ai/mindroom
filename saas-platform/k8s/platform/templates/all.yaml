@@ -1,0 +1,222 @@
+# Platform Services Deployment
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mindroom-{{ .Values.environment }}
+---
+# Secrets for platform services
+apiVersion: v1
+kind: Secret
+metadata:
+  name: platform-secrets
+  namespace: mindroom-{{ .Values.environment }}
+type: Opaque
+stringData:
+  PLATFORM_DOMAIN: {{ .Values.domain }}
+  ENVIRONMENT: {{ .Values.environment }}
+  SUPABASE_URL: {{ .Values.supabase.url }}
+  SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey }}
+  SUPABASE_SERVICE_KEY: {{ .Values.supabase.serviceKey }}
+  STRIPE_PUBLISHABLE_KEY: {{ .Values.stripe.publishableKey }}
+  STRIPE_SECRET_KEY: {{ .Values.stripe.secretKey }}
+  STRIPE_WEBHOOK_SECRET: {{ .Values.stripe.webhookSecret }}
+---
+# Docker registry secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitea-registry
+  namespace: mindroom-{{ .Values.environment }}
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: {{ printf "{\"auths\":{\"git.nijho.lt\":{\"username\":\"basnijholt\",\"password\":\"%s\",\"auth\":\"%s\"}}}" .Values.gitea.token (printf "basnijholt:%s" .Values.gitea.token | b64enc) | b64enc }}
+---
+# Customer Portal
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-portal
+  namespace: mindroom-{{ .Values.environment }}
+  labels:
+    app: customer-portal
+    environment: {{ .Values.environment }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: customer-portal
+      environment: {{ .Values.environment }}
+  template:
+    metadata:
+      labels:
+        app: customer-portal
+        environment: {{ .Values.environment }}
+    spec:
+      imagePullSecrets:
+      - name: gitea-registry
+      containers:
+      - name: app
+        image: {{ .Values.registry }}/customer-portal:{{ .Values.imageTag }}
+        ports:
+        - containerPort: 3000
+        envFrom:
+        - secretRef:
+            name: platform-secrets
+        env:
+        - name: NODE_ENV
+          value: {{ .Values.environment }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-portal
+  namespace: mindroom-{{ .Values.environment }}
+spec:
+  selector:
+    app: customer-portal
+    environment: {{ .Values.environment }}
+  ports:
+  - port: 3000
+    targetPort: 3000
+---
+# Admin Dashboard
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin-dashboard
+  namespace: mindroom-{{ .Values.environment }}
+  labels:
+    app: admin-dashboard
+    environment: {{ .Values.environment }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: admin-dashboard
+      environment: {{ .Values.environment }}
+  template:
+    metadata:
+      labels:
+        app: admin-dashboard
+        environment: {{ .Values.environment }}
+    spec:
+      imagePullSecrets:
+      - name: gitea-registry
+      containers:
+      - name: app
+        image: {{ .Values.registry }}/admin-dashboard:{{ .Values.imageTag }}
+        ports:
+        - containerPort: 80
+        envFrom:
+        - secretRef:
+            name: platform-secrets
+        env:
+        - name: NODE_ENV
+          value: {{ .Values.environment }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin-dashboard
+  namespace: mindroom-{{ .Values.environment }}
+spec:
+  selector:
+    app: admin-dashboard
+    environment: {{ .Values.environment }}
+  ports:
+  - port: 80
+    targetPort: 80
+---
+# Stripe Handler
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stripe-handler
+  namespace: mindroom-{{ .Values.environment }}
+  labels:
+    app: stripe-handler
+    environment: {{ .Values.environment }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: stripe-handler
+      environment: {{ .Values.environment }}
+  template:
+    metadata:
+      labels:
+        app: stripe-handler
+        environment: {{ .Values.environment }}
+    spec:
+      imagePullSecrets:
+      - name: gitea-registry
+      containers:
+      - name: app
+        image: {{ .Values.registry }}/stripe-handler:{{ .Values.imageTag }}
+        ports:
+        - containerPort: 3005
+        envFrom:
+        - secretRef:
+            name: platform-secrets
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stripe-handler
+  namespace: mindroom-{{ .Values.environment }}
+spec:
+  selector:
+    app: stripe-handler
+    environment: {{ .Values.environment }}
+  ports:
+  - port: 3005
+    targetPort: 3005
+---
+# Instance Provisioner
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: instance-provisioner
+  namespace: mindroom-{{ .Values.environment }}
+  labels:
+    app: instance-provisioner
+    environment: {{ .Values.environment }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: instance-provisioner
+      environment: {{ .Values.environment }}
+  template:
+    metadata:
+      labels:
+        app: instance-provisioner
+        environment: {{ .Values.environment }}
+    spec:
+      imagePullSecrets:
+      - name: gitea-registry
+      containers:
+      - name: app
+        image: {{ .Values.registry }}/dokku-provisioner:{{ .Values.imageTag }}
+        ports:
+        - containerPort: 8002
+        envFrom:
+        - secretRef:
+            name: platform-secrets
+        env:
+        - name: K8S_MODE
+          value: "true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: instance-provisioner
+  namespace: mindroom-{{ .Values.environment }}
+spec:
+  selector:
+    app: instance-provisioner
+    environment: {{ .Values.environment }}
+  ports:
+  - port: 8002
+    targetPort: 8002
