@@ -1,30 +1,30 @@
-# Multi-stage build for dokku provisioner
-FROM python:3.12-slim AS base
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+FROM node:18-alpine
 
-# Build stage
-FROM base AS builder
-WORKDIR /app
-# Copy requirements
-COPY services/dokku-provisioner/requirements.txt ./
-# Install Python dependencies
-RUN pip install --no-cache-dir --user -r requirements.txt
+# Install SSH client for Dokku communication
+RUN apk add --no-cache openssh-client curl
 
-# Production stage
-FROM base AS final
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /root/.local /root/.local
-# Make sure scripts in .local are usable
-ENV PATH=/root/.local/bin:$PATH
+# Copy package files
+COPY apps/dokku-provisioner/package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production
 
 # Copy application code
-COPY services/dokku-provisioner/ ./
+COPY apps/dokku-provisioner/src ./src
+
+# Create logs directory
+RUN mkdir -p logs
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
+
+# Change ownership
+RUN chown -R nodejs:nodejs /app
+
+USER nodejs
 
 # Expose port
 EXPOSE 8002
@@ -33,5 +33,5 @@ EXPOSE 8002
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:8002/health || exit 1
 
-# Start FastAPI with uvicorn
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+# Start Node.js app
+CMD ["node", "src/index.js"]
