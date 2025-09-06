@@ -18,14 +18,6 @@ Database management and data setup scripts.
 - **`create-admin-user.js`** - Create admin user for the platform
 - **`setup-stripe-products.js`** - Configure Stripe products and pricing
 
-### 🛠️ `/development`
-Local development utilities.
-
-- **`start`** - Start development environment with Zellij
-- **`stop`** - Stop all development services
-- **`forward-ports.sh`** - Forward ports from remote servers for local testing
-- **`zellij-mindroom.kdl`** - Zellij configuration for development
-
 ### 🧪 `/testing`
 Testing and benchmarking scripts.
 
@@ -38,6 +30,7 @@ General utility scripts.
 - **`cleanup_agent_edits.sh`** - Clean up agent-edited files
 - **`cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker
 - **`cleanup_agent_edits.py`** - Python version of cleanup script
+- **`forward-ports.sh`** - Forward ports from remote servers for local testing
 - **`generate_avatars.py`** - Generate avatar images
 - **`rewrite_git_commits_ai.py`** - Rewrite git commit messages with AI
 - **`rewrite_git_history_apply.py`** - Apply git history rewrites
@@ -56,11 +49,6 @@ General utility scripts.
 ./scripts/database/setup-stripe-products.js
 ```
 
-### Local Development
-```bash
-./scripts/development/start  # Start dev environment
-./scripts/development/stop   # Stop everything
-```
 
 ### Testing
 ```bash

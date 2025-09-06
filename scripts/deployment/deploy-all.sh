@@ -120,7 +120,7 @@ echo -e "${YELLOW}🗄️  Step 3: Running Database Migrations${NC}"
 echo "======================================"
 
 # Use the migration script to run migrations via SSH
-bash scripts/run-migrations.sh
+bash scripts/database/run-migrations.sh
 
 echo -e "${GREEN}✅ Database migrations completed${NC}"
 echo ""
@@ -296,9 +296,7 @@ echo ""
 echo -e "${YELLOW}💳 Step 7: Setting up Stripe Products${NC}"
 echo "====================================="
 
-cd scripts
-node setup-stripe-products.js
-cd ..
+node scripts/database/setup-stripe-products.js
 
 echo -e "${GREEN}✅ Stripe products configured${NC}"
 echo ""
