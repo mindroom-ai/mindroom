@@ -123,7 +123,7 @@ variable "enable_backups" {
 variable "dokku_version" {
   description = "Dokku version to install"
   type        = string
-  default     = "v0.32.3"
+  default     = "0.36.4"
 }
 
 # Supabase Configuration (from your Supabase project)

@@ -67,33 +67,36 @@ write_files:
       systemctl enable nginx
       systemctl start nginx
 
-      # Configure Dokku installation
+      # Add Dokku repository
+      wget -O /tmp/dokku-keyring.gpg https://packagecloud.io/dokku/dokku/gpgkey
+      gpg --dearmor -o /usr/share/keyrings/dokku-archive-keyring.gpg < /tmp/dokku-keyring.gpg
+      echo "deb [signed-by=/usr/share/keyrings/dokku-archive-keyring.gpg] https://packagecloud.io/dokku/dokku/ubuntu/ $(lsb_release -cs) main" > /etc/apt/sources.list.d/dokku.list
+      apt-get update
+
+      # Configure Dokku installation with environment variables to skip prompts
       export DEBIAN_FRONTEND=noninteractive
+      export DOKKU_SKIP_KEY_FILE=true
+      export DOKKU_HOSTNAME=${dokku_domain}
+      export DOKKU_VHOST_ENABLE=true
+      export DOKKU_WEB_CONFIG=false
+      export DOKKU_NGINX_ENABLE=true
+
       echo 'dokku dokku/nginx_enable boolean true' | debconf-set-selections
       echo 'dokku dokku/hostname string ${dokku_domain}' | debconf-set-selections
       echo 'dokku dokku/skip_key_file boolean true' | debconf-set-selections
       echo 'dokku dokku/vhost_enable boolean true' | debconf-set-selections
-      echo 'dokku dokku/web_config boolean true' | debconf-set-selections
+      echo 'dokku dokku/web_config boolean false' | debconf-set-selections
+      echo 'dokku dokku/key_file string /dev/null' | debconf-set-selections
 
-      # Install Dokku
-      apt-get install -y dokku=${dokku_version}
+      # Install Dokku (use latest version)
+      apt-get install -y -qq dokku
 
-      # Enable nginx plugin explicitly
-      dokku plugin:enable nginx-vhosts
-
-      # Configure Dokku
+      # Configure Dokku basics
       dokku domains:set-global ${dokku_domain}
-      
+
       # Ensure nginx is configured for Dokku
       dokku nginx:set --global server-tokens off
       dokku nginx:set --global client-max-body-size 50m
-
-      # Install plugins
-      dokku plugin:install https://github.com/dokku/dokku-postgres.git postgres
-      dokku plugin:install https://github.com/dokku/dokku-redis.git redis
-      dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git
-      dokku letsencrypt:cron-job --add
-      dokku plugin:install https://github.com/dokku/dokku-resource-limit.git resource-limit
 
       # Add provisioner SSH key to Dokku
       cat > /tmp/provisioner.pub <<'KEYEOF'
@@ -106,6 +109,32 @@ write_files:
       echo 'dokku:${admin_password}' > /tmp/dokku.pass
       chpasswd < /tmp/dokku.pass
       rm /tmp/dokku.pass
+
+  - path: /root/install-dokku-plugins.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Install Dokku plugins after Dokku is fully installed
+
+      echo "Installing Dokku plugins..."
+
+      # Install postgres plugin
+      dokku plugin:install https://github.com/dokku/dokku-postgres.git postgres
+
+      # Install redis plugin
+      dokku plugin:install https://github.com/dokku/dokku-redis.git redis
+
+      # Install letsencrypt plugin
+      dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git
+      dokku letsencrypt:cron-job --add
+
+      # Install resource-limit plugin
+      dokku plugin:install https://github.com/dokku/dokku-resource-limit.git resource-limit
+
+      # Verify plugins installed
+      echo "Installed plugins:"
+      dokku plugin:list
 
   - path: /root/setup-volume.sh
     owner: root:root
@@ -195,6 +224,7 @@ runcmd:
   - bash /root/setup-volume.sh
   - bash /root/setup-docker.sh
   - bash /root/install-dokku.sh
+  - bash /root/install-dokku-plugins.sh
 
 final_message: |
   Dokku server setup complete!
