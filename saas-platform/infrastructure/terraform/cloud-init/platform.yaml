@@ -212,50 +212,65 @@ write_files:
     permissions: '0755'
     content: |
       #!/bin/bash
-      # Deploy platform services with Docker
+      # Deploy platform services from registry
+      set -e
 
-      REGISTRY="$${REGISTRY:-${registry}}"
-      ARCH="$${ARCH:-${arch}}"
+      echo "Logging into registry..."
+      echo "${gitea_token}" | docker login git.nijho.lt -u basnijholt --password-stdin
+
+      echo "Pulling latest images..."
+      docker pull git.nijho.lt/basnijholt/customer-portal:amd64
+      docker pull git.nijho.lt/basnijholt/admin-dashboard:amd64
+      docker pull git.nijho.lt/basnijholt/stripe-handler:amd64
+      docker pull git.nijho.lt/basnijholt/dokku-provisioner:amd64
 
       # Stop any existing containers
-      docker stop customer-portal admin-dashboard stripe-handler dokku-provisioner 2>/dev/null || true
-      docker rm customer-portal admin-dashboard stripe-handler dokku-provisioner 2>/dev/null || true
+      docker stop placeholder customer-portal admin-dashboard stripe-handler dokku-provisioner 2>/dev/null || true
+      docker rm placeholder customer-portal admin-dashboard stripe-handler dokku-provisioner 2>/dev/null || true
 
       # Deploy Customer Portal
       docker run -d \
         --name customer-portal \
+        --network platform \
         --restart always \
         -p 3000:3000 \
         --env-file /opt/platform/.env \
-        $$REGISTRY/customer-portal:$$ARCH
+        git.nijho.lt/basnijholt/customer-portal:amd64
 
       # Deploy Admin Dashboard (nginx serves on port 80)
       docker run -d \
         --name admin-dashboard \
+        --network platform \
         --restart always \
         -p 3001:80 \
         --env-file /opt/platform/.env \
-        $$REGISTRY/admin-dashboard:$$ARCH
+        git.nijho.lt/basnijholt/admin-dashboard:amd64
 
       # Deploy Stripe Handler (runs on port 3005)
       docker run -d \
         --name stripe-handler \
+        --network platform \
         --restart always \
         -p 3002:3005 \
         --env-file /opt/platform/.env \
-        $$REGISTRY/stripe-handler:$$ARCH
+        git.nijho.lt/basnijholt/stripe-handler:amd64
 
       # Deploy Dokku Provisioner (runs on port 8002)
       docker run -d \
         --name dokku-provisioner \
+        --network platform \
         --restart always \
         -p 3003:8002 \
         --env-file /opt/platform/.env \
         -e DOKKU_SSH_HOST=${dokku_host} \
         -e DOKKU_SSH_USER=root \
-        -e DOKKU_SSH_KEY_PATH=/ssh/id_rsa \
-        -v /opt/platform/dokku-ssh-key:/ssh/id_rsa:ro \
-        $$REGISTRY/dokku-provisioner:$$ARCH
+        -e DOKKU_SSH_KEY_PATH=/app/dokku-key \
+        git.nijho.lt/basnijholt/dokku-provisioner:amd64
+
+      # Handle SSH key permissions for dokku-provisioner
+      docker cp /opt/platform/dokku-ssh-key dokku-provisioner:/app/dokku-key
+      docker exec -u root dokku-provisioner sh -c 'chmod 600 /app/dokku-key && chown nodejs:nodejs /app/dokku-key'
+      docker restart dokku-provisioner
 
       echo "Services deployed successfully!"
       docker ps
@@ -313,6 +328,12 @@ runcmd:
 
   # Setup
   - bash /opt/platform/setup.sh
+
+  # Docker network for services
+  - docker network create platform 2>/dev/null || true
+
+  # Deploy services from registry (will run if token is available)
+  - 'if [ -n "${gitea_token}" ]; then bash /opt/platform/deploy-services.sh; else echo "No registry token, skipping auto-deployment"; fi'
 
   # Nginx
   - ln -sf /etc/nginx/sites-available/platform-services /etc/nginx/sites-enabled/

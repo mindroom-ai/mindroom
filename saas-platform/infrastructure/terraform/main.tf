@@ -261,6 +261,7 @@ resource "hcloud_server" "platform" {
     stripe_secret_key    = var.stripe_secret_key
     stripe_webhook_secret = var.stripe_webhook_secret
     dokku_host           = hcloud_server.dokku.ipv4_address
+    gitea_token          = var.gitea_token
     registry             = "git.nijho.lt/basnijholt"
     arch                 = "amd64"
   })

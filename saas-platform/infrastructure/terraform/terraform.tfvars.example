@@ -31,6 +31,11 @@ supabase_service_key = "eyJ..."  # Your service_role/secret key (keep this secre
 stripe_secret_key    = "sk_live_..."  # Or sk_test_ for testing
 stripe_webhook_secret = "whsec_..."    # From Webhooks → Signing secret
 
+# Docker Registry Configuration (Optional - for auto-deployment)
+# If provided, services will be auto-deployed from git.nijho.lt registry
+# Get from: https://git.nijho.lt → Settings → Applications → Generate New Token
+gitea_token = ""  # Leave empty to skip auto-deployment
+
 # ===========================================
 # REQUIRED: DNS Management (Porkbun)
 # ===========================================

@@ -93,6 +93,12 @@ variable "ssh_public_key_path" {
   default     = "~/.ssh/id_ed25519.pub"
 }
 
+variable "ssh_private_key_path" {
+  description = "Path to SSH private key for remote-exec provisioners"
+  type        = string
+  default     = "~/.ssh/id_ed25519"
+}
+
 variable "dokku_provisioner_key_path" {
   description = "Path to SSH public key for Dokku provisioner"
   type        = string
@@ -150,4 +156,12 @@ variable "stripe_webhook_secret" {
   description = "Stripe webhook endpoint secret"
   type        = string
   sensitive   = true
+}
+
+# Registry Configuration
+variable "gitea_token" {
+  description = "Gitea registry token for pulling Docker images"
+  type        = string
+  sensitive   = true
+  default     = ""
 }
