@@ -1,0 +1,177 @@
+# MindRoom K8s Deployment
+# Simple, working deployment for local testing with kind
+#
+# Setup:
+# 1. Create cluster: ./setup-kind.sh
+# 2. Create secrets from .env file
+# 3. Apply this manifest
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mindroom
+---
+# Customer Portal
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-portal
+  namespace: mindroom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: customer-portal
+  template:
+    metadata:
+      labels:
+        app: customer-portal
+    spec:
+      imagePullSecrets:
+      - name: gitea-registry
+      containers:
+      - name: app
+        image: git.nijho.lt/basnijholt/customer-portal:amd64
+        ports:
+        - containerPort: 3000
+        envFrom:
+        - secretRef:
+            name: mindroom-secrets
+        env:
+        - name: NODE_ENV
+          value: production
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-portal
+  namespace: mindroom
+spec:
+  selector:
+    app: customer-portal
+  ports:
+  - port: 3000
+    targetPort: 3000
+---
+# Admin Dashboard
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin-dashboard
+  namespace: mindroom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: admin-dashboard
+  template:
+    metadata:
+      labels:
+        app: admin-dashboard
+    spec:
+      imagePullSecrets:
+      - name: gitea-registry
+      containers:
+      - name: app
+        image: git.nijho.lt/basnijholt/admin-dashboard:amd64
+        ports:
+        - containerPort: 80
+        envFrom:
+        - secretRef:
+            name: mindroom-secrets
+        env:
+        - name: NODE_ENV
+          value: production
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin-dashboard
+  namespace: mindroom
+spec:
+  selector:
+    app: admin-dashboard
+  ports:
+  - port: 80
+    targetPort: 80
+---
+# Stripe Handler
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stripe-handler
+  namespace: mindroom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stripe-handler
+  template:
+    metadata:
+      labels:
+        app: stripe-handler
+    spec:
+      imagePullSecrets:
+      - name: gitea-registry
+      containers:
+      - name: app
+        image: git.nijho.lt/basnijholt/stripe-handler:amd64
+        ports:
+        - containerPort: 3005
+        envFrom:
+        - secretRef:
+            name: mindroom-secrets
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stripe-handler
+  namespace: mindroom
+spec:
+  selector:
+    app: stripe-handler
+  ports:
+  - port: 3005
+    targetPort: 3005
+---
+# Instance Provisioner
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: instance-provisioner
+  namespace: mindroom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: instance-provisioner
+  template:
+    metadata:
+      labels:
+        app: instance-provisioner
+    spec:
+      imagePullSecrets:
+      - name: gitea-registry
+      containers:
+      - name: app
+        image: git.nijho.lt/basnijholt/dokku-provisioner:amd64
+        ports:
+        - containerPort: 8002
+        envFrom:
+        - secretRef:
+            name: mindroom-secrets
+        env:
+        - name: K8S_MODE
+          value: "true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: instance-provisioner
+  namespace: mindroom
+spec:
+  selector:
+    app: instance-provisioner
+  ports:
+  - port: 8002
+    targetPort: 8002

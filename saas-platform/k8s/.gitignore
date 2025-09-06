@@ -1,0 +1,6 @@
+# Temporary files
+*.tmp
+*.log
+
+# Output directory from kind
+output/
