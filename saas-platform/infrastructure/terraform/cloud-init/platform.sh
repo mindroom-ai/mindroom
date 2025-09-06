@@ -105,88 +105,21 @@ ${dokku_ssh_key}
 EOF
 chmod 600 /opt/platform/dokku-ssh-key
 
-# Create Docker Compose file for platform services
+# Note: Docker images should be deployed after infrastructure is up
+# This is handled by the deploy-all.sh script
+# For now, create placeholder containers that will be replaced
+
 cat > /opt/platform/docker-compose.yml <<'DOCKEREOF'
 version: '3.8'
 
 services:
-  stripe-handler:
-    image: node:18-alpine
-    container_name: stripe-handler
-    working_dir: /app
-    volumes:
-      - /mnt/platform-data/stripe-handler:/app
-      - /opt/platform/.env:/app/.env
-    environment:
-      - NODE_ENV=production
-    ports:
-      - "3001:3000"
+  # These will be replaced by deploy-all.sh with actual images
+  # Placeholder to ensure ports are reserved
+  placeholder:
+    image: busybox
+    container_name: placeholder
+    command: ["sh", "-c", "echo 'Waiting for deployment' && sleep infinity"]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    command: ["sh", "-c", "npm install && npm start"]
-
-  dokku-provisioner:
-    image: python:3.11-slim
-    container_name: dokku-provisioner
-    working_dir: /app
-    volumes:
-      - /mnt/platform-data/dokku-provisioner:/app
-      - /opt/platform/.env:/app/.env
-      - /opt/platform/dokku-ssh-key:/app/ssh_key:ro
-    environment:
-      - PYTHONUNBUFFERED=1
-    ports:
-      - "3002:8000"
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    command: ["sh", "-c", "pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"]
-
-  customer-portal:
-    image: node:18-alpine
-    container_name: customer-portal
-    working_dir: /app
-    volumes:
-      - /mnt/platform-data/customer-portal:/app
-      - /opt/platform/.env:/app/.env.local
-    environment:
-      - NODE_ENV=production
-      - NEXT_TELEMETRY_DISABLED=1
-    ports:
-      - "3003:3000"
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    command: ["sh", "-c", "npm install && npm run build && npm start"]
-
-  admin-dashboard:
-    image: node:18-alpine
-    container_name: admin-dashboard
-    working_dir: /app
-    volumes:
-      - /mnt/platform-data/admin-dashboard:/app
-      - /opt/platform/.env:/app/.env
-    environment:
-      - NODE_ENV=production
-    ports:
-      - "3004:3000"
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    command: ["sh", "-c", "npm install && npm run build && npm start"]
 
 networks:
   default:
@@ -237,12 +170,12 @@ cat > /var/www/landing/index.html <<EOF
 </html>
 EOF
 
-# Configure Nginx
+# Configure Nginx default site
 cat > /etc/nginx/sites-available/default <<EOF
 server {
   listen 80 default_server;
   listen [::]:80 default_server;
-  server_name _;
+  server_name ${domain} www.${domain};
 
   location / {
     root /var/www/landing;
@@ -251,6 +184,82 @@ server {
   }
 }
 EOF
+
+# Configure platform services (will be activated after deployment)
+cat > /etc/nginx/sites-available/platform-services <<EOF
+# Customer Portal
+server {
+  listen 80;
+  listen [::]:80;
+  server_name app.${domain};
+
+  location / {
+    proxy_pass http://localhost:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection 'upgrade';
+    proxy_set_header Host \$host;
+    proxy_cache_bypass \$http_upgrade;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+  }
+}
+
+# Admin Dashboard
+server {
+  listen 80;
+  listen [::]:80;
+  server_name admin.${domain};
+
+  location / {
+    proxy_pass http://localhost:3001;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection 'upgrade';
+    proxy_set_header Host \$host;
+    proxy_cache_bypass \$http_upgrade;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+  }
+}
+
+# API and Webhooks
+server {
+  listen 80;
+  listen [::]:80;
+  server_name api.${domain} webhooks.${domain};
+
+  location / {
+    proxy_pass http://localhost:4242;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection 'upgrade';
+    proxy_set_header Host \$host;
+    proxy_cache_bypass \$http_upgrade;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+
+    # For Stripe webhooks
+    proxy_request_buffering off;
+    client_max_body_size 10m;
+  }
+
+  location /provision {
+    proxy_pass http://localhost:8002;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+  }
+}
+EOF
+
+# Enable the platform services config
+ln -sf /etc/nginx/sites-available/platform-services /etc/nginx/sites-enabled/
 
 # Enable and restart nginx
 systemctl enable nginx

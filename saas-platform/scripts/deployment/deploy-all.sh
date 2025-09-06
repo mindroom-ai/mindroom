@@ -162,7 +162,7 @@ echo "======================================"
 # Deploy services to platform server
 echo "Deploying to platform server..."
 
-ssh root@$PLATFORM_IP << 'EOF'
+ssh root@$PLATFORM_IP << EOF
 # Create docker network if it doesn't exist
 docker network create platform 2>/dev/null || true
 
@@ -170,14 +170,14 @@ docker network create platform 2>/dev/null || true
 docker stop customer-portal admin-dashboard stripe-handler dokku-provisioner 2>/dev/null || true
 docker rm customer-portal admin-dashboard stripe-handler dokku-provisioner 2>/dev/null || true
 
-# Pull latest images
+# Pull latest images (or use local transfer if registry not accessible)
 source /root/.env
-echo "$GITEA_TOKEN" | docker login $GITEA_URL -u $GITEA_USER --password-stdin
+echo "\$GITEA_TOKEN" | docker login $GITEA_URL -u $GITEA_USER --password-stdin || echo "Registry login failed, will use local images"
 
-docker pull ${REGISTRY}/customer-portal:${DOCKER_ARCH}
-docker pull ${REGISTRY}/admin-dashboard:${DOCKER_ARCH}
-docker pull ${REGISTRY}/stripe-handler:${DOCKER_ARCH}
-docker pull ${REGISTRY}/dokku-provisioner:${DOCKER_ARCH}
+docker pull ${REGISTRY}/customer-portal:${DOCKER_ARCH:-amd64} || echo "Pull failed, using local"
+docker pull ${REGISTRY}/admin-dashboard:${DOCKER_ARCH:-amd64} || echo "Pull failed, using local"
+docker pull ${REGISTRY}/stripe-handler:${DOCKER_ARCH:-amd64} || echo "Pull failed, using local"
+docker pull ${REGISTRY}/dokku-provisioner:${DOCKER_ARCH:-amd64} || echo "Pull failed, using local"
 
 # Run Customer Portal
 docker run -d \
@@ -186,25 +186,25 @@ docker run -d \
   --restart unless-stopped \
   -p 3000:3000 \
   --env-file /root/.env \
-  ${REGISTRY}/customer-portal:${DOCKER_ARCH}
+  ${REGISTRY}/customer-portal:${DOCKER_ARCH:-amd64}
 
-# Run Admin Dashboard
+# Run Admin Dashboard (nginx serves on port 80, mapped to 3001)
 docker run -d \
   --name admin-dashboard \
   --network platform \
   --restart unless-stopped \
-  -p 3001:3001 \
+  -p 3001:80 \
   --env-file /root/.env \
-  ${REGISTRY}/admin-dashboard:${DOCKER_ARCH}
+  ${REGISTRY}/admin-dashboard:${DOCKER_ARCH:-amd64}
 
 # Run Stripe Handler
 docker run -d \
   --name stripe-handler \
   --network platform \
   --restart unless-stopped \
-  -p 8001:8001 \
+  -p 4242:4242 \
   --env-file /root/.env \
-  ${REGISTRY}/stripe-handler:${DOCKER_ARCH}
+  ${REGISTRY}/stripe-handler:${DOCKER_ARCH:-amd64}
 
 # Run Dokku Provisioner
 docker run -d \
@@ -214,7 +214,7 @@ docker run -d \
   -p 8002:8002 \
   -v /root/.ssh:/root/.ssh:ro \
   --env-file /root/.env \
-  ${REGISTRY}/dokku-provisioner:${DOCKER_ARCH}
+  ${REGISTRY}/dokku-provisioner:${DOCKER_ARCH:-amd64}
 
 # Check status
 docker ps
@@ -232,14 +232,18 @@ ssh root@$PLATFORM_IP << EOF
 apt-get update && apt-get install -y nginx certbot python3-certbot-nginx
 
 # Configure nginx for each service
-cat > /etc/nginx/sites-available/platform << 'NGINX'
+cat > /etc/nginx/sites-available/platform << NGINX
 server {
     listen 80;
-    server_name portal.$DOMAIN;
+    server_name app.$DOMAIN;
 
     location / {
         proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
@@ -252,7 +256,11 @@ server {
 
     location / {
         proxy_pass http://localhost:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
@@ -261,18 +269,27 @@ server {
 
 server {
     listen 80;
-    server_name api.$DOMAIN;
+    server_name api.$DOMAIN webhooks.$DOMAIN;
 
-    location /stripe {
-        proxy_pass http://localhost:8001;
+    location / {
+        proxy_pass http://localhost:4242;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+
+        # For Stripe webhooks
+        proxy_request_buffering off;
+        client_max_body_size 10m;
     }
 
     location /provision {
         proxy_pass http://localhost:8002;
+        proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
