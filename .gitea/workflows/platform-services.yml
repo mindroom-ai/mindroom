@@ -2,12 +2,12 @@ name: Build Platform Services
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
     paths:
       - 'saas-platform/**'
       - '.github/workflows/platform-services.yml'
   pull_request:
-    branches: [main, master]
+    branches: [main]
     paths:
       - 'saas-platform/**'
       - '.github/workflows/platform-services.yml'

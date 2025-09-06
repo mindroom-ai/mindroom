@@ -2,13 +2,13 @@ name: Build MindRoom Frontend
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
     paths:
       - 'frontend/**'
       - 'Dockerfile.frontend'
       - '.github/workflows/mindroom-frontend.yml'
   pull_request:
-    branches: [main, master]
+    branches: [main]
     paths:
       - 'frontend/**'
       - 'Dockerfile.frontend'

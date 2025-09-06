@@ -2,14 +2,14 @@ name: Build MindRoom Backend
 
 on:
   push:
-    branches: [main, master]
+    branches: [main]
     paths:
       - 'src/**'
       - 'pyproject.toml'
       - 'Dockerfile.backend'
       - '.github/workflows/mindroom-backend.yml'
   pull_request:
-    branches: [main, master]
+    branches: [main]
     paths:
       - 'src/**'
       - 'pyproject.toml'
