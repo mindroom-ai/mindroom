@@ -2,6 +2,34 @@
 
 Complete Terraform configuration for deploying MindRoom on Kubernetes with a single `terraform apply`.
 
+## Prerequisites
+
+1. **Required Tools:**
+   - [Terraform](https://www.terraform.io/downloads) >= 1.0
+   - [kubectl](https://kubernetes.io/docs/tasks/tools/)
+   - Docker (for building images)
+
+2. **Required Accounts:**
+   - [Hetzner Cloud](https://console.hetzner.cloud/) account
+   - [Porkbun](https://porkbun.com/) account with API access enabled
+   - [Supabase](https://supabase.com/) project
+   - [Stripe](https://stripe.com/) account (test mode is fine)
+   - [Gitea](https://gitea.io/) or similar Docker registry
+
+3. **Domain Setup:**
+   - Own a domain (e.g., mindroom.chat)
+   - Domain must use Porkbun nameservers
+
+4. **Docker Images:**
+   The platform expects Docker images to be available in your Gitea registry.
+   Images needed:
+   - `customer-portal:latest`
+   - `admin-dashboard:latest`
+   - `stripe-handler:latest`
+   - `dokku-provisioner:latest`
+
+   These should be built and pushed to your registry before deployment.
+
 ## What It Deploys
 
 1. **K3s Kubernetes Cluster** on Hetzner Cloud
@@ -22,18 +50,23 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
 
 ## Quick Start
 
-1. **Copy and configure terraform.tfvars:**
+1. **Navigate to the terraform-k8s directory:**
+   ```bash
+   cd saas-platform/terraform-k8s
+   ```
+
+2. **Copy and configure terraform.tfvars:**
    ```bash
    cp terraform.tfvars.example terraform.tfvars
    # Edit terraform.tfvars with your credentials
    ```
 
-2. **Generate SSH keys for the cluster:**
+3. **Generate SSH keys for the cluster:**
    ```bash
    ssh-keygen -t ed25519 -f cluster_ssh_key -N ""
    ```
 
-3. **Deploy everything:**
+4. **Deploy everything:**
    ```bash
    terraform init
    terraform apply
