@@ -1,18 +1,28 @@
 terraform {
+  required_version = ">= 1.0"
+
   required_providers {
     hcloud = {
-      source = "hetznercloud/hcloud"
+      source  = "hetznercloud/hcloud"
       version = "~> 1.45"
+    }
+    porkbun = {
+      source  = "cullenmcdermott/porkbun"
+      version = "~> 0.2"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.12"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.24"
     }
   }
 }
 
-locals {
-  hcloud_token = "HzDBAKtKRg2F4ym5cvekmgwXtt3nN194RxtbZiO92btATer5Saz81j0ZjUWeePeF"
-}
-
 provider "hcloud" {
-  token = local.hcloud_token
+  token = var.hcloud_token
 }
 
 module "kube-hetzner" {
@@ -23,13 +33,13 @@ module "kube-hetzner" {
     hcloud = hcloud
   }
 
-  hcloud_token = local.hcloud_token
+  hcloud_token = var.hcloud_token
 
   # Network configuration - EU Central
   network_region = "eu-central"
 
   # Cluster name
-  cluster_name = "mindroom-k8s"
+  cluster_name = var.cluster_name
 
   # SSH key configuration - use dedicated cluster key
   ssh_public_key = file("./cluster_ssh_key.pub")
@@ -39,8 +49,8 @@ module "kube-hetzner" {
   control_plane_nodepools = [
     {
       name        = "control-plane"
-      server_type = "cpx31"  # 4 vCPU, 8GB RAM
-      location    = "fsn1"
+      server_type = var.server_type
+      location    = var.location
       labels      = []
       taints      = []  # No taints - allow workloads to run
       count       = 1
@@ -50,8 +60,8 @@ module "kube-hetzner" {
   # No separate agent nodes for single-node setup
   agent_nodepools = [{
     name        = "dummy"
-    server_type = "cpx31"
-    location    = "fsn1"
+    server_type = var.server_type
+    location    = var.location
     labels      = []
     taints      = []
     count       = 0  # No nodes will be created
@@ -101,4 +111,23 @@ module "kube-hetzner" {
 
   # Post-install commands (optional)
   # postinstall_exec = []
+}
+
+# ===========================================
+# Outputs
+# ===========================================
+
+output "cluster_ip" {
+  value       = module.kube-hetzner.control_plane_nodes[0].ipv4_address
+  description = "IPv4 address of the K3s cluster"
+}
+
+output "cluster_ipv6" {
+  value       = module.kube-hetzner.control_plane_nodes[0].ipv6_address
+  description = "IPv6 address of the K3s cluster"
+}
+
+output "kubeconfig_path" {
+  value       = "${path.module}/${var.cluster_name}_kubeconfig.yaml"
+  description = "Path to the kubeconfig file"
 }

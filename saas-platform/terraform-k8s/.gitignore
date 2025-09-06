@@ -8,6 +8,8 @@ tfplan
 
 # Sensitive files
 terraform.tfvars
+*.tfvars
+!terraform.tfvars.example
 kubeconfig
 *_kubeconfig.yaml
 *.pem
