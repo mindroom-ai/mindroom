@@ -1,86 +1,50 @@
-# Scripts Directory Structure
+# Scripts Directory
 
-This directory contains all operational scripts for the MindRoom platform, organized by function.
+This directory contains utility scripts for MindRoom self-hosting.
 
-## Directory Structure
+## Available Scripts
 
-### 📦 `/deployment`
-Scripts for deploying and managing the platform infrastructure.
+### 🧪 Testing
+- **`testing/benchmark_matrix_throughput.py`** - Benchmark Matrix message throughput performance
 
-- **`deploy-all.sh`** - Complete platform deployment (infrastructure + services)
-- **`cleanup-all.sh`** - Tear down all infrastructure and services
-- **`update-from-registry.sh`** - Update Docker images from registry
+### 🔧 Utilities
+- **`utilities/cleanup_agent_edits.sh`** - Clean up agent-edited files in Matrix database
+- **`utilities/cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker environment
+- **`utilities/cleanup_agent_edits.py`** - Python version of cleanup script with more options
+- **`utilities/forward-ports.sh`** - Forward ports from remote servers for local testing
+- **`utilities/generate_avatars.py`** - Generate avatar images for agents
+- **`utilities/rewrite_git_commits_ai.py`** - Rewrite git commit messages with AI
+- **`utilities/rewrite_git_history_apply.py`** - Apply git history rewrites
+- **`utilities/setup_cleanup_cron.sh`** - Setup cron job for periodic cleanup
 
-### 🗄️ `/database`
-Database management and data setup scripts.
+## For SaaS Platform Scripts
 
-- **`run-migrations.sh`** - Apply Supabase database migrations
-- **`create-admin-user.js`** - Create admin user for the platform
-- **`setup-stripe-products.js`** - Configure Stripe products and pricing
+If you're looking for platform deployment scripts (infrastructure, database migrations, etc.), those have been moved to the `saas-platform/` directory as they are specific to the hosted service offering.
 
-### 🧪 `/testing`
-Testing and benchmarking scripts.
+## Usage Examples
 
-- **`test_stripe.py`** - Test Stripe integration
-- **`benchmark_matrix_throughput.py`** - Benchmark Matrix message throughput
-
-### 🔧 `/utilities`
-General utility scripts.
-
-- **`cleanup_agent_edits.sh`** - Clean up agent-edited files
-- **`cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker
-- **`cleanup_agent_edits.py`** - Python version of cleanup script
-- **`forward-ports.sh`** - Forward ports from remote servers for local testing
-- **`generate_avatars.py`** - Generate avatar images
-- **`rewrite_git_commits_ai.py`** - Rewrite git commit messages with AI
-- **`rewrite_git_history_apply.py`** - Apply git history rewrites
-- **`setup_cleanup_cron.sh`** - Setup cron job for cleanup
-
-## Common Usage Examples
-
-### Deploy Everything
+### Clean up agent edits
 ```bash
-./scripts/deployment/deploy-all.sh
+# For Docker setup
+./scripts/utilities/cleanup_agent_edits_docker.sh
+
+# For direct database access
+./scripts/utilities/cleanup_agent_edits.py --dry-run
 ```
 
-### Database Operations
+### Benchmark Matrix performance
 ```bash
-./scripts/database/run-migrations.sh
-./scripts/database/setup-stripe-products.js
+./scripts/testing/benchmark_matrix_throughput.py
 ```
 
-
-### Testing
+### Generate agent avatars
 ```bash
-./scripts/testing/test_stripe.py
+./scripts/utilities/generate_avatars.py
 ```
-
-## Environment Management
-
-All scripts that need environment variables automatically handle loading from `.env`:
-
-1. **With `uvx` (recommended)**: Automatically uses `python-dotenv` for robust env loading
-2. **Fallback**: Sources `.env` file directly when `uvx` is not available
-
-The scripts handle this internally, so you don't need any wrapper.
 
 ## Requirements
 
-- **UV/UVX**: For Python scripts with automatic dependency management
-- **Node.js**: For JavaScript database scripts
-- **Terraform**: For infrastructure deployment
-- **Docker**: For container management
-- **Environment Variables**: Configure in `.env` file:
-  - `STRIPE_SECRET_KEY`
-  - `SUPABASE_URL`
-  - `SUPABASE_SERVICE_KEY`
-  - `HCLOUD_TOKEN`
-  - `GITEA_TOKEN`
-  - And more (see `.env.example`)
-
-## Notes
-
-- All scripts are idempotent where possible
-- Python scripts use UV's inline script dependencies
-- Deployment scripts include automatic rollback on failure
-- Database migrations are run via SSH tunnel for security
+- **Python 3.11+**: For Python scripts
+- **UV/UVX** (optional): For automatic dependency management in Python scripts
+- **Docker**: For Docker-based utilities
+- **PostgreSQL client**: For database cleanup scripts

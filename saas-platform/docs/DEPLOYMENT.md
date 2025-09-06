@@ -63,8 +63,8 @@ PLATFORM_DOMAIN=mindroom.chat
 Run the complete deployment script:
 
 ```bash
-chmod +x scripts/deployment/deploy-all.sh
-./scripts/deployment/deploy-all.sh
+chmod +x saas-platform/scripts/deployment/deploy-all.sh
+./saas-platform/scripts/deployment/deploy-all.sh
 ```
 
 This script will:
@@ -82,8 +82,8 @@ This script will:
 To destroy all infrastructure and services:
 
 ```bash
-chmod +x scripts/deployment/cleanup-all.sh
-./scripts/deployment/cleanup-all.sh
+chmod +x saas-platform/scripts/deployment/cleanup-all.sh
+./saas-platform/scripts/deployment/cleanup-all.sh
 ```
 
 ## Manual Deployment Steps
@@ -93,7 +93,7 @@ If you prefer to deploy step by step:
 ### 1. Deploy Infrastructure
 
 ```bash
-cd infrastructure/terraform
+cd saas-platform/infrastructure/terraform
 terraform init
 terraform plan
 terraform apply
@@ -103,7 +103,7 @@ cd ../..
 ### 2. Run Database Migrations
 
 ```bash
-./scripts/database/run-migrations.sh
+./saas-platform/scripts/database/run-migrations.sh
 ```
 
 This uses SSH to run migrations from the platform server (works around network restrictions).
@@ -145,7 +145,7 @@ docker run -d --name customer-portal -p 3000:3000 --env-file .env $REGISTRY/cust
 ### 5. Configure Stripe Products
 
 ```bash
-node scripts/database/setup-stripe-products.js
+node saas-platform/scripts/database/setup-stripe-products.js
 ```
 
 ## Service Endpoints

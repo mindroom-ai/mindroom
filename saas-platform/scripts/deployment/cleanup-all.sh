@@ -43,8 +43,8 @@ fi
 echo -e "${YELLOW}🗑️  Step 1: Destroying Infrastructure${NC}"
 echo "===================================="
 
-if [ -d infrastructure/terraform ]; then
-    cd infrastructure/terraform
+if [ -d saas-platform/infrastructure/terraform ]; then
+    cd saas-platform/infrastructure/terraform
 
     if [ -f terraform.tfstate ]; then
         echo "Running terraform destroy..."
@@ -57,7 +57,7 @@ if [ -d infrastructure/terraform ]; then
         echo "No Terraform state found"
     fi
 
-    cd ../..
+    cd ../../..
 fi
 
 echo -e "${GREEN}✅ Infrastructure destroyed${NC}"

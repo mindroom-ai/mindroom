@@ -212,6 +212,10 @@ Agents ONLY respond in threads (not main room). Within threads:
 
 <!-- OUTPUT:END -->
 
+## Note for Self-Hosters
+
+This repository contains everything you need to self-host MindRoom. The `saas-platform/` directory contains infrastructure and code specific to running MindRoom as a hosted service and can be safely ignored by self-hosters.
+
 ## Configuration
 
 ### Basic Setup

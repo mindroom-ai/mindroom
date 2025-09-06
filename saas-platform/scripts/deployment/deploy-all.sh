@@ -76,7 +76,7 @@ echo ""
 echo -e "${YELLOW}📦 Step 1: Deploying Infrastructure with Terraform${NC}"
 echo "=================================================="
 
-cd infrastructure/terraform
+cd saas-platform/infrastructure/terraform
 
 # Initialize Terraform
 echo "Initializing Terraform..."
@@ -96,7 +96,7 @@ DOKKU_IP=$(terraform output -raw dokku_server_ip)
 PLATFORM_IP=$(terraform output -raw platform_server_ip)
 DOMAIN=$(terraform output -raw domain_name 2>/dev/null || echo "mindroom.chat")
 
-cd ../..
+cd ../../..
 
 echo -e "${GREEN}✅ Infrastructure deployed successfully${NC}"
 echo "  Dokku Server: $DOKKU_IP"
@@ -120,7 +120,7 @@ echo -e "${YELLOW}🗄️  Step 3: Running Database Migrations${NC}"
 echo "======================================"
 
 # Use the migration script to run migrations via SSH
-bash scripts/database/run-migrations.sh
+bash saas-platform/scripts/database/run-migrations.sh
 
 echo -e "${GREEN}✅ Database migrations completed${NC}"
 echo ""
@@ -135,10 +135,10 @@ echo "$GITEA_TOKEN" | docker login $GITEA_URL -u $GITEA_USER --password-stdin
 
 # Build and push each service
 services=(
-    "customer-portal:deploy/Dockerfile.customer-portal"
-    "admin-dashboard:deploy/Dockerfile.admin-dashboard"
-    "stripe-handler:deploy/Dockerfile.stripe-handler"
-    "dokku-provisioner:deploy/Dockerfile.dokku-provisioner"
+    "customer-portal:saas-platform/Dockerfile.customer-portal"
+    "admin-dashboard:saas-platform/Dockerfile.admin-dashboard"
+    "stripe-handler:saas-platform/Dockerfile.stripe-handler"
+    "dokku-provisioner:saas-platform/Dockerfile.dokku-provisioner"
 )
 
 for service_def in "${services[@]}"; do
@@ -296,7 +296,7 @@ echo ""
 echo -e "${YELLOW}💳 Step 7: Setting up Stripe Products${NC}"
 echo "====================================="
 
-node scripts/database/setup-stripe-products.js
+node saas-platform/scripts/database/setup-stripe-products.js
 
 echo -e "${GREEN}✅ Stripe products configured${NC}"
 echo ""
