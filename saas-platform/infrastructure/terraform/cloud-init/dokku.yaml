@@ -66,7 +66,7 @@ runcmd:
   - bash /opt/dokku/scripts/setup-dokku.sh
 
   # Add provisioner SSH key
-  - echo "${provisioner_pub_key}" | dokku ssh-keys:add provisioner
+  - 'echo "${provisioner_pub_key}" | dokku ssh-keys:add provisioner'
 
 # Write files
 write_files:
