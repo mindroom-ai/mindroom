@@ -71,8 +71,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ env.REGISTRY_USER }}
-          password: ${{ secrets.GITEA_TOKEN }}
+          username: ${{ gitea.actor }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: Extract metadata
         id: meta

@@ -63,8 +63,8 @@ jobs:
       uses: docker/login-action@v3
       with:
         registry: ${{ env.REGISTRY }}
-        username: ${{ env.OWNER }}
-        password: ${{ secrets.GITEA_TOKEN }}
+        username: ${{ gitea.actor }}
+        password: ${{ secrets.DOCKER_TOKEN }}
 
     - name: Set build vars
       id: vars
@@ -120,8 +120,8 @@ jobs:
       uses: docker/login-action@v3
       with:
         registry: ${{ env.REGISTRY }}
-        username: ${{ env.OWNER }}
-        password: ${{ secrets.GITEA_TOKEN }}
+        username: ${{ gitea.actor }}
+        password: ${{ secrets.DOCKER_TOKEN }}
 
     - name: Create and push manifest
       run: |

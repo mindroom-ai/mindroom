@@ -47,8 +47,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ env.REGISTRY_USER }}
-          password: ${{ secrets.GITEA_TOKEN }}
+          username: ${{ gitea.actor }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: Extract metadata
         id: meta
@@ -90,7 +90,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             # Login to registry
-            echo "${{ secrets.GITEA_TOKEN }}" | docker login git.nijho.lt -u basnijholt --password-stdin
+            echo "${{ secrets.DOCKER_TOKEN }}" | docker login git.nijho.lt -u ${{ gitea.actor }} --password-stdin
 
             # Pull and restart services
             docker pull git.nijho.lt/basnijholt/customer-portal:latest
