@@ -359,8 +359,8 @@ systemctl start certbot.timer
 cat > /opt/platform/check-status.sh <<'STATUSEOF'
 #!/bin/bash
 echo "=== Platform Services Status ==="
-echo "Customer Portal: $$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000)"
-echo "Admin Dashboard: $$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001)"
+echo "Customer Portal: $$(curl -s -o /dev/null -w "%%{http_code}" http://localhost:3000)"
+echo "Admin Dashboard: $$(curl -s -o /dev/null -w "%%{http_code}" http://localhost:3001)"
 echo "Stripe Handler: $$(curl -s http://localhost:3002/health | jq -r .status 2>/dev/null || echo "not running")"
 echo "Dokku Provisioner: $$(curl -s http://localhost:3003/health | jq -r .status 2>/dev/null || echo "not running")"
 echo ""
