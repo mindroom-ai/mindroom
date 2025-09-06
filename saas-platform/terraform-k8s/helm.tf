@@ -4,19 +4,13 @@
 
 # Configure Kubernetes provider to use the cluster we just created
 provider "kubernetes" {
-  host                   = module.kube-hetzner.kubeconfig.host
-  client_certificate     = module.kube-hetzner.kubeconfig.client_certificate
-  client_key             = module.kube-hetzner.kubeconfig.client_key
-  cluster_ca_certificate = module.kube-hetzner.kubeconfig.cluster_ca_certificate
+  config_path = "${path.module}/${var.cluster_name}_kubeconfig.yaml"
 }
 
 # Configure Helm provider
 provider "helm" {
   kubernetes {
-    host                   = module.kube-hetzner.kubeconfig.host
-    client_certificate     = module.kube-hetzner.kubeconfig.client_certificate
-    client_key             = module.kube-hetzner.kubeconfig.client_key
-    cluster_ca_certificate = module.kube-hetzner.kubeconfig.cluster_ca_certificate
+    config_path = "${path.module}/${var.cluster_name}_kubeconfig.yaml"
   }
 }
 
