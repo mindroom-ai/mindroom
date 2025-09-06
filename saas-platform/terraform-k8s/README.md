@@ -7,6 +7,7 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
 1. **Required Tools:**
    - [Terraform](https://www.terraform.io/downloads) >= 1.0
    - [kubectl](https://kubernetes.io/docs/tasks/tools/)
+   - [Packer](https://developer.hashicorp.com/packer/downloads) (for MicroOS snapshots)
    - Docker (for building images)
 
 2. **Required Accounts:**
@@ -66,7 +67,21 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
    ssh-keygen -t ed25519 -f cluster_ssh_key -N ""
    ```
 
-4. **Deploy everything:**
+4. **Build MicroOS snapshots (first time only):**
+   ```bash
+   # Install Packer if not already installed
+   # https://developer.hashicorp.com/packer/downloads
+
+   # Export your Hetzner token for Packer
+   export HCLOUD_TOKEN="your-hetzner-token-here"
+
+   # Build the MicroOS snapshots (takes ~5-10 minutes)
+   packer build hcloud-microos-snapshots.pkr.hcl
+   ```
+   Note: This creates OpenSUSE MicroOS snapshots in your Hetzner account.
+   Only needed once per Hetzner account. The snapshots will be reused for all future deployments.
+
+5. **Deploy everything:**
    ```bash
    terraform init
    terraform apply
