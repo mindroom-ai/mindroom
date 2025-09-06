@@ -40,6 +40,15 @@ resource "null_resource" "ssh_key_exchange" {
     ]
   }
 
+  # Get the platform's SSH key locally first
+  provisioner "local-exec" {
+    command = <<-EOT
+      # Get the platform's SSH key and save it locally
+      ssh -o StrictHostKeyChecking=no -i ${var.ssh_private_key_path} root@${hcloud_server.platform.ipv4_address} \
+        'cat /opt/platform/dokku-ssh-key.pub' > /tmp/platform_ssh_key.pub
+    EOT
+  }
+
   # Add platform's SSH key to Dokku server
   provisioner "remote-exec" {
     connection {
@@ -52,15 +61,41 @@ resource "null_resource" "ssh_key_exchange" {
     inline = [
       "# Wait for cloud-init to complete",
       "cloud-init status --wait",
-      "# Get platform's public key and add to authorized_keys",
-      "PLATFORM_KEY=$(ssh -o StrictHostKeyChecking=no root@${hcloud_server.platform.ipv4_address} 'cat /opt/platform/dokku-ssh-key.pub')",
-      "if [ -n \"$PLATFORM_KEY\" ]; then",
-      "  grep -q \"$PLATFORM_KEY\" /root/.ssh/authorized_keys 2>/dev/null || echo \"$PLATFORM_KEY\" >> /root/.ssh/authorized_keys",
-      "  echo 'Platform SSH key added successfully'",
-      "else",
-      "  echo 'Failed to get platform SSH key'",
-      "  exit 1",
-      "fi"
+      "# Add platform's SSH key to authorized_keys",
+      "mkdir -p /root/.ssh",
+      "chmod 700 /root/.ssh",
+      "touch /root/.ssh/authorized_keys",
+      "chmod 600 /root/.ssh/authorized_keys"
+    ]
+  }
+
+  # Copy the SSH key to dokku server
+  provisioner "file" {
+    connection {
+      type        = "ssh"
+      host        = hcloud_server.dokku.ipv4_address
+      user        = "root"
+      private_key = file(var.ssh_private_key_path)
+    }
+
+    source      = "/tmp/platform_ssh_key.pub"
+    destination = "/tmp/platform_ssh_key.pub"
+  }
+
+  # Add the key to authorized_keys
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      host        = hcloud_server.dokku.ipv4_address
+      user        = "root"
+      private_key = file(var.ssh_private_key_path)
+    }
+
+    inline = [
+      "# Add the key to authorized_keys",
+      "cat /tmp/platform_ssh_key.pub >> /root/.ssh/authorized_keys",
+      "rm /tmp/platform_ssh_key.pub",
+      "echo 'Platform SSH key added successfully'"
     ]
   }
 }

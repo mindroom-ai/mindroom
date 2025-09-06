@@ -165,6 +165,17 @@ resource "hcloud_firewall" "platform" {
     ]
   }
 
+  # Platform services (temporary - should be removed once nginx proxy is set up)
+  rule {
+    direction = "in"
+    protocol  = "tcp"
+    port      = "3000-3003"
+    source_ips = [
+      "0.0.0.0/0",
+      "::/0"
+    ]
+  }
+
   labels = {
     project     = "mindroom"
     environment = var.environment
@@ -235,7 +246,10 @@ resource "hcloud_server" "platform" {
   image       = "ubuntu-22.04"
   location    = var.location
 
-  ssh_keys = [hcloud_ssh_key.dokku_admin.id]
+  ssh_keys = [
+    hcloud_ssh_key.dokku_admin.id,
+    hcloud_ssh_key.dokku_provisioner.id
+  ]
 
   firewall_ids = [hcloud_firewall.platform.id]
 
