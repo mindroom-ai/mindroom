@@ -1,218 +1,265 @@
 # MindRoom SaaS Platform Deployment Guide
 
-This guide covers the complete deployment process for the MindRoom SaaS platform.
+This guide covers the complete deployment process for the MindRoom SaaS platform on Kubernetes.
 
 ## Architecture Overview
 
 The platform consists of:
-- **Dokku Server**: Hosts customer MindRoom instances
-- **Platform Server**: Runs management services
+- **Kubernetes Cluster**: K3s on Hetzner Cloud (managed by terraform-k8s/)
+- **Platform Services**: Customer portal, admin dashboard, API services
+- **Customer Instances**: Deployed as separate Helm releases in Kubernetes
 - **Supabase**: Cloud PostgreSQL database
 - **Stripe**: Payment processing
 
-## Prerequisites
-
-1. **Hetzner Cloud Account**: For server infrastructure
-2. **Porkbun Account**: For DNS management (or any DNS provider)
-3. **Supabase Project**: For database
-4. **Stripe Account**: For payments
-5. **Gitea Registry**: For Docker images (or use Docker Hub)
-
-## Environment Setup
-
-1. Copy the example environment file:
-```bash
-cp .env.example .env
-```
-
-2. Fill in all required credentials in `.env`:
-
-```bash
-# Hetzner Cloud
-HCLOUD_TOKEN=your_hetzner_token
-
-# DNS (Porkbun)
-PORKBUN_API_KEY=your_api_key
-PORKBUN_SECRET_KEY=your_secret_key
-
-# Supabase
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_ANON_KEY=your_anon_key
-SUPABASE_SERVICE_KEY=your_service_key
-SUPABASE_DB_PASSWORD=your_database_password
-
-# Stripe
-STRIPE_PUBLISHABLE_KEY=pk_test_...
-STRIPE_SECRET_KEY=sk_test_...
-
-# Docker Registry (Gitea)
-REGISTRY=git.nijho.lt/username
-GITEA_URL=git.nijho.lt
-GITEA_USER=username
-GITEA_TOKEN=your_gitea_token
-DOCKER_ARCH=amd64
-
-# Platform Configuration
-PLATFORM_DOMAIN=mindroom.chat
-```
-
 ## Quick Start
+
+### Prerequisites
+
+1. **Required Tools**:
+   - [Terraform](https://www.terraform.io/downloads) >= 1.0
+   - [kubectl](https://kubernetes.io/docs/tasks/tools/)
+   - [Packer](https://developer.hashicorp.com/packer/downloads)
+   - Docker
+
+2. **Required Accounts**:
+   - [Hetzner Cloud](https://console.hetzner.cloud/)
+   - [Porkbun](https://porkbun.com/) for DNS
+   - [Supabase](https://supabase.com/)
+   - [Stripe](https://stripe.com/)
+   - Docker registry (e.g., Gitea)
 
 ### Deploy Everything
 
-Run the complete deployment script:
-
 ```bash
-chmod +x saas-platform/scripts/deployment/deploy-all.sh
-./saas-platform/scripts/deployment/deploy-all.sh
-```
+cd saas-platform/terraform-k8s
 
-This script will:
-1. Deploy infrastructure with Terraform (2 Hetzner servers)
-2. Configure DNS records
-3. Run database migrations
-4. Build and push Docker images
-5. Deploy all platform services
-6. Configure Nginx reverse proxy
-7. Set up Stripe products
-8. Verify deployment
+# 1. Configure credentials
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with your credentials
 
-### Clean Up Everything
+# 2. Generate SSH keys
+ssh-keygen -t ed25519 -f cluster_ssh_key -N ""
 
-To destroy all infrastructure and services:
+# 3. Build MicroOS snapshots (first time only)
+export HCLOUD_TOKEN="your-hetzner-token"
+packer build hcloud-microos-snapshots.pkr.hcl
 
-```bash
-chmod +x saas-platform/scripts/deployment/cleanup-all.sh
-./saas-platform/scripts/deployment/cleanup-all.sh
-```
-
-## Manual Deployment Steps
-
-If you prefer to deploy step by step:
-
-### 1. Deploy Infrastructure
-
-```bash
-cd saas-platform/infrastructure/terraform
+# 4. Deploy Kubernetes cluster and platform
 terraform init
-terraform plan
 terraform apply
-cd ../..
 ```
 
-### 2. Run Database Migrations
+This deploys:
+- K3s Kubernetes cluster on Hetzner
+- nginx-ingress controller with cert-manager
+- Platform services (customer portal, admin dashboard, API)
+- DNS records for platform and customer wildcards
+
+### Access the Cluster
 
 ```bash
-./saas-platform/scripts/database/run-migrations.sh
-```
-
-This uses SSH to run migrations from the platform server (works around network restrictions).
-
-### 3. Build and Push Docker Images
-
-```bash
-# Authenticate with registry
-echo "$GITEA_TOKEN" | docker login $GITEA_URL -u $GITEA_USER --password-stdin
-
-# Build and push each service
-docker build -f apps/customer-portal/Dockerfile -t $REGISTRY/customer-portal:$DOCKER_ARCH .
-docker push $REGISTRY/customer-portal:$DOCKER_ARCH
-
-docker build -f apps/admin-dashboard/Dockerfile -t $REGISTRY/admin-dashboard:$DOCKER_ARCH .
-docker push $REGISTRY/admin-dashboard:$DOCKER_ARCH
-
-docker build -f apps/stripe-handler/Dockerfile -t $REGISTRY/stripe-handler:$DOCKER_ARCH .
-docker push $REGISTRY/stripe-handler:$DOCKER_ARCH
-
-docker build -f apps/dokku-provisioner/Dockerfile -t $REGISTRY/dokku-provisioner:$DOCKER_ARCH .
-docker push $REGISTRY/dokku-provisioner:$DOCKER_ARCH
-```
-
-### 4. Deploy Services to Platform Server
-
-SSH into the platform server and run the containers:
-
-```bash
-ssh root@<platform-ip>
-
-# Pull and run services
-docker pull $REGISTRY/customer-portal:$DOCKER_ARCH
-docker run -d --name customer-portal -p 3000:3000 --env-file .env $REGISTRY/customer-portal:$DOCKER_ARCH
-
-# Repeat for other services...
-```
-
-### 5. Configure Stripe Products
-
-```bash
-node saas-platform/scripts/database/setup-stripe-products.js
+export KUBECONFIG=$(terraform output -raw kubeconfig_path)
+kubectl get nodes
+kubectl get pods -n mindroom-staging
 ```
 
 ## Service Endpoints
 
-After deployment, services are available at:
+After deployment (staging environment):
+- **Customer Portal**: https://app.staging.mindroom.chat
+- **Admin Dashboard**: https://admin.staging.mindroom.chat
+- **API**: https://api.staging.mindroom.chat
+- **Webhooks**: https://webhooks.staging.mindroom.chat
+- **Customer Instances**: https://*.staging.mindroom.chat
 
-- **Customer Portal**: http://portal.mindroom.chat
-- **Admin Dashboard**: http://admin.mindroom.chat
-- **API Endpoint**: http://api.mindroom.chat
-- **Stripe Webhook**: http://api.mindroom.chat/stripe/webhook
+## Building and Deploying Updates
+
+### Build Docker Images
+
+```bash
+# Authenticate with registry
+docker login git.nijho.lt -u username
+
+# Build services
+docker build -f Dockerfile.customer-portal -t git.nijho.lt/username/customer-portal:latest .
+docker build -f Dockerfile.admin-dashboard -t git.nijho.lt/username/admin-dashboard:latest .
+docker build -f Dockerfile.stripe-handler -t git.nijho.lt/username/stripe-handler:latest .
+docker build -f Dockerfile.dokku-provisioner -t git.nijho.lt/username/dokku-provisioner:latest .
+
+# Push to registry
+docker push git.nijho.lt/username/customer-portal:latest
+docker push git.nijho.lt/username/admin-dashboard:latest
+docker push git.nijho.lt/username/stripe-handler:latest
+docker push git.nijho.lt/username/dokku-provisioner:latest
+```
+
+### Deploy Updates
+
+```bash
+# Restart deployments to pull new images
+kubectl rollout restart deployment -n mindroom-staging customer-portal
+kubectl rollout restart deployment -n mindroom-staging admin-dashboard
+kubectl rollout restart deployment -n mindroom-staging stripe-handler
+kubectl rollout restart deployment -n mindroom-staging instance-provisioner
+```
+
+## Local Development with Kind
+
+For local testing without cloud costs:
+
+```bash
+cd saas-platform/k8s
+
+# Start local cluster
+./kind-setup.sh
+
+# Deploy platform
+helm install mindroom-staging platform/ -f platform/values-staging.yaml
+
+# Access services via port-forward
+kubectl port-forward -n mindroom-staging svc/customer-portal 3000:3000
+```
+
+## Database Setup
+
+### Run Migrations
+
+```bash
+cd saas-platform/scripts/database
+./run-migrations.sh
+```
+
+### Create Admin User
+
+```bash
+SUPABASE_URL=https://your-project.supabase.co \
+SUPABASE_SERVICE_KEY=your-service-key \
+ADMIN_EMAIL=admin@mindroom.test \
+ADMIN_PASSWORD=AdminPass123! \
+node create-admin-user.js
+```
+
+### Setup Stripe Products
+
+```bash
+STRIPE_SECRET_KEY=sk_test_... \
+node setup-stripe-products.js
+```
 
 ## Monitoring
 
-Check service status:
+### Check Service Status
 
 ```bash
-# Platform services
-ssh root@<platform-ip> docker ps
+# View all pods
+kubectl get pods -n mindroom-staging
 
-# Dokku apps
-ssh dokku@<dokku-ip> apps:list
+# Check specific service
+kubectl describe pod -n mindroom-staging -l app=customer-portal
+
+# View logs
+kubectl logs -n mindroom-staging -l app=customer-portal
+
+# Stream logs
+kubectl logs -f -n mindroom-staging deployment/customer-portal
 ```
 
-View logs:
+### Resource Usage
 
 ```bash
-# Platform service logs
-ssh root@<platform-ip> docker logs customer-portal
+# Node resources
+kubectl top nodes
 
-# Dokku app logs
-ssh dokku@<dokku-ip> logs <app-name>
+# Pod resources
+kubectl top pods -n mindroom-staging
+```
+
+## Customer Instance Management
+
+Customer instances are deployed as separate Helm releases:
+
+```bash
+# Deploy a new customer instance
+helm install customer-acme k8s/instance/ \
+  --set customer.name=acme \
+  --set customer.subdomain=acme \
+  --set environment=staging
+
+# List customer instances
+helm list | grep customer-
+
+# Upgrade a customer instance
+helm upgrade customer-acme k8s/instance/ --reuse-values
+
+# Delete a customer instance
+helm uninstall customer-acme
 ```
 
 ## Troubleshooting
 
-### Database Connection Issues
+### Pod Issues
 
-If you can't connect to Supabase from your local network:
-- The migration script uses SSH tunnel through the platform server
-- Alternatively, run migrations from Supabase Dashboard SQL editor
-
-### Docker Registry Authentication
-
-If you get "unauthorized" errors:
 ```bash
-echo "$GITEA_TOKEN" | docker login $GITEA_URL -u $GITEA_USER --password-stdin
+# Get pod events
+kubectl describe pod -n mindroom-staging <pod-name>
+
+# Check pod logs
+kubectl logs -n mindroom-staging <pod-name> --previous
+
+# Execute into pod
+kubectl exec -it -n mindroom-staging <pod-name> -- /bin/sh
 ```
 
-### DNS Propagation
+### DNS Issues
 
-DNS changes can take up to 48 hours to propagate. Use IP addresses directly if needed:
-- http://<platform-ip>:3000 (Customer Portal)
-- http://<platform-ip>:3001 (Admin Dashboard)
+```bash
+# Check ingress
+kubectl get ingress -n mindroom-staging
+
+# Check certificates
+kubectl get certificates -n mindroom-staging
+
+# DNS lookup
+nslookup app.staging.mindroom.chat
+```
+
+### Registry Authentication
+
+```bash
+# Check image pull secrets
+kubectl get secrets -n mindroom-staging gitea-registry -o yaml
+
+# Verify registry access
+docker pull git.nijho.lt/username/customer-portal:latest
+```
 
 ## Security Notes
 
-1. **SSH Keys**: Make sure your SSH key is added to servers
-2. **Firewall**: Servers have UFW configured to allow only necessary ports
-3. **HTTPS**: Use Certbot to enable SSL certificates after DNS propagates
-4. **Secrets**: Never commit `.env` or `terraform.tfvars` files
+1. **Secrets Management**: All secrets stored in Kubernetes secrets
+2. **TLS/SSL**: Automatically managed by cert-manager
+3. **Network Policies**: Can be configured for pod isolation
+4. **RBAC**: Kubernetes role-based access control
+5. **Image Scanning**: Scan Docker images for vulnerabilities
+
+## Destroying Infrastructure
+
+To tear down everything:
+
+```bash
+cd saas-platform/terraform-k8s
+terraform destroy
+```
+
+This removes:
+- K8s cluster and server
+- DNS records
+- All deployed applications
 
 ## Next Steps
 
 After deployment:
-
 1. Configure Stripe webhook endpoint in Stripe Dashboard
 2. Test customer signup flow
-3. Monitor first deployments
-4. Set up backup strategy
-5. Configure monitoring and alerts
+3. Set up monitoring (Prometheus/Grafana)
+4. Configure backup strategy for persistent volumes
+5. Set up CI/CD pipeline for automated deployments
