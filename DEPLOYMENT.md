@@ -67,6 +67,12 @@ chmod +x scripts/deploy-all.sh
 ./scripts/deploy-all.sh
 ```
 
+Or use the environment wrapper:
+
+```bash
+./scripts/with-env.sh ./scripts/deploy-all.sh
+```
+
 This script will:
 1. Deploy infrastructure with Terraform (2 Hetzner servers)
 2. Configure DNS records

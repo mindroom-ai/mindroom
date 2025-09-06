@@ -24,8 +24,16 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-# Load environment variables
-source .env
+# Check if we have uvx for env management
+if ! command -v uvx &> /dev/null; then
+    echo -e "${YELLOW}⚠️  uvx not found, falling back to source .env${NC}"
+    source .env
+else
+    # Export all env vars for child processes when using uvx
+    set -a
+    eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
+    set +a
+fi
 
 # Verify required environment variables
 required_vars=(

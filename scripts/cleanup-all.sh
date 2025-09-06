@@ -29,7 +29,14 @@ fi
 
 # Load environment variables
 if [ -f .env ]; then
-    source .env
+    if command -v uvx &> /dev/null; then
+        # Export all env vars for child processes when using uvx
+        set -a
+        eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
+        set +a
+    else
+        source .env
+    fi
 fi
 
 # Step 1: Destroy Infrastructure with Terraform
