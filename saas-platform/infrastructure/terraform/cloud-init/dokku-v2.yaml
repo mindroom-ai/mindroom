@@ -52,10 +52,14 @@ write_files:
       dokku plugin:install https://github.com/dokku/dokku-resource-limit.git resource-limit
 
       # Add provisioner SSH key to Dokku
-      echo "${provisioner_pub_key}" | dokku ssh-keys:add provisioner
+      echo "${provisioner_pub_key}" > /tmp/provisioner.pub
+      dokku ssh-keys:add provisioner < /tmp/provisioner.pub
+      rm /tmp/provisioner.pub
 
       # Set admin password
-      echo "dokku:${admin_password}" | chpasswd
+      echo "dokku:${admin_password}" > /tmp/dokku.pass
+      chpasswd < /tmp/dokku.pass
+      rm /tmp/dokku.pass
 
   - path: /root/setup-volume.sh
     owner: root:root
