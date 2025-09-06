@@ -114,6 +114,13 @@ class DokkuClient {
 
   // Docker deployment
   async deployDockerImage(appName, imageName) {
+    // Authenticate with Gitea if credentials are provided
+    if (process.env.GITEA_TOKEN && process.env.GITEA_USER && process.env.GITEA_URL) {
+      logger.debug('Authenticating with Gitea registry...');
+      const loginCmd = `echo '${process.env.GITEA_TOKEN}' | docker login ${process.env.GITEA_URL} -u ${process.env.GITEA_USER} --password-stdin`;
+      await this.execute(loginCmd);
+    }
+
     // Tag and deploy the Docker image
     await this.execute(`docker pull ${imageName}`);
     await this.execute(`docker tag ${imageName} dokku/${appName}:latest`);

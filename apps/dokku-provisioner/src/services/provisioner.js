@@ -131,13 +131,15 @@ export class ProvisionerService {
       // Step 5: Deploy Docker images
       logger.info(`Deploying applications for ${appName}...`);
 
-      const registry = process.env.REGISTRY || 'ghcr.io/mindroom';
+      // Use Gitea registry with architecture-specific tags
+      const registry = process.env.REGISTRY || 'git.nijho.lt/basnijholt';
+      const arch = process.env.DOCKER_ARCH || 'amd64'; // or arm64 for ARM servers
 
       // Deploy backend
-      await dokku.deployDockerImage(backendApp, `${registry}/mindroom-backend:latest`);
+      await dokku.deployDockerImage(backendApp, `${registry}/mindroom-backend:${arch}`);
 
       // Deploy frontend
-      await dokku.deployDockerImage(frontendApp, `${registry}/mindroom-frontend:latest`);
+      await dokku.deployDockerImage(frontendApp, `${registry}/mindroom-frontend:${arch}`);
 
       // Deploy Matrix/Synapse
       await dokku.deployDockerImage(matrixApp, 'matrixdotorg/synapse:latest');
