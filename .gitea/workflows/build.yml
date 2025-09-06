@@ -5,13 +5,13 @@ on:
   push:
     branches: [ main, public ]
     paths:
-      - 'backend/**'
+      - 'src/**'  # Backend code is in src/, not backend/
       - 'frontend/**'
       - 'deploy/Dockerfile.*'
+      - 'Dockerfile.backend'
+      - 'Dockerfile.frontend'
       - 'pyproject.toml'
       - 'uv.lock'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
       - '.gitea/workflows/**'
   workflow_dispatch:
     inputs:
