@@ -32,7 +32,7 @@ spec:
         - name: MATRIX_HOMESERVER
           value: "http://synapse-{{ .Values.customer }}:8008"
         - name: MATRIX_SERVER_NAME
-          value: "m-{{ .Values.domain }}"
+          value: "{{ .Values.customer }}.matrix.{{ .Values.baseDomain }}"
         volumeMounts:
         - name: data
           mountPath: /app/mindroom_data
@@ -246,39 +246,3 @@ data:
       level: INFO
       handlers: [console]
 ---
-# Ingress
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: mindroom-{{ .Values.customer }}
-spec:
-  rules:
-  # Main app
-  - host: {{ .Values.domain }}
-    http:
-      paths:
-      - path: /api
-        pathType: Prefix
-        backend:
-          service:
-            name: mindroom-{{ .Values.customer }}
-            port:
-              number: 8765
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: mindroom-{{ .Values.customer }}
-            port:
-              number: 3003
-  # Matrix server
-  - host: m-{{ .Values.domain }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: synapse-{{ .Values.customer }}
-            port:
-              number: 8008

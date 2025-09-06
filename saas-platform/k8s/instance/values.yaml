@@ -1,5 +1,5 @@
 customer: demo
-domain: demo.mindroom.chat
+baseDomain: mindroom.chat  # Base domain for all services
 storage: 10Gi  # More storage for Matrix data
 
 # Docker images

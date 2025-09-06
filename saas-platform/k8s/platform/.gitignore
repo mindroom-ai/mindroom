@@ -1,0 +1,3 @@
+# Never commit environment-specific secrets!
+values-prod.yaml
+values-staging.yaml

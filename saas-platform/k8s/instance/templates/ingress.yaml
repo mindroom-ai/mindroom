@@ -1,0 +1,46 @@
+# Customer Instance Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Values.customer }}-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+  # MindRoom Frontend
+  - host: {{ .Values.customer }}.{{ .Values.baseDomain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mindroom-{{ .Values.customer }}
+            port:
+              number: 3003
+
+  # MindRoom Backend API
+  - host: {{ .Values.customer }}.api.{{ .Values.baseDomain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mindroom-{{ .Values.customer }}
+            port:
+              number: 8765
+
+  # Matrix/Synapse Server
+  - host: {{ .Values.customer }}.matrix.{{ .Values.baseDomain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: synapse-{{ .Values.customer }}
+            port:
+              number: 8008

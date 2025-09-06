@@ -1,0 +1,20 @@
+# Production environment values
+# Copy to values-prod.yaml and fill in real values
+environment: production
+domain: mindroom.chat
+
+# Production Supabase instance
+supabase:
+  url: # Production Supabase URL
+  anonKey: # Production anon key
+  serviceKey: # Production service key
+
+# Stripe live keys
+stripe:
+  publishableKey: # pk_live_...
+  secretKey: # sk_live_...
+  webhookSecret: # whsec_...
+
+# Gitea registry
+gitea:
+  token: # Production token

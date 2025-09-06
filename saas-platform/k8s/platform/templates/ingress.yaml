@@ -1,0 +1,59 @@
+# Platform Services Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: platform-ingress
+  namespace: mindroom-{{ .Values.environment }}
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+  # Customer Portal
+  - host: app.{{ .Values.domain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: customer-portal
+            port:
+              number: 3000
+
+  # Admin Dashboard
+  - host: admin.{{ .Values.domain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: admin-dashboard
+            port:
+              number: 80
+
+  # Instance Provisioner API
+  - host: api.{{ .Values.domain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: instance-provisioner
+            port:
+              number: 8002
+
+  # Stripe Webhooks
+  - host: webhooks.{{ .Values.domain }}
+    http:
+      paths:
+      - path: /stripe
+        pathType: Prefix
+        backend:
+          service:
+            name: stripe-handler
+            port:
+              number: 3005

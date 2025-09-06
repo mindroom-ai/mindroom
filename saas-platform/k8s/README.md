@@ -1,71 +1,75 @@
 # MindRoom K8s Infrastructure
 
-Kubernetes deployments for MindRoom SaaS platform.
+Simple Helm-based Kubernetes deployments for MindRoom SaaS.
 
-## Architecture
+## Structure
 
 ```
 k8s/
-├── platform/     # Platform services (admin, billing, provisioning)
-│   └── Simple K8s manifests - deployed once per cluster
-│
-└── instances/    # Customer instances (MindRoom + Synapse)
-    └── Helm charts - templated for multiple customers
+├── platform/      # Platform services (admin, billing, provisioning)
+├── instance/      # Customer instances (MindRoom + Synapse)
+├── kind-setup.sh  # Local cluster setup
+└── shell.nix      # Development tools
 ```
+
+Both use Helm for consistency and environment management.
 
 ## Quick Start
 
-### 1. Setup Cluster
+### 1. Setup Local Cluster
 
 ```bash
-# Enter nix shell for tools
 nix-shell
-
-# Create local kind cluster
 ./kind-setup.sh
 ```
 
-### 2. Deploy Platform Services
+### 2. Deploy Platform (Staging)
 
 ```bash
-cd platform/
-./setup-secrets.sh  # Create secrets from .env
-kubectl apply -f deploy.yml
+helm install platform-staging platform/ -f platform/values-staging.yaml
+kubectl get pods -n mindroom-staging
 ```
 
 ### 3. Deploy Customer Instance
 
 ```bash
-cd instances/
-helm install demo . \
+helm install demo instance/ \
   --set customer=demo \
   --set domain=demo.mindroom.chat \
   --set openai_key=$OPENAI_API_KEY
 ```
 
-## Why This Structure?
+## Environments
 
-- **Platform services** need to be deployed once → Simple YAML manifests
-- **Customer instances** need templating for multiple deployments → Helm charts
-- Clear separation of infrastructure vs customer workloads
-- Right tool for each job (KISS principle)
+### Platform Environments
+- **Staging**: `values-staging.yaml` - Test environment with test Stripe/Supabase
+- **Production**: `values-prod.yaml` - Live environment with real services
+
+### Deploy to Production
+```bash
+helm install platform-prod platform/ -f platform/values-prod.yaml
+kubectl get pods -n mindroom-production
+```
+
+## Why Helm Everywhere?
+
+- **Consistency**: Single tool for all deployments
+- **Environment Management**: Easy staging/prod separation
+- **Templating**: Reuse configs across environments
+- **Standard**: Industry standard for K8s packages
 
 ## Components
 
-### Platform Services
-- **customer-portal**: Customer-facing web app
-- **admin-dashboard**: Internal admin interface
-- **stripe-handler**: Payment processing
-- **instance-provisioner**: Automated provisioning
+### Platform Services (`platform/`)
+- customer-portal (port 3000)
+- admin-dashboard (port 80)
+- stripe-handler (port 3005)
+- instance-provisioner (port 8002)
 
-### Customer Instances
-- **mindroom**: AI agent framework (ports 3003, 8765)
-- **synapse**: Matrix server for chat
+Configuration: `values-staging.yaml`, `values-prod.yaml`
 
-## Development
+### Customer Instances (`instance/`)
+- mindroom (ports 3003, 8765)
+- synapse (port 8008)
 
-All tools available via nix-shell:
-- `kubectl` - Kubernetes CLI
-- `helm` - Package manager
-- `k9s` - Terminal UI
-- `kind` - Local clusters
+Each customer gets isolated instance with own namespace.
