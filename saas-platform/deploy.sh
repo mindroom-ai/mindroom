@@ -8,7 +8,7 @@ set -e
 #   ./deploy.sh customer-portal
 #   ./deploy.sh admin-dashboard
 #   ./deploy.sh stripe-handler
-#   ./deploy.sh instance-provisioner  # (was dokku-provisioner)
+#   ./deploy.sh instance-provisioner
 #
 # Note: Uses 'latest' tag and forces K8s to pull the new image via rollout restart
 

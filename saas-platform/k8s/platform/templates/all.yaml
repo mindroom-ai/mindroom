@@ -207,19 +207,22 @@ spec:
         app: instance-provisioner
         environment: {{ .Values.environment }}
     spec:
+      serviceAccountName: instance-provisioner
       imagePullSecrets:
       - name: gitea-registry
       containers:
       - name: app
-        image: {{ .Values.registry }}/dokku-provisioner:{{ .Values.imageTag }}
+        image: {{ .Values.registry }}/instance-provisioner:{{ .Values.imageTag }}
         ports:
         - containerPort: 8002
         envFrom:
         - secretRef:
             name: platform-secrets
         env:
-        - name: K8S_MODE
-          value: "true"
+        - name: BASE_DOMAIN
+          value: "{{ .Values.domain }}"
+        - name: REGISTRY
+          value: "{{ .Values.registry }}"
 ---
 apiVersion: v1
 kind: Service
