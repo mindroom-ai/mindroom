@@ -85,17 +85,17 @@ write_files:
     content: |
       #!/bin/bash
       # Mount Hetzner volume if it exists
-      DEVICE=$(ls /dev/disk/by-id/scsi-0HC_Volume_* 2>/dev/null | head -n1)
-      if [ -n "$DEVICE" ]; then
-        if ! blkid $DEVICE >/dev/null 2>&1; then
-          mkfs.ext4 $DEVICE
+      DEVICE=$$(ls /dev/disk/by-id/scsi-0HC_Volume_* 2>/dev/null | head -n1)
+      if [ -n "$$DEVICE" ]; then
+        if ! blkid $$DEVICE >/dev/null 2>&1; then
+          mkfs.ext4 $$DEVICE
         fi
         mkdir -p /mnt/dokku-data
         if ! mountpoint -q /mnt/dokku-data; then
-          mount $DEVICE /mnt/dokku-data
-          UUID=$(blkid -s UUID -o value $DEVICE)
-          if ! grep -q "$UUID" /etc/fstab; then
-            echo "UUID=$UUID /mnt/dokku-data ext4 defaults,nofail 0 2" >> /etc/fstab
+          mount $$DEVICE /mnt/dokku-data
+          UUID=$$(blkid -s UUID -o value $$DEVICE)
+          if ! grep -q "$$UUID" /etc/fstab; then
+            echo "UUID=$$UUID /mnt/dokku-data ext4 defaults,nofail 0 2" >> /etc/fstab
           fi
         fi
 
@@ -145,12 +145,12 @@ write_files:
       #!/bin/bash
       # This script will be called by the platform server to add its SSH key
       # Usage: ssh root@dokku-server 'bash /root/add-platform-key.sh "ssh-ed25519 AAAA..."'
-      if [ -z "$1" ]; then
-        echo "Usage: $0 'ssh-key'"
+      if [ -z "$$1" ]; then
+        echo "Usage: $$0 'ssh-key'"
         exit 1
       fi
-      if ! grep -q "$1" /root/.ssh/authorized_keys 2>/dev/null; then
-        echo "$1" >> /root/.ssh/authorized_keys
+      if ! grep -q "$$1" /root/.ssh/authorized_keys 2>/dev/null; then
+        echo "$$1" >> /root/.ssh/authorized_keys
         echo "Platform SSH key added successfully"
       else
         echo "Key already exists"

@@ -100,17 +100,17 @@ write_files:
     content: |
       #!/bin/bash
       # Mount Hetzner volume if it exists
-      DEVICE=$(ls /dev/disk/by-id/scsi-0HC_Volume_* 2>/dev/null | head -n1)
-      if [ -n "$DEVICE" ]; then
-        if ! blkid $DEVICE >/dev/null 2>&1; then
-          mkfs.ext4 $DEVICE
+      DEVICE=$$(ls /dev/disk/by-id/scsi-0HC_Volume_* 2>/dev/null | head -n1)
+      if [ -n "$$DEVICE" ]; then
+        if ! blkid $$DEVICE >/dev/null 2>&1; then
+          mkfs.ext4 $$DEVICE
         fi
         mkdir -p /mnt/platform-data
         if ! mountpoint -q /mnt/platform-data; then
-          mount $DEVICE /mnt/platform-data
-          UUID=$(blkid -s UUID -o value $DEVICE)
-          if ! grep -q "$UUID" /etc/fstab; then
-            echo "UUID=$UUID /mnt/platform-data ext4 defaults,nofail 0 2" >> /etc/fstab
+          mount $$DEVICE /mnt/platform-data
+          UUID=$$(blkid -s UUID -o value $$DEVICE)
+          if ! grep -q "$$UUID" /etc/fstab; then
+            echo "UUID=$$UUID /mnt/platform-data ext4 defaults,nofail 0 2" >> /etc/fstab
           fi
         fi
         # Create service directories
@@ -137,8 +137,8 @@ write_files:
       #!/bin/bash
       # Deploy platform services with Docker
 
-      REGISTRY="${registry:-git.nijho.lt/basnijholt}"
-      ARCH="${arch:-amd64}"
+      REGISTRY="$${REGISTRY:-${registry}}"
+      ARCH="$${ARCH:-${arch}}"
 
       # Stop any existing containers
       docker stop customer-portal admin-dashboard stripe-handler dokku-provisioner 2>/dev/null || true
@@ -150,7 +150,7 @@ write_files:
         --restart always \
         -p 3000:3000 \
         --env-file /opt/platform/.env \
-        $REGISTRY/customer-portal:$ARCH
+        $$REGISTRY/customer-portal:$$ARCH
 
       # Deploy Admin Dashboard (nginx serves on port 80)
       docker run -d \
@@ -158,7 +158,7 @@ write_files:
         --restart always \
         -p 3001:80 \
         --env-file /opt/platform/.env \
-        $REGISTRY/admin-dashboard:$ARCH
+        $$REGISTRY/admin-dashboard:$$ARCH
 
       # Deploy Stripe Handler (runs on port 3005)
       docker run -d \
@@ -166,7 +166,7 @@ write_files:
         --restart always \
         -p 3002:3005 \
         --env-file /opt/platform/.env \
-        $REGISTRY/stripe-handler:$ARCH
+        $$REGISTRY/stripe-handler:$$ARCH
 
       # Deploy Dokku Provisioner (runs on port 8002)
       docker run -d \
@@ -178,7 +178,7 @@ write_files:
         -e DOKKU_SSH_USER=root \
         -e DOKKU_SSH_KEY_PATH=/ssh/id_rsa \
         -v /opt/platform/dokku-ssh-key:/ssh/id_rsa:ro \
-        $REGISTRY/dokku-provisioner:$ARCH
+        $$REGISTRY/dokku-provisioner:$$ARCH
 
       echo "Services deployed successfully!"
       docker ps
@@ -190,10 +190,10 @@ write_files:
       cat > /opt/platform/check-status.sh <<'SCRIPT'
       #!/bin/bash
       echo "=== Platform Services Status ==="
-      echo "Customer Portal: $(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000)"
-      echo "Admin Dashboard: $(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001)"
-      echo "Stripe Handler: $(curl -s http://localhost:3002/health | jq -r .status 2>/dev/null || echo "not running")"
-      echo "Dokku Provisioner: $(curl -s http://localhost:3003/health | jq -r .status 2>/dev/null || echo "not running")"
+      echo "Customer Portal: $$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000)"
+      echo "Admin Dashboard: $$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001)"
+      echo "Stripe Handler: $$(curl -s http://localhost:3002/health | jq -r .status 2>/dev/null || echo "not running")"
+      echo "Dokku Provisioner: $$(curl -s http://localhost:3003/health | jq -r .status 2>/dev/null || echo "not running")"
       echo ""
       echo "=== Docker Containers ==="
       docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
@@ -342,7 +342,7 @@ write_files:
       ln -sf /etc/nginx/sites-available/platform-services /etc/nginx/sites-enabled/
 
       # Admin htpasswd
-      echo "admin:$(openssl passwd -apr1 'MindRoom2024!')" > /etc/nginx/.htpasswd
+      echo "admin:$$(openssl passwd -apr1 'MindRoom2024!')" > /etc/nginx/.htpasswd
 
       # Enable and restart nginx
       systemctl enable nginx
