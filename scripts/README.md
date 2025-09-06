@@ -35,7 +35,6 @@ Testing and benchmarking scripts.
 ### 🔧 `/utilities`
 General utility scripts.
 
-- **`with-env.sh`** - Run any command with .env variables loaded
 - **`cleanup_agent_edits.sh`** - Clean up agent-edited files
 - **`cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker
 - **`cleanup_agent_edits.py`** - Python version of cleanup script
@@ -47,7 +46,6 @@ General utility scripts.
 ### 📁 `/setup`
 Setup and configuration helpers.
 
-- **`run-with-env.sh`** - Legacy env loader (use utilities/with-env.sh instead)
 - **`test_data.sql`** - Test data for development
 
 ## Common Usage Examples
@@ -55,12 +53,6 @@ Setup and configuration helpers.
 ### Deploy Everything
 ```bash
 ./scripts/deployment/deploy-all.sh
-```
-
-### Run with Environment Variables
-```bash
-./scripts/utilities/with-env.sh npm run dev
-./scripts/utilities/with-env.sh terraform apply
 ```
 
 ### Database Operations
@@ -82,15 +74,12 @@ Setup and configuration helpers.
 
 ## Environment Management
 
-All scripts that need environment variables support two methods:
+All scripts that need environment variables automatically handle loading from `.env`:
 
 1. **With `uvx` (recommended)**: Automatically uses `python-dotenv` for robust env loading
-2. **Fallback**: Sources `.env` file directly
+2. **Fallback**: Sources `.env` file directly when `uvx` is not available
 
-Use `./scripts/utilities/with-env.sh` to run any command with env vars:
-```bash
-./scripts/utilities/with-env.sh <any-command>
-```
+The scripts handle this internally, so you don't need any wrapper.
 
 ## Requirements
 
