@@ -43,11 +43,6 @@ General utility scripts.
 - **`rewrite_git_history_apply.py`** - Apply git history rewrites
 - **`setup_cleanup_cron.sh`** - Setup cron job for cleanup
 
-### 📁 `/setup`
-Setup and configuration helpers.
-
-- **`test_data.sql`** - Test data for development
-
 ## Common Usage Examples
 
 ### Deploy Everything
