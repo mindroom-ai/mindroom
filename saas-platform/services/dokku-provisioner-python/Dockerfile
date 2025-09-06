@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+# Using public ECR to avoid Docker Hub rate limits
+FROM public.ecr.aws/docker/library/python:3.12-slim
 
 WORKDIR /app
 

@@ -1,5 +1,6 @@
 # Build stage
-FROM node:20-alpine AS builder
+# Using public ECR to avoid Docker Hub rate limits
+FROM public.ecr.aws/docker/library/node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -16,7 +17,8 @@ COPY . .
 RUN npm run build
 
 # Runtime stage
-FROM nginx:alpine
+# Using public ECR to avoid Docker Hub rate limits
+FROM public.ecr.aws/docker/library/nginx:alpine
 
 # Copy built assets from builder
 COPY --from=builder /app/dist /usr/share/nginx/html

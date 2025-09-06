@@ -1,5 +1,6 @@
 # Build stage
-FROM node:18-alpine AS builder
+# Using public ECR to avoid Docker Hub rate limits
+FROM public.ecr.aws/docker/library/node:18-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache python3 make g++
@@ -20,7 +21,8 @@ COPY src ./src
 RUN npm run build
 
 # Production stage
-FROM node:18-alpine
+# Using public ECR to avoid Docker Hub rate limits
+FROM public.ecr.aws/docker/library/node:18-alpine
 
 # Install dumb-init for proper signal handling
 RUN apk add --no-cache dumb-init
