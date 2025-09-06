@@ -44,7 +44,7 @@ write_files:
       curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
       # Add Docker repository
-      echo "deb [arch=$$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $$(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
       # Install Docker
       apt-get update
@@ -113,17 +113,17 @@ write_files:
     content: |
       #!/bin/bash
       # Mount Hetzner volume if it exists
-      DEVICE=$$(ls /dev/disk/by-id/scsi-0HC_Volume_* 2>/dev/null | head -n1)
-      if [ -n "$$DEVICE" ]; then
-        if ! blkid $$DEVICE >/dev/null 2>&1; then
-          mkfs.ext4 $$DEVICE
+      DEVICE=$(ls /dev/disk/by-id/scsi-0HC_Volume_* 2>/dev/null | head -n1)
+      if [ -n "$DEVICE" ]; then
+        if ! blkid $DEVICE >/dev/null 2>&1; then
+          mkfs.ext4 $DEVICE
         fi
         mkdir -p /mnt/dokku-data
         if ! mountpoint -q /mnt/dokku-data; then
-          mount $$DEVICE /mnt/dokku-data
-          UUID=$$(blkid -s UUID -o value $$DEVICE)
-          if ! grep -q "$$UUID" /etc/fstab; then
-            echo "UUID=$$UUID /mnt/dokku-data ext4 defaults,nofail 0 2" >> /etc/fstab
+          mount $DEVICE /mnt/dokku-data
+          UUID=$(blkid -s UUID -o value $DEVICE)
+          if ! grep -q "$UUID" /etc/fstab; then
+            echo "UUID=$UUID /mnt/dokku-data ext4 defaults,nofail 0 2" >> /etc/fstab
           fi
         fi
 
@@ -147,12 +147,12 @@ write_files:
     content: |
       #!/bin/bash
       # Add platform server's SSH key
-      if [ -z "$$1" ]; then
-        echo "Usage: $$0 'ssh-key'"
+      if [ -z "$1" ]; then
+        echo "Usage: $0 'ssh-key'"
         exit 1
       fi
-      if ! grep -q "$$1" /root/.ssh/authorized_keys 2>/dev/null; then
-        echo "$$1" >> /root/.ssh/authorized_keys
+      if ! grep -q "$1" /root/.ssh/authorized_keys 2>/dev/null; then
+        echo "$1" >> /root/.ssh/authorized_keys
         echo "Platform SSH key added successfully"
       else
         echo "Key already exists"
