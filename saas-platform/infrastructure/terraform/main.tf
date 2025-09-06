@@ -209,7 +209,7 @@ resource "hcloud_server" "dokku" {
     service     = "customer-instances"
   }
 
-  user_data = templatefile("${path.module}/cloud-init/dokku.sh", {
+  user_data = templatefile("${path.module}/cloud-init/dokku.yaml", {
     dokku_version       = var.dokku_version
     dokku_domain       = var.domain
     admin_password     = random_password.dokku_admin.result
@@ -253,8 +253,7 @@ resource "hcloud_server" "platform" {
     service     = "management"
   }
 
-  user_data = templatefile("${path.module}/cloud-init/platform.sh", {
-    docker_compose_version = "2.23.0"
+  user_data = templatefile("${path.module}/cloud-init/platform.yaml", {
     domain                = var.domain
     hcloud_token         = var.hcloud_token
     supabase_url         = var.supabase_url
@@ -262,7 +261,8 @@ resource "hcloud_server" "platform" {
     stripe_secret_key    = var.stripe_secret_key
     stripe_webhook_secret = var.stripe_webhook_secret
     dokku_host           = hcloud_server.dokku.ipv4_address
-    dokku_ssh_key        = file(var.dokku_provisioner_private_key_path)
+    registry             = "git.nijho.lt/basnijholt"
+    arch                 = "amd64"
   })
 }
 
