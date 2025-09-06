@@ -32,3 +32,5 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+.auth_configured
+.supabase_config.json
