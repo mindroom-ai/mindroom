@@ -1,5 +1,6 @@
 # Multi-stage build for admin dashboard
-FROM node:20-slim AS base
+# Using public ECR for node to avoid Docker Hub rate limits
+FROM public.ecr.aws/docker/library/node:20-slim AS base
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 RUN npm install -g pnpm
 
@@ -25,7 +26,8 @@ ENV VITE_STRIPE_SECRET_KEY=${VITE_STRIPE_SECRET_KEY}
 RUN pnpm run build
 
 # Production stage
-FROM nginx:alpine AS final
+# Using public ECR for nginx to avoid Docker Hub rate limits
+FROM public.ecr.aws/docker/library/nginx:alpine AS final
 # Copy built assets from builder
 COPY --from=builder /app/dist /usr/share/nginx/html
 # Copy nginx configuration if it exists

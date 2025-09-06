@@ -1,4 +1,5 @@
-FROM node:18-alpine
+# Using public ECR to avoid Docker Hub rate limits
+FROM public.ecr.aws/docker/library/node:18-alpine
 
 # Install SSH client for Dokku communication
 RUN apk add --no-cache openssh-client curl

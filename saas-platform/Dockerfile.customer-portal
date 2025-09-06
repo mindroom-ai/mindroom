@@ -1,5 +1,6 @@
 # Multi-stage build for customer portal
-FROM node:20-slim AS base
+# Using public ECR to avoid Docker Hub rate limits
+FROM public.ecr.aws/docker/library/node:20-slim AS base
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 RUN npm install -g pnpm
 
@@ -19,7 +20,7 @@ COPY apps/customer-portal/ ./
 RUN pnpm run build
 
 # Production stage
-FROM node:20-slim AS final
+FROM public.ecr.aws/docker/library/node:20-slim AS final
 RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 RUN npm install -g pnpm
 WORKDIR /app
