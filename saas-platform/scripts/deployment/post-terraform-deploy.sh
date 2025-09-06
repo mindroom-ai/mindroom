@@ -16,33 +16,17 @@ echo -e "${GREEN}🚀 Post-Terraform Deployment${NC}"
 echo "=================================="
 echo ""
 
-# Load environment variables
-if [ ! -f .env ]; then
-    echo -e "${RED}❌ Error: .env file not found${NC}"
-    exit 1
-fi
-
-# Check if we have uvx for env management
-if ! command -v uvx &> /dev/null; then
-    echo -e "${YELLOW}⚠️  uvx not found, falling back to source .env${NC}"
-    source .env
-else
-    # Export all env vars for child processes when using uvx
-    set -a
-    eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
-    set +a
-fi
-
-# Get server IPs from Terraform (if not in env)
+# Get server IPs from Terraform
 if [ -z "$PLATFORM_IP" ] || [ -z "$DOKKU_IP" ]; then
     echo "Getting server IPs from Terraform..."
-    cd saas-platform/infrastructure/terraform
+    cd infrastructure/terraform 2>/dev/null || cd saas-platform/infrastructure/terraform
     PLATFORM_IP=$(terraform output -raw platform_server_ip 2>/dev/null || echo "")
     DOKKU_IP=$(terraform output -raw dokku_server_ip 2>/dev/null || echo "")
-    cd ../../..
+    cd - > /dev/null
 
     if [ -z "$PLATFORM_IP" ] || [ -z "$DOKKU_IP" ]; then
         echo -e "${RED}❌ Could not get server IPs from Terraform${NC}"
+        echo "Please set PLATFORM_IP and DOKKU_IP environment variables"
         exit 1
     fi
 fi
@@ -81,17 +65,35 @@ done
 
 echo ""
 
-# Step 2: Copy environment file to platform server
-echo -e "${YELLOW}📋 Step 2: Setting up environment${NC}"
-echo "================================="
+# Step 2: Set up SSH keys for Dokku access
+echo -e "${YELLOW}🔑 Step 2: Setting up SSH keys${NC}"
+echo "================================"
 
-# Copy .env file to platform server
-scp -q .env root@$PLATFORM_IP:/root/.env
-echo -e "${GREEN}✅ Environment file copied${NC}"
+# Get the platform server's SSH public key and add it to Dokku
+PLATFORM_KEY=$(ssh root@$PLATFORM_IP "cat /opt/platform/dokku-ssh-key.pub" 2>/dev/null)
+if [ -n "$PLATFORM_KEY" ]; then
+    ssh root@$DOKKU_IP "echo '$PLATFORM_KEY' >> /root/.ssh/authorized_keys"
+    echo -e "${GREEN}✅ SSH key added to Dokku server${NC}"
+else
+    echo -e "${YELLOW}⚠️  Platform SSH key not found (will be generated on first boot)${NC}"
+fi
+
 echo ""
 
-# Step 3: Deploy services on platform server
-echo -e "${YELLOW}🚀 Step 3: Deploying Services${NC}"
+# Step 3: Copy environment file to platform server
+echo -e "${YELLOW}📋 Step 3: Setting up environment${NC}"
+echo "================================="
+
+# Copy .env file to platform server and fix format
+scp -q .env root@$PLATFORM_IP:/root/.env.tmp
+ssh root@$PLATFORM_IP "sed 's/^export //' /root/.env.tmp > /root/.env && rm /root/.env.tmp"
+# Also copy to /opt/platform for the systemd service
+ssh root@$PLATFORM_IP "cp /root/.env /opt/platform/.env"
+echo -e "${GREEN}✅ Environment file copied and formatted${NC}"
+echo ""
+
+# Step 4: Deploy services on platform server
+echo -e "${YELLOW}🚀 Step 4: Deploying Services${NC}"
 echo "============================="
 
 ssh root@$PLATFORM_IP << 'DEPLOY_SCRIPT'
@@ -123,23 +125,24 @@ docker run -d \
   --env-file /root/.env \
   git.nijho.lt/basnijholt/admin-dashboard:amd64
 
-# Run Stripe Handler
+# Run Stripe Handler (service runs on port 3005 internally)
 docker run -d \
   --name stripe-handler \
   --network platform \
   --restart unless-stopped \
-  -p 4242:4242 \
+  -p 3002:3005 \
   --env-file /root/.env \
   git.nijho.lt/basnijholt/stripe-handler:amd64
 
-# Run Dokku Provisioner
+# Run Dokku Provisioner (service runs on port 8002 internally)
 docker run -d \
   --name dokku-provisioner \
   --network platform \
   --restart unless-stopped \
-  -p 8002:8002 \
-  -v /root/.ssh:/root/.ssh:ro \
+  -p 3003:8002 \
+  -v /opt/platform/dokku-ssh-key:/ssh/id_rsa:ro \
   --env-file /root/.env \
+  -e DOKKU_SSH_KEY_PATH=/ssh/id_rsa \
   git.nijho.lt/basnijholt/dokku-provisioner:amd64
 
 # Restart Nginx to ensure configs are loaded
@@ -155,8 +158,8 @@ echo ""
 echo -e "${GREEN}✅ Services deployed successfully!${NC}"
 echo ""
 
-# Step 4: Verify deployment
-echo -e "${YELLOW}🔍 Step 4: Verifying Deployment${NC}"
+# Step 5: Verify deployment
+echo -e "${YELLOW}🔍 Step 5: Verifying Deployment${NC}"
 echo "================================"
 
 # Test endpoints

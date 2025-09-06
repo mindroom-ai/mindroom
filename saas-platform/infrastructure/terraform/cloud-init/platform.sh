@@ -99,11 +99,11 @@ DOKKU_SSH_PORT=22
 HCLOUD_TOKEN=${hcloud_token}
 EOF
 
-# Save SSH key for Dokku access
-cat > /opt/platform/dokku-ssh-key <<EOF
-${dokku_ssh_key}
-EOF
+# Generate SSH key for Dokku access
+ssh-keygen -t ed25519 -f /opt/platform/dokku-ssh-key -N "" -C "dokku-provisioner@${domain}"
 chmod 600 /opt/platform/dokku-ssh-key
+# Make readable for container (will be mounted as read-only)
+chmod 644 /opt/platform/dokku-ssh-key
 
 # Note: Docker images should be deployed after infrastructure is up
 # This is handled by the deploy-all.sh script
@@ -232,7 +232,7 @@ server {
   server_name api.${domain} webhooks.${domain};
 
   location / {
-    proxy_pass http://localhost:4242;
+    proxy_pass http://localhost:3002;
     proxy_http_version 1.1;
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection 'upgrade';
@@ -248,7 +248,7 @@ server {
   }
 
   location /provision {
-    proxy_pass http://localhost:8002;
+    proxy_pass http://localhost:3003;
     proxy_http_version 1.1;
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
@@ -268,7 +268,86 @@ systemctl restart nginx
 # Create admin htpasswd
 echo "admin:$(openssl passwd -apr1 'MindRoom2024!')" > /etc/nginx/.htpasswd
 
-# Start Docker Compose services
+# Create deployment script that will be run after Docker images are available
+cat > /opt/platform/deploy-services.sh <<'DEPLOYEOF'
+#!/bin/bash
+# This script deploys the actual platform services
+# It should be run after the Docker images are available
+
+REGISTRY="${registry:-git.nijho.lt/basnijholt}"
+ARCH="${docker_arch:-amd64}"
+
+# Stop any placeholder containers
+docker stop placeholder 2>/dev/null || true
+docker rm placeholder 2>/dev/null || true
+
+# Remove any existing service containers
+docker stop customer-portal admin-dashboard stripe-handler dokku-provisioner 2>/dev/null || true
+docker rm customer-portal admin-dashboard stripe-handler dokku-provisioner 2>/dev/null || true
+
+# Deploy Customer Portal
+docker run -d \
+  --name customer-portal \
+  --restart always \
+  -p 3000:3000 \
+  --env-file /opt/platform/.env \
+  ${REGISTRY}/customer-portal:${ARCH}
+
+# Deploy Admin Dashboard (nginx serves on port 80 internally)
+docker run -d \
+  --name admin-dashboard \
+  --restart always \
+  -p 3001:80 \
+  --env-file /opt/platform/.env \
+  ${REGISTRY}/admin-dashboard:${ARCH}
+
+# Deploy Stripe Handler (service runs on port 3005 internally)
+docker run -d \
+  --name stripe-handler \
+  --restart always \
+  -p 3002:3005 \
+  --env-file /opt/platform/.env \
+  ${REGISTRY}/stripe-handler:${ARCH}
+
+# Deploy Dokku Provisioner (service runs on port 8002 internally)
+docker run -d \
+  --name dokku-provisioner \
+  --restart always \
+  -p 3003:8002 \
+  --env-file /opt/platform/.env \
+  -e DOKKU_SSH_HOST=${dokku_host} \
+  -e DOKKU_SSH_USER=root \
+  -e DOKKU_SSH_KEY_PATH=/ssh/id_rsa \
+  -v /opt/platform/dokku-ssh-key:/ssh/id_rsa:ro \
+  ${REGISTRY}/dokku-provisioner:${ARCH}
+
+echo "Services deployed successfully!"
+docker ps
+DEPLOYEOF
+
+chmod +x /opt/platform/deploy-services.sh
+
+# Create a systemd service to ensure containers start on boot
+cat > /etc/systemd/system/platform-services.service <<EOF
+[Unit]
+Description=MindRoom Platform Services
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'docker ps | grep -q "customer-portal\\|admin-dashboard\\|stripe-handler\\|dokku-provisioner" || /opt/platform/deploy-services.sh'
+ExecStop=/bin/bash -c 'docker stop customer-portal admin-dashboard stripe-handler dokku-provisioner'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable platform-services
+
+# Start placeholder container to reserve ports
 cd /opt/platform
 docker-compose up -d
 
@@ -276,4 +355,19 @@ docker-compose up -d
 systemctl enable certbot.timer
 systemctl start certbot.timer
 
+# Create a status check script
+cat > /opt/platform/check-status.sh <<'STATUSEOF'
+#!/bin/bash
+echo "=== Platform Services Status ==="
+echo "Customer Portal: $(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000)"
+echo "Admin Dashboard: $(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001)"
+echo "Stripe Handler: $(curl -s http://localhost:3002/health | jq -r .status 2>/dev/null || echo "not running")"
+echo "Dokku Provisioner: $(curl -s http://localhost:3003/health | jq -r .status 2>/dev/null || echo "not running")"
+echo ""
+echo "=== Docker Containers ==="
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+STATUSEOF
+chmod +x /opt/platform/check-status.sh
+
 echo "Platform setup complete!"
+echo "Note: Run /opt/platform/deploy-services.sh after Docker images are available"

@@ -30,6 +30,20 @@ sudo DOKKU_TAG=${dokku_version} bash /tmp/bootstrap.sh
 # Configure Dokku
 dokku domains:set-global ${dokku_domain}
 
+# Create a script to add platform server's SSH key when available
+cat > /root/add-platform-key.sh <<'KEYEOF'
+#!/bin/bash
+# This script will be called by the platform server to add its SSH key
+# Usage: ssh root@dokku-server 'bash /root/add-platform-key.sh "ssh-ed25519 AAAA..."'
+if [ -z "$1" ]; then
+  echo "Usage: $0 'ssh-key'"
+  exit 1
+fi
+echo "$1" >> /root/.ssh/authorized_keys
+echo "Platform SSH key added successfully"
+KEYEOF
+chmod +x /root/add-platform-key.sh
+
 # Install Dokku plugins
 dokku plugin:install https://github.com/dokku/dokku-postgres.git postgres
 dokku plugin:install https://github.com/dokku/dokku-redis.git redis
