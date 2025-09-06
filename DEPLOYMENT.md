@@ -63,14 +63,14 @@ PLATFORM_DOMAIN=mindroom.chat
 Run the complete deployment script:
 
 ```bash
-chmod +x scripts/deploy-all.sh
-./scripts/deploy-all.sh
+chmod +x scripts/deployment/deploy-all.sh
+./scripts/deployment/deploy-all.sh
 ```
 
 Or use the environment wrapper:
 
 ```bash
-./scripts/with-env.sh ./scripts/deploy-all.sh
+./scripts/utilities/with-env.sh ./scripts/deployment/deploy-all.sh
 ```
 
 This script will:
@@ -88,8 +88,8 @@ This script will:
 To destroy all infrastructure and services:
 
 ```bash
-chmod +x scripts/cleanup-all.sh
-./scripts/cleanup-all.sh
+chmod +x scripts/deployment/cleanup-all.sh
+./scripts/deployment/cleanup-all.sh
 ```
 
 ## Manual Deployment Steps
@@ -109,7 +109,7 @@ cd ../..
 ### 2. Run Database Migrations
 
 ```bash
-./scripts/run-migrations.sh
+./scripts/database/run-migrations.sh
 ```
 
 This uses SSH to run migrations from the platform server (works around network restrictions).
@@ -151,8 +151,7 @@ docker run -d --name customer-portal -p 3000:3000 --env-file .env $REGISTRY/cust
 ### 5. Configure Stripe Products
 
 ```bash
-cd scripts
-node setup-stripe-products.js
+node scripts/database/setup-stripe-products.js
 ```
 
 ## Service Endpoints

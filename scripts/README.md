@@ -1,71 +1,114 @@
-# MindRoom Scripts
+# Scripts Directory Structure
 
-This directory contains utility scripts for the MindRoom SaaS platform.
+This directory contains all operational scripts for the MindRoom platform, organized by function.
 
-## Setup Scripts
+## Directory Structure
 
-### `setup/setup-saas.sh`
+### 📦 `/deployment`
+Scripts for deploying and managing the platform infrastructure.
 
-Main setup script for initializing the SaaS platform services:
-- Configures Supabase database and migrations
-- Creates Stripe products and pricing tiers
-- Sets up webhook endpoints
-- Inserts test data for development
+- **`deploy-all.sh`** - Complete platform deployment (infrastructure + services)
+- **`cleanup-all.sh`** - Tear down all infrastructure and services
+- **`update-from-registry.sh`** - Update Docker images from registry
 
-**Usage:**
+### 🗄️ `/database`
+Database management and data setup scripts.
+
+- **`run-migrations.sh`** - Apply Supabase database migrations
+- **`create-admin-user.js`** - Create admin user for the platform
+- **`setup-stripe-products.js`** - Configure Stripe products and pricing
+
+### 🛠️ `/development`
+Local development utilities.
+
+- **`start`** - Start development environment with Zellij
+- **`stop`** - Stop all development services
+- **`forward-ports.sh`** - Forward ports from remote servers for local testing
+- **`zellij-mindroom.kdl`** - Zellij configuration for development
+
+### 🧪 `/testing`
+Testing and benchmarking scripts.
+
+- **`test_stripe.py`** - Test Stripe integration
+- **`benchmark_matrix_throughput.py`** - Benchmark Matrix message throughput
+
+### 🔧 `/utilities`
+General utility scripts.
+
+- **`with-env.sh`** - Run any command with .env variables loaded
+- **`cleanup_agent_edits.sh`** - Clean up agent-edited files
+- **`cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker
+- **`cleanup_agent_edits.py`** - Python version of cleanup script
+- **`generate_avatars.py`** - Generate avatar images
+- **`rewrite_git_commits_ai.py`** - Rewrite git commit messages with AI
+- **`rewrite_git_history_apply.py`** - Apply git history rewrites
+- **`setup_cleanup_cron.sh`** - Setup cron job for cleanup
+
+### 📁 `/setup`
+Setup and configuration helpers.
+
+- **`run-with-env.sh`** - Legacy env loader (use utilities/with-env.sh instead)
+- **`test_data.sql`** - Test data for development
+
+## Common Usage Examples
+
+### Deploy Everything
 ```bash
-./scripts/setup/setup-saas.sh
+./scripts/deployment/deploy-all.sh
 ```
 
-### `setup/setup_stripe_products.py`
-
-Standalone Python script for setting up Stripe products:
-- Creates 4 subscription tiers (Free, Starter, Professional, Enterprise)
-- Sets up pricing for each tier
-- Configures webhook endpoints
-- Idempotent - safe to run multiple times
-
-**Usage:**
+### Run with Environment Variables
 ```bash
-# Automatically installs dependencies via UV
-./scripts/setup/setup_stripe_products.py
-
-# Or with environment variables
-export STRIPE_SECRET_KEY="sk_test_..."
-export PLATFORM_DOMAIN="mindroom.chat"
-./scripts/setup/setup_stripe_products.py
+./scripts/utilities/with-env.sh npm run dev
+./scripts/utilities/with-env.sh terraform apply
 ```
 
-### `setup/test_data.sql`
-
-SQL script with test data for development:
-- Creates test customer accounts
-- Sets up sample subscriptions
-- Creates test instances
-
-## Test Scripts
-
-### `test_stripe.py`
-
-Test script to verify Stripe connection and list products.
-
-**Usage:**
+### Database Operations
 ```bash
-export STRIPE_SECRET_KEY="sk_test_..."
-./scripts/test_stripe.py
+./scripts/database/run-migrations.sh
+./scripts/database/setup-stripe-products.js
+```
+
+### Local Development
+```bash
+./scripts/development/start  # Start dev environment
+./scripts/development/stop   # Stop everything
+```
+
+### Testing
+```bash
+./scripts/testing/test_stripe.py
+```
+
+## Environment Management
+
+All scripts that need environment variables support two methods:
+
+1. **With `uvx` (recommended)**: Automatically uses `python-dotenv` for robust env loading
+2. **Fallback**: Sources `.env` file directly
+
+Use `./scripts/utilities/with-env.sh` to run any command with env vars:
+```bash
+./scripts/utilities/with-env.sh <any-command>
 ```
 
 ## Requirements
 
-- **UV**: Scripts use UV for automatic dependency management
-- **Environment Variables**: Must have `.env` file configured with:
+- **UV/UVX**: For Python scripts with automatic dependency management
+- **Node.js**: For JavaScript database scripts
+- **Terraform**: For infrastructure deployment
+- **Docker**: For container management
+- **Environment Variables**: Configure in `.env` file:
   - `STRIPE_SECRET_KEY`
   - `SUPABASE_URL`
-  - `SUPABASE_ANON_KEY`
-  - `PLATFORM_DOMAIN`
+  - `SUPABASE_SERVICE_KEY`
+  - `HCLOUD_TOKEN`
+  - `GITEA_TOKEN`
+  - And more (see `.env.example`)
 
 ## Notes
 
-- All Python scripts use UV's inline script dependencies
-- Scripts are idempotent and safe to run multiple times
-- Stripe webhook secrets cannot be retrieved after creation
+- All scripts are idempotent where possible
+- Python scripts use UV's inline script dependencies
+- Deployment scripts include automatic rollback on failure
+- Database migrations are run via SSH tunnel for security
