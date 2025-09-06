@@ -1,45 +1,71 @@
-# K8s Deployment (Experimental)
+# MindRoom K8s Infrastructure
 
-Simple Kubernetes deployment for local testing. **Not production ready.**
+Kubernetes deployments for MindRoom SaaS platform.
 
-## Files
+## Architecture
 
-- `kind-config.yaml` - kind cluster configuration
-- `kind-setup.sh` - Creates local K8s cluster with kind
-- `setup-secrets.sh` - Creates secrets from .env file
-- `deploy.yaml` - Service deployments
-- `shell.nix` - Nix shell with kubectl/helm
+```
+k8s/
+├── platform/     # Platform services (admin, billing, provisioning)
+│   └── Simple K8s manifests - deployed once per cluster
+│
+└── instances/    # Customer instances (MindRoom + Synapse)
+    └── Helm charts - templated for multiple customers
+```
 
-## Setup
+## Quick Start
+
+### 1. Setup Cluster
 
 ```bash
 # Enter nix shell for tools
 nix-shell
 
-# Create cluster
+# Create local kind cluster
 ./kind-setup.sh
-
-# Create secrets from .env
-./setup-secrets.sh
-
-# Deploy services
-kubectl apply -f deploy.yaml
-
-# Check status
-kubectl get pods -n mindroom
 ```
 
-## Current Issues
+### 2. Deploy Platform Services
 
-- Instance provisioner crashes (missing env vars)
-- No ingress configuration
-- No production readiness
-- Images must be manually pushed to registry
+```bash
+cd platform/
+./setup-secrets.sh  # Create secrets from .env
+kubectl apply -f deploy.yml
+```
 
-## Why K8s over Dokku?
+### 3. Deploy Customer Instance
 
-- Better for multiple services
-- Native scaling
-- Standard tooling
+```bash
+cd instances/
+helm install demo . \
+  --set customer=demo \
+  --set domain=demo.mindroom.chat \
+  --set openai_key=$OPENAI_API_KEY
+```
 
-But also more complex. This is experimental.
+## Why This Structure?
+
+- **Platform services** need to be deployed once → Simple YAML manifests
+- **Customer instances** need templating for multiple deployments → Helm charts
+- Clear separation of infrastructure vs customer workloads
+- Right tool for each job (KISS principle)
+
+## Components
+
+### Platform Services
+- **customer-portal**: Customer-facing web app
+- **admin-dashboard**: Internal admin interface
+- **stripe-handler**: Payment processing
+- **instance-provisioner**: Automated provisioning
+
+### Customer Instances
+- **mindroom**: AI agent framework (ports 3003, 8765)
+- **synapse**: Matrix server for chat
+
+## Development
+
+All tools available via nix-shell:
+- `kubectl` - Kubernetes CLI
+- `helm` - Package manager
+- `k9s` - Terminal UI
+- `kind` - Local clusters

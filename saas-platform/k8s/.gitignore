@@ -4,3 +4,7 @@
 
 # Output directory from kind
 output/
+
+# Direnv files
+.direnv/
+.envrc

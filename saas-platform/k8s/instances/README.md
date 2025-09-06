@@ -1,17 +1,25 @@
-# MindRoom with Matrix (Minimal)
+# Customer Instance Deployments
 
-Minimal Helm chart that includes:
-- MindRoom (frontend + backend)
-- Synapse Matrix server with SQLite (no PostgreSQL/Redis needed)
+Helm chart for deploying isolated MindRoom customer instances with Matrix.
 
-## Install
+## Components per Instance
+
+- **MindRoom**: AI agent framework (frontend + backend)
+- **Synapse**: Matrix server with SQLite (no PostgreSQL/Redis needed)
+- **Storage**: Persistent volumes for data isolation
+
+## Quick Install
 
 ```bash
-helm install demo ./mindroom \
+# From k8s/instances/ directory
+helm install demo . \
   --set customer=demo \
   --set domain=demo.mindroom.chat \
   --set openai_key=$OPENAI_API_KEY \
   --set matrix_admin_password=secure-password
+
+# Or use the setup script
+./setup.sh demo demo.mindroom.chat
 ```
 
 ## What You Get

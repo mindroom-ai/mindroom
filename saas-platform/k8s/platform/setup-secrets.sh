@@ -5,8 +5,8 @@
 
 set -e
 
-if [ ! -f "../.env" ]; then
-    echo "Error: ../.env file not found"
+if [ ! -f "../../.env" ]; then
+    echo "Error: ../../.env file not found"
     exit 1
 fi
 
@@ -19,11 +19,11 @@ kubectl delete secret mindroom-secrets -n mindroom 2>/dev/null || true
 
 # Create secret from env file
 kubectl create secret generic mindroom-secrets \
-  --from-env-file=../.env \
+  --from-env-file=../../.env \
   --namespace=mindroom
 
 echo "Creating registry secret..."
-source ../.env
+source ../../.env
 kubectl create secret docker-registry gitea-registry \
   --docker-server=git.nijho.lt \
   --docker-username=basnijholt \
