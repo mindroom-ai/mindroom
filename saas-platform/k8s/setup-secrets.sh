@@ -17,7 +17,7 @@ echo "Creating secrets from .env..."
 # Delete existing secret if present
 kubectl delete secret mindroom-secrets -n mindroom 2>/dev/null || true
 
-# Create secret from env file (kubectl will use last value for duplicates)
+# Create secret from env file
 kubectl create secret generic mindroom-secrets \
   --from-env-file=../.env \
   --namespace=mindroom
