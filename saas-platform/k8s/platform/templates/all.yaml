@@ -66,6 +66,10 @@ spec:
         env:
         - name: NODE_ENV
           value: {{ .Values.environment }}
+        - name: NEXT_PUBLIC_SUPABASE_URL
+          value: {{ .Values.supabase.url }}
+        - name: NEXT_PUBLIC_SUPABASE_ANON_KEY
+          value: {{ .Values.supabase.anonKey }}
 ---
 apiVersion: v1
 kind: Service
