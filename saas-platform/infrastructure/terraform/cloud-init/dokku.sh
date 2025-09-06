@@ -35,11 +35,11 @@ cat > /root/add-platform-key.sh <<'KEYEOF'
 #!/bin/bash
 # This script will be called by the platform server to add its SSH key
 # Usage: ssh root@dokku-server 'bash /root/add-platform-key.sh "ssh-ed25519 AAAA..."'
-if [ -z "$1" ]; then
-  echo "Usage: $0 'ssh-key'"
+if [ -z "$$1" ]; then
+  echo "Usage: $$0 'ssh-key'"
   exit 1
 fi
-echo "$1" >> /root/.ssh/authorized_keys
+echo "$$1" >> /root/.ssh/authorized_keys
 echo "Platform SSH key added successfully"
 KEYEOF
 chmod +x /root/add-platform-key.sh
@@ -95,14 +95,14 @@ chown -R dokku-deploy:dokku-deploy /home/dokku-deploy/.ssh
 echo "dokku-deploy ALL=(ALL) NOPASSWD: /usr/bin/dokku" >> /etc/sudoers.d/dokku-deploy
 
 # Mount volume (required for production)
-DEVICE=$(ls /dev/disk/by-id/scsi-0HC_Volume_* | head -n1)
-if ! blkid $DEVICE; then
-  mkfs.ext4 $DEVICE
+DEVICE=$$(ls /dev/disk/by-id/scsi-0HC_Volume_* | head -n1)
+if ! blkid $$DEVICE; then
+  mkfs.ext4 $$DEVICE
 fi
 mkdir -p /mnt/dokku-data
-mount $DEVICE /mnt/dokku-data
-UUID=$(blkid -s UUID -o value $DEVICE)
-echo "UUID=$UUID /mnt/dokku-data ext4 defaults,nofail 0 2" >> /etc/fstab
+mount $$DEVICE /mnt/dokku-data
+UUID=$$(blkid -s UUID -o value $$DEVICE)
+echo "UUID=$$UUID /mnt/dokku-data ext4 defaults,nofail 0 2" >> /etc/fstab
 
 # Move Docker data to volume
 systemctl stop docker

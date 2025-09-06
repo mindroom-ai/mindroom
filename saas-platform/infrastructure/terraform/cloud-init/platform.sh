@@ -65,14 +65,14 @@ EOF
 sysctl -p
 
 # Mount volume (required for production)
-DEVICE=$(ls /dev/disk/by-id/scsi-0HC_Volume_* | head -n1)
-if ! blkid $DEVICE; then
-  mkfs.ext4 $DEVICE
+DEVICE=$$(ls /dev/disk/by-id/scsi-0HC_Volume_* | head -n1)
+if ! blkid $$DEVICE; then
+  mkfs.ext4 $$DEVICE
 fi
 mkdir -p /mnt/platform-data
-mount $DEVICE /mnt/platform-data
-UUID=$(blkid -s UUID -o value $DEVICE)
-echo "UUID=$UUID /mnt/platform-data ext4 defaults,nofail 0 2" >> /etc/fstab
+mount $$DEVICE /mnt/platform-data
+UUID=$$(blkid -s UUID -o value $$DEVICE)
+echo "UUID=$$UUID /mnt/platform-data ext4 defaults,nofail 0 2" >> /etc/fstab
 
 # Create directories for services
 mkdir -p /mnt/platform-data/stripe-handler
@@ -266,7 +266,7 @@ systemctl enable nginx
 systemctl restart nginx
 
 # Create admin htpasswd
-echo "admin:$(openssl passwd -apr1 'MindRoom2024!')" > /etc/nginx/.htpasswd
+echo "admin:$$(openssl passwd -apr1 'MindRoom2024!')" > /etc/nginx/.htpasswd
 
 # Create deployment script that will be run after Docker images are available
 cat > /opt/platform/deploy-services.sh <<'DEPLOYEOF'
@@ -274,8 +274,8 @@ cat > /opt/platform/deploy-services.sh <<'DEPLOYEOF'
 # This script deploys the actual platform services
 # It should be run after the Docker images are available
 
-REGISTRY="${registry:-git.nijho.lt/basnijholt}"
-ARCH="${docker_arch:-amd64}"
+REGISTRY="$${REGISTRY:-git.nijho.lt/basnijholt}"
+ARCH="$${DOCKER_ARCH:-amd64}"
 
 # Stop any placeholder containers
 docker stop placeholder 2>/dev/null || true
@@ -291,7 +291,7 @@ docker run -d \
   --restart always \
   -p 3000:3000 \
   --env-file /opt/platform/.env \
-  ${REGISTRY}/customer-portal:${ARCH}
+  $${REGISTRY}/customer-portal:$${ARCH}
 
 # Deploy Admin Dashboard (nginx serves on port 80 internally)
 docker run -d \
@@ -299,7 +299,7 @@ docker run -d \
   --restart always \
   -p 3001:80 \
   --env-file /opt/platform/.env \
-  ${REGISTRY}/admin-dashboard:${ARCH}
+  $${REGISTRY}/admin-dashboard:$${ARCH}
 
 # Deploy Stripe Handler (service runs on port 3005 internally)
 docker run -d \
@@ -307,7 +307,7 @@ docker run -d \
   --restart always \
   -p 3002:3005 \
   --env-file /opt/platform/.env \
-  ${REGISTRY}/stripe-handler:${ARCH}
+  $${REGISTRY}/stripe-handler:$${ARCH}
 
 # Deploy Dokku Provisioner (service runs on port 8002 internally)
 docker run -d \
@@ -319,7 +319,7 @@ docker run -d \
   -e DOKKU_SSH_USER=root \
   -e DOKKU_SSH_KEY_PATH=/ssh/id_rsa \
   -v /opt/platform/dokku-ssh-key:/ssh/id_rsa:ro \
-  ${REGISTRY}/dokku-provisioner:${ARCH}
+  $${REGISTRY}/dokku-provisioner:$${ARCH}
 
 echo "Services deployed successfully!"
 docker ps
@@ -359,10 +359,10 @@ systemctl start certbot.timer
 cat > /opt/platform/check-status.sh <<'STATUSEOF'
 #!/bin/bash
 echo "=== Platform Services Status ==="
-echo "Customer Portal: $(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000)"
-echo "Admin Dashboard: $(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001)"
-echo "Stripe Handler: $(curl -s http://localhost:3002/health | jq -r .status 2>/dev/null || echo "not running")"
-echo "Dokku Provisioner: $(curl -s http://localhost:3003/health | jq -r .status 2>/dev/null || echo "not running")"
+echo "Customer Portal: $$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000)"
+echo "Admin Dashboard: $$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001)"
+echo "Stripe Handler: $$(curl -s http://localhost:3002/health | jq -r .status 2>/dev/null || echo "not running")"
+echo "Dokku Provisioner: $$(curl -s http://localhost:3003/health | jq -r .status 2>/dev/null || echo "not running")"
 echo ""
 echo "=== Docker Containers ==="
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
