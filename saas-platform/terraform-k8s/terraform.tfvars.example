@@ -1,0 +1,39 @@
+# ===========================================
+# MindRoom K8s Infrastructure Configuration
+# ===========================================
+# Copy this file to terraform.tfvars and fill in your values
+# NEVER commit terraform.tfvars to version control!
+# ===========================================
+
+# Hetzner Cloud
+hcloud_token = "YOUR_HETZNER_API_TOKEN"
+
+# DNS Management (Porkbun)
+porkbun_api_key    = "YOUR_PORKBUN_API_KEY"
+porkbun_secret_key = "YOUR_PORKBUN_SECRET_KEY"
+
+# Domain and Environment
+domain      = "mindroom.chat"
+environment = "staging"  # or "production"
+
+# Supabase
+supabase_url         = "https://YOUR_PROJECT.supabase.co"
+supabase_anon_key    = "eyJ..."
+supabase_service_key = "eyJ..."
+
+# Stripe
+stripe_publishable_key = "pk_test_..."
+stripe_secret_key      = "sk_test_..."
+stripe_webhook_secret  = "whsec_..."
+
+# Docker Registry (Gitea)
+gitea_token = "YOUR_GITEA_TOKEN"
+registry    = "git.nijho.lt/basnijholt"
+image_tag   = "latest"
+
+# Server Configuration
+server_type = "cpx31"  # 4 vCPU, 8GB RAM
+location    = "fsn1"   # Falkenstein, Germany
+
+# Cluster Configuration
+cluster_name = "mindroom-k8s"

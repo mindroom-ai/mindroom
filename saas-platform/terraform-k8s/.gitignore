@@ -1,0 +1,34 @@
+# Terraform files
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+.terraform/
+.terraform.lock.hcl
+
+# Sensitive files
+terraform.tfvars
+*.tfvars
+!terraform.tfvars.example
+kubeconfig
+*_kubeconfig.yaml
+*.pem
+*.key
+cluster_ssh_key
+cluster_ssh_key.pub
+
+# Binaries and downloads
+kubectl
+packer
+*.zip
+*_kustomization_backup.yaml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
