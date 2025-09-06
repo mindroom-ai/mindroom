@@ -45,7 +45,7 @@ def check_yaml_file(filepath):
                 if "|" in content_str and "bash" in content_str:
                     line_with_pipe = next((line for line in content_str.split("\n") if "|" in line), "")
                     warnings.append(
-                        f"  File {file_entry.get('path', idx)}: Contains pipe '|' which may cause YAML parsing issues"
+                        f"  File {file_entry.get('path', idx)}: Contains pipe '|' which may cause YAML parsing issues",
                     )
                     warnings.append(f"    Problem line: {line_with_pipe[:80]}...")
 
