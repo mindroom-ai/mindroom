@@ -111,6 +111,23 @@ kubectl get nodes
 kubectl get pods -A
 ```
 
+## Post-Deployment Setup
+
+### Configure Authentication Providers
+
+After deployment, configure OAuth providers in Supabase:
+
+1. **Access Supabase Dashboard**: https://supabase.com/dashboard/project/[your-project-id]
+2. **Enable Providers**: Authentication → Providers → Enable Google/GitHub
+3. **Add Redirect URLs**: Authentication → URL Configuration
+   ```
+   https://app.staging.mindroom.chat/auth/callback
+   https://app.mindroom.chat/auth/callback
+   http://localhost:3000/auth/callback
+   ```
+
+See [setup-auth-instructions.md](../scripts/database/setup-auth-instructions.md) for detailed OAuth setup.
+
 ## Environments
 
 - **Staging**: Uses `staging.mindroom.chat` subdomain
