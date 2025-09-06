@@ -1,8 +1,18 @@
 #cloud-config
-# Dokku Server Configuration for MindRoom SaaS
+# Dokku Server Configuration - Using Native CloudInit Features
 
 package_update: true
 package_upgrade: true
+
+# Create users with SSH keys - CloudInit native feature!
+users:
+  - default
+  - name: dokku-deploy
+    groups: [docker, sudo]
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD: /usr/bin/dokku']
+    ssh_authorized_keys:
+      - ${provisioner_pub_key}
 
 packages:
   - apt-transport-https
@@ -15,71 +25,75 @@ packages:
   - htop
   - ncdu
   - tmux
-  - docker.io
   - wget
+  - gnupg
+  - lsb-release
 
-# Run commands
-runcmd:
-  # Configure Docker
-  - systemctl enable docker
-  - systemctl start docker
-
-  # Install Dokku
-  - wget -NP /tmp https://dokku.com/install/${dokku_version}/bootstrap.sh
-  - sudo DOKKU_TAG=${dokku_version} bash /tmp/bootstrap.sh
-
-  # Configure Dokku
-  - dokku domains:set-global ${dokku_domain}
-
-  # Install Dokku plugins
-  - dokku plugin:install https://github.com/dokku/dokku-postgres.git postgres
-  - dokku plugin:install https://github.com/dokku/dokku-redis.git redis
-  - dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git
-  - dokku letsencrypt:cron-job --add
-  - dokku plugin:install https://github.com/dokku/dokku-resource-limit.git resource-limit
-
-  # Configure firewall
-  - ufw --force enable
-  - ufw default deny incoming
-  - ufw default allow outgoing
-  - ufw allow 22/tcp
-  - ufw allow 80/tcp
-  - ufw allow 443/tcp
-  - ufw allow 8448/tcp
-  - ufw reload
-
-  # Configure fail2ban
-  - systemctl enable fail2ban
-  - systemctl start fail2ban
-
-  # Add swap
-  - fallocate -l 4G /swapfile
-  - chmod 600 /swapfile
-  - mkswap /swapfile
-  - swapon /swapfile
-  - echo '/swapfile none swap sw 0 0' >> /etc/fstab
-
-  # Mount volume if exists
-  - bash /opt/dokku/scripts/mount-volume.sh
-
-  # Setup Dokku users and permissions
-  - bash /opt/dokku/scripts/setup-dokku.sh
-
-  # Add provisioner SSH key
-  - 'echo "${provisioner_pub_key}" | dokku ssh-keys:add provisioner'
-
-# Write files
+# Write the Dokku installation script
 write_files:
-  # Sysctl optimizations
-  - path: /etc/sysctl.d/99-dokku.conf
+  - path: /root/setup-docker.sh
+    owner: root:root
+    permissions: '0755'
     content: |
-      vm.max_map_count=262144
-      net.core.somaxconn=65535
-      net.ipv4.tcp_max_syn_backlog=65535
-      net.ipv4.ip_local_port_range=1024 65535
+      #!/bin/bash
+      set -e
 
-  # Volume mounting script
-  - path: /opt/dokku/scripts/mount-volume.sh
+      # Add Docker's official GPG key
+      mkdir -p /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+      # Add Docker repository
+      echo "deb [arch=$$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $$(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+      # Install Docker
+      apt-get update
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+      # Enable Docker service
+      systemctl enable docker
+      systemctl start docker
+
+  - path: /root/install-dokku.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+
+      # Configure Dokku installation
+      export DEBIAN_FRONTEND=noninteractive
+      echo 'dokku dokku/nginx_enable boolean true' | debconf-set-selections
+      echo 'dokku dokku/hostname string ${dokku_domain}' | debconf-set-selections
+      echo 'dokku dokku/skip_key_file boolean true' | debconf-set-selections
+      echo 'dokku dokku/vhost_enable boolean true' | debconf-set-selections
+
+      # Install Dokku
+      apt-get update
+      apt-get install -y dokku=${dokku_version}
+
+      # Configure Dokku
+      dokku domains:set-global ${dokku_domain}
+
+      # Install plugins
+      dokku plugin:install https://github.com/dokku/dokku-postgres.git postgres
+      dokku plugin:install https://github.com/dokku/dokku-redis.git redis
+      dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git
+      dokku letsencrypt:cron-job --add
+      dokku plugin:install https://github.com/dokku/dokku-resource-limit.git resource-limit
+
+      # Add provisioner SSH key to Dokku
+      cat > /tmp/provisioner.pub <<'KEYEOF'
+      ${provisioner_pub_key}
+      KEYEOF
+      dokku ssh-keys:add provisioner < /tmp/provisioner.pub
+      rm /tmp/provisioner.pub
+
+      # Set admin password
+      echo 'dokku:${admin_password}' > /tmp/dokku.pass
+      chpasswd < /tmp/dokku.pass
+      rm /tmp/dokku.pass
+
+  - path: /root/setup-volume.sh
     owner: root:root
     permissions: '0755'
     content: |
@@ -99,7 +113,7 @@ write_files:
           fi
         fi
 
-        # Move Docker data to volume
+        # Move Docker and Dokku data to volume
         systemctl stop docker
         if [ -d /var/lib/docker ] && [ ! -L /var/lib/docker ]; then
           mv /var/lib/docker /mnt/dokku-data/
@@ -107,44 +121,18 @@ write_files:
         fi
         systemctl start docker
 
-        # Move Dokku data to volume
         if [ -d /home/dokku ] && [ ! -L /home/dokku ]; then
           mv /home/dokku /mnt/dokku-data/
           ln -s /mnt/dokku-data/dokku /home/dokku
         fi
       fi
 
-  # Dokku setup script
-  - path: /opt/dokku/scripts/setup-dokku.sh
-    owner: root:root
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      set -e
-
-      # Create dokku-deploy user for provisioner
-      if ! id -u dokku-deploy >/dev/null 2>&1; then
-        useradd -m -s /bin/bash dokku-deploy
-        usermod -aG docker dokku-deploy
-        mkdir -p /home/dokku-deploy/.ssh
-        echo "${provisioner_pub_key}" > /home/dokku-deploy/.ssh/authorized_keys
-        chmod 700 /home/dokku-deploy/.ssh
-        chmod 600 /home/dokku-deploy/.ssh/authorized_keys
-        chown -R dokku-deploy:dokku-deploy /home/dokku-deploy/.ssh
-        echo "dokku-deploy ALL=(ALL) NOPASSWD: /usr/bin/dokku" >> /etc/sudoers.d/dokku-deploy
-      fi
-
-      # Set Dokku admin password
-      echo "dokku:${admin_password}" | chpasswd
-
-  # SSH key addition script for platform server
   - path: /root/add-platform-key.sh
     owner: root:root
     permissions: '0755'
     content: |
       #!/bin/bash
-      # This script will be called by the platform server to add its SSH key
-      # Usage: ssh root@dokku-server 'bash /root/add-platform-key.sh "ssh-ed25519 AAAA..."'
+      # Add platform server's SSH key
       if [ -z "$$1" ]; then
         echo "Usage: $$0 'ssh-key'"
         exit 1
@@ -156,13 +144,44 @@ write_files:
         echo "Key already exists"
       fi
 
-# System configuration
-bootcmd:
-  - echo 'vm.max_map_count=262144' >> /etc/sysctl.conf
-  - sysctl -p
+  - path: /etc/sysctl.d/99-dokku.conf
+    content: |
+      vm.max_map_count=262144
+      net.core.somaxconn=65535
+      net.ipv4.tcp_max_syn_backlog=65535
+      net.ipv4.ip_local_port_range=1024 65535
 
-# Final message
+# Simple runcmd - just run our scripts
+runcmd:
+  # System setup
+  - sysctl -p /etc/sysctl.d/99-dokku.conf
+
+  # Firewall
+  - ufw --force enable
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw allow 8448/tcp
+  - ufw reload
+
+  # Security
+  - systemctl enable fail2ban
+  - systemctl start fail2ban
+
+  # Swap
+  - fallocate -l 4G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - 'echo "/swapfile none swap sw 0 0" >> /etc/fstab'
+
+  # Run setup scripts
+  - bash /root/setup-volume.sh
+  - bash /root/setup-docker.sh
+  - bash /root/install-dokku.sh
+
 final_message: |
   Dokku server setup complete!
   Dokku is ready to receive deployments.
-  Add platform SSH key using: /root/add-platform-key.sh

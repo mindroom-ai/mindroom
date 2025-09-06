@@ -209,7 +209,7 @@ resource "hcloud_server" "dokku" {
     service     = "customer-instances"
   }
 
-  user_data = templatefile("${path.module}/cloud-init/dokku-v2.yaml", {
+  user_data = templatefile("${path.module}/cloud-init/dokku.yaml", {
     dokku_version       = var.dokku_version
     dokku_domain       = var.domain
     admin_password     = random_password.dokku_admin.result
@@ -253,7 +253,7 @@ resource "hcloud_server" "platform" {
     service     = "management"
   }
 
-  user_data = templatefile("${path.module}/cloud-init/platform-v2.yaml", {
+  user_data = templatefile("${path.module}/cloud-init/platform.yaml", {
     domain                = var.domain
     hcloud_token         = var.hcloud_token
     supabase_url         = var.supabase_url
