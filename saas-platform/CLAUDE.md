@@ -40,12 +40,12 @@ cd services/stripe-handler
 pnpm install
 pnpm run dev  # Runs on localhost:3005
 
-# Python Provisioner
-cd services/dokku-provisioner-python
+# Instance Provisioner
+cd services/instance-provisioner
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+python app.py  # Runs on port 8002
 ```
 
 ### Deployment
@@ -103,11 +103,10 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey }}
 - Both environments share K8s cluster but use different namespaces
 
 ### Instance Provisioning
-Two provisioner implementations exist:
-1. **dokku-provisioner-python**: Original SSH-based Dokku provisioner
-2. **k8s_provisioner.py**: New Kubernetes-native provisioner using Helm
-
-The platform is transitioning from Dokku to native K8s deployments.
+The platform uses a Kubernetes-native provisioner (`instance-provisioner`) that:
+- Deploys customer instances using Helm charts
+- Manages instance lifecycle (provision/deprovision)
+- Runs as a service in the Kubernetes cluster
 
 ### Authentication Flow
 1. User visits `/auth/login`

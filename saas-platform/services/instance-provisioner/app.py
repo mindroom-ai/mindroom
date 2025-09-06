@@ -131,10 +131,10 @@ async def root() -> dict:
 async def health() -> dict:
     """Health check."""
     # Check if kubectl is available
-    success, _ = run_command(["kubectl", "version", "--client", "--short"])
+    success, _ = run_command(["kubectl", "version", "--client"])
 
     # Check if helm is available
-    helm_success, _ = run_command(["helm", "version", "--short"])
+    helm_success, _ = run_command(["helm", "version"])
 
     if success and helm_success:
         return {"status": "healthy", "kubectl": "available", "helm": "available"}

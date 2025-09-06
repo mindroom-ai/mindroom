@@ -27,7 +27,7 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
    - `customer-portal:latest`
    - `admin-dashboard:latest`
    - `stripe-handler:latest`
-   - `dokku-provisioner:latest`
+   - `instance-provisioner:latest`
 
    These should be built and pushed to your registry before deployment.
 

@@ -10,11 +10,10 @@ saas-platform/
 ├── supabase/          # Database schema and migrations
 ├── apps/              # Platform web applications
 │   ├── customer-portal/      # Customer signup and management
-│   ├── admin-dashboard/      # Administrative interface
-│   └── dokku-provisioner/    # Instance provisioning service
+│   └── admin-dashboard/      # Administrative interface
 ├── services/          # Platform microservices
 │   ├── stripe-handler/       # Stripe webhook processing
-│   └── dokku-provisioner-python/  # Alternative provisioner implementation
+│   └── instance-provisioner/ # Kubernetes/Helm instance provisioner
 ├── scripts/           # Platform management scripts
 │   ├── deployment/    # Infrastructure and service deployment
 │   ├── database/      # Database migrations and setup

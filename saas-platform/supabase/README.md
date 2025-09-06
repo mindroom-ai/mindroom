@@ -97,6 +97,6 @@ All tables have RLS enabled with policies ensuring:
 
 The platform uses dedicated Node.js services for webhook handling and instance management, not Supabase Edge Functions. The services are:
 - **stripe-handler** - Processes Stripe webhooks
-- **dokku-provisioner** - Manages instance provisioning
+- **instance-provisioner** - Manages instance provisioning using Kubernetes/Helm
 - **customer-portal** - Customer-facing web interface
 - **admin-dashboard** - Administrative interface

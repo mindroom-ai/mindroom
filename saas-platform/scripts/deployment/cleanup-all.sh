@@ -72,7 +72,7 @@ if [ -n "$REGISTRY" ]; then
     docker rmi ${REGISTRY}/customer-portal:${DOCKER_ARCH:-amd64} 2>/dev/null || true
     docker rmi ${REGISTRY}/admin-dashboard:${DOCKER_ARCH:-amd64} 2>/dev/null || true
     docker rmi ${REGISTRY}/stripe-handler:${DOCKER_ARCH:-amd64} 2>/dev/null || true
-    docker rmi ${REGISTRY}/dokku-provisioner:${DOCKER_ARCH:-amd64} 2>/dev/null || true
+    docker rmi ${REGISTRY}/instance-provisioner:${DOCKER_ARCH:-amd64} 2>/dev/null || true
 fi
 
 echo -e "${GREEN}✅ Docker images cleaned up${NC}"
