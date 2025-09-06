@@ -69,13 +69,23 @@ echo ""
 echo -e "${YELLOW}🔑 Step 2: Setting up SSH keys${NC}"
 echo "================================"
 
-# Get the platform server's SSH public key and add it to Dokku
-PLATFORM_KEY=$(ssh root@$PLATFORM_IP "cat /opt/platform/dokku-ssh-key.pub" 2>/dev/null)
+# Wait for platform SSH key to be generated if needed
+for i in {1..10}; do
+    PLATFORM_KEY=$(ssh root@$PLATFORM_IP "cat /opt/platform/dokku-ssh-key.pub" 2>/dev/null)
+    if [ -n "$PLATFORM_KEY" ]; then
+        break
+    fi
+    echo "Waiting for SSH key generation... ($i/10)"
+    sleep 2
+done
+
 if [ -n "$PLATFORM_KEY" ]; then
-    ssh root@$DOKKU_IP "echo '$PLATFORM_KEY' >> /root/.ssh/authorized_keys"
+    # Add key to Dokku server if not already present
+    ssh root@$DOKKU_IP "grep -q \"$PLATFORM_KEY\" /root/.ssh/authorized_keys 2>/dev/null || echo '$PLATFORM_KEY' >> /root/.ssh/authorized_keys"
     echo -e "${GREEN}✅ SSH key added to Dokku server${NC}"
 else
-    echo -e "${YELLOW}⚠️  Platform SSH key not found (will be generated on first boot)${NC}"
+    echo -e "${RED}❌ Platform SSH key not found after waiting${NC}"
+    exit 1
 fi
 
 echo ""
@@ -87,6 +97,8 @@ echo "================================="
 # Copy .env file to platform server and fix format
 scp -q .env root@$PLATFORM_IP:/root/.env.tmp
 ssh root@$PLATFORM_IP "sed 's/^export //' /root/.env.tmp > /root/.env && rm /root/.env.tmp"
+# Add DOKKU_USER=root to ensure dokku-provisioner connects as root
+ssh root@$PLATFORM_IP "echo 'DOKKU_USER=root' >> /root/.env"
 # Also copy to /opt/platform for the systemd service
 ssh root@$PLATFORM_IP "cp /root/.env /opt/platform/.env"
 echo -e "${GREEN}✅ Environment file copied and formatted${NC}"
@@ -135,18 +147,28 @@ docker run -d \
   git.nijho.lt/basnijholt/stripe-handler:amd64
 
 # Run Dokku Provisioner (service runs on port 8002 internally)
+# Note: We need to copy the SSH key into the container with correct permissions
+# because the container runs as nodejs user and can't read root-owned files
 docker run -d \
   --name dokku-provisioner \
   --network platform \
   --restart unless-stopped \
   -p 3003:8002 \
-  -v /opt/platform/dokku-ssh-key:/ssh/id_rsa:ro \
   --env-file /root/.env \
-  -e DOKKU_SSH_KEY_PATH=/ssh/id_rsa \
+  -e DOKKU_SSH_KEY_PATH=/app/dokku-key \
+  -e DOKKU_USER=root \
   git.nijho.lt/basnijholt/dokku-provisioner:amd64
 
+# Copy SSH key into container with correct permissions
+docker cp /opt/platform/dokku-ssh-key dokku-provisioner:/app/dokku-key
+docker exec -u root dokku-provisioner sh -c 'chmod 600 /app/dokku-key && chown nodejs:nodejs /app/dokku-key'
+docker restart dokku-provisioner
+
+# Fix any nginx config issues (from cloud-init double $$ escaping)
+find /etc/nginx -type f \( -name '*.conf' -o -name 'default' -o -name 'platform-services' \) -exec sed -i 's/\$\$/\$/g' {} \;
+
 # Restart Nginx to ensure configs are loaded
-nginx -t && systemctl reload nginx
+nginx -t && (systemctl is-active nginx && systemctl reload nginx || systemctl start nginx)
 
 # Check status
 echo ""
