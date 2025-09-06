@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Test MindRoom Helm chart locally with kind
 
 set -e
