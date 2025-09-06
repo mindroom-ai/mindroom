@@ -66,6 +66,8 @@ spec:
         env:
         - name: NODE_ENV
           value: production
+        - name: NEXT_PUBLIC_APP_URL
+          value: https://app.{{ .Values.domain }}
         # Map standard env vars to Next.js public env vars
         - name: NEXT_PUBLIC_SUPABASE_URL
           valueFrom:
