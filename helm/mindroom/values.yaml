@@ -1,0 +1,14 @@
+customer: demo
+domain: demo.mindroom.chat
+storage: 10Gi  # More storage for Matrix data
+
+# Docker images
+mindroom_image: git.nijho.lt/basnijholt/mindroom-frontend:latest
+synapse_image: matrixdotorg/synapse:latest
+
+# API Keys (set via --set)
+openai_key: ""
+anthropic_key: ""
+
+# Matrix admin user
+matrix_admin_password: "changeme"
