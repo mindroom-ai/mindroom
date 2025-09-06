@@ -114,3 +114,32 @@ variable "location" {
   type        = string
   default     = "fsn1"
 }
+
+# OAuth Provider Variables
+variable "google_oauth_client_id" {
+  description = "Google OAuth Client ID"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "google_oauth_client_secret" {
+  description = "Google OAuth Client Secret"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "github_oauth_client_id" {
+  description = "GitHub OAuth Client ID"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "github_oauth_client_secret" {
+  description = "GitHub OAuth Client Secret"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
