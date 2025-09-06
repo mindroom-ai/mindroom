@@ -28,6 +28,7 @@ packages:
   - wget
   - gnupg
   - lsb-release
+  - nginx
 
 # Write the Dokku installation script
 write_files:
@@ -60,19 +61,32 @@ write_files:
       #!/bin/bash
       set -e
 
+      # Install nginx first (required for Dokku web)
+      apt-get update
+      apt-get install -y nginx
+      systemctl enable nginx
+      systemctl start nginx
+
       # Configure Dokku installation
       export DEBIAN_FRONTEND=noninteractive
       echo 'dokku dokku/nginx_enable boolean true' | debconf-set-selections
       echo 'dokku dokku/hostname string ${dokku_domain}' | debconf-set-selections
       echo 'dokku dokku/skip_key_file boolean true' | debconf-set-selections
       echo 'dokku dokku/vhost_enable boolean true' | debconf-set-selections
+      echo 'dokku dokku/web_config boolean true' | debconf-set-selections
 
       # Install Dokku
-      apt-get update
       apt-get install -y dokku=${dokku_version}
+
+      # Enable nginx plugin explicitly
+      dokku plugin:enable nginx-vhosts
 
       # Configure Dokku
       dokku domains:set-global ${dokku_domain}
+      
+      # Ensure nginx is configured for Dokku
+      dokku nginx:set --global server-tokens off
+      dokku nginx:set --global client-max-body-size 50m
 
       # Install plugins
       dokku plugin:install https://github.com/dokku/dokku-postgres.git postgres
