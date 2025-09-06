@@ -65,11 +65,18 @@ spec:
             name: platform-secrets
         env:
         - name: NODE_ENV
-          value: {{ .Values.environment }}
+          value: production
+        # Map standard env vars to Next.js public env vars
         - name: NEXT_PUBLIC_SUPABASE_URL
-          value: {{ .Values.supabase.url }}
+          valueFrom:
+            secretKeyRef:
+              name: platform-secrets
+              key: SUPABASE_URL
         - name: NEXT_PUBLIC_SUPABASE_ANON_KEY
-          value: {{ .Values.supabase.anonKey }}
+          valueFrom:
+            secretKeyRef:
+              name: platform-secrets
+              key: SUPABASE_ANON_KEY
 ---
 apiVersion: v1
 kind: Service
