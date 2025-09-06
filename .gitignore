@@ -215,6 +215,9 @@ token.json
 frontend/test-*.js
 frontend/test-*.html
 
+# Node.js
+node_modules/
+
 # Node.js logs
 pnpm-debug.log*
 yarn-debug.log*
@@ -230,3 +233,6 @@ deploy/instances.json
 deploy/.env.*
 deploy/instance_data/
 deploy/bridge_instances.json
+terraform.tfstate
+apps/admin-dashboard/.next/
+.vite/

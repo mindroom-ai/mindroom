@@ -1,0 +1,44 @@
+# Multi-stage build for stripe handler
+FROM node:20-slim AS base
+RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
+RUN npm install -g pnpm
+
+# Dependencies stage
+FROM base AS deps
+WORKDIR /app
+COPY services/stripe-handler/package.json services/stripe-handler/pnpm-lock.yaml ./
+# Use cache mount for pnpm store to speed up builds
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+# Build stage
+FROM deps AS builder
+WORKDIR /app
+COPY services/stripe-handler/ ./
+# Compile TypeScript
+RUN pnpm run build
+
+# Production stage
+FROM node:20-slim AS final
+RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
+RUN npm install -g pnpm
+WORKDIR /app
+
+# Copy built application and dependencies
+COPY --from=builder /app/dist /app/dist
+COPY --from=builder /app/package.json /app/package.json
+COPY --from=builder /app/pnpm-lock.yaml /app/pnpm-lock.yaml
+
+# Install only production dependencies
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile --production
+
+# Expose port
+EXPOSE 3007
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3007/health || exit 1
+
+# Start the service
+CMD ["node", "dist/index.js"]

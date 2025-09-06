@@ -1,0 +1,39 @@
+# Multi-stage build for admin dashboard
+FROM node:20-slim AS base
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN npm install -g pnpm
+
+# Dependencies stage
+FROM base AS deps
+WORKDIR /app
+COPY apps/admin-dashboard/package.json apps/admin-dashboard/pnpm-lock.yaml ./
+# Use cache mount for pnpm store to speed up builds
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+# Build stage
+FROM deps AS builder
+WORKDIR /app
+COPY apps/admin-dashboard/ ./
+# Build with environment variables
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_SERVICE_KEY
+ARG VITE_STRIPE_SECRET_KEY
+ENV VITE_SUPABASE_URL=${VITE_SUPABASE_URL}
+ENV VITE_SUPABASE_SERVICE_KEY=${VITE_SUPABASE_SERVICE_KEY}
+ENV VITE_STRIPE_SECRET_KEY=${VITE_STRIPE_SECRET_KEY}
+RUN pnpm run build
+
+# Production stage
+FROM nginx:alpine AS final
+# Copy built assets from builder
+COPY --from=builder /app/dist /usr/share/nginx/html
+# Copy nginx configuration if it exists
+COPY apps/admin-dashboard/nginx.conf /etc/nginx/conf.d/default.conf
+# Expose port
+EXPOSE 80
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost/ || exit 1
+# Start nginx
+CMD ["nginx", "-g", "daemon off;"]

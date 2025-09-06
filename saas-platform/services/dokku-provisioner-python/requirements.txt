@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+paramiko
+asyncpg
+httpx
+python-dotenv
+jinja2
+pyyaml
+supabase

@@ -1,0 +1,107 @@
+name: Build Platform Services
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'saas-platform/**'
+      - '.github/workflows/platform-services.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'saas-platform/**'
+      - '.github/workflows/platform-services.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: git.nijho.lt
+  REGISTRY_USER: basnijholt
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - name: customer-portal
+            dockerfile: Dockerfile.customer-portal
+            context: saas-platform
+          - name: admin-dashboard
+            dockerfile: Dockerfile.admin-dashboard
+            context: saas-platform
+          - name: stripe-handler
+            dockerfile: Dockerfile.stripe-handler
+            context: saas-platform
+          - name: dokku-provisioner
+            dockerfile: Dockerfile.dokku-provisioner
+            context: saas-platform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Gitea Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.REGISTRY_USER }}
+          password: ${{ secrets.GITEA_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REGISTRY_USER }}/${{ matrix.service.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=amd64,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.service.context }}
+          file: ${{ matrix.service.context }}/${{ matrix.service.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to Platform Server
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.PLATFORM_HOST }}
+          username: root
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # Login to registry
+            echo "${{ secrets.GITEA_TOKEN }}" | docker login git.nijho.lt -u basnijholt --password-stdin
+
+            # Pull and restart services
+            docker pull git.nijho.lt/basnijholt/customer-portal:latest
+            docker pull git.nijho.lt/basnijholt/admin-dashboard:latest
+            docker pull git.nijho.lt/basnijholt/stripe-handler:latest
+            docker pull git.nijho.lt/basnijholt/dokku-provisioner:latest
+
+            # Restart containers (assuming they exist)
+            docker restart customer-portal admin-dashboard stripe-handler dokku-provisioner || true
+
+            echo "Deployment complete!"
