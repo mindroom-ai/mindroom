@@ -165,6 +165,17 @@ resource "hcloud_firewall" "platform" {
     ]
   }
 
+  # Platform services (temporary - should be removed once nginx proxy is set up)
+  rule {
+    direction = "in"
+    protocol  = "tcp"
+    port      = "3000-3003"
+    source_ips = [
+      "0.0.0.0/0",
+      "::/0"
+    ]
+  }
+
   labels = {
     project     = "mindroom"
     environment = var.environment
