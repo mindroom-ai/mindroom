@@ -37,8 +37,11 @@ app.add_middleware(
 # Security
 security = HTTPBearer()
 
-# Get the API key from environment
-PROVISIONER_API_KEY = os.getenv("PROVISIONER_API_KEY", "change_me_in_production_123")
+# Get the API key from environment (required)
+PROVISIONER_API_KEY = os.getenv("PROVISIONER_API_KEY")
+if not PROVISIONER_API_KEY:
+    logger.warning("PROVISIONER_API_KEY not set - using a temporary key for development")
+    PROVISIONER_API_KEY = "development_only_key_not_for_production"
 
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> bool:  # noqa: B008

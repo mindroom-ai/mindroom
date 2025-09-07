@@ -5,6 +5,11 @@
 
 set -e
 
+# Load environment variables from .env file
+set -a
+eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
+set +a
+
 KUBECONFIG="${KUBECONFIG:-./terraform-k8s/mindroom-k8s_kubeconfig.yaml}"
 
 case "$1" in
@@ -47,7 +52,7 @@ case "$1" in
         echo "Provisioning instance for: $2"
         curl -k -X POST https://api.staging.mindroom.chat/api/v1/provision \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer change_me_in_production_123" \
+            -H "Authorization: Bearer ${PROVISIONER_API_KEY}" \
             -d "{
                 \"account_id\": \"$2\",
                 \"subscription_id\": \"sub-$2\",
@@ -67,7 +72,7 @@ case "$1" in
         echo "Deprovisioning instance for: $2"
         curl -k -X DELETE https://api.staging.mindroom.chat/api/v1/deprovision \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer change_me_in_production_123" \
+            -H "Authorization: Bearer ${PROVISIONER_API_KEY}" \
             -d "{\"customer_id\": \"$2\", \"subscription_id\": \"sub-$2\"}" | jq
         ;;
 
