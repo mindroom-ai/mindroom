@@ -10,18 +10,20 @@
     "create-admin": "node ../../scripts/create-admin-user.js"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "react-admin": "^4.16.0",
-    "@supabase/supabase-js": "^2.39.0",
-    "ra-supabase": "^2.3.0",
-    "recharts": "^2.10.0",
-    "lucide-react": "^0.294.0",
-    "date-fns": "^2.30.0",
-    "@mui/material": "^5.14.0",
     "@emotion/react": "^11.11.0",
     "@emotion/styled": "^11.11.0",
-    "@tanstack/react-query-devtools": "^5.13.0"
+    "@mui/material": "^5.14.0",
+    "@supabase/supabase-js": "^2.39.0",
+    "@tanstack/react-query-devtools": "^5.13.0",
+    "@types/react-router-dom": "^5.3.3",
+    "date-fns": "^2.30.0",
+    "lucide-react": "^0.294.0",
+    "ra-supabase": "^2.3.0",
+    "react": "^18.2.0",
+    "react-admin": "^4.16.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^7.8.2",
+    "recharts": "^2.10.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",

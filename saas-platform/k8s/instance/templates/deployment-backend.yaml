@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mindroom-backend-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: mindroom-backend
+    customer: {{ .Values.customer }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mindroom-backend
+      customer: {{ .Values.customer }}
+  template:
+    metadata:
+      labels:
+        app: mindroom-backend
+        customer: {{ .Values.customer }}
+    spec:
+      containers:
+      - name: mindroom-backend
+        image: {{ .Values.mindroom_backend_image | default "git.nijho.lt/basnijholt/mindroom-backend:latest" }}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8765
+          name: websocket
+        env:
+        - name: OPENAI_API_KEY
+          value: {{ .Values.openai_key | quote }}
+        - name: ANTHROPIC_API_KEY
+          value: {{ .Values.anthropic_key | quote }}
+        - name: CUSTOMER_ID
+          value: {{ .Values.customer }}
+        - name: STORAGE_PATH
+          value: /app/mindroom_data
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: MATRIX_HOMESERVER
+          value: "http://synapse-{{ .Values.customer }}:8008"
+        - name: MATRIX_USER
+          value: "@admin:{{ .Values.customer }}.{{ .Values.baseDomain }}"
+        - name: MATRIX_PASSWORD
+          value: {{ .Values.matrix_admin_password }}
+        volumeMounts:
+        - name: storage
+          mountPath: /app/mindroom_data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+      imagePullSecrets:
+      - name: gitea-registry
+      volumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: mindroom-storage-{{ .Values.customer }}

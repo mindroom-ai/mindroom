@@ -29,13 +29,14 @@ export interface Subscription {
 export interface Instance {
   id: string;
   subscription_id: string;
-  dokku_app_name: string;
+  instance_id: string; // Unique K8s instance identifier (was dokku_app_name)
   subdomain: string;
   status: 'provisioning' | 'active' | 'deprovisioning' | 'failed' | 'stopped';
   frontend_url: string;
   backend_url: string;
   memory_limit_mb: number;
   cpu_limit: number;
+  auth_token?: string; // Simple auth token for the instance
   deprovisioned_at?: Date | null;
   created_at: Date;
   updated_at: Date;
@@ -77,10 +78,12 @@ export interface ProvisionResponse {
   backendUrl: string;
   status: 'success' | 'pending';
   message?: string;
+  authToken?: string; // Auth token for the instance
 }
 
 export interface DeprovisionRequest {
   appName: string;
+  subscriptionId?: string; // Optional subscription ID for K8s provisioner
 }
 
 export interface DeprovisionResponse {

@@ -16,11 +16,24 @@ export const authProvider: AuthProvider = {
         throw new Error(error.message)
       }
 
+      // Check if user is an admin
+      const { data: account } = await supabase
+        .from('accounts')
+        .select('is_admin')
+        .eq('email', username)
+        .single()
+
+      if (!account?.is_admin) {
+        await supabase.auth.signOut()
+        throw new Error('Access denied. Admin privileges required.')
+      }
+
       // Store the session
       if (data.session) {
         localStorage.setItem('auth_token', data.session.access_token)
         localStorage.setItem('refresh_token', data.session.refresh_token)
         localStorage.setItem('user', JSON.stringify(data.user))
+        localStorage.setItem('is_admin', 'true')
       }
 
       return Promise.resolve()
@@ -34,18 +47,33 @@ export const authProvider: AuthProvider = {
     localStorage.removeItem('auth_token')
     localStorage.removeItem('refresh_token')
     localStorage.removeItem('user')
+    localStorage.removeItem('is_admin')
     return Promise.resolve()
   },
 
   checkAuth: async () => {
     const token = localStorage.getItem('auth_token')
-    if (!token) {
+    const isAdmin = localStorage.getItem('is_admin')
+
+    if (!token || !isAdmin) {
       return Promise.reject()
     }
 
     // Verify the session is still valid
     const { data: { session }, error } = await supabase.auth.getSession()
     if (error || !session) {
+      return Promise.reject()
+    }
+
+    // Double-check admin status in database
+    const { data: account } = await supabase
+      .from('accounts')
+      .select('is_admin')
+      .eq('email', session.user.email)
+      .single()
+
+    if (!account?.is_admin) {
+      localStorage.removeItem('is_admin')
       return Promise.reject()
     }
 
@@ -58,6 +86,7 @@ export const authProvider: AuthProvider = {
       localStorage.removeItem('auth_token')
       localStorage.removeItem('refresh_token')
       localStorage.removeItem('user')
+      localStorage.removeItem('is_admin')
       return Promise.reject()
     }
     return Promise.resolve()

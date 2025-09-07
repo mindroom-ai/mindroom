@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: synapse-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: synapse
+    customer: {{ .Values.customer }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: synapse
+      customer: {{ .Values.customer }}
+  template:
+    metadata:
+      labels:
+        app: synapse
+        customer: {{ .Values.customer }}
+    spec:
+      containers:
+      - name: synapse
+        image: {{ .Values.synapse_image | default "matrixdotorg/synapse:latest" }}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8008
+          name: http
+        env:
+        - name: SYNAPSE_SERVER_NAME
+          value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
+        - name: SYNAPSE_REPORT_STATS
+          value: "no"
+        - name: SYNAPSE_CONFIG_DIR
+          value: "/data"
+        - name: SYNAPSE_DATA_DIR
+          value: "/data"
+        volumeMounts:
+        - name: synapse-data
+          mountPath: /data
+        - name: synapse-config
+          mountPath: /data/homeserver.yaml
+          subPath: homeserver.yaml
+        - name: synapse-config
+          mountPath: /data/log.config
+          subPath: log.config
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        # Initialize and start Synapse
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            # Fix permissions
+            chown -R 991:991 /data
+            # Generate signing key if it doesn't exist
+            if [ ! -f /data/{{ .Values.customer }}.signing.key ]; then
+              echo "Generating signing key..."
+              su-exec 991:991 python -m synapse.app.homeserver \
+                --config-path /data/homeserver.yaml \
+                --generate-keys
+            fi
+            # Start Synapse
+            echo "Starting Synapse..."
+            exec /start.py
+      volumes:
+      - name: synapse-data
+        persistentVolumeClaim:
+          claimName: synapse-storage-{{ .Values.customer }}
+      - name: synapse-config
+        configMap:
+          name: synapse-config-{{ .Values.customer }}

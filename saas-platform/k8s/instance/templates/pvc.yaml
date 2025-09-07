@@ -1,0 +1,32 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mindroom-storage-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: mindroom
+    customer: {{ .Values.customer }}
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.storage }}
+  storageClassName: hcloud-volumes
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: synapse-storage-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: synapse
+    customer: {{ .Values.customer }}
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.storage }}
+  storageClassName: hcloud-volumes

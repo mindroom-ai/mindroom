@@ -7,16 +7,55 @@ import { InstanceCard } from '@/components/dashboard/InstanceCard'
 import { UsageChart } from '@/components/dashboard/UsageChart'
 import { QuickActions } from '@/components/dashboard/QuickActions'
 import { Loader2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 
 export default function DashboardPage() {
   const { user } = useAuth()
   const { instance, loading: instanceLoading } = useInstance()
-  const { subscription } = useSubscription()
+  const { subscription, loading: subscriptionLoading } = useSubscription()
+  const [isSettingUp, setIsSettingUp] = useState(false)
+  const router = useRouter()
 
-  if (instanceLoading) {
+  useEffect(() => {
+    // Auto-setup free tier if user has no subscription
+    const setupFreeTier = async () => {
+      if (!user || subscriptionLoading || subscription || isSettingUp) {
+        return
+      }
+
+      setIsSettingUp(true)
+      try {
+        const response = await fetch('/api/auth/setup', {
+          method: 'POST',
+        })
+
+        if (response.ok) {
+          router.refresh()
+        } else {
+          console.error('Failed to setup free tier:', await response.text())
+        }
+      } catch (error) {
+        console.error('Error setting up free tier:', error)
+      } finally {
+        setIsSettingUp(false)
+      }
+    }
+
+    setupFreeTier()
+  }, [user, subscriptionLoading, subscription, isSettingUp])
+
+  if (instanceLoading || subscriptionLoading || isSettingUp) {
     return (
       <div className="flex items-center justify-center h-96">
-        <Loader2 className="w-8 h-8 animate-spin text-orange-500" />
+        <div className="text-center">
+          <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-4" />
+          {isSettingUp ? (
+            <p className="text-gray-600">Setting up your free MindRoom instance...</p>
+          ) : (
+            <p className="text-gray-600">Loading...</p>
+          )}
+        </div>
       </div>
     )
   }

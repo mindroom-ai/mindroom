@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, Trash2, ExternalLink, Server, Database, Globe } from 'lucide-react'
-import { createClientSupabase } from '@/lib/supabase/client'
+import { createClient } from '@/lib/supabase/client'
 
 type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'deprovisioning' | 'maintenance'
 
@@ -44,35 +44,25 @@ export default function InstancePage() {
     if (!silent) setLoading(true)
 
     try {
-      const supabase = createClientSupabase()
+      // Use API endpoint that has service client access
+      const response = await fetch('/api/instance/status')
 
-      // Get current user
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
-        router.push('/auth/login')
-        return
+      if (!response.ok) {
+        if (response.status === 401) {
+          router.push('/auth/login')
+          return
+        }
+        throw new Error('Failed to fetch instance')
       }
 
-      // Get user's subscription
-      const { data: subscription } = await supabase
-        .from('subscriptions')
-        .select('*')
-        .eq('account_id', user.id)
-        .single()
+      const data = await response.json()
 
-      if (!subscription) {
+      if (!data.subscription) {
         setLoading(false)
         return
       }
 
-      // Get instance for subscription
-      const { data: instanceData } = await supabase
-        .from('instances')
-        .select('*')
-        .eq('subscription_id', subscription.id)
-        .single()
-
-      setInstance(instanceData)
+      setInstance(data.instance)
     } catch (error) {
       console.error('Error fetching instance:', error)
     } finally {
@@ -273,7 +263,7 @@ export default function InstancePage() {
             </div>
             <div>
               <p className="text-sm text-gray-600">Subdomain</p>
-              <p className="font-mono text-sm">{instance.subdomain}</p>
+              <p className="font-mono text-sm">{instance.subdomain}.staging.mindroom.chat</p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Created</p>

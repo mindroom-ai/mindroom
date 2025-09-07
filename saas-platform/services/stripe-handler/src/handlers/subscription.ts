@@ -65,16 +65,17 @@ export async function handleSubscriptionCreated(
       limits: limits,
     });
 
-    // Create instance record
+    // Create instance record with auth token
     await createInstance({
       subscription_id: sub.id,
-      dokku_app_name: provisionResult.appName,
+      instance_id: provisionResult.appName, // K8s instance ID
       subdomain: provisionResult.subdomain,
       status: 'provisioning',
       frontend_url: provisionResult.frontendUrl,
       backend_url: provisionResult.backendUrl,
       memory_limit_mb: limits.memoryMb,
       cpu_limit: limits.cpuLimit,
+      auth_token: provisionResult.authToken, // Save the auth token
     });
 
     // Send welcome email
@@ -150,7 +151,7 @@ export async function handleSubscriptionUpdated(
       if (instance) {
         // Update resource limits in provisioner
         await updateInstanceLimits({
-          appName: instance.dokku_app_name,
+          appName: instance.instance_id, // Use K8s instance ID
           limits: newLimits,
         });
 
@@ -222,9 +223,10 @@ export async function handleSubscriptionDeleted(
     if (sub.instances && sub.instances.length > 0) {
       const instance = sub.instances[0];
 
-      // Initiate deprovisioning
+      // Initiate deprovisioning with subscription ID
       await deprovisionInstance({
-        appName: instance.dokku_app_name,
+        appName: instance.instance_id, // Use K8s instance ID
+        subscriptionId: sub.id,
       });
 
       // Update instance status

@@ -27,26 +27,35 @@ export function useInstance() {
       return
     }
 
-    // Get user's instance through their subscription
+    // Get user's instance through their account and subscription
     const fetchInstance = async () => {
       try {
-        // First get the user's subscription
-        const { data: subscription } = await supabase
-          .from('subscriptions')
+        // First get the account by email
+        const { data: account } = await supabase
+          .from('accounts')
           .select('id')
-          .eq('account_id', user.id)
+          .eq('email', user.email)
           .single()
 
-        if (subscription) {
-          // Then get the instance for that subscription
-          const { data: instanceData } = await supabase
-            .from('instances')
-            .select('*')
-            .eq('subscription_id', subscription.id)
+        if (account) {
+          // Then get the user's subscription
+          const { data: subscription } = await supabase
+            .from('subscriptions')
+            .select('id')
+            .eq('account_id', account.id)
             .single()
 
-          if (instanceData) {
-            setInstance(instanceData)
+          if (subscription) {
+            // Finally get the instance for that subscription
+            const { data: instanceData } = await supabase
+              .from('instances')
+              .select('*')
+              .eq('subscription_id', subscription.id)
+              .single()
+
+            if (instanceData) {
+              setInstance(instanceData)
+            }
           }
         }
       } catch (error) {
@@ -58,26 +67,48 @@ export function useInstance() {
 
     fetchInstance()
 
-    // Subscribe to changes
-    const subscription = supabase
-      .channel('instance-changes')
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'instances',
-        },
-        (payload) => {
-          if (payload.new && (payload.new as Instance).subscription_id === user.id) {
-            setInstance(payload.new as Instance)
+    // Subscribe to changes (need to get subscription ID for proper filtering)
+    const setupRealtimeSubscription = async () => {
+      const { data: account } = await supabase
+        .from('accounts')
+        .select('id')
+        .eq('email', user.email)
+        .single()
+
+      if (account) {
+        const { data: subscriptionData } = await supabase
+          .from('subscriptions')
+          .select('id')
+          .eq('account_id', account.id)
+          .single()
+
+        if (subscriptionData) {
+          const subscription = supabase
+            .channel('instance-changes')
+            .on(
+              'postgres_changes',
+              {
+                event: '*',
+                schema: 'public',
+                table: 'instances',
+                filter: `subscription_id=eq.${subscriptionData.id}`,
+              },
+              (payload) => {
+                setInstance(payload.new as Instance)
+              }
+            )
+            .subscribe()
+
+          return () => {
+            subscription.unsubscribe()
           }
         }
-      )
-      .subscribe()
+      }
+    }
 
+    const cleanup = setupRealtimeSubscription()
     return () => {
-      subscription.unsubscribe()
+      cleanup.then(fn => fn && fn())
     }
   }, [user, supabase])
 

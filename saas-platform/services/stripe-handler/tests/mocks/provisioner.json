@@ -63,7 +63,7 @@
       },
       "body": {
         "status": "healthy",
-        "service": "dokku-provisioner"
+        "service": "instance-provisioner"
       }
     }
   }

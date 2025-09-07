@@ -84,13 +84,13 @@ docker login git.nijho.lt -u username
 docker build -f Dockerfile.customer-portal -t git.nijho.lt/username/customer-portal:latest .
 docker build -f Dockerfile.admin-dashboard -t git.nijho.lt/username/admin-dashboard:latest .
 docker build -f Dockerfile.stripe-handler -t git.nijho.lt/username/stripe-handler:latest .
-docker build -f Dockerfile.dokku-provisioner -t git.nijho.lt/username/dokku-provisioner:latest .
+docker build -f Dockerfile.instance-provisioner -t git.nijho.lt/username/instance-provisioner:latest .
 
 # Push to registry
 docker push git.nijho.lt/username/customer-portal:latest
 docker push git.nijho.lt/username/admin-dashboard:latest
 docker push git.nijho.lt/username/stripe-handler:latest
-docker push git.nijho.lt/username/dokku-provisioner:latest
+docker push git.nijho.lt/username/instance-provisioner:latest
 ```
 
 ### Deploy Updates

@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mindroom-frontend-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: mindroom-frontend
+    customer: {{ .Values.customer }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mindroom-frontend
+      customer: {{ .Values.customer }}
+  template:
+    metadata:
+      labels:
+        app: mindroom-frontend
+        customer: {{ .Values.customer }}
+    spec:
+      containers:
+      # Nginx auth proxy (handles authentication)
+      - name: nginx-auth
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+          name: http
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+
+      # MindRoom frontend (only accessible through nginx)
+      - name: mindroom-frontend
+        image: {{ .Values.mindroom_image | default "git.nijho.lt/basnijholt/mindroom-frontend:latest" }}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3003
+          name: app
+        - containerPort: 8765
+          name: websocket
+        env:
+        - name: OPENAI_API_KEY
+          value: {{ .Values.openai_key | quote }}
+        - name: ANTHROPIC_API_KEY
+          value: {{ .Values.anthropic_key | quote }}
+        - name: CUSTOMER_ID
+          value: {{ .Values.customer }}
+        - name: DOCKER_CONTAINER
+          value: "1"
+        - name: MATRIX_HOMESERVER
+          value: "http://synapse-{{ .Values.customer }}:8008"
+        - name: MATRIX_USER
+          value: "@admin:{{ .Values.customer }}.{{ .Values.baseDomain }}"
+        - name: MATRIX_PASSWORD
+          value: {{ .Values.matrix_admin_password }}
+        - name: PUBLIC_URL
+          value: "https://{{ .Values.customer }}.{{ .Values.baseDomain }}"
+        - name: INSTANCE_AUTH_TOKEN
+          value: {{ .Values.instance_auth_token | quote }}
+        - name: BACKEND_URL
+          value: "http://mindroom-backend-{{ .Values.customer }}:8765"
+        - name: API_URL
+          value: "http://mindroom-backend-{{ .Values.customer }}:8765"
+        - name: WEBSOCKET_URL
+          value: "ws://mindroom-backend-{{ .Values.customer }}:8765"
+        volumeMounts:
+        - name: storage
+          mountPath: /app/config
+        - name: logs
+          mountPath: /app/logs
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+      imagePullSecrets:
+      - name: gitea-registry
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-auth-config-{{ .Values.customer }}
+      - name: storage
+        persistentVolumeClaim:
+          claimName: mindroom-storage-{{ .Values.customer }}
+      - name: logs
+        emptyDir: {}

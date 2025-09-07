@@ -28,7 +28,7 @@ async function makeRequest<T>(
       method,
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Key': config.provisioner.apiKey || '',
+        'Authorization': `Bearer ${config.provisioner.apiKey || ''}`,
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
@@ -60,15 +60,28 @@ export async function provisionInstance(data: ProvisionRequest): Promise<Provisi
   console.log(`📦 Provisioning instance for subscription ${data.subscriptionId}`);
 
   try {
-    const response = await makeRequest<ProvisionResponse>(
+    // Call the K8s provisioner with the correct field names
+    const k8sResponse = await makeRequest<any>(
       `${config.provisioner.url}/provision`,
       'POST',
       {
-        ...data,
-        // Generate subdomain if not provided
-        subdomain: data.subdomain || generateSubdomain(data.accountId),
+        subscription_id: data.subscriptionId,
+        account_id: data.accountId,
+        tier: data.tier,
+        // Don't pass subdomain - let the provisioner generate it
       }
     );
+
+    // Map K8s provisioner response to our expected format
+    const response: ProvisionResponse = {
+      appName: k8sResponse.customer_id, // Use customer_id as app name
+      subdomain: k8sResponse.customer_id, // Use customer_id as subdomain too
+      frontendUrl: k8sResponse.frontend_url,
+      backendUrl: k8sResponse.api_url, // Map api_url to backendUrl
+      status: k8sResponse.success ? 'success' : 'pending',
+      message: k8sResponse.message,
+      authToken: k8sResponse.auth_token, // Store the auth token
+    };
 
     console.log(`✅ Instance provisioned: ${response.appName}`);
     return response;
@@ -82,11 +95,20 @@ export async function deprovisionInstance(data: DeprovisionRequest): Promise<Dep
   console.log(`🗑️ Deprovisioning instance: ${data.appName}`);
 
   try {
-    const response = await makeRequest<DeprovisionResponse>(
+    // Call K8s provisioner with correct field names
+    const k8sResponse = await makeRequest<any>(
       `${config.provisioner.url}/deprovision`,
       'DELETE',
-      data
+      {
+        customer_id: data.appName, // Use appName as customer_id
+        subscription_id: data.subscriptionId || 'unknown', // Pass subscription ID if available
+      }
     );
+
+    const response: DeprovisionResponse = {
+      status: k8sResponse.success ? 'success' : 'pending',
+      message: k8sResponse.message,
+    };
 
     console.log(`✅ Instance deprovisioned: ${data.appName}`);
     return response;
@@ -120,7 +142,7 @@ export async function checkProvisionerHealth(): Promise<boolean> {
     const response = await fetch(`${config.provisioner.url}/health`, {
       method: 'GET',
       headers: {
-        'X-API-Key': config.provisioner.apiKey || '',
+        'Authorization': `Bearer ${config.provisioner.apiKey || ''}`,
       },
       signal: AbortSignal.timeout(5000), // 5 second timeout
     });
@@ -132,13 +154,6 @@ export async function checkProvisionerHealth(): Promise<boolean> {
   }
 }
 
-// Helper function to generate a unique subdomain
-function generateSubdomain(accountId: string): string {
-  // Use last 8 chars of account ID and a random suffix
-  const idPart = accountId.replace(/-/g, '').slice(-8);
-  const randomPart = Math.random().toString(36).substring(2, 6);
-  return `mr-${idPart}-${randomPart}`.toLowerCase();
-}
 
 // Export resource limit helpers
 export function getResourceLimits(tier: string): ResourceLimits {

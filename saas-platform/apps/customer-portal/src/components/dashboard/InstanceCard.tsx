@@ -1,8 +1,31 @@
-import { ExternalLink, CheckCircle, AlertCircle, Loader2, XCircle } from 'lucide-react'
+import { ExternalLink, CheckCircle, AlertCircle, Loader2, XCircle, Rocket } from 'lucide-react'
 import Link from 'next/link'
+import { useState } from 'react'
 import type { Instance } from '@/hooks/useInstance'
 
 export function InstanceCard({ instance }: { instance: Instance | null }) {
+  const [isProvisioning, setIsProvisioning] = useState(false)
+
+  const handleProvision = async () => {
+    setIsProvisioning(true)
+    try {
+      const response = await fetch('/api/instance/provision', {
+        method: 'POST',
+      })
+
+      if (response.ok) {
+        // Refresh the page to show the new instance
+        window.location.reload()
+      } else {
+        const error = await response.json()
+        alert(`Failed to provision instance: ${error.error}`)
+      }
+    } catch (error) {
+      alert('Failed to provision instance')
+    } finally {
+      setIsProvisioning(false)
+    }
+  }
   const getStatusIcon = () => {
     switch (instance?.status) {
       case 'running':
@@ -53,9 +76,27 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
       <div className="bg-white rounded-lg p-6 shadow-sm">
         <h2 className="text-xl font-bold mb-4">Your MindRoom Instance</h2>
         <div className="text-center py-8">
-          <Loader2 className="w-8 h-8 mx-auto text-gray-400 animate-spin" />
-          <p className="text-gray-500 mt-4">Setting up your instance...</p>
-          <p className="text-sm text-gray-400 mt-2">This may take a few minutes</p>
+          {isProvisioning ? (
+            <>
+              <Loader2 className="w-8 h-8 mx-auto text-orange-500 animate-spin" />
+              <p className="text-gray-500 mt-4">Provisioning your instance...</p>
+              <p className="text-sm text-gray-400 mt-2">This may take a few minutes</p>
+            </>
+          ) : (
+            <>
+              <AlertCircle className="w-8 h-8 mx-auto text-gray-400" />
+              <p className="text-gray-500 mt-4">No instance found</p>
+              <p className="text-sm text-gray-400 mt-2">Click below to provision your MindRoom instance</p>
+              <button
+                onClick={handleProvision}
+                disabled={isProvisioning}
+                className="mt-4 px-6 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 mx-auto"
+              >
+                <Rocket className="w-4 h-4" />
+                Provision Instance
+              </button>
+            </>
+          )}
         </div>
       </div>
     )
@@ -96,9 +137,24 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
         <div className="flex items-center justify-between">
           <span className="text-gray-600">Subdomain</span>
           <span className="font-mono text-sm bg-gray-100 px-2 py-1 rounded">
-            {instance.subdomain}.mindroom.app
+            {instance.subdomain}.staging.mindroom.chat
           </span>
         </div>
+
+        {/* Matrix Server */}
+        {instance.matrix_server_url && instance.status === 'running' && (
+          <div className="flex items-center justify-between">
+            <span className="text-gray-600">Matrix Server</span>
+            <Link
+              href={instance.matrix_server_url}
+              target="_blank"
+              className="flex items-center gap-1 text-purple-600 hover:text-purple-700 font-medium"
+            >
+              Matrix API
+              <ExternalLink className="w-4 h-4" />
+            </Link>
+          </div>
+        )}
 
         {/* Created */}
         <div className="flex items-center justify-between">
