@@ -7,8 +7,9 @@ import secrets
 import string
 import subprocess
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 # Configure logging
@@ -32,6 +33,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Security
+security = HTTPBearer()
+
+# Get the API key from environment
+PROVISIONER_API_KEY = os.getenv("PROVISIONER_API_KEY", "change_me_in_production_123")
+
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> bool:  # noqa: B008
+    """Verify the bearer token."""
+    if credentials.credentials != PROVISIONER_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return True
 
 
 # Models
@@ -142,7 +160,10 @@ async def health() -> dict:
 
 
 @app.post("/api/v1/provision")
-async def provision_instance(request: ProvisionRequest) -> ProvisionResponse:
+async def provision_instance(
+    request: ProvisionRequest,
+    authenticated: bool = Depends(verify_token),  # noqa: ARG001, FAST002
+) -> ProvisionResponse:
     """Provision a new MindRoom instance using Helm."""
     customer_id = generate_customer_id(request.subscription_id)
     matrix_password = generate_password()
@@ -157,17 +178,45 @@ async def provision_instance(request: ProvisionRequest) -> ProvisionResponse:
 
     try:
         # Create namespace if it doesn't exist
-        run_command(
-            [
-                "kubectl",
-                "create",
-                "namespace",
-                namespace,
-                "--dry-run=client",
-                "-o",
-                "yaml",
-            ],
-        )
+        try:
+            run_command(
+                [
+                    "kubectl",
+                    "create",
+                    "namespace",
+                    namespace,
+                ],
+            )
+            logger.info(f"Created namespace {namespace}")
+        except Exception:
+            logger.info(f"Namespace {namespace} already exists")
+
+        # Create image pull secret for private registry
+        gitea_username = os.getenv("GITEA_USERNAME", "basnijholt")
+        gitea_password = os.getenv("GITEA_PASSWORD", "c9433aa79a9805574f9eb0768f2b71a82bc54123")
+
+        logger.info(f"Creating image pull secret in namespace {namespace}")
+        # Create the secret (kubectl will error if already exists, we catch that)
+        secret_cmd = [
+            "kubectl",
+            "create",
+            "secret",
+            "docker-registry",
+            "gitea-registry",
+            f"--docker-server={registry.split('/')[0]}",  # Extract registry URL
+            f"--docker-username={gitea_username}",
+            f"--docker-password={gitea_password}",
+            f"--namespace={namespace}",
+        ]
+        try:
+            run_command(secret_cmd)
+            logger.info("Image pull secret created successfully")
+        except Exception as e:
+            # Secret might already exist, that's fine
+            if "already exists" in str(e):
+                logger.info("Image pull secret already exists")
+            else:
+                logger.warning(f"Could not create image pull secret: {e}")
 
         # Prepare Helm values
         helm_cmd = [
@@ -233,7 +282,10 @@ async def provision_instance(request: ProvisionRequest) -> ProvisionResponse:
 
 
 @app.delete("/api/v1/deprovision")
-async def deprovision_instance(request: DeprovisionRequest) -> DeprovisionResponse:
+async def deprovision_instance(
+    request: DeprovisionRequest,
+    authenticated: bool = Depends(verify_token),  # noqa: ARG001, FAST002
+) -> DeprovisionResponse:
     """Remove a MindRoom instance."""
     customer_id = request.customer_id
     namespace = "mindroom-instances"

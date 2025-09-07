@@ -28,7 +28,7 @@ async function makeRequest<T>(
       method,
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Key': config.provisioner.apiKey || '',
+        'Authorization': `Bearer ${config.provisioner.apiKey || ''}`,
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
@@ -120,7 +120,7 @@ export async function checkProvisionerHealth(): Promise<boolean> {
     const response = await fetch(`${config.provisioner.url}/health`, {
       method: 'GET',
       headers: {
-        'X-API-Key': config.provisioner.apiKey || '',
+        'Authorization': `Bearer ${config.provisioner.apiKey || ''}`,
       },
       signal: AbortSignal.timeout(5000), // 5 second timeout
     });
