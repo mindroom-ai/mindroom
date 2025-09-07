@@ -1,9 +1,0 @@
----
-# Self-signed issuer for webhook certificate
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: cert-manager-webhook-porkbun-selfsign
-  namespace: cert-manager-webhook-porkbun
-spec:
-  selfSigned: {}

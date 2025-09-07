@@ -14,6 +14,11 @@ provider "helm" {
   }
 }
 
+# Configure kubectl provider
+provider "kubectl" {
+  config_path = "${path.module}/${var.cluster_name}_kubeconfig.yaml"
+}
+
 # ===========================================
 # Wait for cluster to be ready
 # ===========================================
