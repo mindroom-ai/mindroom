@@ -1,0 +1,36 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mindroom-backend
+  namespace: mindroom-saas
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - api.mindroom.chat
+    - admin.mindroom.chat
+    secretName: mindroom-tls
+  rules:
+  - host: api.mindroom.chat
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mindroom-backend
+            port:
+              number: 80
+  - host: admin.mindroom.chat
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mindroom-backend
+            port:
+              number: 80

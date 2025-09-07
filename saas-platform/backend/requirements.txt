@@ -1,7 +1,5 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-supabase==2.3.0
-stripe==7.6.0
-httpx==0.25.1
-pydantic==2.5.0
 python-dotenv==1.0.0
+stripe==7.0.0
+supabase==2.0.0
