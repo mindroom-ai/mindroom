@@ -51,26 +51,26 @@ export async function POST(request: Request) {
       )
     }
 
-    // Call the provisioner to restart the instance
+    // Call the provisioner to start the instance
     const provisionerUrl = process.env.PROVISIONER_URL || 'http://instance-provisioner:8002'
 
-    const restartResponse = await fetch(`${provisionerUrl}/api/v1/restart/${instance.instance_id || instance.subdomain}`, {
+    const startResponse = await fetch(`${provisionerUrl}/api/v1/start/${instance.instance_id || instance.subdomain}`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.PROVISIONER_API_KEY || ''}`,
       }
     })
 
-    if (!restartResponse.ok) {
-      const error = await restartResponse.text()
-      console.error('Failed to restart instance:', error)
+    if (!startResponse.ok) {
+      const error = await startResponse.text()
+      console.error('Failed to start instance:', error)
       return NextResponse.json(
-        { error: 'Failed to restart instance', details: error },
+        { error: 'Failed to start instance', details: error },
         { status: 500 }
       )
     }
 
-    const restartData = await restartResponse.json()
+    const startData = await startResponse.json()
 
     // Update instance status in database
     const { error: updateError } = await supabase
@@ -86,11 +86,11 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({
-      success: restartData.success,
-      message: restartData.message
+      success: startData.success,
+      message: startData.message
     })
   } catch (error) {
-    console.error('Error restarting instance:', error)
+    console.error('Error starting instance:', error)
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
