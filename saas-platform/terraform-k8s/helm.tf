@@ -62,7 +62,11 @@ locals {
 
 # Deploy the platform Helm chart
 resource "helm_release" "mindroom_platform" {
-  depends_on = [time_sleep.wait_for_cluster]
+  depends_on = [
+    time_sleep.wait_for_cluster,
+    kubectl_manifest.cluster_issuer_prod,
+    kubectl_manifest.cluster_issuer_staging
+  ]
 
   name       = "mindroom-${var.environment}"
   namespace  = var.environment
