@@ -273,7 +273,7 @@ export default function InstancePage() {
             </div>
             <div>
               <p className="text-sm text-gray-600">Subdomain</p>
-              <p className="font-mono text-sm">{instance.subdomain}</p>
+              <p className="font-mono text-sm">{instance.subdomain}.staging.mindroom.chat</p>
             </div>
             <div>
               <p className="text-sm text-gray-600">Created</p>

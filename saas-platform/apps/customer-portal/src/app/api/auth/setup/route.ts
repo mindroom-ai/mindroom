@@ -137,9 +137,11 @@ export async function POST() {
           subscription_id: subscription.id,
           instance_id: provisionData.customer_id,
           subdomain: provisionData.customer_id,
+          dokku_app_name: provisionData.customer_id, // For compatibility
           status: 'running',
           frontend_url: provisionData.frontend_url,
           backend_url: provisionData.api_url,
+          matrix_server_url: provisionData.matrix_url,
           memory_limit_mb: 512,
           cpu_limit: 0.5,
           auth_token: provisionData.auth_token,
