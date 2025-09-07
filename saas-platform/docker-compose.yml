@@ -2,10 +2,11 @@ version: '3.8'
 
 services:
   backend:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
     ports:
       - "8000:8000"
-      - "8002:8000"  # Also expose on 8002 for provisioner API compatibility
     env_file:
       - .env
     volumes:
