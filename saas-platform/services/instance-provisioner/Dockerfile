@@ -16,11 +16,14 @@ RUN curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | b
 WORKDIR /app
 
 # Copy requirements and install
-COPY requirements.txt .
+COPY services/instance-provisioner/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
-COPY app.py .
+COPY services/instance-provisioner/app.py .
+
+# Copy Helm charts
+COPY k8s/instance /app/k8s/instance
 
 # Run as non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

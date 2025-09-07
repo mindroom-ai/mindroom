@@ -11,7 +11,7 @@ spec:
   type: ClusterIP
   ports:
   - port: 3003
-    targetPort: 3003
+    targetPort: 80  # Now targets nginx auth proxy
     name: http
   - port: 8765
     targetPort: 8765

@@ -19,12 +19,24 @@ spec:
         customer: {{ .Values.customer }}
     spec:
       containers:
+      # Nginx auth proxy (handles authentication)
+      - name: nginx-auth
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+          name: http
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+
+      # MindRoom frontend (only accessible through nginx)
       - name: mindroom-frontend
         image: {{ .Values.mindroom_image | default "git.nijho.lt/basnijholt/mindroom-frontend:latest" }}
         imagePullPolicy: Always
         ports:
         - containerPort: 3003
-          name: http
+          name: app
         - containerPort: 8765
           name: websocket
         env:
@@ -44,6 +56,8 @@ spec:
           value: {{ .Values.matrix_admin_password }}
         - name: PUBLIC_URL
           value: "https://{{ .Values.customer }}.{{ .Values.baseDomain }}"
+        - name: INSTANCE_AUTH_TOKEN
+          value: {{ .Values.instance_auth_token | quote }}
         volumeMounts:
         - name: storage
           mountPath: /app/config
@@ -59,6 +73,9 @@ spec:
       imagePullSecrets:
       - name: gitea-registry
       volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-auth-config-{{ .Values.customer }}
       - name: storage
         persistentVolumeClaim:
           claimName: mindroom-storage-{{ .Values.customer }}

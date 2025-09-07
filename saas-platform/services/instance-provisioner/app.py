@@ -74,6 +74,7 @@ class ProvisionResponse(BaseModel):
     api_url: str
     matrix_url: str
     message: str
+    auth_token: str | None = None  # Simple auth token for accessing the instance
 
 
 class DeprovisionRequest(BaseModel):
@@ -170,6 +171,7 @@ async def provision_instance(
     """Provision a new MindRoom instance using Helm."""
     customer_id = generate_customer_id(request.subscription_id)
     matrix_password = generate_password()
+    instance_auth_token = generate_password()  # Simple auth token for the instance
 
     # Configuration
     namespace = "mindroom-instances"
@@ -242,6 +244,8 @@ async def provision_instance(
             f"storage={get_storage_by_tier(request.tier)}",
             "--set",
             f"matrix_admin_password={matrix_password}",
+            "--set",
+            f"instance_auth_token={instance_auth_token}",
         ]
 
         # Add API keys if available
@@ -256,7 +260,7 @@ async def provision_instance(
         if success:
             logger.info(f"Successfully provisioned instance for {customer_id}")
 
-            # Return URLs
+            # Return URLs and auth token
             return ProvisionResponse(
                 success=True,
                 customer_id=customer_id,
@@ -264,6 +268,7 @@ async def provision_instance(
                 api_url=f"https://{customer_id}.api.{base_domain}",
                 matrix_url=f"https://{customer_id}.matrix.{base_domain}",
                 message=f"Instance provisioned successfully for {customer_id}",
+                auth_token=instance_auth_token,  # Return the auth token
             )
         raise HTTPException(500, f"Helm install failed: {output}")  # noqa: TRY301
 
