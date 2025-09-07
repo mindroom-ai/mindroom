@@ -52,7 +52,10 @@ export async function POST(request: Request) {
     }
 
     // Call the provisioner to stop the instance
-    const provisionerUrl = process.env.PROVISIONER_URL || 'http://instance-provisioner:8002'
+    const provisionerUrl = process.env.PROVISIONER_URL
+    if (!provisionerUrl) {
+      throw new Error('PROVISIONER_URL environment variable is not configured')
+    }
 
     const stopResponse = await fetch(`${provisionerUrl}/api/v1/stop/${instance.instance_id || instance.subdomain}`, {
       method: 'POST',

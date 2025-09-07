@@ -5,6 +5,7 @@ services:
     build: .
     ports:
       - "8000:8000"
+      - "8002:8000"  # Also expose on 8002 for provisioner API compatibility
     env_file:
       - .env
     volumes:
@@ -20,4 +21,29 @@ services:
     volumes:
       - ./apps/admin-dashboard:/app
       - /app/node_modules
-    command: npm run dev -- --host
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+  customer-portal:
+    build:
+      context: ./apps/customer-portal
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./apps/customer-portal:/app
+      - /app/node_modules
+    environment:
+      - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
+      - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - PROVISIONER_URL=http://backend:8000
+      - PROVISIONER_API_KEY=${PROVISIONER_API_KEY}
+    depends_on:
+      - backend

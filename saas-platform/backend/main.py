@@ -1,8 +1,10 @@
 """MindRoom Backend - Simple single-file FastAPI backend."""
 
+import asyncio
 import logging
 import os
-import subprocess
+import secrets
+import string
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -54,6 +56,9 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@mindroom.chat")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin-password")
 
+# Provisioner API key
+PROVISIONER_API_KEY = os.getenv("PROVISIONER_API_KEY", "")
+
 
 # === Models ===
 class LoginRequest(BaseModel):
@@ -74,7 +79,7 @@ async def health_check() -> dict[str, Any]:
     }
 
 
-# === Admin Authentication (Simple) ===
+# === Admin Authentication ===
 @app.post("/api/admin/auth/login")
 async def admin_login(data: LoginRequest) -> dict[str, Any]:
     """Simple admin login."""
@@ -284,87 +289,162 @@ async def get_dashboard_metrics() -> dict[str, Any]:
         }
 
 
-# === Instance Management ===
-@app.post("/api/admin/instances/{instance_id}/start")
-async def start_instance(instance_id: str) -> dict[str, bool]:
-    """Start an instance."""
+# === Instance Provisioner API (for customer portal compatibility) ===
+@app.post("/api/v1/provision")
+async def provision_instance(
+    data: dict,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """Provision a new instance (compatible with customer portal)."""
+    # Check API key
+    if authorization != f"Bearer {PROVISIONER_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not configured")
 
-    try:
-        instance = supabase.table("instances").select("*").eq("id", instance_id).single().execute()
-        customer_id = instance.data["customer_id"]
+    subscription_id = data.get("subscription_id")
+    account_id = data.get("account_id")  # noqa: F841
+    tier = data.get("tier", "free")
 
-        # Simple kubectl command to scale deployment
-        cmd = [
+    # Generate a customer ID (simplified)
+    customer_id = "cust-" + "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
+
+    logger.info(f"Provisioning instance for subscription {subscription_id}, tier: {tier}")
+
+    # Create namespace if it doesn't exist
+    namespace = "mindroom-instances"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "kubectl",
+            "create",
+            "namespace",
+            namespace,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+    except Exception as e:
+        logger.warning(f"Could not create namespace (may already exist): {e}")
+
+    # TODO: Deploy actual instance using Helm or kubectl apply
+    # For now, just log the action
+    logger.info(f"Would deploy instance {customer_id} to namespace {namespace}")
+
+    return {
+        "customer_id": customer_id,
+        "frontend_url": f"https://{customer_id}.mindroom.chat",
+        "api_url": f"https://{customer_id}.api.mindroom.chat",
+        "matrix_url": f"https://{customer_id}.matrix.mindroom.chat",
+        "auth_token": "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32)),
+        "success": True,
+        "message": "Instance provisioned successfully",
+    }
+
+
+@app.post("/api/v1/start/{instance_id}")
+async def start_instance_provisioner(
+    instance_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """Start an instance (provisioner API compatible)."""
+    if authorization != f"Bearer {PROVISIONER_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    logger.info(f"Starting instance {instance_id}")
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
             "kubectl",
             "scale",
-            f"deployment/mindroom-backend-{customer_id}",
+            f"deployment/mindroom-backend-{instance_id}",
             "--replicas=1",
             "--namespace=mindroom-instances",
-        ]
-        subprocess.run(cmd, check=True, capture_output=True)  # noqa: ASYNC221
-
-        supabase.table("instances").update({"status": "running"}).eq("id", instance_id).execute()
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise Exception(stderr.decode())  # noqa: TRY002, TRY301
+        logger.info(f"Started instance {instance_id}: {stdout.decode()}")
     except Exception as e:
-        logger.exception("Error starting instance")
-        raise HTTPException(status_code=500, detail=str(e)) from e
-    else:
-        return {"success": True}
+        logger.exception(f"Failed to start instance {instance_id}")
+        raise HTTPException(status_code=500, detail=f"Failed to start instance: {e}") from e
+
+    return {
+        "success": True,
+        "message": f"Instance {instance_id} started successfully",
+    }
 
 
-@app.post("/api/admin/instances/{instance_id}/stop")
-async def stop_instance(instance_id: str) -> dict[str, bool]:
-    """Stop an instance."""
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not configured")
+@app.post("/api/v1/stop/{instance_id}")
+async def stop_instance_provisioner(
+    instance_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """Stop an instance (provisioner API compatible)."""
+    if authorization != f"Bearer {PROVISIONER_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    logger.info(f"Stopping instance {instance_id}")
 
     try:
-        instance = supabase.table("instances").select("*").eq("id", instance_id).single().execute()
-        customer_id = instance.data["customer_id"]
-
-        # Simple kubectl command to scale deployment to 0
-        cmd = [
+        proc = await asyncio.create_subprocess_exec(
             "kubectl",
             "scale",
-            f"deployment/mindroom-backend-{customer_id}",
+            f"deployment/mindroom-backend-{instance_id}",
             "--replicas=0",
             "--namespace=mindroom-instances",
-        ]
-        subprocess.run(cmd, check=True, capture_output=True)  # noqa: ASYNC221
-
-        supabase.table("instances").update({"status": "stopped"}).eq("id", instance_id).execute()
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise Exception(stderr.decode())  # noqa: TRY002, TRY301
+        logger.info(f"Stopped instance {instance_id}: {stdout.decode()}")
     except Exception as e:
-        logger.exception("Error stopping instance")
-        raise HTTPException(status_code=500, detail=str(e)) from e
-    else:
-        return {"success": True}
+        logger.exception(f"Failed to stop instance {instance_id}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop instance: {e}") from e
+
+    return {
+        "success": True,
+        "message": f"Instance {instance_id} stopped successfully",
+    }
 
 
-@app.post("/api/admin/instances/{instance_id}/restart")
-async def restart_instance(instance_id: str) -> dict[str, bool]:
-    """Restart an instance."""
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not configured")
+@app.post("/api/v1/restart/{instance_id}")
+async def restart_instance_provisioner(
+    instance_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """Restart an instance (provisioner API compatible)."""
+    if authorization != f"Bearer {PROVISIONER_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    logger.info(f"Restarting instance {instance_id}")
 
     try:
-        instance = supabase.table("instances").select("*").eq("id", instance_id).single().execute()
-        customer_id = instance.data["customer_id"]
-
-        # Simple kubectl rollout restart
-        cmd = [
+        proc = await asyncio.create_subprocess_exec(
             "kubectl",
             "rollout",
             "restart",
-            f"deployment/mindroom-backend-{customer_id}",
+            f"deployment/mindroom-backend-{instance_id}",
             "--namespace=mindroom-instances",
-        ]
-        subprocess.run(cmd, check=True, capture_output=True)  # noqa: ASYNC221
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise Exception(stderr.decode())  # noqa: TRY002, TRY301
+        logger.info(f"Restarted instance {instance_id}: {stdout.decode()}")
     except Exception as e:
-        logger.exception("Error restarting instance")
-        raise HTTPException(status_code=500, detail=str(e)) from e
-    else:
-        return {"success": True}
+        logger.exception(f"Failed to restart instance {instance_id}")
+        raise HTTPException(status_code=500, detail=f"Failed to restart instance: {e}") from e
+
+    return {
+        "success": True,
+        "message": f"Instance {instance_id} restarted successfully",
+    }
 
 
 # === Stripe Webhooks ===

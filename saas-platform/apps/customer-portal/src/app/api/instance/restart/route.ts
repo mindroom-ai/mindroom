@@ -52,7 +52,10 @@ export async function POST(request: Request) {
     }
 
     // Call the provisioner to restart the instance
-    const provisionerUrl = process.env.PROVISIONER_URL || 'http://instance-provisioner:8002'
+    const provisionerUrl = process.env.PROVISIONER_URL
+    if (!provisionerUrl) {
+      throw new Error('PROVISIONER_URL environment variable is not configured')
+    }
 
     const restartResponse = await fetch(`${provisionerUrl}/api/v1/restart/${instance.instance_id || instance.subdomain}`, {
       method: 'POST',

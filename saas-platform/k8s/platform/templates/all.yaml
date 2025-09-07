@@ -25,7 +25,7 @@ stringData:
   STRIPE_PRICE_PROFESSIONAL: {{ .Values.stripe.priceProfessional }}
   STRIPE_PRICE_ENTERPRISE: {{ .Values.stripe.priceEnterprise }}
   PROVISIONER_API_KEY: {{ .Values.provisioner.apiKey }}
-  PROVISIONER_URL: "http://instance-provisioner:8002"
+  PROVISIONER_URL: "http://mindroom-backend:8000"
   GITEA_USER: {{ .Values.gitea.user }}
   GITEA_TOKEN: {{ .Values.gitea.token }}
 ---

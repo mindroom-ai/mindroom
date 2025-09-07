@@ -2,11 +2,14 @@ FROM public.ecr.aws/docker/library/node:20-slim
 
 WORKDIR /app
 
+# Install pnpm
+RUN npm install -g pnpm
+
 # Copy package files
-COPY package*.json ./
+COPY package.json pnpm-lock.yaml ./
 
 # Install dependencies
-RUN npm ci
+RUN pnpm install
 
 # Copy application files
 COPY . .
@@ -15,4 +18,4 @@ COPY . .
 EXPOSE 3000
 
 # Start development server
-CMD ["npm", "run", "dev"]
+CMD ["pnpm", "run", "dev"]
