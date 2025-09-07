@@ -1,6 +1,5 @@
 import { Card, CardContent, CardHeader, Typography, Box, Chip, LinearProgress } from '@mui/material'
 import { useEffect, useState } from 'react'
-import { createClient } from '@supabase/supabase-js'
 import { config } from '../config'
 import { CheckCircle, AlertCircle, XCircle, Clock } from 'lucide-react'
 
@@ -26,18 +25,18 @@ export const InstanceHealth = () => {
   }, [])
 
   const fetchInstanceHealth = async () => {
-    const supabase = createClient(config.supabaseUrl, config.supabaseServiceKey)
+    try {
+      const response = await fetch(`${config.apiUrl}/instances?_sort=created_at&_order=DESC&_start=0&_end=10`)
 
-    const { data, error } = await supabase
-      .from('instances')
-      .select('id, dokku_app_name, subdomain, status, health_status, last_health_check, cpu_limit, memory_limit_mb')
-      .order('created_at', { ascending: false })
-      .limit(10)
-
-    if (!error && data) {
-      setInstances(data as InstanceHealthData[])
+      if (response.ok) {
+        const result = await response.json()
+        setInstances(result.data as InstanceHealthData[])
+      }
+    } catch (error) {
+      console.error('Error fetching instance health:', error)
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   const getHealthIcon = (status: string) => {

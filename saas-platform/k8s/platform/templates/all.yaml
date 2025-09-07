@@ -100,53 +100,55 @@ spec:
   - port: 3000
     targetPort: 3000
 ---
-# Admin Dashboard
+# Admin API (Backend for admin dashboard)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: admin-dashboard
+  name: admin-api
   namespace: mindroom-{{ .Values.environment }}
   labels:
-    app: admin-dashboard
+    app: admin-api
     environment: {{ .Values.environment }}
 spec:
   replicas: {{ .Values.replicas }}
   selector:
     matchLabels:
-      app: admin-dashboard
+      app: admin-api
       environment: {{ .Values.environment }}
   template:
     metadata:
       labels:
-        app: admin-dashboard
+        app: admin-api
         environment: {{ .Values.environment }}
     spec:
       imagePullSecrets:
       - name: gitea-registry
       containers:
       - name: app
-        image: {{ .Values.registry }}/admin-dashboard:{{ .Values.imageTag }}
+        image: {{ .Values.registry }}/admin-api:{{ .Values.imageTag }}
         ports:
-        - containerPort: 80
+        - containerPort: 8000
         envFrom:
         - secretRef:
             name: platform-secrets
         env:
-        - name: NODE_ENV
-          value: {{ .Values.environment }}
+        - name: ADMIN_EMAIL
+          value: "admin@mindroom.chat"
+        - name: ADMIN_PASSWORD
+          value: "{{ .Values.adminPassword }}"
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: admin-dashboard
+  name: admin-api
   namespace: mindroom-{{ .Values.environment }}
 spec:
   selector:
-    app: admin-dashboard
+    app: admin-api
     environment: {{ .Values.environment }}
   ports:
-  - port: 80
-    targetPort: 80
+  - port: 8000
+    targetPort: 8000
 ---
 # Stripe Handler
 apiVersion: apps/v1

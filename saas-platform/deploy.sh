@@ -6,7 +6,7 @@ set -e
 #
 # Available apps:
 #   ./deploy.sh customer-portal
-#   ./deploy.sh admin-dashboard
+#   ./deploy.sh admin-api         # (formerly admin-dashboard)
 #   ./deploy.sh stripe-handler
 #   ./deploy.sh instance-provisioner
 #
@@ -17,20 +17,9 @@ APP=${1:-customer-portal}
 # Load env vars
 source ../.env
 
-# Build args for admin-dashboard (Vite needs them at build time)
-if [ "$APP" = "admin-dashboard" ]; then
-    BUILD_ARGS="--build-arg VITE_SUPABASE_URL=$SUPABASE_URL \
-                --build-arg VITE_SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY \
-                --build-arg VITE_SUPABASE_SERVICE_KEY=$SUPABASE_SERVICE_KEY \
-                --build-arg VITE_PROVISIONER_URL=http://instance-provisioner:8002 \
-                --build-arg VITE_PROVISIONER_API_KEY=$PROVISIONER_API_KEY \
-                --build-arg VITE_STRIPE_SECRET_KEY=$STRIPE_SECRET_KEY"
-else
-    BUILD_ARGS=""
-fi
-
+# No more build args needed - all secrets stay server-side!
 echo "Building $APP..."
-docker build $BUILD_ARGS -t git.nijho.lt/basnijholt/$APP:latest -f Dockerfile.$APP .
+docker build -t git.nijho.lt/basnijholt/$APP:latest -f Dockerfile.$APP .
 
 echo "Pushing $APP..."
 docker push git.nijho.lt/basnijholt/$APP:latest

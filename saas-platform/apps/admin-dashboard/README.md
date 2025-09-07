@@ -79,13 +79,11 @@ The dashboard will be available at http://localhost:5173
 
 ### Environment Variables
 
-For local development, create a `.env` file with:
+No environment variables needed in the frontend! All secrets are handled by the backend API.
 
-- `VITE_SUPABASE_URL`: Your Supabase project URL
-- `VITE_SUPABASE_SERVICE_KEY`: Service role key for full database access
-- `VITE_PROVISIONER_URL`: Instance provisioner API endpoint (default: http://localhost:8002)
-- `VITE_PROVISIONER_API_KEY`: API key for provisioner
-- `VITE_STRIPE_SECRET_KEY`: Stripe secret key (optional)
+For local development:
+1. Run the admin-api backend (see services/admin-api)
+2. The frontend will proxy API calls to http://localhost:8000
 
 ## Development
 
