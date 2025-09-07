@@ -1,0 +1,30 @@
+---
+# Wildcard Certificate for all staging.mindroom.chat subdomains
+# This single certificate covers all customer instances
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-staging-mindroom-cert
+  namespace: mindroom-instances
+spec:
+  # Secret that will store the certificate
+  secretName: wildcard-staging-mindroom-tls
+
+  # Reference to the ClusterIssuer
+  issuerRef:
+    name: letsencrypt-prod-dns01
+    kind: ClusterIssuer
+
+  # Common name for the certificate
+  commonName: "*.staging.mindroom.chat"
+
+  # All domains this certificate should cover
+  dnsNames:
+  - "*.staging.mindroom.chat"
+  - "*.api.staging.mindroom.chat"
+  - "*.matrix.staging.mindroom.chat"
+
+  # Certificate will be valid for 90 days
+  # cert-manager will automatically renew 30 days before expiry
+  duration: 2160h # 90 days
+  renewBefore: 720h # 30 days before expiry

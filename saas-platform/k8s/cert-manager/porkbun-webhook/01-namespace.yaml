@@ -1,0 +1,7 @@
+---
+# Porkbun Webhook for cert-manager DNS-01 challenge
+# Based on https://github.com/mdonoughe/porkbun-webhook
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager-webhook-porkbun

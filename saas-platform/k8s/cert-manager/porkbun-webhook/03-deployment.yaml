@@ -1,0 +1,58 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cert-manager-webhook-porkbun
+  namespace: cert-manager-webhook-porkbun
+  labels:
+    app: cert-manager-webhook-porkbun
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cert-manager-webhook-porkbun
+  template:
+    metadata:
+      labels:
+        app: cert-manager-webhook-porkbun
+    spec:
+      serviceAccountName: cert-manager-webhook-porkbun
+      containers:
+      - name: webhook
+        image: ghcr.io/mdonoughe/porkbun-webhook:v1.1.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - --tls-cert-file=/tls/tls.crt
+        - --tls-private-key-file=/tls/tls.key
+        env:
+        - name: GROUP_NAME
+          value: "acme.porkbun.com"
+        - name: PORKBUN_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: porkbun-api-key
+              key: api-key
+        - name: PORKBUN_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: porkbun-api-key
+              key: secret-key
+        ports:
+        - name: https
+          containerPort: 443
+          protocol: TCP
+        volumeMounts:
+        - name: certs
+          mountPath: /tls
+          readOnly: true
+        resources:
+          limits:
+            memory: 128Mi
+            cpu: 100m
+          requests:
+            memory: 64Mi
+            cpu: 50m
+      volumes:
+      - name: certs
+        secret:
+          secretName: cert-manager-webhook-porkbun-tls

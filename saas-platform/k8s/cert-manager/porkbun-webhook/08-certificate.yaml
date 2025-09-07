@@ -1,0 +1,18 @@
+---
+# Certificate for webhook TLS
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cert-manager-webhook-porkbun-ca
+  namespace: cert-manager-webhook-porkbun
+spec:
+  secretName: cert-manager-webhook-porkbun-tls
+  duration: 8760h # 1 year
+  issuerRef:
+    name: cert-manager-webhook-porkbun-selfsign
+    kind: Issuer
+  commonName: cert-manager-webhook-porkbun.cert-manager-webhook-porkbun.svc
+  dnsNames:
+  - cert-manager-webhook-porkbun
+  - cert-manager-webhook-porkbun.cert-manager-webhook-porkbun
+  - cert-manager-webhook-porkbun.cert-manager-webhook-porkbun.svc
