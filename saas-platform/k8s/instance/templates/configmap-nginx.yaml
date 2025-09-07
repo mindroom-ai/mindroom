@@ -48,6 +48,20 @@ data:
           proxy_set_header X-Forwarded-Proto $scheme;
         }
 
+        # API/Backend proxy
+        location /api {
+          if ($valid_auth = 0) {
+            return 403;
+          }
+
+          proxy_pass http://mindroom-backend-{{ .Values.customer }}:8765;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
         # WebSocket support
         location /ws {
           if ($valid_auth = 0) {
@@ -55,7 +69,7 @@ data:
             return 403;
           }
 
-          proxy_pass http://localhost:8765;
+          proxy_pass http://mindroom-backend-{{ .Values.customer }}:8765;
           proxy_http_version 1.1;
           proxy_set_header Upgrade $http_upgrade;
           proxy_set_header Connection "upgrade";

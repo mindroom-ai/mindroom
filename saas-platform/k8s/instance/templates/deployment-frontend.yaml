@@ -58,6 +58,12 @@ spec:
           value: "https://{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: INSTANCE_AUTH_TOKEN
           value: {{ .Values.instance_auth_token | quote }}
+        - name: BACKEND_URL
+          value: "http://mindroom-backend-{{ .Values.customer }}:8765"
+        - name: API_URL
+          value: "http://mindroom-backend-{{ .Values.customer }}:8765"
+        - name: WEBSOCKET_URL
+          value: "ws://mindroom-backend-{{ .Values.customer }}:8765"
         volumeMounts:
         - name: storage
           mountPath: /app/config
