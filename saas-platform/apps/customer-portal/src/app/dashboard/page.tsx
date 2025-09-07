@@ -43,15 +43,17 @@ export default function DashboardPage() {
     }
 
     setupFreeTier()
-  }, [user, subscriptionLoading])
+  }, [user, subscriptionLoading, subscription, isSettingUp])
 
   if (instanceLoading || subscriptionLoading || isSettingUp) {
     return (
       <div className="flex items-center justify-center h-96">
         <div className="text-center">
           <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-4" />
-          {isSettingUp && (
+          {isSettingUp ? (
             <p className="text-gray-600">Setting up your free MindRoom instance...</p>
+          ) : (
+            <p className="text-gray-600">Loading...</p>
           )}
         </div>
       </div>
