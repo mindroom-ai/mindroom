@@ -16,7 +16,7 @@ export const config = {
     // Price IDs for different tiers
     prices: {
       starter: process.env.STRIPE_PRICE_STARTER || 'price_starter',
-      professional: process.env.STRIPE_PRICE_PRO || 'price_pro',
+      professional: process.env.STRIPE_PRICE_PROFESSIONAL || 'price_professional',
       enterprise: process.env.STRIPE_PRICE_ENTERPRISE || 'price_enterprise',
     },
 

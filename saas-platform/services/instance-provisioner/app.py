@@ -197,8 +197,8 @@ async def provision_instance(
             logger.info(f"Namespace {namespace} already exists")
 
         # Create image pull secret for private registry
-        gitea_username = os.getenv("GITEA_USERNAME", "basnijholt")
-        gitea_password = os.getenv("GITEA_PASSWORD", "c9433aa79a9805574f9eb0768f2b71a82bc54123")
+        gitea_username = os.getenv("GITEA_USER", "basnijholt")
+        gitea_password = os.getenv("GITEA_TOKEN", "c9433aa79a9805574f9eb0768f2b71a82bc54123")
 
         logger.info(f"Creating image pull secret in namespace {namespace}")
         # Create the secret (kubectl will error if already exists, we catch that)

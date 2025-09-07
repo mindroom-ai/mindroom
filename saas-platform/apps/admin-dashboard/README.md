@@ -61,27 +61,29 @@ Internal admin dashboard for managing MindRoom platform operations, customers, s
 1. Install dependencies:
 ```bash
 cd apps/admin-dashboard
-npm install
+pnpm install
 ```
 
-2. Configure environment:
+2. Setup environment variables:
 ```bash
 cp .env.example .env
-# Edit .env with your credentials
+# Edit .env with your actual values
 ```
 
 3. Start development server:
 ```bash
-npm run dev
+pnpm run dev
 ```
 
 The dashboard will be available at http://localhost:5173
 
 ### Environment Variables
 
+For local development, create a `.env` file with:
+
 - `VITE_SUPABASE_URL`: Your Supabase project URL
 - `VITE_SUPABASE_SERVICE_KEY`: Service role key for full database access
-- `VITE_PROVISIONER_URL`: Dokku provisioner API endpoint
+- `VITE_PROVISIONER_URL`: Instance provisioner API endpoint (default: http://localhost:8002)
 - `VITE_PROVISIONER_API_KEY`: API key for provisioner
 - `VITE_STRIPE_SECRET_KEY`: Stripe secret key (optional)
 
@@ -185,7 +187,7 @@ Payment operations can integrate with Stripe API for subscription management.
 
 ### Debug Mode
 
-Set `VITE_DEBUG=true` in `.env` to enable verbose logging.
+Set `DEBUG=true` in environment variables to enable verbose logging.
 
 ## Support
 

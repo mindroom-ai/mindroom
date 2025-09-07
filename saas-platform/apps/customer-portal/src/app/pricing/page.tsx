@@ -39,7 +39,7 @@ const pricingTiers: PricingTier[] = [
     id: 'starter',
     name: 'Starter',
     price: '$49',
-    priceId: process.env.NEXT_PUBLIC_STRIPE_PRICE_STARTER || '',
+    priceId: process.env.STRIPE_PRICE_STARTER || '',
     description: 'Great for individuals and small teams',
     features: [
       '5 AI Agents',
@@ -61,7 +61,7 @@ const pricingTiers: PricingTier[] = [
     id: 'professional',
     name: 'Professional',
     price: '$199',
-    priceId: process.env.NEXT_PUBLIC_STRIPE_PRICE_PROFESSIONAL || '',
+    priceId: process.env.STRIPE_PRICE_PROFESSIONAL || '',
     description: 'For growing businesses',
     features: [
       'Unlimited AI Agents',

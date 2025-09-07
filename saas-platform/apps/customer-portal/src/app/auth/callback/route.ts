@@ -13,7 +13,7 @@ export async function GET(request: NextRequest) {
 
   // URL to redirect to after sign in process completes
   // Use the public app URL from environment or construct from headers
-  const publicUrl = process.env.NEXT_PUBLIC_APP_URL ||
+  const publicUrl = process.env.APP_URL ||
     `https://${request.headers.get('host')}` ||
     request.url
 

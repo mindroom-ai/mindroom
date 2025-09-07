@@ -6,8 +6,8 @@ export async function createServerClientSupabase() {
   const cookieStore = await cookies()
 
   // Use placeholder values during build time, real values will be injected at runtime
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co'
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key'
+  const url = process.env.SUPABASE_URL || 'https://placeholder.supabase.co'
+  const anonKey = process.env.SUPABASE_ANON_KEY || 'placeholder-key'
 
   return createServerClient<Database>(
     url,

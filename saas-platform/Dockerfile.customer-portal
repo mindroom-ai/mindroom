@@ -16,15 +16,8 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 FROM deps AS builder
 WORKDIR /app
 COPY apps/customer-portal/ ./
-# Accept build arguments for Supabase configuration
-ARG NEXT_PUBLIC_SUPABASE_URL
-ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
-ARG NEXT_PUBLIC_APP_URL
-# Set as environment variables for the build
-ENV NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
-ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
-ENV NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL}
-# Build Next.js app
+# Build Next.js app - configuration is fetched at runtime via /api/config
+# No need for build-time environment variables anymore
 RUN pnpm run build
 
 # Production stage

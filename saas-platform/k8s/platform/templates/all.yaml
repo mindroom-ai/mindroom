@@ -21,6 +21,13 @@ stringData:
   STRIPE_PUBLISHABLE_KEY: {{ .Values.stripe.publishableKey }}
   STRIPE_SECRET_KEY: {{ .Values.stripe.secretKey }}
   STRIPE_WEBHOOK_SECRET: {{ .Values.stripe.webhookSecret }}
+  STRIPE_PRICE_STARTER: {{ .Values.stripe.priceStarter }}
+  STRIPE_PRICE_PROFESSIONAL: {{ .Values.stripe.priceProfessional }}
+  STRIPE_PRICE_ENTERPRISE: {{ .Values.stripe.priceEnterprise }}
+  PROVISIONER_API_KEY: {{ .Values.provisioner.apiKey }}
+  PROVISIONER_URL: "http://instance-provisioner:8002"
+  GITEA_USER: {{ .Values.gitea.user }}
+  GITEA_TOKEN: {{ .Values.gitea.token }}
 ---
 # Docker registry secret
 apiVersion: v1
@@ -66,15 +73,15 @@ spec:
         env:
         - name: NODE_ENV
           value: production
-        - name: NEXT_PUBLIC_APP_URL
+        - name: APP_URL
           value: https://app.{{ .Values.domain }}
         # Map standard env vars to Next.js public env vars
-        - name: NEXT_PUBLIC_SUPABASE_URL
+        - name: SUPABASE_URL
           valueFrom:
             secretKeyRef:
               name: platform-secrets
               key: SUPABASE_URL
-        - name: NEXT_PUBLIC_SUPABASE_ANON_KEY
+        - name: SUPABASE_ANON_KEY
           valueFrom:
             secretKeyRef:
               name: platform-secrets

@@ -83,14 +83,14 @@ The authentication flow relies on proper Supabase configuration:
 
 ### Environment Variables
 The platform uses build-time and runtime environment variables:
-- **Build-time** (Next.js): `NEXT_PUBLIC_*` variables are baked into the Docker image
+- **Build-time** (Next.js): `*` variables are baked into the Docker image
 - **Runtime**: Server-side variables from K8s secrets
 
 Key environment mappings in K8s:
 ```yaml
-NEXT_PUBLIC_APP_URL: https://app.{{ .Values.domain }}
-NEXT_PUBLIC_SUPABASE_URL: {{ .Values.supabase.url }}
-NEXT_PUBLIC_SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey }}
+APP_URL: https://app.{{ .Values.domain }}
+SUPABASE_URL: {{ .Values.supabase.url }}
+SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey }}
 ```
 
 ### Service Dependencies
@@ -139,9 +139,9 @@ All tables use Row-Level Security (RLS) policies for data isolation.
 **Cause**: Next.js needs environment variables at build time
 **Fix**: Pass build args in deploy.sh:
 ```bash
---build-arg NEXT_PUBLIC_SUPABASE_URL=$SUPABASE_URL
---build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
---build-arg NEXT_PUBLIC_APP_URL=https://app.staging.mindroom.chat
+--build-arg SUPABASE_URL=$SUPABASE_URL
+--build-arg SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
+--build-arg APP_URL=https://app.staging.mindroom.chat
 ```
 
 ### K8s Deployment Not Updating
