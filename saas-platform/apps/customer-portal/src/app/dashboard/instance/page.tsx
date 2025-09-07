@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, Trash2, ExternalLink, Server, Database, Globe } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 
-type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'deprovisioning' | 'maintenance'
+type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'deprovisioning' | 'maintenance' | 'error'
 
 type Instance = {
   id: string
@@ -117,6 +117,7 @@ export default function InstancePage() {
       case 'maintenance':
         return <Clock className="w-5 h-5 text-yellow-500" />
       case 'failed':
+      case 'error':
         return <AlertCircle className="w-5 h-5 text-red-500" />
       default:
         return null
@@ -133,6 +134,8 @@ export default function InstancePage() {
         return 'Instance is stopped. Start it to access your MindRoom.'
       case 'failed':
         return 'Instance provisioning failed. Please contact support.'
+      case 'error':
+        return 'Instance not found in cluster. It may have been removed during maintenance. Please contact support to reprovision your instance.'
       case 'deprovisioning':
         return 'Removing instance...'
       case 'maintenance':
@@ -198,6 +201,7 @@ export default function InstancePage() {
                 ${instance.status === 'provisioning' ? 'text-orange-600' : ''}
                 ${instance.status === 'stopped' ? 'text-yellow-600' : ''}
                 ${instance.status === 'failed' ? 'text-red-600' : ''}
+                ${instance.status === 'error' ? 'text-red-600' : ''}
               `}>
                 {instance.status}
               </span>
@@ -250,6 +254,26 @@ export default function InstancePage() {
               )}
               Start Instance
             </button>
+          )}
+
+          {instance.status === 'error' && (
+            <div className="flex gap-2">
+              <button
+                onClick={() => window.location.href = 'mailto:support@mindroom.chat?subject=Instance Error - Reprovision Request&body=My instance ID: ' + instance.id + ' (subdomain: ' + instance.subdomain + ') is showing an error status and needs to be reprovisioned.'}
+                className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
+              >
+                <AlertCircle className="w-4 h-4" />
+                Contact Support
+              </button>
+              <button
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
+              >
+                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                Retry
+              </button>
+            </div>
           )}
         </div>
 
