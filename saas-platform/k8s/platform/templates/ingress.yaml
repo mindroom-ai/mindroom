@@ -38,9 +38,9 @@ spec:
           service:
             name: admin-dashboard
             port:
-              number: 80
+              number: 3001
 
-  # Instance Provisioner API
+  # Backend API (Admin + Provisioner + Webhooks)
   - host: api.{{ .Values.domain }}
     http:
       paths:
@@ -48,11 +48,11 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: instance-provisioner
+            name: mindroom-backend
             port:
-              number: 8002
+              number: 8000
 
-  # Stripe Webhooks
+  # Stripe Webhooks (handled by backend)
   - host: webhooks.{{ .Values.domain }}
     http:
       paths:
@@ -60,9 +60,9 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: stripe-handler
+            name: mindroom-backend
             port:
-              number: 3005
+              number: 8000
 
   tls:
   - hosts:

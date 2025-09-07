@@ -1,36 +1,40 @@
 ---
-# ServiceAccount for instance-provisioner
+# ServiceAccount for unified backend (handles provisioning)
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: instance-provisioner
+  name: mindroom-backend
   namespace: mindroom-{{ .Values.environment }}
 ---
 # ClusterRole for managing instances
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: instance-provisioner
+  name: mindroom-backend
 rules:
 # Allow creating namespaces for instances
 - apiGroups: [""]
   resources: ["namespaces"]
   verbs: ["get", "list", "create", "delete"]
-# Allow managing all resources in instance namespaces
-- apiGroups: ["*"]
-  resources: ["*"]
-  verbs: ["*"]
+# Allow managing deployments for scaling instances
+- apiGroups: ["apps"]
+  resources: ["deployments", "deployments/scale"]
+  verbs: ["get", "list", "update", "patch"]
+# Allow managing pods for instance operations
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "delete"]
 ---
 # ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: instance-provisioner
+  name: mindroom-backend
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: instance-provisioner
+  name: mindroom-backend
 subjects:
 - kind: ServiceAccount
-  name: instance-provisioner
+  name: mindroom-backend
   namespace: mindroom-{{ .Values.environment }}
