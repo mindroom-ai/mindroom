@@ -44,35 +44,25 @@ export default function InstancePage() {
     if (!silent) setLoading(true)
 
     try {
-      const supabase = createClient()
+      // Use API endpoint that has service client access
+      const response = await fetch('/api/instance/status')
 
-      // Get current user
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
-        router.push('/auth/login')
-        return
+      if (!response.ok) {
+        if (response.status === 401) {
+          router.push('/auth/login')
+          return
+        }
+        throw new Error('Failed to fetch instance')
       }
 
-      // Get user's subscription
-      const { data: subscription } = await supabase
-        .from('subscriptions')
-        .select('*')
-        .eq('account_id', user.id)
-        .single()
+      const data = await response.json()
 
-      if (!subscription) {
+      if (!data.subscription) {
         setLoading(false)
         return
       }
 
-      // Get instance for subscription
-      const { data: instanceData } = await supabase
-        .from('instances')
-        .select('*')
-        .eq('subscription_id', subscription.id)
-        .single()
-
-      setInstance(instanceData)
+      setInstance(data.instance)
     } catch (error) {
       console.error('Error fetching instance:', error)
     } finally {
