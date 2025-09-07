@@ -11,6 +11,8 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
     nginx.ingress.kubernetes.io/client-header-buffer-size: "16k"
     nginx.ingress.kubernetes.io/large-client-header-buffers: "4 32k"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: nginx
   rules:
@@ -61,3 +63,11 @@ spec:
             name: stripe-handler
             port:
               number: 3005
+
+  tls:
+  - hosts:
+    - app.{{ .Values.domain }}
+    - admin.{{ .Values.domain }}
+    - api.{{ .Values.domain }}
+    - webhooks.{{ .Values.domain }}
+    secretName: platform-tls-cert
