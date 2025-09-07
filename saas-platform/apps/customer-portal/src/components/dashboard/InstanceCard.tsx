@@ -137,9 +137,24 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
         <div className="flex items-center justify-between">
           <span className="text-gray-600">Subdomain</span>
           <span className="font-mono text-sm bg-gray-100 px-2 py-1 rounded">
-            {instance.subdomain}.mindroom.app
+            {instance.subdomain}.staging.mindroom.chat
           </span>
         </div>
+
+        {/* Matrix Server */}
+        {instance.matrix_server_url && instance.status === 'running' && (
+          <div className="flex items-center justify-between">
+            <span className="text-gray-600">Matrix Server</span>
+            <Link
+              href={instance.matrix_server_url}
+              target="_blank"
+              className="flex items-center gap-1 text-purple-600 hover:text-purple-700 font-medium"
+            >
+              Matrix API
+              <ExternalLink className="w-4 h-4" />
+            </Link>
+          </div>
+        )}
 
         {/* Created */}
         <div className="flex items-center justify-between">
