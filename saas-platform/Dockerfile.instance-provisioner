@@ -25,6 +25,10 @@ COPY services/instance-provisioner/app.py .
 # Copy Helm chart (will be available in container)
 COPY k8s/instance /app/k8s/instance
 
+# Run as non-root user for security
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8002
 
 # Health check
