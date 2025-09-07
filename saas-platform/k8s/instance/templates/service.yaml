@@ -1,0 +1,57 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mindroom-frontend-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: mindroom-frontend
+    customer: {{ .Values.customer }}
+spec:
+  type: ClusterIP
+  ports:
+  - port: 3003
+    targetPort: 3003
+    name: http
+  - port: 8765
+    targetPort: 8765
+    name: websocket
+  selector:
+    app: mindroom-frontend
+    customer: {{ .Values.customer }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mindroom-backend-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: mindroom-backend
+    customer: {{ .Values.customer }}
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8765
+    targetPort: 8765
+    name: websocket
+  selector:
+    app: mindroom-backend
+    customer: {{ .Values.customer }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: synapse-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: synapse
+    customer: {{ .Values.customer }}
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8008
+    targetPort: 8008
+    name: http
+  selector:
+    app: synapse
+    customer: {{ .Values.customer }}

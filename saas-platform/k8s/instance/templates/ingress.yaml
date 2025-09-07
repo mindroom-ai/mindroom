@@ -4,10 +4,22 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ .Values.customer }}-ingress
+  namespace: mindroom-instances
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: "mindroom-frontend-{{ .Values.customer }},mindroom-backend-{{ .Values.customer }}"
 spec:
   ingressClassName: nginx
+  tls:
+  - hosts:
+    - {{ .Values.customer }}.{{ .Values.baseDomain }}
+    - {{ .Values.customer }}.api.{{ .Values.baseDomain }}
+    - {{ .Values.customer }}.matrix.{{ .Values.baseDomain }}
+    secretName: mindroom-{{ .Values.customer }}-tls
   rules:
   # MindRoom Frontend
   - host: {{ .Values.customer }}.{{ .Values.baseDomain }}
@@ -17,9 +29,16 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: mindroom-{{ .Values.customer }}
+            name: mindroom-frontend-{{ .Values.customer }}
             port:
               number: 3003
+      - path: /ws
+        pathType: Prefix
+        backend:
+          service:
+            name: mindroom-frontend-{{ .Values.customer }}
+            port:
+              number: 8765
 
   # MindRoom Backend API
   - host: {{ .Values.customer }}.api.{{ .Values.baseDomain }}
@@ -29,7 +48,7 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: mindroom-{{ .Values.customer }}
+            name: mindroom-backend-{{ .Values.customer }}
             port:
               number: 8765
 

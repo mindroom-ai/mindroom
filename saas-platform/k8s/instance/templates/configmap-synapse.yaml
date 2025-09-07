@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: synapse-config-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app: synapse
+    customer: {{ .Values.customer }}
+data:
+  homeserver.yaml: |
+    # Synapse configuration for {{ .Values.customer }}
+    server_name: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
+    pid_file: /data/homeserver.pid
+
+    listeners:
+      - port: 8008
+        tls: false
+        type: http
+        x_forwarded: true
+        resources:
+          - names: [client, federation]
+            compress: false
+
+    database:
+      name: sqlite3
+      args:
+        database: /data/homeserver.db
+
+    media_store_path: /data/media_store
+    uploads_path: /data/uploads
+
+    # Registration and authentication
+    enable_registration: true
+    enable_registration_without_verification: true
+    registration_shared_secret: "{{ .Values.matrix_admin_password }}"
+
+    # Disable reporting stats
+    report_stats: false
+
+    # Keys and secrets
+    macaroon_secret_key: "{{ .Values.matrix_admin_password }}"
+    form_secret: "{{ .Values.matrix_admin_password }}"
+    signing_key_path: /data/{{ .Values.customer }}.signing.key
+
+    # Trusted key servers
+    trusted_key_servers:
+      - server_name: "matrix.org"
+
+    # Logging
+    log_config: /data/log.config
+
+    # URL preview settings
+    url_preview_enabled: false
+
+    # Federation (can be disabled for private instances)
+    federation_domain_whitelist: []
+
+    # Rate limiting
+    rc_message:
+      per_second: 10
+      burst_count: 50
+
+    rc_registration:
+      per_second: 0.2
+      burst_count: 3
+
+    rc_login:
+      address:
+        per_second: 0.17
+        burst_count: 3
+      account:
+        per_second: 0.17
+        burst_count: 3
+      failed_attempts:
+        per_second: 0.17
+        burst_count: 3
+
+  log.config: |
+    version: 1
+    formatters:
+      simple:
+        format: '%(asctime)s - %(name)s - %(lineno)d - %(levelname)s - %(request)s - %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+    root:
+      level: INFO
+      handlers: [console]
+    disable_existing_loggers: false
