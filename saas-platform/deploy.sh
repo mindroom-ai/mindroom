@@ -22,6 +22,11 @@ if [ "$APP" = "customer-portal" ]; then
     BUILD_ARGS="--build-arg NEXT_PUBLIC_SUPABASE_URL=$SUPABASE_URL \
                 --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY \
                 --build-arg NEXT_PUBLIC_APP_URL=https://app.staging.mindroom.chat"
+elif [ "$APP" = "admin-dashboard" ]; then
+    BUILD_ARGS="--build-arg VITE_SUPABASE_URL=$SUPABASE_URL \
+                --build-arg VITE_SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY \
+                --build-arg VITE_SUPABASE_SERVICE_KEY=$SUPABASE_SERVICE_KEY \
+                --build-arg VITE_STRIPE_SECRET_KEY=$STRIPE_SECRET_KEY"
 else
     BUILD_ARGS=""
 fi

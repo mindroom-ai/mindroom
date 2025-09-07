@@ -31,17 +31,27 @@ export function useSubscription() {
       return
     }
 
-    // Get user's subscription
+    // Get user's subscription through their account
     const fetchSubscription = async () => {
       try {
-        const { data } = await supabase
-          .from('subscriptions')
-          .select('*')
-          .eq('account_id', user.id)
+        // First get the account by email
+        const { data: account } = await supabase
+          .from('accounts')
+          .select('id')
+          .eq('email', user.email)
           .single()
 
-        if (data) {
-          setSubscription(data)
+        if (account) {
+          // Then get the subscription for that account
+          const { data } = await supabase
+            .from('subscriptions')
+            .select('*')
+            .eq('account_id', account.id)
+            .single()
+
+          if (data) {
+            setSubscription(data)
+          }
         }
       } catch (error) {
         console.error('Error fetching subscription:', error)
@@ -52,25 +62,40 @@ export function useSubscription() {
 
     fetchSubscription()
 
-    // Subscribe to changes
-    const subscription = supabase
-      .channel('subscription-changes')
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'subscriptions',
-          filter: `account_id=eq.${user.id}`,
-        },
-        (payload) => {
-          setSubscription(payload.new as Subscription)
-        }
-      )
-      .subscribe()
+    // Subscribe to changes (we need to get account ID first for proper filtering)
+    const setupRealtimeSubscription = async () => {
+      const { data: account } = await supabase
+        .from('accounts')
+        .select('id')
+        .eq('email', user.email)
+        .single()
 
+      if (account) {
+        const subscription = supabase
+          .channel('subscription-changes')
+          .on(
+            'postgres_changes',
+            {
+              event: '*',
+              schema: 'public',
+              table: 'subscriptions',
+              filter: `account_id=eq.${account.id}`,
+            },
+            (payload) => {
+              setSubscription(payload.new as Subscription)
+            }
+          )
+          .subscribe()
+
+        return () => {
+          subscription.unsubscribe()
+        }
+      }
+    }
+
+    const cleanup = setupRealtimeSubscription()
     return () => {
-      subscription.unsubscribe()
+      cleanup.then(fn => fn && fn())
     }
   }, [user, supabase])
 

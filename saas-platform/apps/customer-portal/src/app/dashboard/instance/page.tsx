@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, Trash2, ExternalLink, Server, Database, Globe } from 'lucide-react'
-import { createClientSupabase } from '@/lib/supabase/client'
+import { createClient } from '@/lib/supabase/client'
 
 type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'deprovisioning' | 'maintenance'
 
@@ -44,7 +44,7 @@ export default function InstancePage() {
     if (!silent) setLoading(true)
 
     try {
-      const supabase = createClientSupabase()
+      const supabase = createClient()
 
       // Get current user
       const { data: { user } } = await supabase.auth.getUser()

@@ -5,6 +5,7 @@ declare global {
   interface Window {
     ENV_CONFIG?: {
       VITE_SUPABASE_URL?: string;
+      VITE_SUPABASE_ANON_KEY?: string;
       VITE_SUPABASE_SERVICE_KEY?: string;
       VITE_PROVISIONER_URL?: string;
       VITE_PROVISIONER_API_KEY?: string;
@@ -25,6 +26,7 @@ const getConfigValue = (key: string, defaultValue = ''): string => {
 
 export const config = {
   supabaseUrl: getConfigValue('VITE_SUPABASE_URL'),
+  supabaseAnonKey: getConfigValue('VITE_SUPABASE_ANON_KEY'),
   supabaseServiceKey: getConfigValue('VITE_SUPABASE_SERVICE_KEY'),
   provisionerUrl: getConfigValue('VITE_PROVISIONER_URL', 'http://localhost:8002'),
   provisionerApiKey: getConfigValue('VITE_PROVISIONER_API_KEY'),
