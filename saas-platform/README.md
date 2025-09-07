@@ -15,9 +15,8 @@ saas-platform/
 │   ├── stripe-handler/       # Stripe webhook processing
 │   └── instance-provisioner/ # Kubernetes/Helm instance provisioner
 ├── scripts/           # Platform management scripts
-│   ├── deployment/    # Infrastructure and service deployment
-│   ├── database/      # Database migrations and setup
-│   └── testing/       # Platform-specific tests
+│   ├── db/            # Stripe and admin setup scripts
+│   └── deployment/    # Infrastructure and service deployment
 ├── docs/              # Platform documentation
 └── Dockerfile.*       # Docker images for platform services
 ```
@@ -119,14 +118,24 @@ cd saas-platform/services/stripe-handler
 npm run dev
 ```
 
-### Database Migrations
-```bash
-./saas-platform/scripts/database/run-migrations.sh
-```
+### Database Setup
+
+The database uses Supabase (PostgreSQL) with migrations in `supabase/migrations/`:
+- `001_schema.sql` - Core tables (accounts, subscriptions, instances, etc.)
+- `002_rls.sql` - Row Level Security policies
+
+To set up the database:
+1. Go to your Supabase Dashboard → SQL Editor
+2. Run each `.sql` file in order from `supabase/migrations/`
+3. Verify tables are created and RLS is enabled
+
+Optional setup scripts in `scripts/db/`:
+- `setup-stripe-products.js` - Creates Stripe products
+- `create-admin-user.js` - Creates an admin user
 
 ### Adding New Features
-1. Update database schema in `supabase/migrations/`
-2. Regenerate combined migration: `cat supabase/migrations/*.sql > supabase/all-migrations.sql`
+1. Create new migration files in `supabase/migrations/` (e.g., `003_new_feature.sql`)
+2. Apply migrations manually in Supabase Dashboard
 3. Update services to use new schema
 4. Deploy changes
 

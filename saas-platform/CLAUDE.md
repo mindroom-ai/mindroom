@@ -61,13 +61,16 @@ cd terraform-k8s
 kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout restart deployment/customer-portal -n mindroom-staging
 ```
 
-### Database Operations
+### Database Setup
 ```bash
-# Run migrations
-./scripts/database/run-migrations.sh
+# Migrations are in supabase/migrations/
+# Apply them manually in Supabase Dashboard SQL Editor
 
-# Regenerate combined migration file
-cat supabase/migrations/*.sql > supabase/all-migrations.sql
+# Optional: Setup Stripe products
+node scripts/db/setup-stripe-products.js
+
+# Optional: Create admin user
+node scripts/db/create-admin-user.js
 ```
 
 ## Critical Configuration Points
