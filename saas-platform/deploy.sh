@@ -42,12 +42,20 @@ docker push git.nijho.lt/basnijholt/$APP:latest
 echo "Updating deployment..."
 cd terraform-k8s
 
+# Map app name to deployment name
+DEPLOYMENT_NAME=$APP
+if [ "$APP" = "backend" ]; then
+    DEPLOYMENT_NAME="mindroom-backend"
+elif [ "$APP" = "admin" ]; then
+    DEPLOYMENT_NAME="admin-dashboard"
+fi
+
 # Force Kubernetes to pull the new image by restarting the deployment
-echo "Restarting $APP deployment to pull new image..."
-kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout restart deployment/$APP -n mindroom-staging
+echo "Restarting $DEPLOYMENT_NAME deployment to pull new image..."
+kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout restart deployment/$DEPLOYMENT_NAME -n mindroom-staging
 
 # Wait for rollout to complete
 echo "Waiting for rollout to complete..."
-kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout status deployment/$APP -n mindroom-staging
+kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout status deployment/$DEPLOYMENT_NAME -n mindroom-staging
 
 echo "✅ Done!"
