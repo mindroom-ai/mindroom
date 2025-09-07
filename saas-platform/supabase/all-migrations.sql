@@ -1413,3 +1413,21 @@ COMMENT ON FUNCTION handle_instance_status_change IS 'Track instance status chan
 COMMENT ON FUNCTION cleanup_expired_data IS 'Clean up old data to save storage';
 COMMENT ON FUNCTION calculate_uptime IS 'Calculate instance uptime percentage';
 COMMENT ON FUNCTION auto_pause_inactive_instances IS 'Automatically pause inactive free tier instances';
+-- Add auth_token field to instances table for simple authentication
+ALTER TABLE instances
+ADD COLUMN auth_token TEXT;
+
+-- Add index for quick lookups
+CREATE INDEX idx_instances_auth_token ON instances(auth_token);
+
+-- Comment on the new column
+COMMENT ON COLUMN instances.auth_token IS 'Simple authentication token for accessing the instance (temporary until proper auth is implemented)';-- Remove all Dokku references and use K8s-appropriate naming
+
+-- Rename dokku_app_name to instance_id (unique identifier for the instance)
+ALTER TABLE instances
+RENAME COLUMN dokku_app_name TO instance_id;
+
+-- Update the comment
+COMMENT ON COLUMN instances.instance_id IS 'Unique identifier for the Kubernetes instance (e.g., sub1757)';
+
+-- The subdomain column stays the same as it's still used for the URL

@@ -20,7 +20,7 @@ PLATFORM_HOST="159.69.220.57"
 
 # Copy migration file to platform server
 echo "Copying migration file to platform server..."
-scp -o StrictHostKeyChecking=no saas-platform/supabase/all-migrations.sql root@${PLATFORM_HOST}:/tmp/
+scp -o StrictHostKeyChecking=no supabase/all-migrations.sql root@${PLATFORM_HOST}:/tmp/
 
 # Run migrations from the platform server
 echo "Executing migrations from platform server..."

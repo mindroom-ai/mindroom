@@ -31,7 +31,7 @@ export const config = {
   },
 
   provisioner: {
-    url: process.env.DOKKU_PROVISIONER_URL || 'http://localhost:8002',
+    url: process.env.INSTANCE_PROVISIONER_URL || 'http://localhost:8002',
     apiKey: process.env.PROVISIONER_API_KEY,
     timeout: parseInt(process.env.PROVISIONER_TIMEOUT || '30000', 10), // milliseconds
   },
