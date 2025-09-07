@@ -95,7 +95,7 @@ def scan(  # noqa: C901, PLR0912, PLR0915
         script_path = Path(__file__).resolve()
 
         # Handle both running from scripts/ or from project root
-        project_root = script_path.parent.parent if script_path.parent.name == "scripts" else script_path.parent
+        project_root = script_path.parent.parent.parent
 
         env_path = project_root / ".env"
 
