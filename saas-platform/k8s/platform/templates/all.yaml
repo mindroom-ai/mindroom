@@ -75,7 +75,18 @@ spec:
           value: production
         - name: APP_URL
           value: https://app.{{ .Values.domain }}
-        # Map standard env vars to Next.js public env vars
+        # Next.js public env vars for client-side
+        - name: NEXT_PUBLIC_SUPABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: platform-secrets
+              key: SUPABASE_URL
+        - name: NEXT_PUBLIC_SUPABASE_ANON_KEY
+          valueFrom:
+            secretKeyRef:
+              name: platform-secrets
+              key: SUPABASE_ANON_KEY
+        # Also provide without prefix for server-side
         - name: SUPABASE_URL
           valueFrom:
             secretKeyRef:
