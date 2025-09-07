@@ -14,12 +14,27 @@ set -e
 
 APP=${1:-customer-portal}
 
-# Load env vars
-source ../.env
+# Load env vars from saas-platform directory
+if [ -f .env ]; then
+    source .env
+else
+    echo "Error: .env file not found in saas-platform directory"
+    exit 1
+fi
 
-# No more build args needed - all secrets stay server-side!
+# Build with appropriate args based on app
 echo "Building $APP..."
-docker build -t git.nijho.lt/basnijholt/$APP:latest -f Dockerfile.$APP .
+if [ "$APP" = "customer-portal" ]; then
+    # Customer portal needs NEXT_PUBLIC_ vars at build time
+    docker build \
+        --build-arg NEXT_PUBLIC_SUPABASE_URL="$SUPABASE_URL" \
+        --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
+        -t git.nijho.lt/basnijholt/$APP:latest \
+        -f Dockerfile.$APP .
+else
+    # Other apps don't need build args - secrets stay server-side
+    docker build -t git.nijho.lt/basnijholt/$APP:latest -f Dockerfile.$APP .
+fi
 
 echo "Pushing $APP..."
 docker push git.nijho.lt/basnijholt/$APP:latest
