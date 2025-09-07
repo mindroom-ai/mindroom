@@ -289,6 +289,33 @@ async def get_dashboard_metrics() -> dict[str, Any]:
         }
 
 
+# === Helper Functions ===
+async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-instances") -> bool:
+    """Check if a Kubernetes deployment exists."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "kubectl",
+            "get",
+            f"deployment/mindroom-backend-{instance_id}",
+            f"--namespace={namespace}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        # If the deployment doesn't exist, kubectl will return non-zero
+        if proc.returncode != 0:
+            error_msg = stderr.decode()
+            # Check for "not found" errors (deployment or namespace)
+            if "not found" in error_msg.lower() or "notfound" in error_msg.lower():
+                logger.info(f"Deployment mindroom-backend-{instance_id} not found in namespace {namespace}")
+                return False
+            return False  # Other errors
+        return proc.returncode == 0
+    except Exception:
+        logger.exception("Error checking deployment existence")
+        return False
+
+
 # === Instance Provisioner API (for customer portal compatibility) ===
 @app.post("/api/v1/provision")
 async def provision_instance(
@@ -353,6 +380,12 @@ async def start_instance_provisioner(
 
     logger.info(f"Starting instance {instance_id}")
 
+    # Check if deployment exists first
+    if not await check_deployment_exists(instance_id):
+        error_msg = f"Deployment mindroom-backend-{instance_id} not found"
+        logger.warning(error_msg)
+        raise HTTPException(status_code=404, detail=error_msg)
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "kubectl",
@@ -387,6 +420,12 @@ async def stop_instance_provisioner(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     logger.info(f"Stopping instance {instance_id}")
+
+    # Check if deployment exists first
+    if not await check_deployment_exists(instance_id):
+        error_msg = f"Deployment mindroom-backend-{instance_id} not found"
+        logger.warning(error_msg)
+        raise HTTPException(status_code=404, detail=error_msg)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -423,6 +462,12 @@ async def restart_instance_provisioner(
 
     logger.info(f"Restarting instance {instance_id}")
 
+    # Check if deployment exists first
+    if not await check_deployment_exists(instance_id):
+        error_msg = f"Deployment mindroom-backend-{instance_id} not found"
+        logger.warning(error_msg)
+        raise HTTPException(status_code=404, detail=error_msg)
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "kubectl",
@@ -445,6 +490,115 @@ async def restart_instance_provisioner(
         "success": True,
         "message": f"Instance {instance_id} restarted successfully",
     }
+
+
+# === Instance Sync API ===
+@app.post("/api/v1/sync-instances")
+async def sync_instances(
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """Sync instance states between database and Kubernetes cluster."""
+    if authorization != f"Bearer {PROVISIONER_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    logger.info("Starting instance sync")
+
+    try:
+        # Get all instances from database
+        result = supabase.table("instances").select("*").execute()
+        instances = result.data if result.data else []
+
+        sync_results = {
+            "total": len(instances),
+            "synced": 0,
+            "errors": 0,
+            "updates": [],
+        }
+
+        for instance in instances:
+            instance_id = instance.get("instance_id") or instance.get("subdomain")
+            if not instance_id:
+                logger.warning(f"Instance {instance.get('id')} has no instance_id or subdomain")
+                sync_results["errors"] += 1
+                continue
+
+            # Check if deployment exists in Kubernetes
+            exists = await check_deployment_exists(instance_id)
+
+            current_status = instance.get("status", "unknown")
+
+            # Determine what the status should be
+            if not exists:
+                # Deployment doesn't exist in Kubernetes
+                if current_status not in ["error", "deprovisioned"]:
+                    # Update database to reflect reality
+                    logger.info(f"Instance {instance_id} not found in cluster, marking as error")
+                    supabase.table("instances").update(
+                        {
+                            "status": "error",
+                            "updated_at": datetime.now(UTC).isoformat(),
+                        },
+                    ).eq("id", instance["id"]).execute()
+
+                    sync_results["updates"].append(
+                        {
+                            "instance_id": instance_id,
+                            "old_status": current_status,
+                            "new_status": "error",
+                            "reason": "deployment_not_found",
+                        },
+                    )
+                    sync_results["synced"] += 1
+            else:
+                # Deployment exists, check its actual state
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "kubectl",
+                        "get",
+                        f"deployment/mindroom-backend-{instance_id}",
+                        "--namespace=mindroom-instances",
+                        "-o=jsonpath={.spec.replicas}",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, _ = await proc.communicate()
+                    if proc.returncode == 0:
+                        replicas = int(stdout.decode().strip() or "0")
+                        actual_status = "running" if replicas > 0 else "stopped"
+
+                        if current_status != actual_status:
+                            logger.info(
+                                f"Instance {instance_id} status mismatch: DB={current_status}, K8s={actual_status}",
+                            )
+                            supabase.table("instances").update(
+                                {
+                                    "status": actual_status,
+                                    "updated_at": datetime.now(UTC).isoformat(),
+                                },
+                            ).eq("id", instance["id"]).execute()
+
+                            sync_results["updates"].append(
+                                {
+                                    "instance_id": instance_id,
+                                    "old_status": current_status,
+                                    "new_status": actual_status,
+                                    "reason": "status_mismatch",
+                                },
+                            )
+                            sync_results["synced"] += 1
+                except Exception:
+                    logger.exception(f"Error checking instance {instance_id} state")
+                    sync_results["errors"] += 1
+
+        logger.info(f"Instance sync completed: {sync_results}")
+        return sync_results
+
+    except Exception as e:
+        logger.exception("Failed to sync instances")
+        raise HTTPException(status_code=500, detail=f"Failed to sync instances: {e}") from e
 
 
 # === Stripe Webhooks ===

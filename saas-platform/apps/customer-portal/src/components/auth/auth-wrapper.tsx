@@ -48,7 +48,7 @@ export function AuthWrapper({ view = 'sign_in' }: AuthWrapperProps) {
         },
       }}
       redirectTo={`${origin}/auth/callback`}
-      providers={['google']}
+      providers={['google', 'github']}
       showLinks={view === 'sign_in'}
     />
   )

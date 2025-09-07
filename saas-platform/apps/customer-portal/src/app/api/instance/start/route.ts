@@ -67,6 +67,24 @@ export async function POST(request: Request) {
     if (!startResponse.ok) {
       const error = await startResponse.text()
       console.error('Failed to start instance:', error)
+
+      // Check if it's a "deployment not found" error
+      if (error.includes('not found') || error.includes('NotFound') || error.includes('No resources found')) {
+        // Update database to reflect that instance doesn't exist in cluster
+        await supabase
+          .from('instances')
+          .update({
+            status: 'error',
+            updated_at: new Date().toISOString()
+          } as any)
+          .eq('id', instanceId)
+
+        return NextResponse.json(
+          { error: 'Instance not found in cluster. It may have been removed. Please contact support to reprovision.' },
+          { status: 404 }
+        )
+      }
+
       return NextResponse.json(
         { error: 'Failed to start instance', details: error },
         { status: 500 }
@@ -75,7 +93,7 @@ export async function POST(request: Request) {
 
     const startData = await startResponse.json()
 
-    // Update instance status in database
+    // Only update instance status if start was successful
     const { error: updateError } = await supabase
       .from('instances')
       .update({
@@ -86,6 +104,7 @@ export async function POST(request: Request) {
 
     if (updateError) {
       console.error('Failed to update instance status:', updateError)
+      // Still return success since the start worked
     }
 
     return NextResponse.json({
