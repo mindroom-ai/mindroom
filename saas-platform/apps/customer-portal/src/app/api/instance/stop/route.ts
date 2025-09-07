@@ -51,32 +51,32 @@ export async function POST(request: Request) {
       )
     }
 
-    // Call the provisioner to restart the instance
+    // Call the provisioner to stop the instance
     const provisionerUrl = process.env.PROVISIONER_URL || 'http://instance-provisioner:8002'
 
-    const restartResponse = await fetch(`${provisionerUrl}/api/v1/restart/${instance.instance_id || instance.subdomain}`, {
+    const stopResponse = await fetch(`${provisionerUrl}/api/v1/stop/${instance.instance_id || instance.subdomain}`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.PROVISIONER_API_KEY || ''}`,
       }
     })
 
-    if (!restartResponse.ok) {
-      const error = await restartResponse.text()
-      console.error('Failed to restart instance:', error)
+    if (!stopResponse.ok) {
+      const error = await stopResponse.text()
+      console.error('Failed to stop instance:', error)
       return NextResponse.json(
-        { error: 'Failed to restart instance', details: error },
+        { error: 'Failed to stop instance', details: error },
         { status: 500 }
       )
     }
 
-    const restartData = await restartResponse.json()
+    const stopData = await stopResponse.json()
 
     // Update instance status in database
     const { error: updateError } = await supabase
       .from('instances')
       .update({
-        status: 'running',
+        status: 'stopped',
         updated_at: new Date().toISOString()
       } as any)
       .eq('id', instanceId)
@@ -86,11 +86,11 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({
-      success: restartData.success,
-      message: restartData.message
+      success: stopData.success,
+      message: stopData.message
     })
   } catch (error) {
-    console.error('Error restarting instance:', error)
+    console.error('Error stopping instance:', error)
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

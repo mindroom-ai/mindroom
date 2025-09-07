@@ -364,6 +364,162 @@ async def get_instance_status(customer_id: str) -> dict:
         return {"exists": False, "customer_id": customer_id}
 
 
+@app.post("/api/v1/restart/{customer_id}")
+async def restart_instance(
+    customer_id: str,
+    authenticated: bool = Depends(verify_token),  # noqa: ARG001, FAST002
+) -> dict:
+    """Restart all deployments for a MindRoom instance."""
+    namespace = "mindroom-instances"
+
+    logger.info(f"Restarting instance for customer: {customer_id}")
+
+    # Check if instance exists
+    status = await get_instance_status(customer_id)
+    if not status.get("exists"):
+        raise HTTPException(404, f"Instance not found for customer: {customer_id}")
+
+    # Restart all deployments for this customer
+    deployments = [
+        f"mindroom-backend-{customer_id}",
+        f"mindroom-frontend-{customer_id}",
+        f"synapse-{customer_id}",
+    ]
+
+    failed_deployments = []
+    for deployment in deployments:
+        success, output = run_command(
+            [
+                "kubectl",
+                "rollout",
+                "restart",
+                f"deployment/{deployment}",
+                "--namespace",
+                namespace,
+            ],
+        )
+        if not success:
+            logger.error(f"Failed to restart deployment {deployment}: {output}")
+            failed_deployments.append(deployment)
+
+    if failed_deployments:
+        return {
+            "success": False,
+            "message": f"Failed to restart deployments: {', '.join(failed_deployments)}",
+            "customer_id": customer_id,
+        }
+
+    return {
+        "success": True,
+        "message": f"Instance restarted successfully for customer {customer_id}",
+        "customer_id": customer_id,
+    }
+
+
+@app.post("/api/v1/stop/{customer_id}")
+async def stop_instance(
+    customer_id: str,
+    authenticated: bool = Depends(verify_token),  # noqa: ARG001, FAST002
+) -> dict:
+    """Stop all deployments for a MindRoom instance by scaling to 0."""
+    namespace = "mindroom-instances"
+
+    logger.info(f"Stopping instance for customer: {customer_id}")
+
+    # Check if instance exists
+    status = await get_instance_status(customer_id)
+    if not status.get("exists"):
+        raise HTTPException(404, f"Instance not found for customer: {customer_id}")
+
+    # Scale all deployments to 0
+    deployments = [
+        f"mindroom-backend-{customer_id}",
+        f"mindroom-frontend-{customer_id}",
+        f"synapse-{customer_id}",
+    ]
+
+    failed_deployments = []
+    for deployment in deployments:
+        success, output = run_command(
+            [
+                "kubectl",
+                "scale",
+                f"deployment/{deployment}",
+                "--replicas=0",
+                "--namespace",
+                namespace,
+            ],
+        )
+        if not success:
+            logger.error(f"Failed to stop deployment {deployment}: {output}")
+            failed_deployments.append(deployment)
+
+    if failed_deployments:
+        return {
+            "success": False,
+            "message": f"Failed to stop deployments: {', '.join(failed_deployments)}",
+            "customer_id": customer_id,
+        }
+
+    return {
+        "success": True,
+        "message": f"Instance stopped successfully for customer {customer_id}",
+        "customer_id": customer_id,
+    }
+
+
+@app.post("/api/v1/start/{customer_id}")
+async def start_instance(
+    customer_id: str,
+    authenticated: bool = Depends(verify_token),  # noqa: ARG001, FAST002
+) -> dict:
+    """Start all deployments for a MindRoom instance by scaling to 1."""
+    namespace = "mindroom-instances"
+
+    logger.info(f"Starting instance for customer: {customer_id}")
+
+    # Check if instance exists
+    status = await get_instance_status(customer_id)
+    if not status.get("exists"):
+        raise HTTPException(404, f"Instance not found for customer: {customer_id}")
+
+    # Scale all deployments to 1
+    deployments = [
+        f"mindroom-backend-{customer_id}",
+        f"mindroom-frontend-{customer_id}",
+        f"synapse-{customer_id}",
+    ]
+
+    failed_deployments = []
+    for deployment in deployments:
+        success, output = run_command(
+            [
+                "kubectl",
+                "scale",
+                f"deployment/{deployment}",
+                "--replicas=1",
+                "--namespace",
+                namespace,
+            ],
+        )
+        if not success:
+            logger.error(f"Failed to start deployment {deployment}: {output}")
+            failed_deployments.append(deployment)
+
+    if failed_deployments:
+        return {
+            "success": False,
+            "message": f"Failed to start deployments: {', '.join(failed_deployments)}",
+            "customer_id": customer_id,
+        }
+
+    return {
+        "success": True,
+        "message": f"Instance started successfully for customer {customer_id}",
+        "customer_id": customer_id,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
 
