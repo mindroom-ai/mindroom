@@ -12,9 +12,9 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md /app/
 
 # Install dependencies (without the project itself)
-# Include all extras to ensure API dependencies are installed
+# Exclude dev dependencies for production
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project --all-extras
+    uv sync --locked --no-install-project --no-dev
 
 # Copy source code and other files (changes more frequently)
 COPY src /app/src
@@ -25,7 +25,7 @@ COPY tools /app/tools/
 
 # Install the project itself (fast, dependencies already installed)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --all-extras --no-install-workspace
+    uv sync --locked --no-dev
 
 # Make startup script executable
 RUN chmod +x /app/run-backend.sh
