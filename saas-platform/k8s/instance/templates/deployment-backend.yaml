@@ -5,33 +5,31 @@ metadata:
   namespace: mindroom-instances
   labels:
     app: mindroom-backend
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: mindroom-backend
-      customer: {{ .Values.customer }}
+      customer: {{ .Values.customer | quote }}
   template:
     metadata:
       labels:
         app: mindroom-backend
-        customer: {{ .Values.customer }}
+        customer: {{ .Values.customer | quote }}
     spec:
       containers:
       - name: mindroom-backend
         image: {{ .Values.mindroom_backend_image | default "git.nijho.lt/basnijholt/mindroom-backend:latest" }}
         imagePullPolicy: Always
-        ports:
-        - containerPort: 8765
-          name: websocket
+        # No ports exposed - this is a Matrix bot, not an API server
         env:
         - name: OPENAI_API_KEY
           value: {{ .Values.openai_key | quote }}
         - name: ANTHROPIC_API_KEY
           value: {{ .Values.anthropic_key | quote }}
         - name: CUSTOMER_ID
-          value: {{ .Values.customer }}
+          value: {{ .Values.customer | quote }}
         - name: STORAGE_PATH
           value: /app/mindroom_data
         - name: LOG_LEVEL

@@ -8,7 +8,6 @@ import {
 import { MetricCard } from './components/MetricCard'
 import { InstanceHealth } from './components/InstanceHealth'
 import { QuickActions } from './components/QuickActions'
-import { createClient } from '@supabase/supabase-js'
 import { config } from './config'
 import { format } from 'date-fns'
 
@@ -41,93 +40,35 @@ export const Dashboard = () => {
   }, [])
 
   const fetchDashboardMetrics = async () => {
-    const supabase = createClient(
-      config.supabaseUrl,
-      config.supabaseServiceKey
-    )
-
     try {
-      // Get counts
-      const [accounts, subscriptions, instances] = await Promise.all([
-        supabase.from('accounts').select('*', { count: 'exact', head: true }),
-        supabase.from('subscriptions').select('*', { count: 'exact', head: true }).eq('status', 'active'),
-        supabase.from('instances').select('*', { count: 'exact', head: true }).eq('status', 'running'),
-      ])
+      // Fetch dashboard metrics from backend API
+      const response = await fetch(`${config.apiUrl}/metrics/dashboard`)
 
-      // Get MRR (Monthly Recurring Revenue)
-      const { data: mrrData } = await supabase
-        .from('subscriptions')
-        .select('tier')
-        .eq('status', 'active')
-
-      const tierPrices: Record<string, number> = {
-        starter: 49,
-        professional: 199,
-        enterprise: 999,
-        free: 0,
+      if (!response.ok) {
+        throw new Error(`Failed to fetch dashboard metrics: ${response.statusText}`)
       }
 
-      const mrr = mrrData?.reduce((sum, sub) => {
-        return sum + (tierPrices[sub.tier] || 0)
-      }, 0) || 0
+      const data = await response.json()
 
-      // Get daily message metrics for last 7 days
-      const sevenDaysAgo = new Date()
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
+      // Format the data for display
+      const dailyMessages = data.dailyMessages?.map((item: any) => ({
+        date: format(new Date(item.date), 'MMM dd'),
+        messages_sent: item.messages_sent
+      })) || []
 
-      const { data: messageData } = await supabase
-        .from('usage_metrics')
-        .select('metric_date, messages_sent')
-        .gte('metric_date', sevenDaysAgo.toISOString())
-        .order('metric_date')
-
-      // Aggregate messages by date
-      const messagesByDate = messageData?.reduce((acc: Record<string, number>, metric) => {
-        const date = format(new Date(metric.metric_date), 'MMM dd')
-        acc[date] = (acc[date] || 0) + metric.messages_sent
-        return acc
-      }, {}) || {}
-
-      const dailyMessages = Object.entries(messagesByDate).map(([date, messages_sent]) => ({
-        date,
-        messages_sent
-      }))
-
-      // Get instance status distribution
-      const { data: instanceData } = await supabase
-        .from('instances')
-        .select('status')
-
-      const statusCounts = instanceData?.reduce((acc: Record<string, number>, inst) => {
-        acc[inst.status] = (acc[inst.status] || 0) + 1
-        return acc
-      }, {}) || {}
-
-      const instanceStatuses = Object.entries(statusCounts).map(([status, count]) => ({
-        status,
-        count,
-      }))
-
-      // Get recent activity
-      const { data: auditData } = await supabase
-        .from('audit_logs')
-        .select('created_at, action, account_id')
-        .order('created_at', { ascending: false })
-        .limit(10)
-
-      const recentActivity = auditData?.map(log => ({
+      const recentActivity = data.recentActivity?.map((log: any) => ({
         time: format(new Date(log.created_at), 'HH:mm'),
         action: log.action,
         user: log.account_id?.substring(0, 8) || 'System',
       })) || []
 
       setMetrics({
-        totalAccounts: accounts.count || 0,
-        activeSubscriptions: subscriptions.count || 0,
-        runningInstances: instances.count || 0,
-        mrr,
+        totalAccounts: data.totalAccounts || 0,
+        activeSubscriptions: data.activeSubscriptions || 0,
+        runningInstances: data.runningInstances || 0,
+        mrr: data.mrr || 0,
         dailyMessages,
-        instanceStatuses,
+        instanceStatuses: data.instanceStatuses || [],
         recentActivity,
       })
     } catch (error) {

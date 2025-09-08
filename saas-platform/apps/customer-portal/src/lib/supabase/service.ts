@@ -6,7 +6,7 @@ import type { Database } from './types'
  * This bypasses RLS and should only be used in secure server-side contexts
  */
 export function createServiceClient() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL
+  const url = process.env.SUPABASE_URL || process.env.SUPABASE_URL
   const serviceKey = process.env.SUPABASE_SERVICE_KEY
 
   if (!url || !serviceKey) {

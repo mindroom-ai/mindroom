@@ -1,8 +1,16 @@
 import { DataProvider } from 'react-admin'
-import { createClient } from '@supabase/supabase-js'
 import { config } from './config'
 
-const supabase = createClient(config.supabaseUrl, config.supabaseServiceKey)
+// Helper to build query string
+const buildQueryString = (params: any) => {
+  const query = new URLSearchParams()
+  Object.keys(params).forEach(key => {
+    if (params[key] !== undefined && params[key] !== null) {
+      query.append(key, params[key])
+    }
+  })
+  return query.toString()
+}
 
 export const dataProvider: DataProvider = {
   getList: async (resource, params) => {
@@ -10,160 +18,116 @@ export const dataProvider: DataProvider = {
     const { field, order } = params.sort
     const filter = params.filter || {}
 
-    // Build query
-    let query = supabase
-      .from(resource)
-      .select('*', { count: 'exact' })
-
-    // Apply filters
-    Object.keys(filter).forEach(key => {
-      if (filter[key] !== undefined && filter[key] !== '') {
-        // Handle special filter operators
-        if (key === 'q') {
-          // Search filter
-          query = query.or(`email.ilike.%${filter[key]}%,full_name.ilike.%${filter[key]}%,company_name.ilike.%${filter[key]}%`)
-        } else if (typeof filter[key] === 'object' && filter[key] !== null) {
-          // Range filters
-          if ('gte' in filter[key]) {
-            query = query.gte(key, filter[key].gte)
-          }
-          if ('lte' in filter[key]) {
-            query = query.lte(key, filter[key].lte)
-          }
-        } else {
-          query = query.eq(key, filter[key])
-        }
-      }
+    const query = buildQueryString({
+      _sort: field,
+      _order: order,
+      _start: (page - 1) * perPage,
+      _end: page * perPage,
+      ...filter
     })
 
-    // Apply sorting
-    if (field) {
-      query = query.order(field, { ascending: order === 'ASC' })
-    }
+    const response = await fetch(`${config.apiUrl}/${resource}?${query}`)
+    if (!response.ok) throw new Error(response.statusText)
 
-    // Apply pagination
-    const start = (page - 1) * perPage
-    const end = start + perPage - 1
-    query = query.range(start, end)
-
-    const { data, count, error } = await query
-
-    if (error) throw error
-
+    const json = await response.json()
     return {
-      data: data || [],
-      total: count || 0,
+      data: json.data,
+      total: json.total
     }
   },
 
   getOne: async (resource, params) => {
-    const { data, error } = await supabase
-      .from(resource)
-      .select('*')
-      .eq('id', params.id)
-      .single()
+    const response = await fetch(`${config.apiUrl}/${resource}/${params.id}`)
+    if (!response.ok) throw new Error(response.statusText)
 
-    if (error) throw error
-
-    return { data }
+    const json = await response.json()
+    return json
   },
 
   getMany: async (resource, params) => {
-    const { data, error } = await supabase
-      .from(resource)
-      .select('*')
-      .in('id', params.ids)
-
-    if (error) throw error
-
-    return { data: data || [] }
+    const promises = params.ids.map(id =>
+      fetch(`${config.apiUrl}/${resource}/${id}`).then(r => r.json())
+    )
+    const responses = await Promise.all(promises)
+    return { data: responses.map(r => r.data) }
   },
 
   getManyReference: async (resource, params) => {
     const { page, perPage } = params.pagination
     const { field, order } = params.sort
 
-    let query = supabase
-      .from(resource)
-      .select('*', { count: 'exact' })
-      .eq(params.target, params.id)
+    const query = buildQueryString({
+      [params.target]: params.id,
+      _sort: field,
+      _order: order,
+      _start: (page - 1) * perPage,
+      _end: page * perPage,
+      ...params.filter
+    })
 
-    if (field) {
-      query = query.order(field, { ascending: order === 'ASC' })
-    }
+    const response = await fetch(`${config.apiUrl}/${resource}?${query}`)
+    if (!response.ok) throw new Error(response.statusText)
 
-    const start = (page - 1) * perPage
-    const end = start + perPage - 1
-    query = query.range(start, end)
-
-    const { data, count, error } = await query
-
-    if (error) throw error
-
+    const json = await response.json()
     return {
-      data: data || [],
-      total: count || 0,
+      data: json.data,
+      total: json.total
     }
   },
 
   create: async (resource, params) => {
-    const { data, error } = await supabase
-      .from(resource)
-      .insert(params.data)
-      .select()
-      .single()
+    const response = await fetch(`${config.apiUrl}/${resource}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params.data)
+    })
+    if (!response.ok) throw new Error(response.statusText)
 
-    if (error) throw error
-
-    return { data }
+    const json = await response.json()
+    return json
   },
 
   update: async (resource, params) => {
-    const { data, error } = await supabase
-      .from(resource)
-      .update(params.data)
-      .eq('id', params.id)
-      .select()
-      .single()
+    const response = await fetch(`${config.apiUrl}/${resource}/${params.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params.data)
+    })
+    if (!response.ok) throw new Error(response.statusText)
 
-    if (error) throw error
-
-    return { data }
+    const json = await response.json()
+    return json
   },
 
   updateMany: async (resource, params) => {
-    const { data, error } = await supabase
-      .from(resource)
-      .update(params.data)
-      .in('id', params.ids)
-      .select()
-
-    if (error) throw error
-
-    return { data: params.ids }
+    const promises = params.ids.map(id =>
+      fetch(`${config.apiUrl}/${resource}/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params.data)
+      }).then(r => r.json())
+    )
+    const responses = await Promise.all(promises)
+    return { data: responses.map(r => r.data) }
   },
 
   delete: async (resource, params) => {
-    const { data, error } = await supabase
-      .from(resource)
-      .delete()
-      .eq('id', params.id)
-      .select()
-      .single()
+    const response = await fetch(`${config.apiUrl}/${resource}/${params.id}`, {
+      method: 'DELETE'
+    })
+    if (!response.ok) throw new Error(response.statusText)
 
-    if (error) throw error
-
-    return { data }
+    const json = await response.json()
+    return json
   },
 
   deleteMany: async (resource, params) => {
-    const { error } = await supabase
-      .from(resource)
-      .delete()
-      .in('id', params.ids)
-
-    if (error) throw error
-
+    const promises = params.ids.map(id =>
+      fetch(`${config.apiUrl}/${resource}/${id}`, {
+        method: 'DELETE'
+      }).then(r => r.json())
+    )
+    await Promise.all(promises)
     return { data: params.ids }
-  },
+  }
 }

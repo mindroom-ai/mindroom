@@ -75,6 +75,33 @@ variable "stripe_webhook_secret" {
   sensitive   = true
 }
 
+variable "stripe_price_starter" {
+  description = "Stripe price ID for starter tier"
+  type        = string
+}
+
+variable "stripe_price_professional" {
+  description = "Stripe price ID for professional tier"
+  type        = string
+}
+
+variable "stripe_price_enterprise" {
+  description = "Stripe price ID for enterprise tier"
+  type        = string
+}
+
+variable "provisioner_api_key" {
+  description = "API key for the instance provisioner service"
+  type        = string
+  sensitive   = true
+}
+
+variable "gitea_user" {
+  description = "Gitea username for registry access"
+  type        = string
+  default     = "basnijholt"
+}
+
 variable "gitea_token" {
   description = "Gitea registry token"
   type        = string

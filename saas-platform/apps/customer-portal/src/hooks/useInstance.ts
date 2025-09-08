@@ -27,36 +27,17 @@ export function useInstance() {
       return
     }
 
-    // Get user's instance through their account and subscription
+    // Get user's instance through the API endpoint (avoids RLS issues)
     const fetchInstance = async () => {
       try {
-        // First get the account by email
-        const { data: account } = await supabase
-          .from('accounts')
-          .select('id')
-          .eq('email', user.email)
-          .single()
-
-        if (account) {
-          // Then get the user's subscription
-          const { data: subscription } = await supabase
-            .from('subscriptions')
-            .select('id')
-            .eq('account_id', account.id)
-            .single()
-
-          if (subscription) {
-            // Finally get the instance for that subscription
-            const { data: instanceData } = await supabase
-              .from('instances')
-              .select('*')
-              .eq('subscription_id', subscription.id)
-              .single()
-
-            if (instanceData) {
-              setInstance(instanceData)
-            }
+        const response = await fetch('/api/instance/status')
+        if (response.ok) {
+          const data = await response.json()
+          if (data.instance) {
+            setInstance(data.instance)
           }
+        } else {
+          console.error('Failed to fetch instance status')
         }
       } catch (error) {
         console.error('Error fetching instance:', error)
@@ -67,48 +48,21 @@ export function useInstance() {
 
     fetchInstance()
 
-    // Subscribe to changes (need to get subscription ID for proper filtering)
-    const setupRealtimeSubscription = async () => {
-      const { data: account } = await supabase
-        .from('accounts')
-        .select('id')
-        .eq('email', user.email)
-        .single()
-
-      if (account) {
-        const { data: subscriptionData } = await supabase
-          .from('subscriptions')
-          .select('id')
-          .eq('account_id', account.id)
-          .single()
-
-        if (subscriptionData) {
-          const subscription = supabase
-            .channel('instance-changes')
-            .on(
-              'postgres_changes',
-              {
-                event: '*',
-                schema: 'public',
-                table: 'instances',
-                filter: `subscription_id=eq.${subscriptionData.id}`,
-              },
-              (payload) => {
-                setInstance(payload.new as Instance)
-              }
-            )
-            .subscribe()
-
-          return () => {
-            subscription.unsubscribe()
+    // Poll for changes every 10 seconds instead of realtime subscription
+    // (avoids RLS issues with direct Supabase access)
+    const interval = setInterval(() => {
+      fetch('/api/instance/status')
+        .then(res => res.json())
+        .then(data => {
+          if (data.instance) {
+            setInstance(data.instance)
           }
-        }
-      }
-    }
+        })
+        .catch(err => console.error('Error polling instance status:', err))
+    }, 10000)
 
-    const cleanup = setupRealtimeSubscription()
     return () => {
-      cleanup.then(fn => fn && fn())
+      clearInterval(interval)
     }
   }, [user, supabase])
 

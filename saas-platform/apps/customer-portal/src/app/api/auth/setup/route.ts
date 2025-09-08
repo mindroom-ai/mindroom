@@ -108,7 +108,15 @@ export async function POST() {
     }
 
     // Trigger instance provisioning via the provisioner service
-    const provisionerUrl = process.env.PROVISIONER_URL || 'http://instance-provisioner:8002'
+    const provisionerUrl = process.env.PLATFORM_BACKEND_URL
+    if (!provisionerUrl) {
+      console.warn('PLATFORM_BACKEND_URL not configured, skipping instance provisioning')
+      return NextResponse.json({
+        message: 'Free tier account created successfully (instance provisioning pending)',
+        subscriptionId: subscription.id,
+        tier: 'free'
+      })
+    }
 
     const provisionResponse = await fetch(`${provisionerUrl}/api/v1/provision`, {
       method: 'POST',

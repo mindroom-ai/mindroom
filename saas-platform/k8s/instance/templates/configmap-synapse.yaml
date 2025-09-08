@@ -5,7 +5,7 @@ metadata:
   namespace: mindroom-instances
   labels:
     app: synapse
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 data:
   homeserver.yaml: |
     # Synapse configuration for {{ .Values.customer }}

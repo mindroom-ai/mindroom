@@ -11,7 +11,6 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
-    nginx.ingress.kubernetes.io/websocket-services: "mindroom-frontend-{{ .Values.customer }},mindroom-backend-{{ .Values.customer }}"
 spec:
   ingressClassName: nginx
   tls:
@@ -32,25 +31,9 @@ spec:
             name: mindroom-frontend-{{ .Values.customer }}
             port:
               number: 3003
-      - path: /ws
-        pathType: Prefix
-        backend:
-          service:
-            name: mindroom-frontend-{{ .Values.customer }}
-            port:
-              number: 8765
 
-  # MindRoom Backend API
-  - host: {{ .Values.customer }}.api.{{ .Values.baseDomain }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: mindroom-backend-{{ .Values.customer }}
-            port:
-              number: 8765
+  # API subdomain could be used for future API endpoints if needed
+  # Currently the mindroom-backend is just a Matrix bot, not an API server
 
   # Matrix/Synapse Server
   - host: {{ .Values.customer }}.matrix.{{ .Values.baseDomain }}

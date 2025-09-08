@@ -11,6 +11,8 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
     nginx.ingress.kubernetes.io/client-header-buffer-size: "16k"
     nginx.ingress.kubernetes.io/large-client-header-buffers: "4 32k"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: nginx
   rules:
@@ -36,9 +38,9 @@ spec:
           service:
             name: admin-dashboard
             port:
-              number: 80
+              number: 3001
 
-  # Instance Provisioner API
+  # Backend API (Admin + Provisioner + Webhooks)
   - host: api.{{ .Values.domain }}
     http:
       paths:
@@ -46,11 +48,11 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: instance-provisioner
+            name: platform-backend
             port:
-              number: 8002
+              number: 8000
 
-  # Stripe Webhooks
+  # Stripe Webhooks (handled by backend)
   - host: webhooks.{{ .Values.domain }}
     http:
       paths:
@@ -58,6 +60,14 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: stripe-handler
+            name: platform-backend
             port:
-              number: 3005
+              number: 8000
+
+  tls:
+  - hosts:
+    - app.{{ .Values.domain }}
+    - admin.{{ .Values.domain }}
+    - api.{{ .Values.domain }}
+    - webhooks.{{ .Values.domain }}
+    secretName: platform-tls-cert

@@ -1,43 +1,23 @@
 # Multi-stage build for admin dashboard
-# Using public ECR for node to avoid Docker Hub rate limits
 FROM public.ecr.aws/docker/library/node:20-slim AS base
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 RUN npm install -g pnpm
 
 # Dependencies stage
 FROM base AS deps
 WORKDIR /app
 COPY apps/admin-dashboard/package.json apps/admin-dashboard/pnpm-lock.yaml ./
-# Use cache mount for pnpm store to speed up builds
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile
 
 # Build stage
 FROM deps AS builder
 WORKDIR /app
 COPY apps/admin-dashboard/ ./
-# Build with environment variables
-ARG VITE_SUPABASE_URL
-ARG VITE_SUPABASE_ANON_KEY
-ARG VITE_SUPABASE_SERVICE_KEY
-ARG VITE_STRIPE_SECRET_KEY
-ENV VITE_SUPABASE_URL=${VITE_SUPABASE_URL}
-ENV VITE_SUPABASE_ANON_KEY=${VITE_SUPABASE_ANON_KEY}
-ENV VITE_SUPABASE_SERVICE_KEY=${VITE_SUPABASE_SERVICE_KEY}
-ENV VITE_STRIPE_SECRET_KEY=${VITE_STRIPE_SECRET_KEY}
 RUN pnpm run build
 
-# Production stage
-# Using public ECR for nginx to avoid Docker Hub rate limits
-FROM public.ecr.aws/docker/library/nginx:alpine AS final
-# Copy built assets from builder
-COPY --from=builder /app/dist /usr/share/nginx/html
-# Copy nginx configuration if it exists
-COPY apps/admin-dashboard/nginx.conf /etc/nginx/conf.d/default.conf
-# Expose port
-EXPOSE 80
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost/ || exit 1
-# Start nginx
-CMD ["nginx", "-g", "daemon off;"]
+# Production stage - serve with a simple node server
+FROM public.ecr.aws/docker/library/node:20-slim
+RUN npm install -g serve
+WORKDIR /app
+COPY --from=builder /app/dist ./dist
+EXPOSE 3001
+CMD ["serve", "-s", "dist", "-l", "3001"]

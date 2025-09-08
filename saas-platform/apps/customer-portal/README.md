@@ -82,15 +82,15 @@ cp .env.local.example .env.local
 3. Configure your `.env.local` file:
 ```env
 # Supabase
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_ANON_KEY=your-anon-key
 
 # Stripe
-NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_...
+STRIPE_PUBLISHABLE_KEY=pk_test_...
 STRIPE_SECRET_KEY=sk_test_...
 
 # App URL
-NEXT_PUBLIC_APP_URL=http://localhost:3000
+APP_URL=http://localhost:3000
 ```
 
 4. Run the development server:
@@ -212,7 +212,7 @@ npm start
 ```
 
 ### Environment Variables for Production
-- Update `NEXT_PUBLIC_APP_URL` to your production domain
+- Update `APP_URL` to your production domain
 - Use production Supabase and Stripe keys
 - Enable Supabase RLS policies
 - Configure Stripe webhooks

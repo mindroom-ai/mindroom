@@ -45,16 +45,24 @@ export default function DashboardPage() {
     setupFreeTier()
   }, [user, subscriptionLoading, subscription, isSettingUp])
 
-  if (instanceLoading || subscriptionLoading || isSettingUp) {
+  if (instanceLoading || subscriptionLoading) {
     return (
       <div className="flex items-center justify-center h-96">
         <div className="text-center">
           <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-4" />
-          {isSettingUp ? (
-            <p className="text-gray-600">Setting up your free MindRoom instance...</p>
-          ) : (
-            <p className="text-gray-600">Loading...</p>
-          )}
+          <p className="text-gray-600">Loading...</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Show setup message only when actually setting up a new free tier
+  if (isSettingUp && !subscription) {
+    return (
+      <div className="flex items-center justify-center h-96">
+        <div className="text-center">
+          <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-4" />
+          <p className="text-gray-600">Setting up your free MindRoom instance...</p>
         </div>
       </div>
     )

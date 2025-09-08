@@ -14,6 +14,11 @@ provider "helm" {
   }
 }
 
+# Configure kubectl provider
+provider "kubectl" {
+  config_path = "${path.module}/${var.cluster_name}_kubeconfig.yaml"
+}
+
 # ===========================================
 # Wait for cluster to be ready
 # ===========================================
@@ -44,12 +49,20 @@ locals {
     }
 
     stripe = {
-      publishableKey = var.stripe_publishable_key
-      secretKey      = var.stripe_secret_key
-      webhookSecret  = var.stripe_webhook_secret
+      publishableKey      = var.stripe_publishable_key
+      secretKey           = var.stripe_secret_key
+      webhookSecret       = var.stripe_webhook_secret
+      priceStarter        = var.stripe_price_starter
+      priceProfessional   = var.stripe_price_professional
+      priceEnterprise     = var.stripe_price_enterprise
+    }
+
+    provisioner = {
+      apiKey = var.provisioner_api_key
     }
 
     gitea = {
+      user  = var.gitea_user
       token = var.gitea_token
     }
   }
@@ -57,7 +70,11 @@ locals {
 
 # Deploy the platform Helm chart
 resource "helm_release" "mindroom_platform" {
-  depends_on = [time_sleep.wait_for_cluster]
+  depends_on = [
+    time_sleep.wait_for_cluster,
+    kubectl_manifest.cluster_issuer_prod,
+    kubectl_manifest.cluster_issuer_staging
+  ]
 
   name       = "mindroom-${var.environment}"
   namespace  = var.environment

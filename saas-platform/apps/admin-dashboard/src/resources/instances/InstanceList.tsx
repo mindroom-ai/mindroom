@@ -26,13 +26,9 @@ const InstanceActions = ({ record }: any) => {
 
   const handleAction = useCallback(async (action: string) => {
     try {
-      const response = await fetch(`/api/instances/${action}`, {
+      const response = await fetch(`/api/instances/${record.id}/${action}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          app_name: record.dokku_app_name,
-          instance_id: record.id
-        }),
       })
 
       if (response.ok) {

@@ -62,7 +62,10 @@ export async function POST() {
     }
 
     // Call the provisioner
-    const provisionerUrl = process.env.PROVISIONER_URL || 'http://instance-provisioner:8002'
+    const provisionerUrl = process.env.PLATFORM_BACKEND_URL
+    if (!provisionerUrl) {
+      throw new Error('PLATFORM_BACKEND_URL environment variable is not configured')
+    }
 
     const provisionResponse = await fetch(`${provisionerUrl}/api/v1/provision`, {
       method: 'POST',

@@ -5,18 +5,18 @@ metadata:
   namespace: mindroom-instances
   labels:
     app: synapse
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: synapse
-      customer: {{ .Values.customer }}
+      customer: {{ .Values.customer | quote }}
   template:
     metadata:
       labels:
         app: synapse
-        customer: {{ .Values.customer }}
+        customer: {{ .Values.customer | quote }}
     spec:
       containers:
       - name: synapse

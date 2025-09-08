@@ -17,11 +17,10 @@ interface ProvisionResponse {
 
 export const provisionerService = {
   async provision(data: ProvisionRequest): Promise<ProvisionResponse> {
-    const response = await fetch(`${config.provisionerUrl}/provision`, {
+    const response = await fetch(`${config.apiUrl}/instances`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Key': config.provisionerApiKey,
       },
       body: JSON.stringify(data),
     })
@@ -34,11 +33,8 @@ export const provisionerService = {
   },
 
   async deprovision(appName: string): Promise<void> {
-    const response = await fetch(`${config.provisionerUrl}/deprovision/${appName}`, {
+    const response = await fetch(`${config.apiUrl}/instances/${appName}`, {
       method: 'DELETE',
-      headers: {
-        'X-API-Key': config.provisionerApiKey,
-      },
     })
 
     if (!response.ok) {
@@ -46,12 +42,9 @@ export const provisionerService = {
     }
   },
 
-  async start(appName: string): Promise<void> {
-    const response = await fetch(`${config.provisionerUrl}/instances/${appName}/start`, {
+  async start(instanceId: string): Promise<void> {
+    const response = await fetch(`${config.apiUrl}/instances/${instanceId}/start`, {
       method: 'POST',
-      headers: {
-        'X-API-Key': config.provisionerApiKey,
-      },
     })
 
     if (!response.ok) {
@@ -59,12 +52,9 @@ export const provisionerService = {
     }
   },
 
-  async stop(appName: string): Promise<void> {
-    const response = await fetch(`${config.provisionerUrl}/instances/${appName}/stop`, {
+  async stop(instanceId: string): Promise<void> {
+    const response = await fetch(`${config.apiUrl}/instances/${instanceId}/stop`, {
       method: 'POST',
-      headers: {
-        'X-API-Key': config.provisionerApiKey,
-      },
     })
 
     if (!response.ok) {
@@ -72,12 +62,9 @@ export const provisionerService = {
     }
   },
 
-  async restart(appName: string): Promise<void> {
-    const response = await fetch(`${config.provisionerUrl}/instances/${appName}/restart`, {
+  async restart(instanceId: string): Promise<void> {
+    const response = await fetch(`${config.apiUrl}/instances/${instanceId}/restart`, {
       method: 'POST',
-      headers: {
-        'X-API-Key': config.provisionerApiKey,
-      },
     })
 
     if (!response.ok) {
@@ -85,12 +72,8 @@ export const provisionerService = {
     }
   },
 
-  async getLogs(appName: string, lines: number = 100): Promise<string> {
-    const response = await fetch(`${config.provisionerUrl}/instances/${appName}/logs?lines=${lines}`, {
-      headers: {
-        'X-API-Key': config.provisionerApiKey,
-      },
-    })
+  async getLogs(instanceId: string, lines: number = 100): Promise<string> {
+    const response = await fetch(`${config.apiUrl}/instances/${instanceId}/logs?lines=${lines}`)
 
     if (!response.ok) {
       throw new Error(`Failed to get logs: ${response.statusText}`)
@@ -99,12 +82,8 @@ export const provisionerService = {
     return response.text()
   },
 
-  async getHealth(appName: string): Promise<any> {
-    const response = await fetch(`${config.provisionerUrl}/instances/${appName}/health`, {
-      headers: {
-        'X-API-Key': config.provisionerApiKey,
-      },
-    })
+  async getHealth(instanceId: string): Promise<any> {
+    const response = await fetch(`${config.apiUrl}/instances/${instanceId}/health`)
 
     if (!response.ok) {
       throw new Error(`Failed to get health status: ${response.statusText}`)
