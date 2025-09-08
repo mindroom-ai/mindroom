@@ -5,7 +5,6 @@
 ### Platform Services
 Fixed subdomains for platform infrastructure:
 - `app.mindroom.chat` → Customer Portal (customers login here)
-- `admin.mindroom.chat` → Admin Dashboard (internal admin)
 - `api.mindroom.chat` → Provisioning API
 - `webhooks.mindroom.chat/stripe` → Stripe webhook endpoint
 
@@ -29,7 +28,6 @@ Add these DNS records to your domain:
 ```
 # Platform services
 app.mindroom.chat        A     <your-k8s-ingress-ip>
-admin.mindroom.chat      A     <your-k8s-ingress-ip>
 api.mindroom.chat        A     <your-k8s-ingress-ip>
 webhooks.mindroom.chat   A     <your-k8s-ingress-ip>
 
@@ -44,7 +42,7 @@ webhooks.mindroom.chat   A     <your-k8s-ingress-ip>
 Add to `/etc/hosts`:
 
 ```
-127.0.0.1  app.mindroom.chat admin.mindroom.chat api.mindroom.chat webhooks.mindroom.chat
+127.0.0.1  app.mindroom.chat api.mindroom.chat webhooks.mindroom.chat
 127.0.0.1  demo.mindroom.chat demo.api.mindroom.chat demo.matrix.mindroom.chat
 ```
 
@@ -116,5 +114,5 @@ kubectl port-forward -n ingress-nginx svc/ingress-nginx-controller 8080:80
 
 4. Access services:
 - http://app.mindroom.chat:8080
-- http://admin.mindroom.chat:8080
+- http://app.mindroom.chat:8080/admin
 - http://demo.mindroom.chat:8080

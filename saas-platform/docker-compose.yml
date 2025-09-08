@@ -13,20 +13,6 @@ services:
       - ./backend:/app
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-  admin:
-    build:
-      context: ./apps/admin-dashboard
-      dockerfile: Dockerfile.dev
-    ports:
-      - "5173:5173"
-    volumes:
-      - ./apps/admin-dashboard:/app
-      - /app/node_modules
-    environment:
-      - VITE_API_URL=http://localhost:8000
-    depends_on:
-      - platform-backend
-
   customer-portal:
     build:
       context: ./apps/customer-portal

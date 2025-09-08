@@ -26,9 +26,6 @@ jobs:
           - name: customer-portal
             dockerfile: Dockerfile.customer-portal
             context: saas-platform
-          - name: admin-dashboard
-            dockerfile: Dockerfile.admin-dashboard
-            context: saas-platform
           - name: stripe-handler
             dockerfile: Dockerfile.stripe-handler
             context: saas-platform

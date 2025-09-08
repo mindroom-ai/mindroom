@@ -56,7 +56,7 @@ async function createAdminUser() {
     console.log('✅ Admin user created successfully!');
     console.log(`   Email: ${ADMIN_EMAIL}`);
     console.log(`   Password: ${ADMIN_PASSWORD}`);
-    console.log('   You can now login to the admin dashboard at http://localhost:3001');
+    console.log('   You can now login to the admin section at http://localhost:3000/admin');
 
   } catch (error) {
     console.error('Error creating admin user:', error.message);

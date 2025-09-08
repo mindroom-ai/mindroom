@@ -62,7 +62,6 @@ kubectl get pods -n mindroom-production
 
 ### Platform Services (`platform/`)
 - customer-portal (port 3000)
-- admin-dashboard (port 80)
 - stripe-handler (port 3005)
 - instance-provisioner (port 8002)
 

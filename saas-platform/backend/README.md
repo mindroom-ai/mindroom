@@ -2,11 +2,11 @@
 
 ## Overview
 Single-file FastAPI backend that handles:
-- Admin dashboard API (React Admin)
+- Admin API endpoints (for customer portal admin interface)
 - Dashboard metrics
 - Instance management (start/stop/restart)
 - Stripe webhooks
-- Simple admin authentication
+- Admin authentication via Supabase with is_admin flag
 
 ## Setup
 
@@ -46,9 +46,9 @@ kubectl apply -f k8s/backend.yaml
 
 ## API Endpoints
 
-### Admin Dashboard
-- `POST /api/admin/auth/login` - Admin login
-- `GET /api/admin/{resource}` - List records (React Admin)
+### Admin API
+- `POST /api/admin/auth/logout` - Admin logout
+- `GET /api/admin/{resource}` - List records (for admin interface)
 - `GET /api/admin/{resource}/{id}` - Get single record
 - `POST /api/admin/{resource}` - Create record
 - `PUT /api/admin/{resource}/{id}` - Update record

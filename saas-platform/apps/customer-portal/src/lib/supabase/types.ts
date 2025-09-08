@@ -6,18 +6,21 @@ export type Database = {
         Row: {
           id: string
           email: string
+          is_admin: boolean
           created_at: string
           updated_at: string
         }
         Insert: {
           id?: string
           email: string
+          is_admin?: boolean
           created_at?: string
           updated_at?: string
         }
         Update: {
           id?: string
           email?: string
+          is_admin?: boolean
           created_at?: string
           updated_at?: string
         }

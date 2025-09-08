@@ -8,7 +8,6 @@ REMOTE_HOST=${1:-"your-server-hostname"}
 echo "🚀 Forwarding MindRoom ports from $REMOTE_HOST..."
 
 ssh -N \
-  -L 3001:localhost:3001 \
   -L 3002:localhost:3002 \
   -L 3007:localhost:3007 \
   -L 8002:localhost:8002 \
@@ -20,7 +19,6 @@ SSH_PID=$!
 echo "✅ Port forwarding started (PID: $SSH_PID)"
 echo ""
 echo "Forwarded ports:"
-echo "  Admin Dashboard:    http://localhost:3001"
 echo "  Customer Portal:    http://localhost:3002"
 echo "  Stripe Handler:     http://localhost:3007"
 echo "  Dokku Provisioner:  http://localhost:8002"

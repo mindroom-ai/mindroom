@@ -1,28 +1,7 @@
 version: '3.8'
 
 services:
-  # Admin Dashboard
-  admin-dashboard:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile.admin-dashboard
-      args:
-        VITE_SUPABASE_URL: ${SUPABASE_URL}
-        VITE_SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
-        VITE_STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
-    container_name: mindroom-admin-dashboard
-    ports:
-      - "3001:80"
-    networks:
-      - mindroom-platform
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-
-  # Customer Portal
+  # Customer Portal (includes admin functionality)
   customer-portal:
     build:
       context: .
