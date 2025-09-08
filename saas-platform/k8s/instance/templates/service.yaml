@@ -14,29 +14,12 @@ spec:
     targetPort: 80  # Now targets nginx auth proxy
     name: http
   - port: 8765
-    targetPort: 8765
-    name: websocket
+    targetPort: 8765  # Backend API in frontend container
+    name: backend
   selector:
     app: mindroom-frontend
     customer: {{ .Values.customer | quote }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: mindroom-backend-{{ .Values.customer }}
-  namespace: mindroom-instances
-  labels:
-    app: mindroom-backend
-    customer: {{ .Values.customer | quote }}
-spec:
-  type: ClusterIP
-  ports:
-  - port: 8765
-    targetPort: 8765
-    name: websocket
-  selector:
-    app: mindroom-backend
-    customer: {{ .Values.customer | quote }}
+# mindroom-backend doesn't need a service - it's a Matrix bot, not an API server
 ---
 apiVersion: v1
 kind: Service

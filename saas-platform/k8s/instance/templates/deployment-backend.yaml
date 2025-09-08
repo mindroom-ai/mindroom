@@ -22,9 +22,7 @@ spec:
       - name: mindroom-backend
         image: {{ .Values.mindroom_backend_image | default "git.nijho.lt/basnijholt/mindroom-backend:latest" }}
         imagePullPolicy: Always
-        ports:
-        - containerPort: 8765
-          name: websocket
+        # No ports exposed - this is a Matrix bot, not an API server
         env:
         - name: OPENAI_API_KEY
           value: {{ .Values.openai_key | quote }}

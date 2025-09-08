@@ -38,7 +38,7 @@ spec:
         - containerPort: 3003
           name: app
         - containerPort: 8765
-          name: websocket
+          name: backend
         env:
         - name: OPENAI_API_KEY
           value: {{ .Values.openai_key | quote }}
@@ -60,10 +60,7 @@ spec:
           value: {{ .Values.instance_auth_token | quote }}
         - name: PLATFORM_BACKEND_URL
           value: "http://platform-backend.mindroom-staging:8000"
-        - name: API_URL
-          value: "http://mindroom-backend-{{ .Values.customer }}:8765"
-        - name: WEBSOCKET_URL
-          value: "ws://mindroom-backend-{{ .Values.customer }}:8765"
+        # mindroom-backend is a standalone Matrix bot, no API communication needed
         volumeMounts:
         - name: storage
           mountPath: /app/config
