@@ -81,13 +81,13 @@ After deployment (staging environment):
 docker login git.nijho.lt -u username
 
 # Build services
-docker build -f Dockerfile.customer-portal -t git.nijho.lt/username/customer-portal:latest .
+docker build -f Dockerfile.platform-frontend -t git.nijho.lt/username/platform-frontend:latest .
 docker build -f Dockerfile.backend -t git.nijho.lt/username/platform-backend:latest .
 docker build -f Dockerfile.stripe-handler -t git.nijho.lt/username/stripe-handler:latest .
 docker build -f Dockerfile.instance-provisioner -t git.nijho.lt/username/instance-provisioner:latest .
 
 # Push to registry
-docker push git.nijho.lt/username/customer-portal:latest
+docker push git.nijho.lt/username/platform-frontend:latest
 docker push git.nijho.lt/username/platform-backend:latest
 docker push git.nijho.lt/username/stripe-handler:latest
 docker push git.nijho.lt/username/instance-provisioner:latest
@@ -97,7 +97,7 @@ docker push git.nijho.lt/username/instance-provisioner:latest
 
 ```bash
 # Restart deployments to pull new images
-kubectl rollout restart deployment -n mindroom-staging customer-portal
+kubectl rollout restart deployment -n mindroom-staging platform-frontend
 kubectl rollout restart deployment -n mindroom-staging platform-backend
 kubectl rollout restart deployment -n mindroom-staging stripe-handler
 kubectl rollout restart deployment -n mindroom-staging instance-provisioner
@@ -117,7 +117,7 @@ cd saas-platform/k8s
 helm install mindroom-staging platform/ -f platform/values-staging.yaml
 
 # Access services via port-forward
-kubectl port-forward -n mindroom-staging svc/customer-portal 3000:3000
+kubectl port-forward -n mindroom-staging svc/platform-frontend 3000:3000
 ```
 
 ## Database Setup
@@ -153,13 +153,13 @@ node setup-stripe-products.js
 kubectl get pods -n mindroom-staging
 
 # Check specific service
-kubectl describe pod -n mindroom-staging -l app=customer-portal
+kubectl describe pod -n mindroom-staging -l app=platform-frontend
 
 # View logs
-kubectl logs -n mindroom-staging -l app=customer-portal
+kubectl logs -n mindroom-staging -l app=platform-frontend
 
 # Stream logs
-kubectl logs -f -n mindroom-staging deployment/customer-portal
+kubectl logs -f -n mindroom-staging deployment/platform-frontend
 ```
 
 ### Resource Usage
@@ -228,7 +228,7 @@ nslookup app.staging.mindroom.chat
 kubectl get secrets -n mindroom-staging gitea-registry -o yaml
 
 # Verify registry access
-docker pull git.nijho.lt/username/customer-portal:latest
+docker pull git.nijho.lt/username/platform-frontend:latest
 ```
 
 ## Security Notes

@@ -5,12 +5,12 @@ set -e
 # Usage: ./deploy.sh [app-name]
 #
 # Available apps:
-#   ./deploy.sh customer-portal
+#   ./deploy.sh platform-frontend
 #   ./deploy.sh backend
 #
 # Note: Uses 'latest' tag and forces K8s to pull the new image via rollout restart
 
-APP=${1:-customer-portal}
+APP=${1:-platform-frontend}
 
 # Load env vars from saas-platform directory
 if [ -f .env ]; then
@@ -28,7 +28,7 @@ fi
 
 # Build with appropriate args based on app
 echo "Building $APP..."
-if [ "$APP" = "customer-portal" ]; then
+if [ "$APP" = "platform-frontend" ]; then
     # Customer portal needs NEXT_PUBLIC_ vars at build time
     docker build \
         --build-arg NEXT_PUBLIC_SUPABASE_URL="$SUPABASE_URL" \
