@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Install uv
 # Using public ECR to avoid Docker Hub rate limits
 FROM public.ecr.aws/docker/library/python:3.12-slim
@@ -14,8 +15,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --locked --no-install-project --all-extras
 
-# Copy the project into the image
-ADD . /app
+# Copy only what's needed for the backend
+COPY pyproject.toml uv.lock README.md /app/
+COPY src /app/src
+COPY config.yaml /app/
+COPY run-backend.sh /app/
+COPY scripts /app/scripts/
+COPY tools /app/tools/
 
 # Sync the project (fast, only installs the project itself)
 RUN --mount=type=cache,target=/root/.cache/uv \

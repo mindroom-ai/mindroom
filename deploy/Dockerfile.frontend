@@ -11,11 +11,9 @@ WORKDIR /app
 COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
 RUN cd frontend && pnpm install --frozen-lockfile
 
-# Copy the tools_metadata.json file needed for icon generation
-COPY src/mindroom/tools_metadata.json /app/src/mindroom/tools_metadata.json
-
-# Copy frontend source and startup script
+# Copy only what frontend needs
 COPY frontend /app/frontend
+COPY src/mindroom/tools_metadata.json /app/src/mindroom/tools_metadata.json
 COPY run-frontend.sh /app/run-frontend.sh
 RUN chmod +x /app/run-frontend.sh
 

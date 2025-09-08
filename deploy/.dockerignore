@@ -1,0 +1,58 @@
+# Git
+.git
+.gitignore
+.gitea
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache
+.coverage
+htmlcov
+.venv
+venv
+*.egg-info
+
+# Node (not needed in backend)
+node_modules
+npm-debug.log
+yarn-error.log
+.pnpm-store
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# IDEs
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific - not needed for backend
+tmp/
+logs/
+*.log
+deploy/instance_data/
+instance_data/
+coverage.xml
+.cache
+avatars/
+htmlcov/
+mindroom_output.log
+.mypy_cache/
+.ruff_cache/
+
+# Large directories not needed in backend
+saas-platform/
+frontend/
+docs/
+
+# Tests (optional - could keep for testing in container)
+tests/
