@@ -1,50 +1,26 @@
-# Multi-stage build for fast rebuilds
+# Simple frontend container for development server
 # Using public ECR to avoid Docker Hub rate limits
-FROM public.ecr.aws/docker/library/node:20-slim as base
-RUN apt-get update && apt-get install -y git curl python3 python3-pip python3-venv build-essential && rm -rf /var/lib/apt/lists/*
+FROM public.ecr.aws/docker/library/node:20-slim
+
+RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 RUN npm install -g pnpm
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Python deps stage
-FROM base as python-deps
 WORKDIR /app
-# Install Python dependencies without the project
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project
 
-# Frontend deps stage
-FROM base as frontend-deps
-WORKDIR /app/frontend
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-# Use cache mount for pnpm store to speed up builds
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile
+# Copy package files and install dependencies
+COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
+RUN cd frontend && pnpm install --frozen-lockfile
 
-# Build frontend
-FROM frontend-deps as frontend-build
-# Copy the tools_metadata.json file needed for icon generation
+# Copy only what frontend needs
+COPY frontend /app/frontend
 COPY src/mindroom/tools_metadata.json /app/src/mindroom/tools_metadata.json
-COPY frontend .
-RUN pnpm run build
+COPY run-frontend.sh /app/run-frontend.sh
+RUN chmod +x /app/run-frontend.sh
 
-# Final stage
-FROM base as final
-WORKDIR /app
-# Copy Python venv from python-deps stage
-COPY --from=python-deps /app/.venv /app/.venv
-# Copy frontend build artifacts
-COPY --from=frontend-deps /app/frontend/node_modules /app/frontend/node_modules
-COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
-# Copy entire project
-ADD . /app/
-# Install the project itself (fast, deps already installed)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked
-RUN mkdir -p /app/logs /app/config
-RUN chmod +x /app/run-ui.sh
-EXPOSE 3003 8765
+# Set environment variables
 ENV DOCKER_CONTAINER=1
-WORKDIR /app
-CMD ["./run-ui.sh"]
+ENV VITE_API_URL=""
+
+EXPOSE 3003
+
+CMD ["./run-frontend.sh"]

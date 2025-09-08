@@ -19,10 +19,20 @@ services:
       - HOME=/app
       - MEM0_DIR=/app/mindroom_data/memory/mem0  # Used by mem0
       - GOOGLE_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/google/callback
+      - BACKEND_PORT=${BACKEND_PORT:-8765}
     networks:
       - mindroom-network
+      - mynetwork
     labels:
-      - traefik.enable=false
+      - traefik.enable=true
+      # API routes - backend now serves the API on port 8765
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.rule=Host(`${INSTANCE_DOMAIN}`) && PathPrefix(`/api`)
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls=true
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.service=${INSTANCE_NAME:-mindroom}-api
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.priority=100
+      - traefik.http.services.${INSTANCE_NAME:-mindroom}-api.loadbalancer.server.port=${BACKEND_PORT:-8765}
 
   frontend:
     image: ${FRONTEND_IMAGE:-deploy-mindroom-frontend:latest}
@@ -31,36 +41,20 @@ services:
       dockerfile: deploy/Dockerfile.frontend
     container_name: ${INSTANCE_NAME:-mindroom}-frontend
     restart: always
-    env_file:
-      - ../.env
     ports:
       - "${FRONTEND_PORT:-3003}:3003"
     volumes:
-      - ${DATA_DIR}/config/config.yaml:/app/config.yaml
       - ${DATA_DIR}/logs:/app/logs
-      - ${DATA_DIR}/mindroom_data:/app/mindroom_data
     environment:
-      - BACKEND_PORT=${BACKEND_PORT:-8765}
       - FRONTEND_PORT=${FRONTEND_PORT:-3003}
-      - VITE_API_URL=
+      - VITE_API_URL=  # Empty for relative URLs
       - HOME=/app
-      - GOOGLE_REDIRECT_URI=https://${INSTANCE_DOMAIN}/api/google/callback
     networks:
       - mindroom-network
       - mynetwork
     labels:
       - traefik.enable=true
-      # API routes (for the API server on port 8765 in the same container)
-      # API has higher priority (100) so it matches first
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.rule=Host(`${INSTANCE_DOMAIN}`) && PathPrefix(`/api`)
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.entrypoints=websecure
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls=true
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls.certresolver=porkbun
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.service=${INSTANCE_NAME:-mindroom}-api
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.priority=100
-      - traefik.http.services.${INSTANCE_NAME:-mindroom}-api.loadbalancer.server.port=${BACKEND_PORT:-8765}
-      # Frontend routes (for the Vite dev server on port 3003)
-      # Frontend has lower priority (50) and catches everything else
+      # Frontend routes - only serves the UI on port 3003
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN}`)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls=true

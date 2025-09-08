@@ -1,6 +1,7 @@
 # Git
 .git
 .gitignore
+.gitea
 
 # Python
 __pycache__
@@ -13,12 +14,16 @@ __pycache__
 htmlcov
 .venv
 venv
+*.egg-info
 
-# Node
+# Node (not needed in backend)
 node_modules
 npm-debug.log
 yarn-error.log
 .pnpm-store
+frontend/node_modules
+frontend/dist
+frontend/.vite
 
 # IDEs
 .vscode
@@ -30,7 +35,7 @@ yarn-error.log
 .DS_Store
 Thumbs.db
 
-# Project specific
+# Project specific - not needed for backend
 tmp/
 logs/
 *.log
@@ -41,14 +46,13 @@ coverage.xml
 avatars/
 htmlcov/
 mindroom_output.log
-saas-platform/
 .mypy_cache/
 .ruff_cache/
 
-# Documentation
+# Large directories not needed in backend
+saas-platform/
+frontend/
 docs/
-# Keep README.md for pyproject.toml
-# *.md
 
-# Tests
+# Tests (optional - could keep for testing in container)
 tests/
