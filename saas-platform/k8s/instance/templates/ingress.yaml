@@ -20,10 +20,19 @@ spec:
     - {{ .Values.customer }}.matrix.{{ .Values.baseDomain }}
     secretName: mindroom-{{ .Values.customer }}-tls
   rules:
-  # MindRoom Frontend
+  # MindRoom Frontend and API on same domain
   - host: {{ .Values.customer }}.{{ .Values.baseDomain }}
     http:
       paths:
+      # API calls go to backend port in frontend container
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: mindroom-frontend-{{ .Values.customer }}
+            port:
+              number: 8765
+      # Everything else goes to frontend
       - path: /
         pathType: Prefix
         backend:
@@ -32,8 +41,17 @@ spec:
             port:
               number: 3003
 
-  # API subdomain could be used for future API endpoints if needed
-  # Currently the mindroom-backend is just a Matrix bot, not an API server
+  # API subdomain for direct backend access
+  - host: {{ .Values.customer }}.api.{{ .Values.baseDomain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mindroom-frontend-{{ .Values.customer }}
+            port:
+              number: 8765
 
   # Matrix/Synapse Server
   - host: {{ .Values.customer }}.matrix.{{ .Values.baseDomain }}
