@@ -56,7 +56,62 @@ export async function middleware(request: NextRequest) {
   )
 
   // Refresh session if needed
-  await supabase.auth.getUser()
+  const { data: { user } } = await supabase.auth.getUser()
+
+  // ADMIN ROUTE PROTECTION
+  if (request.nextUrl.pathname.startsWith('/admin')) {
+    console.log(`[MIDDLEWARE] Admin route access attempt: ${request.nextUrl.pathname}`)
+
+    if (!user) {
+      console.log('[MIDDLEWARE] No user found, redirecting to login')
+      const loginUrl = new URL('/auth/login', request.url)
+      loginUrl.searchParams.set('redirectTo', request.nextUrl.pathname)
+      return NextResponse.redirect(loginUrl)
+    }
+
+    console.log(`[MIDDLEWARE] User found: ${user.id}, email: ${user.email}`)
+
+    // Check admin status using service role key for reliable access
+    const adminSupabase = createServerClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      {
+        cookies: {
+          get(name: string) {
+            return request.cookies.get(name)?.value
+          },
+          set() {}, // No-op for service role client
+          remove() {}, // No-op for service role client
+        },
+      }
+    )
+
+    try {
+      console.log(`[MIDDLEWARE] Checking admin status for user: ${user.id}`)
+      const { data: profile, error } = await adminSupabase
+        .from('user_profiles')
+        .select('is_admin')
+        .eq('id', user.id)
+        .single()
+
+      if (error) {
+        console.error('[MIDDLEWARE] Error checking admin status:', error)
+        return NextResponse.redirect(new URL('/dashboard', request.url))
+      }
+
+      console.log(`[MIDDLEWARE] Profile data:`, profile)
+
+      if (!profile?.is_admin) {
+        console.log('[MIDDLEWARE] User is not admin, redirecting to dashboard')
+        return NextResponse.redirect(new URL('/dashboard', request.url))
+      }
+
+      console.log('[MIDDLEWARE] Admin access granted')
+    } catch (error) {
+      console.error('[MIDDLEWARE] Exception checking admin status:', error)
+      return NextResponse.redirect(new URL('/dashboard', request.url))
+    }
+  }
 
   return response
 }
