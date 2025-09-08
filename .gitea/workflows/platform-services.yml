@@ -26,11 +26,8 @@ jobs:
           - name: customer-portal
             dockerfile: Dockerfile.customer-portal
             context: saas-platform
-          - name: stripe-handler
-            dockerfile: Dockerfile.stripe-handler
-            context: saas-platform
-          - name: dokku-provisioner
-            dockerfile: Dockerfile.dokku-provisioner
+          - name: platform-backend
+            dockerfile: Dockerfile.backend
             context: saas-platform
 
     steps:
