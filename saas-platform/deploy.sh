@@ -6,9 +6,7 @@ set -e
 #
 # Available apps:
 #   ./deploy.sh customer-portal
-#   ./deploy.sh admin-api         # (formerly admin-dashboard)
-#   ./deploy.sh stripe-handler
-#   ./deploy.sh instance-provisioner
+#   ./deploy.sh backend
 #
 # Note: Uses 'latest' tag and forces K8s to pull the new image via rollout restart
 
@@ -52,8 +50,6 @@ cd terraform-k8s
 DEPLOYMENT_NAME=$APP
 if [ "$APP" = "backend" ]; then
     DEPLOYMENT_NAME="platform-backend"
-elif [ "$APP" = "admin" ]; then
-    DEPLOYMENT_NAME="admin-dashboard"
 fi
 
 # Force Kubernetes to pull the new image by restarting the deployment

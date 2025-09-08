@@ -28,18 +28,6 @@ spec:
             port:
               number: 3000
 
-  # Admin Dashboard
-  - host: admin.{{ .Values.domain }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: admin-dashboard
-            port:
-              number: 3001
-
   # Backend API (Admin + Provisioner + Webhooks)
   - host: api.{{ .Values.domain }}
     http:
@@ -67,7 +55,6 @@ spec:
   tls:
   - hosts:
     - app.{{ .Values.domain }}
-    - admin.{{ .Values.domain }}
     - api.{{ .Values.domain }}
     - webhooks.{{ .Values.domain }}
     secretName: platform-tls-cert

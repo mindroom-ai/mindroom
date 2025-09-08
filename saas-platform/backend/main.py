@@ -12,7 +12,7 @@ from typing import Annotated, Any
 
 import stripe
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -84,15 +84,134 @@ async def health_check() -> dict[str, Any]:
 
 
 # === Admin Authentication ===
-@app.post("/api/admin/auth/login")
-async def admin_login(data: LoginRequest) -> dict[str, Any]:
-    """Simple admin login."""
-    if data.email == ADMIN_EMAIL and data.password == ADMIN_PASSWORD:
+async def verify_admin(authorization: str = Header(None)) -> dict:
+    """Verify admin access via Supabase auth."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+
+    token = authorization.replace("Bearer ", "")
+
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        # Verify the JWT token with Supabase
+        user = supabase.auth.get_user(token)
+        if not user or not user.user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Check if user is admin
+        result = supabase.table("accounts").select("is_admin").eq("id", user.user.id).single().execute()
+        if not result.data or not result.data.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Admin access required")
+
+        return {"user_id": user.user.id, "email": user.user.email}
+    except Exception as e:
+        logger.error(f"Admin verification error: {e}")
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+
+# === Admin API Endpoints ===
+@app.get("/api/admin/stats")
+async def get_admin_stats(admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: ARG001, ANN001, B008
+    """Get platform statistics for admin dashboard."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        # Get counts
+        accounts = supabase.table("accounts").select("*", count="exact").execute()
+        subscriptions = supabase.table("subscriptions").select("*", count="exact").eq("status", "active").execute()
+        instances = supabase.table("instances").select("*", count="exact").eq("status", "active").execute()
+
         return {
-            "user": {"email": ADMIN_EMAIL, "role": "admin"},
-            "token": "admin-token",  # Simple token
+            "accounts": len(accounts.data) if accounts.data else 0,
+            "active_subscriptions": len(subscriptions.data) if subscriptions.data else 0,
+            "running_instances": len(instances.data) if instances.data else 0,
         }
-    raise HTTPException(status_code=401, detail="Invalid credentials")
+    except Exception as e:
+        logger.error(f"Error fetching admin stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch statistics")
+
+
+@app.post("/api/admin/instances/{instance_id}/restart")
+async def restart_instance(instance_id: str, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: ARG001, ANN001, B008
+    """Restart a customer instance."""
+    # This would trigger the actual instance restart via Kubernetes
+    # For now, just update the status
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        result = (
+            supabase.table("instances")
+            .update(
+                {
+                    "status": "restarting",
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            .eq("instance_id", instance_id)
+            .execute()
+        )
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Instance not found")
+
+        # TODO: Trigger actual Kubernetes restart
+
+        return {"status": "restarting", "instance_id": instance_id}
+    except Exception as e:
+        logger.error(f"Error restarting instance: {e}")
+        raise HTTPException(status_code=500, detail="Failed to restart instance")
+
+
+@app.put("/api/admin/accounts/{account_id}/status")
+async def update_account_status(
+    account_id: str,
+    status: str,
+    admin=Depends(verify_admin),  # noqa: ANN001, B008
+) -> dict[str, Any]:
+    """Update account status (active, suspended, etc)."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    valid_statuses = ["active", "suspended", "deleted", "pending_verification"]
+    if status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+
+    try:
+        result = (
+            supabase.table("accounts")
+            .update(
+                {
+                    "status": status,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            .eq("id", account_id)
+            .execute()
+        )
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        # Log the action
+        supabase.table("audit_logs").insert(
+            {
+                "account_id": admin["user_id"],
+                "action": "update",
+                "resource_type": "account",
+                "resource_id": account_id,
+                "details": {"status": status},
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        ).execute()
+
+        return {"status": "success", "account_id": account_id, "new_status": status}
+    except Exception as e:
+        logger.error(f"Error updating account status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update account status")
 
 
 @app.post("/api/admin/auth/logout")
