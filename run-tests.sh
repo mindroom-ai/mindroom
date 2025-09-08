@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-echo "Running MindRoom Widget Tests"
-echo "============================="
+echo "Running MindRoom Tests"
+echo "======================"
 
 # Frontend tests
 echo ""
@@ -10,12 +10,18 @@ echo "-------------------------------------------"
 cd frontend
 pnpm exec vitest run
 
-# Backend tests (now in main project)
+# Backend tests
 echo ""
 echo "Running Backend Tests (Python/FastAPI)..."
 echo "----------------------------------------"
-cd ..  # Return to project root
+cd ..
 uv run pytest tests/api/ -v -o addopts=""
+
+# Bot tests
+echo ""
+echo "Running Bot Tests (Python)..."
+echo "-----------------------------"
+uv run pytest tests/ -v -o addopts="" --ignore=tests/api/
 
 echo ""
 echo "Test run complete!"
