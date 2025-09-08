@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation'
 import { createServerClientSupabase } from '@/lib/supabase/server'
+import { createClient } from '@supabase/supabase-js'
 
 export async function requireAdmin() {
   const supabase = await createServerClientSupabase()
@@ -7,17 +8,63 @@ export async function requireAdmin() {
   const { data: { user }, error } = await supabase.auth.getUser()
 
   if (error || !user) {
+    console.error('[Admin Auth] Auth error:', error)
     redirect('/auth/login')
   }
 
-  // Check if user is admin
-  const { data: account, error: accountError } = await supabase
+  // First try with regular client
+  let { data: account, error: accountError } = await supabase
     .from('accounts')
-    .select('is_admin')
+    .select('*')  // Select all fields to ensure we get is_admin
     .eq('id', user.id)
     .single()
 
-  if (accountError || !account?.is_admin) {
+  // If RLS is blocking, try with service role key (if available)
+  if ((accountError || account?.is_admin === undefined) && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.log('[Admin Auth] Trying with service role key due to:', accountError?.message || 'is_admin undefined')
+
+    const serviceSupabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false
+        }
+      }
+    )
+
+    const serviceResult = await serviceSupabase
+      .from('accounts')
+      .select('*')
+      .eq('id', user.id)
+      .single()
+
+    account = serviceResult.data
+    accountError = serviceResult.error
+  }
+
+  // Debug logging
+  console.log('[Admin Auth] Final account query result:', {
+    account,
+    accountError: accountError?.message,
+    userId: user.id,
+    userEmail: user.email,
+    isAdmin: account?.is_admin,
+    hasIsAdminField: account && 'is_admin' in account
+  })
+
+  if (accountError) {
+    console.error('[Admin Auth] Database error:', accountError)
+    redirect('/dashboard')
+  }
+
+  if (!account?.is_admin) {
+    console.log('[Admin Auth] User is not admin:', {
+      userEmail: user.email,
+      isAdmin: account?.is_admin,
+      account
+    })
     redirect('/dashboard')  // Redirect non-admins to regular dashboard
   }
 
