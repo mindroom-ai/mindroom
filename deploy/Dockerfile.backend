@@ -8,24 +8,24 @@ RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 # Change the working directory to the `app` directory
 WORKDIR /app
 
+# Copy dependency files first (changes less frequently)
+COPY pyproject.toml uv.lock README.md /app/
+
 # Install dependencies (without the project itself)
 # Include all extras to ensure API dependencies are installed
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --locked --no-install-project --all-extras
 
-# Copy only what's needed for the backend
-COPY pyproject.toml uv.lock README.md /app/
+# Copy source code and other files (changes more frequently)
 COPY src /app/src
 COPY config.yaml /app/
 COPY run-backend.sh /app/
 COPY scripts /app/scripts/
 COPY tools /app/tools/
 
-# Sync the project (fast, only installs the project itself)
+# Install the project itself (fast, dependencies already installed)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --all-extras
+    uv sync --locked --all-extras --no-install-workspace
 
 # Make startup script executable
 RUN chmod +x /app/run-backend.sh
