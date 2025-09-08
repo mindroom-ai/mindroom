@@ -52,9 +52,9 @@ export async function POST(request: Request) {
     }
 
     // Call the provisioner to start the instance
-    const provisionerUrl = process.env.PROVISIONER_URL
+    const provisionerUrl = process.env.PLATFORM_BACKEND_URL
     if (!provisionerUrl) {
-      throw new Error('PROVISIONER_URL environment variable is not configured')
+      throw new Error('PLATFORM_BACKEND_URL environment variable is not configured')
     }
 
     const startResponse = await fetch(`${provisionerUrl}/api/v1/start/${instance.instance_id || instance.subdomain}`, {

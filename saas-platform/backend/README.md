@@ -38,7 +38,7 @@ uvicorn backend:app --reload
 ### Production Deployment
 ```bash
 # Build Docker image
-docker build -t mindroom-backend .
+docker build -t platform-backend .
 
 # Deploy to Kubernetes
 kubectl apply -f k8s/backend.yaml

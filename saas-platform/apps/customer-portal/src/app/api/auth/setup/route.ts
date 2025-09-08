@@ -108,9 +108,9 @@ export async function POST() {
     }
 
     // Trigger instance provisioning via the provisioner service
-    const provisionerUrl = process.env.PROVISIONER_URL
+    const provisionerUrl = process.env.PLATFORM_BACKEND_URL
     if (!provisionerUrl) {
-      console.warn('PROVISIONER_URL not configured, skipping instance provisioning')
+      console.warn('PLATFORM_BACKEND_URL not configured, skipping instance provisioning')
       return NextResponse.json({
         message: 'Free tier account created successfully (instance provisioning pending)',
         subscriptionId: subscription.id,
