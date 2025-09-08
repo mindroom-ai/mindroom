@@ -7,7 +7,6 @@ This directory contains Docker configurations for running the MindRoom platform 
 ## Files
 
 - `Dockerfile.frontend` - Example frontend Dockerfile (reference)
-- `Dockerfile.admin-dashboard` - Admin dashboard Next.js application
 - `Dockerfile.customer-portal` - Customer portal Next.js application
 - `Dockerfile.stripe-handler` - Stripe webhook handler Node.js service
 - `Dockerfile.dokku-provisioner` - Dokku provisioning FastAPI service
@@ -57,7 +56,7 @@ The default admin credentials (from .env):
 
 ```bash
 # Start specific service
-docker compose -f docker-compose.platform.yml up admin-dashboard
+docker compose -f docker-compose.platform.yml up customer-portal
 
 # Rebuild specific service
 docker compose -f docker-compose.platform.yml build stripe-handler
@@ -79,7 +78,6 @@ docker compose -f docker-compose.platform.yml down -v
 
 | Service | Port | Description | Health Check |
 |---------|------|-------------|--------------|
-| admin-dashboard | 3001 | Admin panel for managing platform | /api/health |
 | customer-portal | 3000 | Customer-facing portal | /api/health |
 | stripe-handler | 3007 | Stripe webhook processor | /health |
 | dokku-provisioner | 8002 | Instance provisioning API | /health |

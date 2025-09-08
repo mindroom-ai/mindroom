@@ -84,7 +84,7 @@ async def health_check() -> dict[str, Any]:
 
 
 # === Admin Authentication ===
-async def verify_admin(authorization: str = Header(None)) -> dict:
+async def verify_admin(authorization: str = Header(None)) -> dict:  # noqa: C901
     """Verify admin access via Supabase auth."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization header")

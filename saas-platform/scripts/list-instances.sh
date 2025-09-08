@@ -67,7 +67,7 @@ fi
 # Platform services status
 echo -e "${YELLOW}Platform Services Status:${NC}"
 echo "-------------------------"
-kubectl get deployments -n mindroom-staging --kubeconfig=$KUBECONFIG 2>/dev/null | grep -E "NAME|provisioner|customer-portal|admin-dashboard|stripe" || echo "Platform services not found"
+kubectl get deployments -n mindroom-staging --kubeconfig=$KUBECONFIG 2>/dev/null | grep -E "NAME|provisioner|customer-portal|stripe|backend" || echo "Platform services not found"
 echo ""
 
 # Quick health check
@@ -77,5 +77,3 @@ echo -n "Instance Provisioner: "
 curl -s -k https://api.staging.mindroom.chat/health 2>/dev/null | jq -r '.status' 2>/dev/null || echo "Not accessible"
 echo -n "Customer Portal: "
 curl -s -o /dev/null -w "%{http_code}\n" -k https://app.staging.mindroom.chat 2>/dev/null || echo "Not accessible"
-echo -n "Admin Dashboard: "
-curl -s -o /dev/null -w "%{http_code}\n" -k https://admin.staging.mindroom.chat 2>/dev/null || echo "Not accessible"

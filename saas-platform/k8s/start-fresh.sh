@@ -35,7 +35,6 @@ echo "   helm install demo instance/ --set customer=demo --set domain=demo.mindr
 echo ""
 echo "2. Access services:"
 echo "   kubectl port-forward -n mindroom-staging svc/customer-portal 3000:3000"
-echo "   kubectl port-forward -n mindroom-staging svc/admin-dashboard 8080:80"
 echo ""
 echo "3. View logs:"
 echo "   kubectl logs -n mindroom-staging -l app=customer-portal"

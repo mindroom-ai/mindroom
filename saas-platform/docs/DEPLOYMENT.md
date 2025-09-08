@@ -67,7 +67,7 @@ kubectl get pods -n mindroom-staging
 
 After deployment (staging environment):
 - **Customer Portal**: https://app.staging.mindroom.chat
-- **Admin Dashboard**: https://admin.staging.mindroom.chat
+- **Admin Panel**: https://app.staging.mindroom.chat/admin (requires is_admin flag)
 - **API**: https://api.staging.mindroom.chat
 - **Webhooks**: https://webhooks.staging.mindroom.chat
 - **Customer Instances**: https://*.staging.mindroom.chat
@@ -82,13 +82,13 @@ docker login git.nijho.lt -u username
 
 # Build services
 docker build -f Dockerfile.customer-portal -t git.nijho.lt/username/customer-portal:latest .
-docker build -f Dockerfile.admin-dashboard -t git.nijho.lt/username/admin-dashboard:latest .
+docker build -f Dockerfile.backend -t git.nijho.lt/username/platform-backend:latest .
 docker build -f Dockerfile.stripe-handler -t git.nijho.lt/username/stripe-handler:latest .
 docker build -f Dockerfile.instance-provisioner -t git.nijho.lt/username/instance-provisioner:latest .
 
 # Push to registry
 docker push git.nijho.lt/username/customer-portal:latest
-docker push git.nijho.lt/username/admin-dashboard:latest
+docker push git.nijho.lt/username/platform-backend:latest
 docker push git.nijho.lt/username/stripe-handler:latest
 docker push git.nijho.lt/username/instance-provisioner:latest
 ```
@@ -98,7 +98,7 @@ docker push git.nijho.lt/username/instance-provisioner:latest
 ```bash
 # Restart deployments to pull new images
 kubectl rollout restart deployment -n mindroom-staging customer-portal
-kubectl rollout restart deployment -n mindroom-staging admin-dashboard
+kubectl rollout restart deployment -n mindroom-staging platform-backend
 kubectl rollout restart deployment -n mindroom-staging stripe-handler
 kubectl rollout restart deployment -n mindroom-staging instance-provisioner
 ```
