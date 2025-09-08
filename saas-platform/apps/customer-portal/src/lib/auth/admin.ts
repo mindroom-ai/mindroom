@@ -21,7 +21,6 @@ export async function requireAdmin() {
 
   // If RLS is blocking, try with service role key (if available)
   if ((accountError || account?.is_admin === undefined) && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    console.log('[Admin Auth] Trying with service role key due to:', accountError?.message || 'is_admin undefined')
 
     const serviceSupabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -44,15 +43,6 @@ export async function requireAdmin() {
     accountError = serviceResult.error
   }
 
-  // Debug logging
-  console.log('[Admin Auth] Final account query result:', {
-    account,
-    accountError: accountError?.message,
-    userId: user.id,
-    userEmail: user.email,
-    isAdmin: account?.is_admin,
-    hasIsAdminField: account && 'is_admin' in account
-  })
 
   if (accountError) {
     console.error('[Admin Auth] Database error:', accountError)
@@ -60,11 +50,6 @@ export async function requireAdmin() {
   }
 
   if (!account?.is_admin) {
-    console.log('[Admin Auth] User is not admin:', {
-      userEmail: user.email,
-      isAdmin: account?.is_admin,
-      account
-    })
     redirect('/dashboard')  // Redirect non-admins to regular dashboard
   }
 

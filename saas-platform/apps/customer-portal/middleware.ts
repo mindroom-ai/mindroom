@@ -60,16 +60,11 @@ export async function middleware(request: NextRequest) {
 
   // ADMIN ROUTE PROTECTION
   if (request.nextUrl.pathname.startsWith('/admin')) {
-    console.log(`[MIDDLEWARE] Admin route access attempt: ${request.nextUrl.pathname}`)
-
     if (!user) {
-      console.log('[MIDDLEWARE] No user found, redirecting to login')
       const loginUrl = new URL('/auth/login', request.url)
       loginUrl.searchParams.set('redirectTo', request.nextUrl.pathname)
       return NextResponse.redirect(loginUrl)
     }
-
-    console.log(`[MIDDLEWARE] User found: ${user.id}, email: ${user.email}`)
 
     // Check admin status using service role key for reliable access
     const adminSupabase = createServerClient(
@@ -87,7 +82,6 @@ export async function middleware(request: NextRequest) {
     )
 
     try {
-      console.log(`[MIDDLEWARE] Checking admin status for user: ${user.id}`)
       const { data: account, error } = await adminSupabase
         .from('accounts')
         .select('is_admin')
@@ -95,20 +89,15 @@ export async function middleware(request: NextRequest) {
         .single()
 
       if (error) {
-        console.error('[MIDDLEWARE] Error checking admin status:', error)
+        console.error('[Middleware] Admin check error:', error.message)
         return NextResponse.redirect(new URL('/dashboard', request.url))
       }
-
-      console.log(`[MIDDLEWARE] Account data:`, account)
 
       if (!account?.is_admin) {
-        console.log('[MIDDLEWARE] User is not admin, redirecting to dashboard')
         return NextResponse.redirect(new URL('/dashboard', request.url))
       }
-
-      console.log('[MIDDLEWARE] Admin access granted')
     } catch (error) {
-      console.error('[MIDDLEWARE] Exception checking admin status:', error)
+      console.error('[Middleware] Admin check exception:', error instanceof Error ? error.message : 'Unknown error')
       return NextResponse.redirect(new URL('/dashboard', request.url))
     }
   }
