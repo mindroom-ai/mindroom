@@ -88,8 +88,8 @@ export async function middleware(request: NextRequest) {
 
     try {
       console.log(`[MIDDLEWARE] Checking admin status for user: ${user.id}`)
-      const { data: profile, error } = await adminSupabase
-        .from('user_profiles')
+      const { data: account, error } = await adminSupabase
+        .from('accounts')
         .select('is_admin')
         .eq('id', user.id)
         .single()
@@ -99,9 +99,9 @@ export async function middleware(request: NextRequest) {
         return NextResponse.redirect(new URL('/dashboard', request.url))
       }
 
-      console.log(`[MIDDLEWARE] Profile data:`, profile)
+      console.log(`[MIDDLEWARE] Account data:`, account)
 
-      if (!profile?.is_admin) {
+      if (!account?.is_admin) {
         console.log('[MIDDLEWARE] User is not admin, redirecting to dashboard')
         return NextResponse.redirect(new URL('/dashboard', request.url))
       }
