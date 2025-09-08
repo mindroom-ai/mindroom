@@ -20,9 +20,8 @@ SUPABASE_SERVICE_KEY=xxx
 STRIPE_SECRET_KEY=sk_test_xxx
 STRIPE_WEBHOOK_SECRET=whsec_xxx
 
-# Admin
-ADMIN_EMAIL=admin@mindroom.chat
-ADMIN_PASSWORD=your-password
+# Admin users are managed through Supabase
+# Set is_admin=true in the accounts table for admin access
 ```
 
 ### Local Development

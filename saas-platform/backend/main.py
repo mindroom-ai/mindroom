@@ -13,7 +13,6 @@ import stripe
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from supabase import create_client
 
 # Load environment variables
@@ -54,20 +53,8 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
-# Simple admin auth
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@mindroom.chat")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin-password")
-
 # Provisioner API key
 PROVISIONER_API_KEY = os.getenv("PROVISIONER_API_KEY", "")
-
-
-# === Models ===
-class LoginRequest(BaseModel):
-    """Login request model."""
-
-    email: str
-    password: str
 
 
 # === Health Check ===

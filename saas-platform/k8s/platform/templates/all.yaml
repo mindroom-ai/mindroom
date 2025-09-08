@@ -143,11 +143,6 @@ spec:
         envFrom:
         - secretRef:
             name: platform-secrets
-        env:
-        - name: ADMIN_EMAIL
-          value: "admin@mindroom.chat"
-        - name: ADMIN_PASSWORD
-          value: "{{ .Values.adminPassword }}"
 ---
 apiVersion: v1
 kind: Service

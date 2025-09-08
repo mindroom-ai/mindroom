@@ -43,14 +43,12 @@ docker compose -f docker-compose.platform.yml up --build
 
 # Run in detached mode (background)
 docker compose -f docker-compose.platform.yml up -d --build
-
-# Create admin user (run after services are up)
-node scripts/create-admin-user.js
 ```
 
-The default admin credentials (from .env):
-- Email: `admin@mindroom.test`
-- Password: `AdminPass123!`
+Admin users are managed through Supabase. To create an admin user:
+1. Sign up through the normal registration flow
+2. Access the Supabase dashboard and navigate to the `accounts` table
+3. Set `is_admin = true` for the user account
 
 ### Individual Service Management
 

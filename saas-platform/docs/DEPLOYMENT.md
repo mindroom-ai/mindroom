@@ -131,13 +131,11 @@ cd saas-platform/scripts/database
 
 ### Create Admin User
 
-```bash
-SUPABASE_URL=https://your-project.supabase.co \
-SUPABASE_SERVICE_KEY=your-service-key \
-ADMIN_EMAIL=admin@mindroom.test \
-ADMIN_PASSWORD=AdminPass123! \
-node create-admin-user.js
-```
+Admin users are managed through Supabase. To create an admin user:
+
+1. Create a user account through the normal signup flow or Supabase dashboard
+2. In the Supabase dashboard, navigate to the `accounts` table
+3. Set `is_admin = true` for the user account
 
 ### Setup Stripe Products
 
