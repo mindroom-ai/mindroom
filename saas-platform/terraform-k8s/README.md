@@ -43,8 +43,7 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
    - Wildcard for customer instances
 
 3. **MindRoom Platform** via Helm
-   - Customer portal
-   - Admin dashboard
+   - Customer portal (with admin interface)
    - Stripe webhook handler
    - Instance provisioner
 

@@ -6,7 +6,7 @@ This guide covers the complete deployment process for the MindRoom SaaS platform
 
 The platform consists of:
 - **Kubernetes Cluster**: K3s on Hetzner Cloud (managed by terraform-k8s/)
-- **Platform Services**: Customer portal, admin dashboard, API services
+- **Platform Services**: Customer portal with admin interface, API services
 - **Customer Instances**: Deployed as separate Helm releases in Kubernetes
 - **Supabase**: Cloud PostgreSQL database
 - **Stripe**: Payment processing
@@ -52,7 +52,7 @@ terraform apply
 This deploys:
 - K3s Kubernetes cluster on Hetzner
 - nginx-ingress controller with cert-manager
-- Platform services (customer portal, admin dashboard, API)
+- Platform services (customer portal with admin interface, API)
 - DNS records for platform and customer wildcards
 
 ### Access the Cluster

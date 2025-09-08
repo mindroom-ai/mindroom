@@ -20,8 +20,5 @@ COPY backend/ .
 # Copy instance Helm chart for provisioning
 COPY k8s/instance /app/k8s/instance/
 
-# Copy admin dashboard (if building with frontend)
-# COPY apps/admin-dashboard/dist /app/admin-static
-
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

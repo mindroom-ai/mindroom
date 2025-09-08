@@ -7,14 +7,12 @@ import secrets
 import string
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Annotated, Any
 
 import stripe
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from supabase import create_client
 
@@ -84,7 +82,7 @@ async def health_check() -> dict[str, Any]:
 
 
 # === Admin Authentication ===
-async def verify_admin(authorization: str = Header(None)) -> dict:  # noqa: C901
+async def verify_admin(authorization: str = Header(None)) -> dict:
     """Verify admin access via Supabase auth."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization header")
@@ -857,12 +855,6 @@ async def stripe_webhook(
         return {"received": True, "error": str(e)}
     else:
         return {"received": True}
-
-
-# === Serve Static Files (Production) ===
-admin_static = Path("/app/admin-static")
-if admin_static.exists():
-    app.mount("/admin", StaticFiles(directory=str(admin_static), html=True), name="admin")
 
 
 if __name__ == "__main__":
