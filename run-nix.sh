@@ -16,4 +16,4 @@ nix-shell "$SCRIPT_DIR/shell.nix" --run ".venv/bin/uvicorn mindroom.api.main:app
 
 # Frontend
 cd frontend
-nix-shell "$SCRIPT_DIR/../shell.nix" --run "pnpm run dev"
+nix-shell "$SCRIPT_DIR/shell.nix" --run "pnpm run dev"
