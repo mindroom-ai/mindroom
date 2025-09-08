@@ -15,14 +15,14 @@ services:
 
   platform-frontend:
     build:
-      context: ./apps/platform-frontend
+      context: ./platform-frontend
       dockerfile: Dockerfile.dev
     ports:
       - "3000:3000"
     env_file:
       - .env
     volumes:
-      - ./apps/platform-frontend:/app
+      - ./platform-frontend:/app
       - /app/node_modules
     environment:
       - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
