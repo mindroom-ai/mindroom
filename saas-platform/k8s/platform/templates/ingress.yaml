@@ -24,7 +24,7 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: customer-portal
+            name: platform-frontend
             port:
               number: 3000
 

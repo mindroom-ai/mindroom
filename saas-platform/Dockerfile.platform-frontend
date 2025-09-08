@@ -7,7 +7,7 @@ RUN npm install -g pnpm
 # Dependencies stage
 FROM base AS deps
 WORKDIR /app
-COPY apps/customer-portal/package.json apps/customer-portal/pnpm-lock.yaml ./
+COPY apps/platform-frontend/package.json apps/platform-frontend/pnpm-lock.yaml ./
 # Use cache mount for pnpm store to speed up builds
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 # Build stage
 FROM deps AS builder
 WORKDIR /app
-COPY apps/customer-portal/ ./
+COPY apps/platform-frontend/ ./
 # Accept build arguments for Next.js public env vars
 ARG NEXT_PUBLIC_SUPABASE_URL
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY

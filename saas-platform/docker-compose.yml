@@ -13,16 +13,16 @@ services:
       - ./backend:/app
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-  customer-portal:
+  platform-frontend:
     build:
-      context: ./apps/customer-portal
+      context: ./apps/platform-frontend
       dockerfile: Dockerfile.dev
     ports:
       - "3000:3000"
     env_file:
       - .env
     volumes:
-      - ./apps/customer-portal:/app
+      - ./apps/platform-frontend:/app
       - /app/node_modules
     environment:
       - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}

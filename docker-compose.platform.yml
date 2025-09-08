@@ -2,11 +2,11 @@ version: '3.8'
 
 services:
   # Customer Portal (includes admin functionality)
-  customer-portal:
+  platform-frontend:
     build:
       context: .
-      dockerfile: deploy/Dockerfile.customer-portal
-    container_name: mindroom-customer-portal
+      dockerfile: deploy/Dockerfile.platform-frontend
+    container_name: mindroom-platform-frontend
     ports:
       - "3002:3000"
     environment:

@@ -23,8 +23,8 @@ jobs:
     strategy:
       matrix:
         service:
-          - name: customer-portal
-            dockerfile: Dockerfile.customer-portal
+          - name: platform-frontend
+            dockerfile: Dockerfile.platform-frontend
             context: saas-platform
           - name: platform-backend
             dockerfile: Dockerfile.backend

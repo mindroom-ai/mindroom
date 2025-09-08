@@ -24,7 +24,7 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
 4. **Docker Images:**
    The platform expects Docker images to be available in your Gitea registry.
    Images needed:
-   - `customer-portal:latest`
+   - `platform-frontend:latest`
    - `stripe-handler:latest`
    - `instance-provisioner:latest`
 

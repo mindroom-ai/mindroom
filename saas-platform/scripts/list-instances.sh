@@ -67,7 +67,7 @@ fi
 # Platform services status
 echo -e "${YELLOW}Platform Services Status:${NC}"
 echo "-------------------------"
-kubectl get deployments -n mindroom-staging --kubeconfig=$KUBECONFIG 2>/dev/null | grep -E "NAME|provisioner|customer-portal|stripe|backend" || echo "Platform services not found"
+kubectl get deployments -n mindroom-staging --kubeconfig=$KUBECONFIG 2>/dev/null | grep -E "NAME|provisioner|platform-frontend|stripe|backend" || echo "Platform services not found"
 echo ""
 
 # Quick health check

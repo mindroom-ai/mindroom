@@ -43,28 +43,28 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: customer-portal
+  name: platform-frontend
   namespace: mindroom-{{ .Values.environment }}
   labels:
-    app: customer-portal
+    app: platform-frontend
     environment: {{ .Values.environment }}
 spec:
   replicas: {{ .Values.replicas }}
   selector:
     matchLabels:
-      app: customer-portal
+      app: platform-frontend
       environment: {{ .Values.environment }}
   template:
     metadata:
       labels:
-        app: customer-portal
+        app: platform-frontend
         environment: {{ .Values.environment }}
     spec:
       imagePullSecrets:
       - name: gitea-registry
       containers:
       - name: app
-        image: {{ .Values.registry }}/customer-portal:{{ .Values.imageTag }}
+        image: {{ .Values.registry }}/platform-frontend:{{ .Values.imageTag }}
         ports:
         - containerPort: 3000
         envFrom:
@@ -101,11 +101,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: customer-portal
+  name: platform-frontend
   namespace: mindroom-{{ .Values.environment }}
 spec:
   selector:
-    app: customer-portal
+    app: platform-frontend
     environment: {{ .Values.environment }}
   ports:
   - port: 3000
@@ -162,4 +162,4 @@ spec:
   - port: 8000
     targetPort: 8000
 # Admin Dashboard (Static Frontend)
-# Admin dashboard removed - functionality merged into customer-portal
+# Admin dashboard removed - functionality merged into platform-frontend

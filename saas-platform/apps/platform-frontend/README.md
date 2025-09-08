@@ -39,7 +39,7 @@ A beautiful, modern customer portal for MindRoom - the AI agent platform that de
 ## 📁 Project Structure
 
 ```
-apps/customer-portal/
+apps/platform-frontend/
 ├── src/
 │   ├── app/                    # Next.js App Router pages
 │   │   ├── auth/               # Authentication pages
