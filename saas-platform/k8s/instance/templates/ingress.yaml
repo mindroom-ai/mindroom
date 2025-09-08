@@ -24,12 +24,12 @@ spec:
   - host: {{ .Values.customer }}.{{ .Values.baseDomain }}
     http:
       paths:
-      # API calls go to backend port in frontend container
+      # API calls go to backend service
       - path: /api
         pathType: Prefix
         backend:
           service:
-            name: mindroom-frontend-{{ .Values.customer }}
+            name: mindroom-backend-{{ .Values.customer }}
             port:
               number: 8765
       # Everything else goes to frontend
@@ -49,7 +49,7 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: mindroom-frontend-{{ .Values.customer }}
+            name: mindroom-backend-{{ .Values.customer }}
             port:
               number: 8765
 

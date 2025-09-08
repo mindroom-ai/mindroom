@@ -30,37 +30,23 @@ spec:
           mountPath: /etc/nginx/nginx.conf
           subPath: nginx.conf
 
-      # MindRoom frontend (only accessible through nginx)
+      # MindRoom frontend (UI only, API now in backend)
       - name: mindroom-frontend
         image: {{ .Values.mindroom_image | default "git.nijho.lt/basnijholt/mindroom-frontend:latest" }}
         imagePullPolicy: Always
         ports:
         - containerPort: 3003
           name: app
-        - containerPort: 8765
-          name: backend
         env:
-        - name: OPENAI_API_KEY
-          value: {{ .Values.openai_key | quote }}
-        - name: ANTHROPIC_API_KEY
-          value: {{ .Values.anthropic_key | quote }}
         - name: CUSTOMER_ID
           value: {{ .Values.customer | quote }}
         - name: DOCKER_CONTAINER
           value: "1"
-        - name: MATRIX_HOMESERVER
-          value: "http://synapse-{{ .Values.customer }}:8008"
-        - name: MATRIX_USER
-          value: "@admin:{{ .Values.customer }}.{{ .Values.baseDomain }}"
-        - name: MATRIX_PASSWORD
-          value: {{ .Values.matrix_admin_password }}
         - name: PUBLIC_URL
           value: "https://{{ .Values.customer }}.{{ .Values.baseDomain }}"
-        - name: INSTANCE_AUTH_TOKEN
-          value: {{ .Values.instance_auth_token | quote }}
-        - name: PLATFORM_BACKEND_URL
-          value: "http://platform-backend.mindroom-staging:8000"
-        # mindroom-backend is a standalone Matrix bot, no API communication needed
+        - name: VITE_API_URL
+          value: ""  # Use relative URLs to proxy to backend
+        # Frontend no longer needs API keys or Matrix credentials
         volumeMounts:
         - name: storage
           mountPath: /app/config

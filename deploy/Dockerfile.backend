@@ -8,16 +8,30 @@ RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 # Install dependencies (without the project itself)
+# Include all extras to ensure API dependencies are installed
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project --no-dev
+    uv sync --locked --no-install-project --all-extras
 
 # Copy the project into the image
 ADD . /app
 
 # Sync the project (fast, only installs the project itself)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
+    uv sync --locked --all-extras
 
-CMD ["/app/.venv/bin/python", "-m", "mindroom.cli", "run", "--log-level", "INFO", "--storage-path", "/app/mindroom_data"]
+# Make startup script executable
+RUN chmod +x /app/run-backend.sh
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/mindroom_data
+
+# Expose API port
+EXPOSE 8765
+
+# Set environment variable to indicate Docker mode
+ENV DOCKER_CONTAINER=1
+
+# Run both bot and API using the startup script
+CMD ["/app/run-backend.sh"]
