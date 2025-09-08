@@ -48,6 +48,10 @@ else:
     logger.warning("Supabase not configured")
     supabase = None
 
+# Platform configuration
+PLATFORM_DOMAIN = os.getenv("PLATFORM_DOMAIN", "mindroom.chat")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
+
 # Initialize Stripe
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
@@ -310,7 +314,7 @@ async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-i
                 logger.info(f"Deployment mindroom-backend-{instance_id} not found in namespace {namespace}")
                 return False
             return False  # Other errors
-        return proc.returncode == 0
+        return proc.returncode == 0  # noqa: TRY300
     except Exception:
         logger.exception("Error checking deployment existence")
         return False
@@ -334,8 +338,19 @@ async def provision_instance(
     account_id = data.get("account_id")  # noqa: F841
     tier = data.get("tier", "free")
 
-    # Generate a customer ID (simplified)
-    customer_id = "cust-" + "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
+    # Generate a numeric customer ID
+    # Count existing instances to get the next ID
+    result = supabase.table("instances").select("subdomain").execute()
+    existing_ids = []
+    for instance in result.data or []:
+        # Extract numeric ID from subdomain if it exists
+        subdomain = instance.get("subdomain", "")
+        if subdomain.isdigit():
+            existing_ids.append(int(subdomain))
+
+    # Get next available ID
+    next_id = max(existing_ids) + 1 if existing_ids else 1
+    customer_id = str(next_id)
 
     logger.info(f"Provisioning instance for subscription {subscription_id}, tier: {tier}")
 
@@ -354,15 +369,60 @@ async def provision_instance(
     except Exception as e:
         logger.warning(f"Could not create namespace (may already exist): {e}")
 
-    # TODO: Deploy actual instance using Helm or kubectl apply
-    # For now, just log the action
-    logger.info(f"Would deploy instance {customer_id} to namespace {namespace}")
+    # Deploy instance using Helm
+    logger.info(f"Deploying instance {customer_id} to namespace {namespace}")
+
+    try:
+        # Run helm install command
+        # Note: API keys should be configured by the customer after provisioning
+        proc = await asyncio.create_subprocess_exec(
+            "helm",
+            "install",
+            customer_id,
+            "/app/k8s/instance/",  # Path to instance chart
+            "--namespace",
+            namespace,
+            "--create-namespace",
+            "--set",
+            f"customer={customer_id}",
+            "--set",
+            f"baseDomain={PLATFORM_DOMAIN}",
+            "--set",
+            "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
+            "--wait",
+            "--timeout",
+            "5m",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            error_msg = stderr.decode()
+            logger.error(f"Failed to deploy instance: {error_msg}")
+            # Try to clean up if deployment failed
+            cleanup_proc = await asyncio.create_subprocess_exec(
+                "helm",
+                "uninstall",
+                customer_id,
+                "--namespace",
+                namespace,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await cleanup_proc.communicate()
+            raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {error_msg}") from None  # noqa: TRY301
+
+        logger.info(f"Successfully deployed instance {customer_id}")
+    except Exception as e:
+        logger.exception("Error deploying instance.")
+        raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
 
     return {
         "customer_id": customer_id,
-        "frontend_url": f"https://{customer_id}.mindroom.chat",
-        "api_url": f"https://{customer_id}.api.mindroom.chat",
-        "matrix_url": f"https://{customer_id}.matrix.mindroom.chat",
+        "frontend_url": f"https://{customer_id}.{PLATFORM_DOMAIN}",
+        "api_url": f"https://{customer_id}.api.{PLATFORM_DOMAIN}",
+        "matrix_url": f"https://{customer_id}.matrix.{PLATFORM_DOMAIN}",
         "auth_token": "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32)),
         "success": True,
         "message": "Instance provisioned successfully",
@@ -494,7 +554,7 @@ async def restart_instance_provisioner(
 
 # === Instance Sync API ===
 @app.post("/api/v1/sync-instances")
-async def sync_instances(
+async def sync_instances(  # noqa: C901
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Sync instance states between database and Kubernetes cluster."""
@@ -594,7 +654,7 @@ async def sync_instances(
                     sync_results["errors"] += 1
 
         logger.info(f"Instance sync completed: {sync_results}")
-        return sync_results
+        return sync_results  # noqa: TRY300
 
     except Exception as e:
         logger.exception("Failed to sync instances")

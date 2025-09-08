@@ -48,7 +48,7 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: mindroom-backend
+            name: platform-backend
             port:
               number: 8000
 
@@ -60,7 +60,7 @@ spec:
         pathType: Prefix
         backend:
           service:
-            name: mindroom-backend
+            name: platform-backend
             port:
               number: 8000
 

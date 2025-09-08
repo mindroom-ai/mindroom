@@ -6,7 +6,7 @@ metadata:
   namespace: mindroom-instances
   labels:
     app: mindroom-frontend
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 spec:
   type: ClusterIP
   ports:
@@ -18,7 +18,7 @@ spec:
     name: websocket
   selector:
     app: mindroom-frontend
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -27,7 +27,7 @@ metadata:
   namespace: mindroom-instances
   labels:
     app: mindroom-backend
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 spec:
   type: ClusterIP
   ports:
@@ -36,7 +36,7 @@ spec:
     name: websocket
   selector:
     app: mindroom-backend
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -45,7 +45,7 @@ metadata:
   namespace: mindroom-instances
   labels:
     app: synapse
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 spec:
   type: ClusterIP
   ports:
@@ -54,4 +54,4 @@ spec:
     name: http
   selector:
     app: synapse
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}

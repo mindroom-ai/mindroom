@@ -5,18 +5,18 @@ metadata:
   namespace: mindroom-instances
   labels:
     app: mindroom-backend
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: mindroom-backend
-      customer: {{ .Values.customer }}
+      customer: {{ .Values.customer | quote }}
   template:
     metadata:
       labels:
         app: mindroom-backend
-        customer: {{ .Values.customer }}
+        customer: {{ .Values.customer | quote }}
     spec:
       containers:
       - name: mindroom-backend
@@ -31,7 +31,7 @@ spec:
         - name: ANTHROPIC_API_KEY
           value: {{ .Values.anthropic_key | quote }}
         - name: CUSTOMER_ID
-          value: {{ .Values.customer }}
+          value: {{ .Values.customer | quote }}
         - name: STORAGE_PATH
           value: /app/mindroom_data
         - name: LOG_LEVEL

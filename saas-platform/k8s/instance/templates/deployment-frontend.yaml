@@ -5,18 +5,18 @@ metadata:
   namespace: mindroom-instances
   labels:
     app: mindroom-frontend
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: mindroom-frontend
-      customer: {{ .Values.customer }}
+      customer: {{ .Values.customer | quote }}
   template:
     metadata:
       labels:
         app: mindroom-frontend
-        customer: {{ .Values.customer }}
+        customer: {{ .Values.customer | quote }}
     spec:
       containers:
       # Nginx auth proxy (handles authentication)
@@ -45,7 +45,7 @@ spec:
         - name: ANTHROPIC_API_KEY
           value: {{ .Values.anthropic_key | quote }}
         - name: CUSTOMER_ID
-          value: {{ .Values.customer }}
+          value: {{ .Values.customer | quote }}
         - name: DOCKER_CONTAINER
           value: "1"
         - name: MATRIX_HOMESERVER
@@ -58,8 +58,8 @@ spec:
           value: "https://{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: INSTANCE_AUTH_TOKEN
           value: {{ .Values.instance_auth_token | quote }}
-        - name: BACKEND_URL
-          value: "http://mindroom-backend-{{ .Values.customer }}:8765"
+        - name: PLATFORM_BACKEND_URL
+          value: "http://platform-backend.mindroom-staging:8000"
         - name: API_URL
           value: "http://mindroom-backend-{{ .Values.customer }}:8765"
         - name: WEBSOCKET_URL

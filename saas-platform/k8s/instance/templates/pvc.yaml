@@ -6,7 +6,7 @@ metadata:
   namespace: mindroom-instances
   labels:
     app: mindroom
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 spec:
   accessModes:
   - ReadWriteOnce
@@ -22,7 +22,7 @@ metadata:
   namespace: mindroom-instances
   labels:
     app: synapse
-    customer: {{ .Values.customer }}
+    customer: {{ .Values.customer | quote }}
 spec:
   accessModes:
   - ReadWriteOnce

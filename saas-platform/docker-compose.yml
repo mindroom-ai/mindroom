@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  backend:
+  platform-backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
@@ -25,7 +25,7 @@ services:
     environment:
       - VITE_API_URL=http://localhost:8000
     depends_on:
-      - backend
+      - platform-backend
 
   customer-portal:
     build:
@@ -44,7 +44,7 @@ services:
       - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
-      - PROVISIONER_URL=http://backend:8000
+      - PLATFORM_BACKEND_URL=http://platform-backend:8000
       - PROVISIONER_API_KEY=${PROVISIONER_API_KEY}
     depends_on:
-      - backend
+      - platform-backend
