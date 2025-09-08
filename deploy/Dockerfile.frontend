@@ -1,39 +1,28 @@
-# Multi-stage build for fast rebuilds
+# Simple frontend container for development server
 # Using public ECR to avoid Docker Hub rate limits
-FROM public.ecr.aws/docker/library/node:20-slim as base
+FROM public.ecr.aws/docker/library/node:20-slim
+
 RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 RUN npm install -g pnpm
 
-# Frontend deps stage
-FROM base as frontend-deps
-WORKDIR /app/frontend
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
-# Use cache mount for pnpm store to speed up builds
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile
+WORKDIR /app
 
-# Build frontend
-FROM frontend-deps as frontend-build
+# Copy package files and install dependencies
+COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
+RUN cd frontend && pnpm install --frozen-lockfile
+
 # Copy the tools_metadata.json file needed for icon generation
 COPY src/mindroom/tools_metadata.json /app/src/mindroom/tools_metadata.json
-COPY frontend .
-RUN pnpm run build
 
-# Final stage - only Node.js, no Python
-FROM base as final
-WORKDIR /app
-# Copy frontend build artifacts
-COPY --from=frontend-deps /app/frontend/node_modules /app/frontend/node_modules
-COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
-# Copy frontend directory and startup script
+# Copy frontend source and startup script
 COPY frontend /app/frontend
 COPY run-frontend.sh /app/run-frontend.sh
 RUN chmod +x /app/run-frontend.sh
-RUN mkdir -p /app/logs
-# Only expose frontend port
-EXPOSE 3003
+
 # Set environment variables
 ENV DOCKER_CONTAINER=1
 ENV VITE_API_URL=""
-WORKDIR /app
+
+EXPOSE 3003
+
 CMD ["./run-frontend.sh"]
