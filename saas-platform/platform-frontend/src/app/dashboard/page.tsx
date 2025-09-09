@@ -64,7 +64,7 @@ export default function DashboardPage() {
       <div className="flex items-center justify-center h-96">
         <div className="text-center">
           <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-4" />
-          <p className="text-gray-600">Loading...</p>
+          <p className="text-gray-600 dark:text-gray-400">Loading...</p>
         </div>
       </div>
     )
@@ -76,7 +76,7 @@ export default function DashboardPage() {
       <div className="flex items-center justify-center h-96">
         <div className="text-center">
           <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-4" />
-          <p className="text-gray-600">Setting up your free MindRoom instance...</p>
+          <p className="text-gray-600 dark:text-gray-400">Setting up your free MindRoom instance...</p>
         </div>
       </div>
     )
@@ -85,9 +85,9 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       {/* Welcome Header */}
-      <div className="bg-white rounded-lg p-6 shadow-sm">
-        <h1 className="text-2xl font-bold">Welcome back!</h1>
-        <p className="text-gray-600 mt-1">
+      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
+        <h1 className="text-2xl font-bold dark:text-white">Welcome back!</h1>
+        <p className="text-gray-600 dark:text-gray-400 mt-1">
           Your MindRoom is {instance?.status === 'running' ? 'up and running' : instance?.status === 'provisioning' ? 'starting up' : 'currently offline'}
         </p>
       </div>

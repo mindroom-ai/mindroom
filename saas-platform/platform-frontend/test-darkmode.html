@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dark Mode Test</title>
+    <style>
+        body {
+            margin: 20px;
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #f9f9f9;
+            transition: background 0.3s ease;
+        }
+        body.dark {
+            background: #1a1a1a;
+            color: #e5e5e5;
+        }
+        .card {
+            padding: 20px;
+            margin: 20px 0;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            transition: all 0.3s ease;
+        }
+        body.dark .card {
+            background: #2a2a2a;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        .button {
+            padding: 10px 20px;
+            background: #ff6b00;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        .button:hover {
+            background: #e55b00;
+        }
+        .dropdown {
+            display: none;
+            position: absolute;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 5px;
+            margin-top: 5px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+        body.dark .dropdown {
+            background: #333;
+            border-color: #555;
+        }
+        .dropdown.show {
+            display: block;
+        }
+        .dropdown button {
+            display: block;
+            width: 100%;
+            padding: 8px 12px;
+            background: none;
+            border: none;
+            text-align: left;
+            cursor: pointer;
+        }
+        .dropdown button:hover {
+            background: rgba(255,107,0,0.1);
+        }
+        body.dark .dropdown button:hover {
+            background: rgba(255,107,0,0.2);
+        }
+        .dropdown button.active {
+            color: #ff6b00;
+        }
+    </style>
+</head>
+<body>
+    <h1>Dark Mode Implementation Test</h1>
+
+    <div class="card">
+        <h2>Test Card</h2>
+        <p>This demonstrates the dark mode toggle functionality. The mode persists in localStorage and respects system preferences by default.</p>
+
+        <div style="position: relative; display: inline-block;">
+            <button class="button" onclick="toggleDropdown()">
+                <span id="modeIcon">☀️</span> <span id="modeText">Light</span>
+            </button>
+            <div id="dropdown" class="dropdown">
+                <button onclick="setMode('light')">☀️ Light</button>
+                <button onclick="setMode('dark')">🌙 Dark</button>
+                <button onclick="setMode('system')">💻 System</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>Current Settings</h3>
+        <p>Mode: <strong id="currentMode">system</strong></p>
+        <p>Appearance: <strong id="currentAppearance">light</strong></p>
+        <p>System Preference: <strong id="systemPref">light</strong></p>
+    </div>
+
+    <script>
+        let mode = localStorage.getItem('darkMode') || 'system';
+
+        function updateDarkMode() {
+            const systemPrefDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            document.getElementById('systemPref').textContent = systemPrefDark ? 'dark' : 'light';
+
+            let isDark = false;
+            if (mode === 'dark') {
+                isDark = true;
+            } else if (mode === 'light') {
+                isDark = false;
+            } else {
+                isDark = systemPrefDark;
+            }
+
+            document.body.classList.toggle('dark', isDark);
+
+            // Update UI
+            document.getElementById('currentMode').textContent = mode;
+            document.getElementById('currentAppearance').textContent = isDark ? 'dark' : 'light';
+
+            const icon = document.getElementById('modeIcon');
+            const text = document.getElementById('modeText');
+            if (mode === 'system') {
+                icon.textContent = '💻';
+                text.textContent = 'System';
+            } else if (isDark) {
+                icon.textContent = '🌙';
+                text.textContent = 'Dark';
+            } else {
+                icon.textContent = '☀️';
+                text.textContent = 'Light';
+            }
+
+            // Update dropdown active state
+            document.querySelectorAll('#dropdown button').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.textContent.toLowerCase().includes(mode)) {
+                    btn.classList.add('active');
+                }
+            });
+        }
+
+        function setMode(newMode) {
+            mode = newMode;
+            localStorage.setItem('darkMode', mode);
+            updateDarkMode();
+            document.getElementById('dropdown').classList.remove('show');
+        }
+
+        function toggleDropdown() {
+            document.getElementById('dropdown').classList.toggle('show');
+        }
+
+        // Listen for system theme changes
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+            if (mode === 'system') {
+                updateDarkMode();
+            }
+        });
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.button') && !e.target.closest('.dropdown')) {
+                document.getElementById('dropdown').classList.remove('show');
+            }
+        });
+
+        // Initialize
+        updateDarkMode();
+    </script>
+</body>
+</html>
