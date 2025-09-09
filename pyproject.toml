@@ -190,6 +190,16 @@ lint.per-file-ignores."saas-platform/final_migration_test.py" = [
   "S602",   # allow subprocess shell=True in this script
   "TRY300", # return in try block
 ]
+lint.per-file-ignores."saas-platform/instance-backend-sample/**" = [
+  "ANN",     # annotations relaxed in samples
+  "B008",    # Depends in defaults (sample usage)
+  "B904",    # raise ... from err
+  "D",       # relax docstrings for samples
+  "EM101",   # literal exceptions
+  "FAST002", # fastapi annotated strictness in samples
+  "N999",    # hyphenated folder names
+  "TRY003",  # long messages
+]
 lint.per-file-ignores."saas-platform/platform-backend/**" = [
   "ANN",     # type annotations relaxed for backend subproject
   "ARG001",  # unused FastAPI dependency args in signatures

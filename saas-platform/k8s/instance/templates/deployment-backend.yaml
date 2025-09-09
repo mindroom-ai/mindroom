@@ -31,6 +31,8 @@ spec:
           value: {{ .Values.openai_key | quote }}
         - name: ANTHROPIC_API_KEY
           value: {{ .Values.anthropic_key | quote }}
+        - name: ACCOUNT_ID
+          value: {{ .Values.accountId | quote }}
         - name: CUSTOMER_ID
           value: {{ .Values.customer | quote }}
         - name: STORAGE_PATH
@@ -45,6 +47,10 @@ spec:
           value: {{ .Values.matrix_admin_password }}
         - name: MATRIX_SERVER_NAME
           value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
+        - name: SUPABASE_URL
+          value: {{ .Values.supabaseUrl | quote }}
+        - name: SUPABASE_ANON_KEY
+          value: {{ .Values.supabaseAnonKey | quote }}
         volumeMounts:
         - name: storage
           mountPath: /app/mindroom_data

@@ -9,7 +9,7 @@ import { apiCall } from '@/lib/api'
 interface Instance {
   id: string
   account_id: string
-  instance_id: string
+  instance_id: number | string
   subdomain: string
   status: string
   instance_url: string | null
@@ -31,7 +31,8 @@ export default function InstancesPage() {
         const response = await apiCall('/api/admin/instances')
         if (response.ok) {
           const data = await response.json()
-          setInstances(data.instances || [])
+          // Generic admin list endpoint returns { data, total }
+          setInstances(data.data || [])
         } else {
           console.error('Failed to fetch instances:', response.statusText)
         }

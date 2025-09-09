@@ -245,6 +245,8 @@ BEGIN
 END;
 $$ language 'plpgsql' SECURITY DEFINER;
 
+-- Ensure existing trigger is removed to avoid conflicts on re-apply
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 -- Trigger that fires when a new user is created in auth.users
 CREATE TRIGGER on_auth_user_created
     AFTER INSERT ON auth.users

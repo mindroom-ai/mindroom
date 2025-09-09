@@ -25,6 +25,7 @@ logger = logging.getLogger("mindroom.backend")
 # Initialize Supabase (service client bypasses RLS)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -59,6 +60,8 @@ __all__ = [
     "PLATFORM_DOMAIN",
     "PROVISIONER_API_KEY",
     "STRIPE_WEBHOOK_SECRET",
+    "SUPABASE_ANON_KEY",
+    "SUPABASE_URL",
     "UTC",
     "auth_client",
     "logger",

@@ -10,5 +10,9 @@ synapse_image: matrixdotorg/synapse:latest
 openai_key: ""
 anthropic_key: ""
 
+# Supabase (shared auth)
+supabaseUrl: ""
+supabaseAnonKey: ""
+
 # Matrix admin user
 matrix_admin_password: "changeme"

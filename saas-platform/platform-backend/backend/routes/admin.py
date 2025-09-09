@@ -127,7 +127,11 @@ async def admin_get_list(
     sb = ensure_supabase()
 
     try:
-        query = sb.table(resource).select("*", count="exact")
+        # Special-case: instances should include account info
+        if resource == "instances":
+            query = sb.table("instances").select("*, accounts(email, full_name)", count="exact")
+        else:
+            query = sb.table(resource).select("*", count="exact")
 
         if q:
             search_fields = {

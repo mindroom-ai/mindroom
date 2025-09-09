@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from backend.config import PLATFORM_DOMAIN, PROVISIONER_API_KEY, logger
+from backend.config import (
+    PLATFORM_DOMAIN,
+    PROVISIONER_API_KEY,
+    SUPABASE_ANON_KEY,
+    SUPABASE_URL,
+    logger,
+)
 from backend.deps import ensure_supabase
 from backend.k8s import check_deployment_exists, run_kubectl, wait_for_deployment_ready
 from backend.process import run_helm
@@ -118,6 +124,12 @@ async def provision_instance(
                 f"customer={customer_id}",
                 "--set",
                 f"baseDomain={PLATFORM_DOMAIN}",
+                "--set",
+                f"accountId={account_id}",
+                "--set",
+                f"supabaseUrl={SUPABASE_URL or ''}",
+                "--set",
+                f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
                 "--set",
                 "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
             ],
