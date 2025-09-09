@@ -19,6 +19,8 @@ interface Account {
 export default function AccountsPage() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [loading, setLoading] = useState(true)
+  const [updatingId, setUpdatingId] = useState<string | null>(null)
+  const [editStatuses, setEditStatuses] = useState<Record<string, string>>({})
 
   useEffect(() => {
     const fetchAccounts = async () => {
@@ -85,13 +87,37 @@ export default function AccountsPage() {
                     <td className="py-3 px-4">{account.full_name || '-'}</td>
                     <td className="py-3 px-4">{account.company_name || '-'}</td>
                     <td className="py-3 px-4">
-                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                        account.status === 'active' ? 'bg-green-100 text-green-800' :
-                        account.status === 'suspended' ? 'bg-red-100 text-red-800' :
-                        'bg-gray-100 text-gray-800'
-                      }`}>
-                        {account.status}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <select
+                          className="text-sm border border-gray-300 rounded px-2 py-1 bg-white"
+                          value={editStatuses[account.id] ?? account.status}
+                          onChange={(e) => setEditStatuses((s) => ({ ...s, [account.id]: e.target.value }))}
+                        >
+                          <option value="active">active</option>
+                          <option value="suspended">suspended</option>
+                          <option value="deleted">deleted</option>
+                          <option value="pending_verification">pending_verification</option>
+                        </select>
+                        <button
+                          className="text-blue-600 hover:text-blue-900 text-sm disabled:text-gray-400"
+                          disabled={updatingId === account.id}
+                          onClick={async () => {
+                            const next = editStatuses[account.id] ?? account.status
+                            setUpdatingId(account.id)
+                            try {
+                              const res = await apiCall(`/admin/accounts/${account.id}/status?status=${encodeURIComponent(next)}`, { method: 'PUT' })
+                              if (!res.ok) throw new Error('Failed to update status')
+                              setAccounts((prev) => prev.map(a => a.id === account.id ? { ...a, status: next } : a))
+                            } catch (err) {
+                              console.error('Update status failed', err)
+                            } finally {
+                              setUpdatingId(null)
+                            }
+                          }}
+                        >
+                          {updatingId === account.id ? 'Saving...' : 'Save'}
+                        </button>
+                      </div>
                     </td>
                     <td className="py-3 px-4">
                       {account.is_admin ? (
@@ -104,10 +130,7 @@ export default function AccountsPage() {
                       {new Date(account.created_at).toLocaleDateString()}
                     </td>
                     <td className="py-3 px-4">
-                      <Link
-                        href={`/admin/accounts/${account.id}`}
-                        className="text-blue-600 hover:text-blue-900 text-sm"
-                      >
+                      <Link href={`/admin/accounts/${account.id}`} className="text-blue-600 hover:text-blue-900 text-sm">
                         View
                       </Link>
                     </td>

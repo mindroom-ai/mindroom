@@ -6,38 +6,68 @@ import { Users, CreditCard, Server, Activity } from 'lucide-react'
 import { apiCall } from '@/lib/api'
 
 interface AdminStats {
-  accounts_count: number
-  subscriptions_count: number
-  instances_count: number
-  recent_activity: Array<{
-    type: string
-    description: string
-    timestamp: string
-  }>
+  // Keep legacy shape for compatibility; we compute values defensively
+  accounts_count?: number
+  subscriptions_count?: number
+  instances_count?: number
+}
+
+interface HealthStatus {
+  status: string
+  supabase: boolean
+  stripe: boolean
+}
+
+interface AdminMetrics {
+  totalAccounts: number
+  activeSubscriptions: number
+  runningInstances: number
+  mrr: number
 }
 
 export default function AdminDashboard() {
   const [stats, setStats] = useState<AdminStats | null>(null)
+  const [health, setHealth] = useState<HealthStatus | null>(null)
+  const [metrics, setMetrics] = useState<AdminMetrics | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const fetchStats = async () => {
+    const fetchData = async () => {
       try {
-        const response = await apiCall('/admin/stats')
-        if (response.ok) {
-          const data = await response.json()
+        // Admin stats
+        const [statsRes, healthRes, metricsRes] = await Promise.all([
+          apiCall('/admin/stats'),
+          apiCall('/health'),
+          apiCall('/admin/metrics/dashboard'),
+        ])
+
+        if (statsRes.ok) {
+          const data = await statsRes.json()
           setStats(data)
+        }
+        if (healthRes.ok) {
+          const data = await healthRes.json()
+          setHealth(data)
         } else {
-          console.error('Failed to fetch admin stats:', response.statusText)
+          setHealth({ status: 'degraded', supabase: false, stripe: false })
+        }
+        if (metricsRes.ok) {
+          const data = await metricsRes.json()
+          setMetrics({
+            totalAccounts: data.totalAccounts ?? 0,
+            activeSubscriptions: data.activeSubscriptions ?? 0,
+            runningInstances: data.runningInstances ?? 0,
+            mrr: data.mrr ?? 0,
+          })
         }
       } catch (error) {
-        console.error('Error fetching admin stats:', error)
+        console.error('Error fetching admin data:', error)
       } finally {
         setLoading(false)
       }
     }
 
-    fetchStats()
+    fetchData()
   }, [])
 
   if (loading) {
@@ -48,34 +78,38 @@ export default function AdminDashboard() {
     )
   }
 
+  const accountsVal = (stats as any)?.accounts ?? stats?.accounts_count ?? 0
+  const subsVal = (stats as any)?.active_subscriptions ?? stats?.subscriptions_count ?? 0
+  const runningVal = (stats as any)?.running_instances ?? stats?.instances_count ?? 0
+
   const statCards = [
     {
       title: 'Total Accounts',
-      value: stats?.accounts_count || 0,
+      value: accountsVal,
       icon: Users,
       change: '+12%',
       changeType: 'positive' as const
     },
     {
       title: 'Active Subscriptions',
-      value: stats?.subscriptions_count || 0,
+      value: subsVal,
       icon: CreditCard,
       change: '+8%',
       changeType: 'positive' as const
     },
     {
       title: 'Running Instances',
-      value: stats?.instances_count || 0,
+      value: runningVal,
       icon: Server,
       change: '+23%',
       changeType: 'positive' as const
     },
     {
       title: 'System Health',
-      value: '99.9%',
+      value: health?.status === 'ok' ? 'Operational' : 'Degraded',
       icon: Activity,
-      change: 'Operational',
-      changeType: 'neutral' as const
+      change: health ? `Supabase ${health.supabase ? 'ok' : 'err'} · Stripe ${health.stripe ? 'ok' : 'err'}` : 'Unknown',
+      changeType: (health && health.status === 'ok') ? 'positive' as const : 'negative' as const
     },
   ]
 
@@ -85,6 +119,44 @@ export default function AdminDashboard() {
         <h1 className="text-3xl font-bold text-gray-900">Admin Dashboard</h1>
         <p className="text-gray-600 mt-2">System overview and key metrics</p>
       </div>
+
+      {/* API-backed Metrics */}
+      {metrics && (
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">MRR (est.)</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">${metrics.mrr.toLocaleString()}</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">Accounts</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{metrics.totalAccounts}</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">Active Subs</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{metrics.activeSubscriptions}</div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">Running Inst.</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{metrics.runningInstances}</div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         {statCards.map((stat) => (
