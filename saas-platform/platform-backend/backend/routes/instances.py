@@ -39,9 +39,20 @@ async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]: 
         if not sub_result.data:
             raise HTTPException(status_code=404, detail="No subscription found")
         subscription = sub_result.data[0]
-        inst_result = sb.table("instances").select("id").eq("subscription_id", subscription["id"]).execute()
+        inst_result = (
+            sb.table("instances")
+            .select("*")
+            .eq("subscription_id", subscription["id"])  # one instance per subscription
+            .limit(1)
+            .execute()
+        )
         if inst_result.data:
-            raise HTTPException(status_code=400, detail="Instance already exists")
+            # Idempotent: return existing instance instead of 400
+            return {
+                "message": "Instance already exists",
+                "instance": inst_result.data[0],
+                "success": True,
+            }
 
         return await provision_instance(
             data={

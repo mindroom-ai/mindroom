@@ -228,6 +228,17 @@ async def start_instance_provisioner(
         if code != 0:
             raise Exception(err)
         logger.info("Started instance %s: %s", instance_id, out)
+        # Reflect desired state in DB immediately
+        try:
+            sb = ensure_supabase()
+            sb.table("instances").update(
+                {
+                    "status": "running",
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            ).eq("instance_id", instance_id).execute()
+        except Exception:
+            logger.warning("Failed to update DB status to running for instance %s", instance_id)
     except Exception as e:
         logger.exception("Failed to start instance %s", instance_id)
         raise HTTPException(status_code=500, detail=f"Failed to start instance: {e}") from e
@@ -263,6 +274,17 @@ async def stop_instance_provisioner(
         if code != 0:
             raise Exception(err)
         logger.info("Stopped instance %s: %s", instance_id, out)
+        # Reflect desired state in DB immediately
+        try:
+            sb = ensure_supabase()
+            sb.table("instances").update(
+                {
+                    "status": "stopped",
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            ).eq("instance_id", instance_id).execute()
+        except Exception:
+            logger.warning("Failed to update DB status to stopped for instance %s", instance_id)
     except Exception as e:
         logger.exception("Failed to stop instance %s", instance_id)
         raise HTTPException(status_code=500, detail=f"Failed to stop instance: {e}") from e

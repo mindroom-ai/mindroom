@@ -1,6 +1,29 @@
-# Guiding Principles for Development
+# CLAUDE.md
 
-This document outlines the core principles and practices for developing this project. Adhering to these guidelines ensures consistency, quality, and a focus on forward-looking development.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+MindRoom - AI agents that live in Matrix and work everywhere via bridges. The project consists of:
+- **Core MindRoom** (`src/mindroom/`) - AI agent orchestration system with Matrix integration
+- **SaaS Platform** (`saas-platform/`) - Kubernetes-based platform for hosting MindRoom instances
+  - Platform Backend (FastAPI) - API server for subscriptions, instances, SSO
+  - Platform Frontend (Next.js 15) - Dashboard for managing instances
+  - Instance deployment via Helm charts
+
+## Architecture
+
+### SaaS Platform (`saas-platform/`)
+- **Platform Backend**: Modular FastAPI app with routes in `backend/routes/`
+- **Platform Frontend**: Next.js 15 with centralized API client in `lib/api.ts`
+- **Authentication**: SSO via HttpOnly cookies across subdomains
+- **Deployment**: Kubernetes with Helm charts, dual-mode support (platform/standalone)
+- **Database**: Supabase with comprehensive RLS policies
+
+### Core MindRoom (`src/mindroom/`)
+- **Agent System**: AI agents with persistent memory in Matrix
+- **Matrix Integration**: Synapse server for federation
+- **Multi-Platform**: Works via bridges to Slack, Discord, Telegram, etc.
 
 ## 1. Core Philosophy
 
@@ -27,6 +50,33 @@ This document outlines the core principles and practices for developing this pro
 
 - **Environment Setup**: Use `uv sync --all-extras` to install all dependencies and `source .venv/bin/activate` to activate the virtual environment.
 - **Adding Packages**: Use `uv add <package_name>` for new dependencies or `uv add --dev <package_name>` for development-only packages.
+
+### SaaS Platform Commands
+
+#### Development
+```bash
+# Platform Backend
+cd saas-platform/platform-backend
+uvicorn main:app --reload --host 0.0.0.0 --port 8765
+
+# Platform Frontend
+cd saas-platform/platform-frontend
+pnpm install && pnpm run dev
+```
+
+#### Deployment
+```bash
+# Deploy platform
+cd saas-platform/k8s/platform
+helm upgrade --install platform . -f values.yaml
+
+# Deploy instance
+cd saas-platform/k8s/instance
+helm upgrade --install instance-1 . --set customer=1
+
+# Quick redeploy of MindRoom backend
+./saas-platform/redeploy-mindroom-backend.sh
+```
 
 ### Step 3: Development & Git
 
