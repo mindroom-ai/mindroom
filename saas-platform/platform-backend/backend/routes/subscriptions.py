@@ -15,9 +15,11 @@ async def get_user_subscription(user=Depends(verify_user)) -> dict[str, Any]:  #
 
     try:
         account_id = user["account_id"]
-        result = sb.table("subscriptions").select("*").eq("account_id", account_id).single().execute()
+        result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
         if not result.data:
             raise HTTPException(status_code=404, detail="Subscription not found")
-        return result.data
+        return result.data[0]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to fetch subscription") from e

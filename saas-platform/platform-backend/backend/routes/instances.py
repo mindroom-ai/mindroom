@@ -35,11 +35,10 @@ async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]: 
 
     try:
         account_id = user["account_id"]
-        sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).single().execute()
+        sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
         if not sub_result.data:
             raise HTTPException(status_code=404, detail="No subscription found")
-
-        subscription = sub_result.data
+        subscription = sub_result.data[0]
         inst_result = sb.table("instances").select("id").eq("subscription_id", subscription["id"]).execute()
         if inst_result.data:
             raise HTTPException(status_code=400, detail="Instance already exists")
@@ -68,7 +67,7 @@ async def start_user_instance(instance_id: int, user=Depends(verify_user)) -> di
         .select("id")
         .eq("instance_id", instance_id)
         .eq("account_id", user["account_id"])
-        .single()
+        .limit(1)
         .execute()
     )
     if not result.data:
@@ -87,7 +86,7 @@ async def stop_user_instance(instance_id: int, user=Depends(verify_user)) -> dic
         .select("id")
         .eq("instance_id", instance_id)
         .eq("account_id", user["account_id"])
-        .single()
+        .limit(1)
         .execute()
     )
     if not result.data:
@@ -106,7 +105,7 @@ async def restart_user_instance(instance_id: int, user=Depends(verify_user)) -> 
         .select("id")
         .eq("instance_id", instance_id)
         .eq("account_id", user["account_id"])
-        .single()
+        .limit(1)
         .execute()
     )
     if not result.data:
