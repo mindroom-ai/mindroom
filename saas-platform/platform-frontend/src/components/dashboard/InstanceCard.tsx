@@ -56,11 +56,11 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
   // No instance yet - show provision card
   if (!instance) {
     return (
-      <div className="bg-white rounded-lg shadow-md p-6">
-        <h2 className="text-xl font-bold mb-4">MindRoom Instance</h2>
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+        <h2 className="text-xl font-bold mb-4 dark:text-white">MindRoom Instance</h2>
         <div className="text-center py-8">
-          <Rocket className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-          <p className="text-gray-600 mb-6">
+          <Rocket className="w-16 h-16 text-gray-400 dark:text-gray-500 mx-auto mb-4" />
+          <p className="text-gray-600 dark:text-gray-400 mb-6">
             No instance provisioned yet. Click below to create your MindRoom instance.
           </p>
           <button
@@ -117,16 +117,16 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
   const getStatusColor = () => {
     switch (instance.status) {
       case 'running':
-        return 'text-green-600 bg-green-50'
+        return 'text-green-600 bg-green-50 dark:text-green-400 dark:bg-green-900/20'
       case 'provisioning':
-        return 'text-blue-600 bg-blue-50'
+        return 'text-blue-600 bg-blue-50 dark:text-blue-400 dark:bg-blue-900/20'
       case 'stopped':
-        return 'text-yellow-600 bg-yellow-50'
+        return 'text-yellow-600 bg-yellow-50 dark:text-yellow-400 dark:bg-yellow-900/20'
       case 'error':
       case 'failed':
-        return 'text-red-600 bg-red-50'
+        return 'text-red-600 bg-red-50 dark:text-red-400 dark:bg-red-900/20'
       default:
-        return 'text-gray-600 bg-gray-50'
+        return 'text-gray-600 bg-gray-50 dark:text-gray-400 dark:bg-gray-800'
     }
   }
 
@@ -135,9 +135,9 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
   const matrixHost = getHostname(instance.matrix_server_url)
 
   return (
-    <div className="bg-white rounded-lg shadow-md p-6">
+    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
       <div className="flex justify-between items-start mb-4">
-        <h2 className="text-xl font-bold">MindRoom Instance</h2>
+        <h2 className="text-xl font-bold dark:text-white">MindRoom Instance</h2>
         <div className={`flex items-center gap-2 px-3 py-1 rounded-full ${getStatusColor()}`}>
           {getStatusIcon()}
           <span className="text-sm font-medium">{getStatusText()}</span>
@@ -148,13 +148,13 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
         {/* Domain */}
         {frontendHost && (
           <div className="flex items-center justify-between">
-            <span className="text-gray-600">Domain</span>
+            <span className="text-gray-600 dark:text-gray-400">Domain</span>
             <div className="flex items-center gap-2">
-              <span className="font-mono text-sm">{frontendHost}</span>
+              <span className="font-mono text-sm dark:text-gray-300">{frontendHost}</span>
               <button
                 onClick={() => copyToClipboard(frontendHost)}
                 title="Copy domain"
-                className="text-gray-500 hover:text-gray-700"
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
               >
                 <Copy className="w-4 h-4" />
               </button>
@@ -165,12 +165,12 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
         {/* Frontend URL */}
         {instance.frontend_url && (
           <div className="flex items-center justify-between">
-            <span className="text-gray-600">Frontend</span>
+            <span className="text-gray-600 dark:text-gray-400">Frontend</span>
             <div className="flex items-center gap-2">
               <Link
                 href={instance.frontend_url}
                 target="_blank"
-                className="flex items-center gap-1 text-blue-600 hover:text-blue-700 font-medium"
+                className="flex items-center gap-1 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium"
               >
                 {frontendHost || 'Open'}
                 <ExternalLink className="w-3 h-3" />
@@ -178,7 +178,7 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
               <button
                 onClick={() => copyToClipboard(instance.frontend_url!)}
                 title="Copy URL"
-                className="text-gray-500 hover:text-gray-700"
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
               >
                 <Copy className="w-4 h-4" />
               </button>
@@ -189,12 +189,12 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
         {/* Backend API */}
         {instance.backend_url && (
           <div className="flex items-center justify-between">
-            <span className="text-gray-600">API</span>
+            <span className="text-gray-600 dark:text-gray-400">API</span>
             <div className="flex items-center gap-2">
               <Link
                 href={instance.backend_url}
                 target="_blank"
-                className="flex items-center gap-1 text-blue-600 hover:text-blue-700 font-medium"
+                className="flex items-center gap-1 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium"
               >
                 {backendHost || 'Open'}
                 <ExternalLink className="w-3 h-3" />
@@ -202,7 +202,7 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
               <button
                 onClick={() => copyToClipboard(instance.backend_url!)}
                 title="Copy API URL"
-                className="text-gray-500 hover:text-gray-700"
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
               >
                 <Copy className="w-4 h-4" />
               </button>
@@ -212,19 +212,19 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
 
         {/* Tier */}
         <div className="flex items-center justify-between">
-          <span className="text-gray-600">Tier</span>
-          <span className="font-medium capitalize">{instance.tier || 'Free'}</span>
+          <span className="text-gray-600 dark:text-gray-400">Tier</span>
+          <span className="font-medium capitalize dark:text-gray-200">{instance.tier || 'Free'}</span>
         </div>
 
         {/* Matrix Server */}
         {instance.matrix_server_url && (
           <div className="flex items-center justify-between">
-            <span className="text-gray-600">Matrix Server</span>
+            <span className="text-gray-600 dark:text-gray-400">Matrix Server</span>
             <div className="flex items-center gap-2">
               <Link
                 href={instance.matrix_server_url}
                 target="_blank"
-                className="flex items-center gap-1 text-purple-600 hover:text-purple-700 font-medium"
+                className="flex items-center gap-1 text-purple-600 hover:text-purple-700 dark:text-purple-400 dark:hover:text-purple-300 font-medium"
               >
                 {matrixHost || 'Connect'}
                 <ExternalLink className="w-3 h-3" />
@@ -232,7 +232,7 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
               <button
                 onClick={() => copyToClipboard(instance.matrix_server_url!)}
                 title="Copy Matrix URL"
-                className="text-gray-500 hover:text-gray-700"
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
               >
                 <Copy className="w-4 h-4" />
               </button>
@@ -242,22 +242,22 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
 
         {/* Last Updated */}
         <div className="flex items-center justify-between">
-          <span className="text-gray-600">Last Updated</span>
-          <span className="text-sm text-gray-500">
+          <span className="text-gray-600 dark:text-gray-400">Last Updated</span>
+          <span className="text-sm text-gray-500 dark:text-gray-400">
             {formatRelativeTime(instance.updated_at)} · {new Date(instance.updated_at).toLocaleString()}
           </span>
         </div>
 
         {/* Instance ID */}
         <div className="flex items-center justify-between">
-          <span className="text-gray-600">Instance ID</span>
-          <span className="font-mono font-medium">#{instance.instance_id}</span>
+          <span className="text-gray-600 dark:text-gray-400">Instance ID</span>
+          <span className="font-mono font-medium dark:text-gray-200">#{instance.instance_id}</span>
         </div>
       </div>
 
       {/* Action Buttons */}
       {instance.status === 'running' && instance.frontend_url && (
-        <div className="mt-6 pt-6 border-t">
+        <div className="mt-6 pt-6 border-t dark:border-gray-700">
           <Link
             href={instance.frontend_url}
             target="_blank"
