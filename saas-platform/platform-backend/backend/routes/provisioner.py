@@ -34,7 +34,7 @@ async def _background_mark_running_when_ready(instance_id: str, namespace: str =
         logger.exception("Background readiness wait failed for instance %s", instance_id)
 
 
-@router.post("/api/v1/provision")
+@router.post("/system/provision")
 async def provision_instance(
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
@@ -186,7 +186,7 @@ async def provision_instance(
     }
 
 
-@router.post("/api/v1/start/{instance_id}")
+@router.post("/system/instances/{instance_id}/start")
 async def start_instance_provisioner(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
@@ -221,7 +221,7 @@ async def start_instance_provisioner(
     return {"success": True, "message": f"Instance {instance_id} started successfully"}
 
 
-@router.post("/api/v1/stop/{instance_id}")
+@router.post("/system/instances/{instance_id}/stop")
 async def stop_instance_provisioner(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
@@ -256,7 +256,7 @@ async def stop_instance_provisioner(
     return {"success": True, "message": f"Instance {instance_id} stopped successfully"}
 
 
-@router.post("/api/v1/restart/{instance_id}")
+@router.post("/system/instances/{instance_id}/restart")
 async def restart_instance_provisioner(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
@@ -291,7 +291,7 @@ async def restart_instance_provisioner(
     return {"success": True, "message": f"Instance {instance_id} restarted successfully"}
 
 
-@router.delete("/api/v1/uninstall/{instance_id}")
+@router.delete("/system/instances/{instance_id}/uninstall")
 async def uninstall_instance(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
@@ -336,7 +336,7 @@ async def uninstall_instance(
     return {"success": True, "message": f"Instance {instance_id} uninstalled successfully", "instance_id": instance_id}
 
 
-@router.post("/api/v1/sync-instances")
+@router.post("/system/sync-instances")
 async def sync_instances(
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:

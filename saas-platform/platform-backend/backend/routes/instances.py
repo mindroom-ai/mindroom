@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 router = APIRouter()
 
 
-@router.get("/api/v1/instances")
+@router.get("/my/instances")
 async def list_user_instances(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """List instances for current user."""
     sb = ensure_supabase()
@@ -28,7 +28,7 @@ async def list_user_instances(user=Depends(verify_user)) -> dict[str, Any]:  # n
         raise HTTPException(status_code=500, detail="Failed to fetch instances") from e
 
 
-@router.post("/api/v1/instances/provision")
+@router.post("/my/instances/provision")
 async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Provision an instance for the current user."""
     sb = ensure_supabase()
@@ -58,7 +58,7 @@ async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]: 
         raise HTTPException(status_code=500, detail="Failed to provision instance") from e
 
 
-@router.post("/api/v1/instances/{instance_id}/start")
+@router.post("/my/instances/{instance_id}/start")
 async def start_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Start user's instance."""
     sb = ensure_supabase()
@@ -77,7 +77,7 @@ async def start_user_instance(instance_id: int, user=Depends(verify_user)) -> di
     return await start_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.post("/api/v1/instances/{instance_id}/stop")
+@router.post("/my/instances/{instance_id}/stop")
 async def stop_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Stop user's instance."""
     sb = ensure_supabase()
@@ -96,7 +96,7 @@ async def stop_user_instance(instance_id: int, user=Depends(verify_user)) -> dic
     return await stop_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.post("/api/v1/instances/{instance_id}/restart")
+@router.post("/my/instances/{instance_id}/restart")
 async def restart_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Restart user's instance."""
     sb = ensure_supabase()

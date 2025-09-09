@@ -16,7 +16,7 @@ class CheckoutRequest(BaseModel):
     tier: str
 
 
-@router.post("/api/v1/stripe/checkout")
+@router.post("/stripe/checkout")
 async def create_checkout_session(
     request: CheckoutRequest,
     user: Annotated[dict | None, Depends(verify_user_optional)],
@@ -65,7 +65,7 @@ async def create_checkout_session(
     return {"url": session.url}
 
 
-@router.post("/api/v1/stripe/portal")
+@router.post("/stripe/portal")
 async def create_portal_session(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Create Stripe customer portal session for subscription management."""
     if not stripe.api_key:

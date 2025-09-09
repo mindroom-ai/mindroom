@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 router = APIRouter()
 
 
-@router.get("/api/v1/account/current")
+@router.get("/my/account")
 async def get_current_account(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Get current user's account with subscription and instances."""
     sb = ensure_supabase()
@@ -35,7 +35,7 @@ async def get_current_account(user=Depends(verify_user)) -> dict[str, Any]:  # n
         raise HTTPException(status_code=500, detail="Failed to fetch account") from e
 
 
-@router.get("/api/v1/account/is-admin")
+@router.get("/my/account/admin-status")
 async def check_admin_status(user=Depends(verify_user)) -> dict[str, bool]:  # noqa: B008
     """Check if current user is an admin."""
     sb = ensure_supabase()
@@ -50,7 +50,7 @@ async def check_admin_status(user=Depends(verify_user)) -> dict[str, bool]:  # n
         return {"is_admin": False}
 
 
-@router.post("/api/v1/account/setup")
+@router.post("/my/account/setup")
 async def setup_account(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Setup free tier account for new user."""
     sb = ensure_supabase()

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 router = APIRouter()
 
 
-@router.get("/api/v1/usage")
+@router.get("/my/usage")
 async def get_user_usage(
     user=Depends(verify_user),  # noqa: B008
     days: int = 30,

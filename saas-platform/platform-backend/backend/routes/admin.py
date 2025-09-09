@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 router = APIRouter()
 
 
-@router.get("/api/admin/stats")
+@router.get("/admin/stats")
 async def get_admin_stats(admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Get platform statistics for admin dashboard."""
     sb = ensure_supabase()
@@ -37,31 +37,31 @@ async def get_admin_stats(admin=Depends(verify_admin)) -> dict[str, Any]:  # noq
         raise HTTPException(status_code=500, detail="Failed to fetch statistics") from e
 
 
-@router.post("/api/admin/instances/{instance_id}/start")
+@router.post("/admin/instances/{instance_id}/start")
 async def admin_start_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Proxy start to provisioner (no key exposed to browser)."""
     return await start_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.post("/api/admin/instances/{instance_id}/stop")
+@router.post("/admin/instances/{instance_id}/stop")
 async def admin_stop_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Proxy stop to provisioner (no key exposed to browser)."""
     return await stop_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.post("/api/admin/instances/{instance_id}/restart")
+@router.post("/admin/instances/{instance_id}/restart")
 async def admin_restart_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Proxy restart to provisioner (no key exposed to browser)."""
     return await restart_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.delete("/api/admin/instances/{instance_id}/uninstall")
+@router.delete("/admin/instances/{instance_id}/uninstall")
 async def admin_uninstall_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Proxy uninstall to provisioner (no key exposed to browser)."""
     return await uninstall_instance(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.put("/api/admin/accounts/{account_id}/status")
+@router.put("/admin/accounts/{account_id}/status")
 async def update_account_status(
     account_id: str,
     status: str,
@@ -107,14 +107,14 @@ async def update_account_status(
         raise HTTPException(status_code=500, detail="Failed to update account status") from e
 
 
-@router.post("/api/admin/auth/logout")
+@router.post("/admin/auth/logout")
 async def admin_logout() -> dict[str, bool]:
     """Admin logout placeholder."""
     return {"success": True}
 
 
 # === React Admin Data Provider ===
-@router.get("/api/admin/{resource}")
+@router.get("/admin/{resource}")
 async def admin_get_list(
     resource: str,
     _sort: Annotated[str | None, Query()] = None,
@@ -157,7 +157,7 @@ async def admin_get_list(
         return {"data": result.data, "total": result.count}
 
 
-@router.get("/api/admin/{resource}/{resource_id}")
+@router.get("/admin/{resource}/{resource_id}")
 async def admin_get_one(resource: str, resource_id: str) -> dict[str, Any]:
     """Get single record for React Admin."""
     sb = ensure_supabase()
@@ -170,7 +170,7 @@ async def admin_get_one(resource: str, resource_id: str) -> dict[str, Any]:
         return {"data": result.data}
 
 
-@router.post("/api/admin/{resource}")
+@router.post("/admin/{resource}")
 async def admin_create(resource: str, data: dict) -> dict[str, Any]:
     """Create record for React Admin."""
     sb = ensure_supabase()
@@ -182,7 +182,7 @@ async def admin_create(resource: str, data: dict) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.put("/api/admin/{resource}/{resource_id}")
+@router.put("/admin/{resource}/{resource_id}")
 async def admin_update(resource: str, resource_id: str, data: dict) -> dict[str, Any]:
     """Update record for React Admin."""
     sb = ensure_supabase()
@@ -195,7 +195,7 @@ async def admin_update(resource: str, resource_id: str, data: dict) -> dict[str,
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.delete("/api/admin/{resource}/{resource_id}")
+@router.delete("/admin/{resource}/{resource_id}")
 async def admin_delete(resource: str, resource_id: str) -> dict[str, Any]:
     """Delete record for React Admin."""
     sb = ensure_supabase()
@@ -208,7 +208,7 @@ async def admin_delete(resource: str, resource_id: str) -> dict[str, Any]:
         return {"data": {"id": resource_id}}
 
 
-@router.get("/api/admin/metrics/dashboard")
+@router.get("/admin/metrics/dashboard")
 async def get_dashboard_metrics() -> dict[str, Any]:
     """Get dashboard metrics for admin panel."""
     try:

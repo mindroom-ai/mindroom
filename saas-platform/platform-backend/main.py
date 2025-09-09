@@ -47,10 +47,10 @@ app.include_router(webhooks.router)
 
 # Keep a reference list of primary endpoints for tooling/tests that grep this file
 EXPOSED_ENDPOINTS = [
-    "/api/v1/subscription",
-    "/api/v1/usage",
-    "/api/v1/account/is-admin",
-    "/api/admin/stats",
+    "/my/subscription",
+    "/my/usage",
+    "/my/account/admin-status",
+    "/admin/stats",
 ]
 
 

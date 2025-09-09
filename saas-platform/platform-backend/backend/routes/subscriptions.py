@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 router = APIRouter()
 
 
-@router.get("/api/v1/subscription")
+@router.get("/my/subscription")
 async def get_user_subscription(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Get current user's subscription."""
     sb = ensure_supabase()
