@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -145,6 +146,8 @@ async def provision_instance(
                 f"supabaseUrl={SUPABASE_URL or ''}",
                 "--set",
                 f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
+                "--set",
+                f"openrouter_key={os.getenv('OPENROUTER_API_KEY', '')}",
                 "--set",
                 "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
             ],

@@ -51,9 +51,14 @@ spec:
           value: {{ .Values.supabaseUrl | quote }}
         - name: SUPABASE_ANON_KEY
           value: {{ .Values.supabaseAnonKey | quote }}
+        - name: OPENROUTER_API_KEY
+          value: {{ .Values.openrouter_key | quote }}
         volumeMounts:
         - name: storage
           mountPath: /app/mindroom_data
+        - name: config
+          mountPath: /app/config.yaml
+          subPath: config.yaml
         resources:
           requests:
             memory: "512Mi"
@@ -67,3 +72,6 @@ spec:
       - name: storage
         persistentVolumeClaim:
           claimName: mindroom-storage-{{ .Values.customer }}
+      - name: config
+        configMap:
+          name: mindroom-config-{{ .Values.customer }}

@@ -1,3 +1,7 @@
+# Default configuration for SaaS platform instances
+# This file is the source of truth for model configurations in deployed instances
+# It uses OpenRouter models exclusively for consistency and cost management
+
 agents:
   agent_builder:
     display_name: AgentBuilder
@@ -41,7 +45,7 @@ agents:
     - Show your work step by step.
     - Explain the mathematical concepts when helpful.
     - Double-check calculations for accuracy.
-    model: sonnet
+    model: default
     num_history_runs: 5
     role: Solve mathematical problems.
     rooms:
@@ -60,7 +64,7 @@ agents:
     - Handle phone numbers in international format when possible
     - Be concise and clear in SMS messages due to character limits
     - For calls, prepare a brief script of what will be communicated
-    model: sonnet
+    model: default
     num_history_runs: 5
     role: Manage phone calls and SMS messages through Twilio integration.
     rooms:
@@ -97,7 +101,7 @@ agents:
     - Identify patterns and trends in data.
     - Provide actionable insights and recommendations.
     - Handle missing or inconsistent data appropriately.
-    model: sonnet
+    model: default
     num_history_runs: 5
     role: Analyze data, create visualizations, and provide insights.
     rooms:
@@ -122,9 +126,9 @@ agents:
     - Respect privacy - only access emails when specifically requested
     - When summarizing, focus on sender, subject, and key points
     - For email drafts, maintain appropriate tone and formality based on context
-    model: gpt5mini
+    model: default
     num_history_runs: 5
-    role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's intelligence
+    role: Manage and respond to emails efficiently using Gmail
     rooms:
     - lobby
     - communication
@@ -141,7 +145,7 @@ agents:
     - Explain financial concepts clearly.
     - Include relevant disclaimers about investment advice.
     - Present data in a clear, organized format.
-    model: sonnet
+    model: default
     num_history_runs: 5
     role: Analyze financial data, stock information, and perform calculations.
     rooms:
@@ -159,7 +163,7 @@ agents:
     - Remember context from the conversation.
     - Be conversational and friendly.
     - Ask clarifying questions when needed.
-    model: sonnet
+    model: default
     num_history_runs: 5
     role: A general-purpose assistant that provides helpful, conversational responses to users.
     rooms:
@@ -178,7 +182,7 @@ agents:
     - List available devices when asked about what you can control
     - Provide clear status updates after performing actions
     - Group related actions together for efficiency
-    model: sonnet
+    model: default
     num_history_runs: 5
     role: Control and monitor smart home devices through Home Assistant
     rooms:
@@ -196,7 +200,7 @@ agents:
     - Include publication dates and sources.
     - Distinguish between news and opinion pieces.
     - Highlight key developments and their significance.
-    model: gpt_oss_120b
+    model: deepseek
     num_history_runs: 5
     role: Gather and summarize news and current events.
     rooms:
@@ -216,7 +220,7 @@ agents:
     - Distinguish between facts and opinions.
     - Provide balanced viewpoints on controversial topics.
     - Summarize findings in a clear, organized manner.
-    model: gpt5mini
+    model: default
     num_history_runs: 5
     role: Conduct research using web sources, Wikipedia, and academic papers.
     rooms:
@@ -251,7 +255,7 @@ agents:
     - Provide clear output and error messages.
     - Suggest safer alternatives when appropriate.
     - Remember the user's working directory context.
-    model: sonnet
+    model: default
     num_history_runs: 5
     role: Execute shell commands and manage system operations.
     rooms:
@@ -261,34 +265,6 @@ agents:
     - ops
     tools:
     - shell
-  sleepy_paws:
-    add_history_to_messages: true
-    display_name: Sleepy Paws 🐾
-    instructions:
-    - Vertel altijd verhalen in het Nederlands
-    - Maak slaapverhaaltjes met Tom de Tijger (speels, nieuwsgierig, zacht) en Leo de Leeuw (moedig, beschermend, zorgzaam)
-    - Gebruik eenvoudige Nederlandse woorden geschikt voor 2-jarigen
-    - Voeg herhalende zinnen en patronen toe die peuters leuk vinden zoals 'Tom en Leo liepen en liepen...'
-    - Houd verhalen 5-7 minuten lang voor optimale aandachtsspanne
-    - Eindig verhalen altijd met de tweeling veilig thuis en klaar om te slapen
-    - Voeg zachte dierengeluiden toe en eenvoudige interactieve elementen in het Nederlands
-    - 'Focus op positieve thema''s: vriendschap, vriendelijkheid, anderen helpen, familieliefde'
-    - Gebruik een steeds kalmere toon naarmate het verhaal naar het einde gaat
-    - Vermijd enge, luide of overstimulerende inhoud
-    - 'Stel eenvoudige vragen om het kind te betrekken: ''Wat denk je dat Tom zag?'' of ''Moet Leo zijn vriend helpen?'''
-    - 'Voeg slaperige signalen toe tegen het einde: gapen, gezellige bedjes, sterrenlight, zachte wiegenliedjes'
-    - Gebruik Nederlandse uitdrukkingen en culturele elementen die geschikt zijn voor Nederlandse kinderen
-    - Maak de verhalen warm, gezellig en vertrouwd voor Nederlandse gezinnen
-    markdown: true
-    model: sonnet
-    num_history_runs: 5
-    role: Je bent Sleepy Paws, een magische verhalenverteller die zachte dierenaventuren creëert met de tweelingbroertjes
-      Tom de Tijger en Leo de Leeuw. Je specialiseert je in verhalen voor 2-jarigen met eenvoudige Nederlandse woordenschat,
-      herhalende patronen, rustgevende thema's en gezellige eindjes die kinderen helpen vredig in slaap te vallen. Vertel
-      altijd verhalen in het Nederlands.
-    rooms:
-    - lobby
-    tools: []
   summary:
     display_name: SummaryAgent
     instructions:
@@ -298,7 +274,7 @@ agents:
     - Use bullet points for clarity when appropriate.
     - Indicate the level of detail in your summary.
     - Preserve important quotes or specific data points.
-    model: sonnet
+    model: default
     num_history_runs: 5
     role: Summarize long texts and extract key information.
     rooms:
@@ -306,39 +282,50 @@ agents:
     - research
     - docs
     tools: []
+
 defaults:
   add_history_to_messages: true
   markdown: true
   num_history_runs: 5
   show_stop_button: true
+
 memory:
   embedder:
     config:
-      host: http://192.168.1.143:11434
-      model: nomic-embed-text
-    provider: ollama
+      model: text-embedding-3-small
+    provider: openai
   llm:
     provider: openrouter
     config:
       model: google/gemini-2.5-flash
       temperature: 0.1
       top_p: 1
+
+# OpenRouter model configurations for SaaS platform
+# All models use OpenRouter for consistency and unified billing
 models:
+  # Primary models
   default:
     provider: openrouter
     id: google/gemini-2.5-flash
   sonnet:
     provider: openrouter
     id: anthropic/claude-sonnet-4
+
+  # Cost-effective alternatives
   deepseek:
     provider: openrouter
     id: deepseek/deepseek-chat-v3.1:free
+
+  # Additional model options
   gemini_flash:
     provider: openrouter
     id: google/gemini-2.5-flash
   glm45:
     provider: openrouter
     id: z-ai/glm-4.5
+
+  # Legacy model name mappings (for compatibility)
   gpt5mini:
     provider: openrouter
     id: google/gemini-2.5-flash
@@ -363,42 +350,43 @@ models:
   devstral:
     provider: openrouter
     id: google/gemini-2.5-flash
+
 room_models:
-  research: haiku
+  research: default
+
 router:
   model: default
+
 teams:
   code_team:
     agents:
     - shell
+    - code
     display_name: Code Team
     mode: coordinate
-    role: New team description
-    rooms: []
-  super_team:
-    agents:
-    - code
-    - shell
-    - research
-    - finance
-    display_name: Super Team
-    mode: collaborate
-    model: sonnet
-    role: A team with all the great agents.
+    role: Development team for coding tasks
     rooms:
-    - research
-    - lobby
-timezone: America/Los_Angeles
+    - dev
+    - automation
+
+# Timezone for displaying scheduled tasks
+timezone: UTC
+
+# Voice message handling configuration
 voice:
-  enabled: true
+  enabled: false
   stt:
     provider: openai
     model: whisper-1
   intelligence:
-    model: sonnet
+    model: default
     confidence_threshold: 0.7
+
+# Authorization configuration with fine-grained permissions
 authorization:
-  global_users:
-  - '@test:m-test-4.mindroom.chat'
+  # Users with access to all rooms (populated per instance)
+  global_users: []
+  # Room-specific permissions (populated per instance)
   room_permissions: {}
+  # Default permission for rooms not explicitly configured
   default_room_access: false
