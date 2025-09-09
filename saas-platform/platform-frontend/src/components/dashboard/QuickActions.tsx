@@ -92,7 +92,7 @@ export function QuickActions({ instance, subscription }: QuickActionsProps) {
         })}
 
         {/* Restart Instance Button (if instance is failed or stopped) */}
-        {instance && (instance.status === 'failed' || instance.status === 'stopped') && (
+        {instance && (instance.status === 'failed' || instance.status === 'error' || instance.status === 'stopped') && (
           <button
             className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-50 transition-colors w-full text-left"
           >

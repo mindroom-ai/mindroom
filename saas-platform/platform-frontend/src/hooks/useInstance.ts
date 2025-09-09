@@ -10,7 +10,7 @@ export interface Instance {
   instance_id: number | string
   subscription_id: string
   subdomain: string
-  status: 'provisioning' | 'running' | 'failed' | 'stopped'
+  status: 'provisioning' | 'running' | 'failed' | 'stopped' | 'error'
   frontend_url: string | null
   backend_url: string | null
   created_at: string

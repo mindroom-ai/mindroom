@@ -27,6 +27,8 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
         return <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
       case 'failed':
         return <XCircle className="w-5 h-5 text-red-500" />
+      case 'error':
+        return <XCircle className="w-5 h-5 text-red-500" />
       case 'stopped':
         return <AlertCircle className="w-5 h-5 text-gray-400" />
       default:
@@ -42,6 +44,8 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
         return 'Setting up your MindRoom...'
       case 'failed':
         return 'Setup failed - Please contact support'
+      case 'error':
+        return 'Setup failed - Please contact support'
       case 'stopped':
         return 'Stopped'
       default:
@@ -56,6 +60,8 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
       case 'provisioning':
         return 'text-blue-700 bg-blue-50'
       case 'failed':
+        return 'text-red-700 bg-red-50'
+      case 'error':
         return 'text-red-700 bg-red-50'
       case 'stopped':
         return 'text-gray-700 bg-gray-50'
