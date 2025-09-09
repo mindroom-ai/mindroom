@@ -496,8 +496,9 @@ class AgentBot:
         except Exception as e:
             self.logger.warning(f"Some background tasks did not complete: {e}")
 
-        assert self.client is not None
-        await self.client.close()
+        if self.client is not None:
+            self.logger.warning("Client is not None in stop()")
+            await self.client.close()
         self.logger.info("Stopped agent bot")
 
     async def _send_welcome_message_if_empty(self, room_id: str) -> None:
