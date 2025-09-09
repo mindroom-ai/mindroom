@@ -413,7 +413,8 @@ class AgentBot:
 
     async def _set_presence_with_model_info(self) -> None:
         """Set presence status with model information."""
-        assert self.client is not None
+        if self.client is None:
+            return
 
         status_msg = build_agent_status_message(self.agent_name, self.config)
         await set_presence_status(self.client, status_msg)
