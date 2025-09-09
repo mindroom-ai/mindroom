@@ -13,7 +13,7 @@ from mindroom import __version__
 from mindroom.bot import main as bot_main
 from mindroom.constants import STORAGE_PATH
 
-app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system")
+app = typer.Typer(help="Mindroom: Multi-agent Matrix bot system", pretty_exceptions_enable=False)
 console = Console()
 
 
