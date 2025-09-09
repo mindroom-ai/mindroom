@@ -9,7 +9,7 @@ import { QuickActions } from '@/components/dashboard/QuickActions'
 import { Loader2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { setupAccount } from '@/lib/api'
+import { setSsoCookie, setupAccount } from '@/lib/api'
 
 export default function DashboardPage() {
   const { user } = useAuth()
@@ -19,6 +19,11 @@ export default function DashboardPage() {
   const router = useRouter()
 
   useEffect(() => {
+    // Ensure SSO cookie for instance access (no-op if not logged in)
+    setSsoCookie().catch((e) => console.warn('Failed to set SSO cookie', e))
+    // Refresh cookie periodically for longer sessions
+    const id = setInterval(() => { setSsoCookie().catch((e) => console.warn('Failed to refresh SSO cookie', e)) }, 15 * 60 * 1000)
+
     // Auto-setup free tier if user has no subscription
     const setupFreeTier = async () => {
       if (!user || subscriptionLoading || subscription || isSettingUp) {
@@ -37,6 +42,7 @@ export default function DashboardPage() {
     }
 
     setupFreeTier()
+    return () => clearInterval(id)
   }, [user, subscriptionLoading, subscription, isSettingUp])
 
   if (instanceLoading || subscriptionLoading) {

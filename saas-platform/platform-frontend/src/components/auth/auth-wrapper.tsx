@@ -7,9 +7,10 @@ import { useEffect, useState } from 'react'
 
 interface AuthWrapperProps {
   view?: 'sign_in' | 'sign_up'
+  redirectTo?: string
 }
 
-export function AuthWrapper({ view = 'sign_in' }: AuthWrapperProps) {
+export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) {
   const [origin, setOrigin] = useState('')
 
   useEffect(() => {
@@ -17,6 +18,10 @@ export function AuthWrapper({ view = 'sign_in' }: AuthWrapperProps) {
   }, [])
 
   const supabase = createClient()
+
+  const computedRedirect = redirectTo && redirectTo.startsWith('http')
+    ? redirectTo
+    : `${origin}${redirectTo || '/auth/callback'}`
 
   return (
     <Auth
@@ -47,7 +52,7 @@ export function AuthWrapper({ view = 'sign_in' }: AuthWrapperProps) {
           label: 'block text-sm font-medium text-gray-700 mb-1.5',
         },
       }}
-      redirectTo={`${origin}/auth/callback`}
+      redirectTo={computedRedirect}
       providers={['google', 'github']}
       showLinks={view === 'sign_in'}
     />

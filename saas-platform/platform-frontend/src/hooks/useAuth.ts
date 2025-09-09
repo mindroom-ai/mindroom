@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { User } from '@supabase/supabase-js'
 import { useRouter } from 'next/navigation'
+import { clearSsoCookie } from '@/lib/api'
 
 export function useAuth() {
   const [user, setUser] = useState<User | null>(null)
@@ -34,7 +35,13 @@ export function useAuth() {
   }, [supabase.auth, router])
 
   const signOut = async () => {
-    await supabase.auth.signOut()
+    try {
+      await clearSsoCookie()
+    } catch {
+      // non-fatal
+    } finally {
+      await supabase.auth.signOut()
+    }
   }
 
   return {

@@ -13,8 +13,21 @@ data:
       server {
         listen 80;
 
+        {{- if .Values.supabaseUrl }}
+        # SSO cookie provided by platform backend (no tokens in URL)
+        set $jwt_token $cookie_mindroom_jwt;
+        {{- end }}
+
         location / {
-          # Proxy to MindRoom frontend
+          {{- if .Values.supabaseUrl }}
+          # Platform mode: Require SSO cookie
+          if ($jwt_token = "") {
+            return 302 https://app.{{ .Values.baseDomain }}/auth/login?redirect_to=$scheme://$host$request_uri;
+          }
+          add_header Referrer-Policy "no-referrer" always;
+          {{- end }}
+
+          # Proxy to frontend
           proxy_pass http://localhost:3003;
           proxy_http_version 1.1;
           proxy_set_header Upgrade $http_upgrade;
@@ -25,16 +38,25 @@ data:
           proxy_set_header X-Forwarded-Proto $scheme;
         }
 
-        # API/Backend proxy (to frontend's backend API)
         location /api {
+          {{- if .Values.supabaseUrl }}
+          # Platform mode: Require JWT for API
+          if ($jwt_token = "") {
+            return 401;
+          }
+          {{- end }}
+
           proxy_pass http://127.0.0.1:8765;
           proxy_http_version 1.1;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
           proxy_set_header X-Forwarded-Proto $scheme;
-          # Forward Authorization header so the backend can verify Supabase JWT
+          {{- if .Values.supabaseUrl }}
+          proxy_set_header Authorization "Bearer $jwt_token";
+          {{- else }}
           proxy_set_header Authorization $http_authorization;
+          {{- end }}
         }
 
       }

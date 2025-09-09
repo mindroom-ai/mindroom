@@ -35,6 +35,7 @@ export async function GET(request: NextRequest) {
               const publicUrl = process.env.APP_URL ||
                 `https://${request.headers.get('host')}` ||
                 request.url
+              // Use normal admin redirect
               return NextResponse.redirect(new URL(next, publicUrl))
             }
           }
@@ -51,5 +52,8 @@ export async function GET(request: NextRequest) {
     `https://${request.headers.get('host')}` ||
     request.url
 
-  return NextResponse.redirect(new URL(next, publicUrl))
+  // Redirect to a client page that sets the SSO cookie before navigating to `next`
+  const completeUrl = new URL('/auth/complete', publicUrl)
+  completeUrl.searchParams.set('next', next)
+  return NextResponse.redirect(completeUrl)
 }

@@ -1,9 +1,8 @@
-'use client'
-
 import { AuthWrapper } from '@/components/auth/auth-wrapper'
 import Link from 'next/link'
 
-export default function LoginPage() {
+export default function LoginPage({ searchParams }: { searchParams: { redirect_to?: string } }) {
+  const redirectTo = searchParams?.redirect_to || '/dashboard'
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4">
@@ -16,7 +15,7 @@ export default function LoginPage() {
           <p className="text-gray-600 mt-2">Sign in to access your MindRoom</p>
         </div>
 
-        <AuthWrapper view="sign_in" />
+        <AuthWrapper view="sign_in" redirectTo={`/auth/callback?next=${encodeURIComponent(redirectTo)}`} />
 
         <div className="mt-6 text-center">
           <p className="text-gray-600">

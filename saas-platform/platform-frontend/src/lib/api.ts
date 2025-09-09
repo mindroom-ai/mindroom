@@ -107,3 +107,27 @@ export async function createPortalSession() {
   }
   return response.json()
 }
+
+// SSO cookie setup
+export async function setSsoCookie() {
+  const supabase = createClient()
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session?.access_token) return { ok: false }
+
+  const response = await fetch(`${API_URL}/my/sso-cookie`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${session.access_token}`,
+    },
+  })
+  return { ok: response.ok }
+}
+
+export async function clearSsoCookie() {
+  await fetch(`${API_URL}/my/sso-cookie`, {
+    method: 'DELETE',
+    credentials: 'include',
+  })
+}

@@ -17,6 +17,9 @@ spec:
       labels:
         app: mindroom-frontend
         customer: {{ .Values.customer | quote }}
+      annotations:
+        # Trigger rollout on Helm upgrade (ensures new nginx.conf from ConfigMap is loaded)
+        rollout/revision: {{ .Release.Revision | quote }}
     spec:
       containers:
       # Nginx auth proxy (handles authentication)

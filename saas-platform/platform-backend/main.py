@@ -13,6 +13,7 @@ from backend.routes import (
     health,
     instances,
     provisioner,
+    sso,
     stripe_routes,
     subscriptions,
     usage,
@@ -43,6 +44,7 @@ app.include_router(instances.router)
 app.include_router(provisioner.router)
 app.include_router(admin.router)
 app.include_router(stripe_routes.router)
+app.include_router(sso.router)
 app.include_router(webhooks.router)
 
 # Keep a reference list of primary endpoints for tooling/tests that grep this file
