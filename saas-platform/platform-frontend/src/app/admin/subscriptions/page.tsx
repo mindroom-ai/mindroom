@@ -31,7 +31,8 @@ export default function SubscriptionsPage() {
         const response = await apiCall('/admin/subscriptions')
         if (response.ok) {
           const data = await response.json()
-          setSubscriptions(data.subscriptions || [])
+          // Generic admin list endpoint returns { data, total }
+          setSubscriptions(data.data || [])
         } else {
           console.error('Failed to fetch subscriptions:', response.statusText)
         }

@@ -28,7 +28,8 @@ export default function AccountsPage() {
         const response = await apiCall('/admin/accounts')
         if (response.ok) {
           const data = await response.json()
-          setAccounts(data.accounts || [])
+          // Generic admin list endpoint returns { data, total }
+          setAccounts(data.data || [])
         } else {
           console.error('Failed to fetch accounts:', response.statusText)
         }
