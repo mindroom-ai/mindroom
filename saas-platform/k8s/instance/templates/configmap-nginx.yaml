@@ -13,30 +13,7 @@ data:
       server {
         listen 80;
 
-        # Check for auth token in query string or cookie
-        set $auth_token "{{ .Values.instance_auth_token }}";
-        set $valid_auth 0;
-
-        # Check query parameter
-        if ($arg_token = $auth_token) {
-          set $valid_auth 1;
-        }
-
-        # Check cookie (for subsequent requests after initial auth)
-        if ($cookie_mindroom_auth = $auth_token) {
-          set $valid_auth 1;
-        }
-
-        # Require authentication for all requests
         location / {
-          if ($valid_auth = 0) {
-            # Redirect to customer portal login page
-            return 302 https://app.staging.mindroom.chat/auth/login?redirect_to=$scheme://$host$request_uri;
-          }
-
-          # Set cookie on successful auth (so user doesn't need token in every URL)
-          add_header Set-Cookie "mindroom_auth=$auth_token; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=86400";
-
           # Proxy to MindRoom frontend
           proxy_pass http://localhost:3003;
           proxy_http_version 1.1;
@@ -50,16 +27,14 @@ data:
 
         # API/Backend proxy (to frontend's backend API)
         location /api {
-          if ($valid_auth = 0) {
-            return 403;
-          }
-
           proxy_pass http://127.0.0.1:8765;
           proxy_http_version 1.1;
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
           proxy_set_header X-Forwarded-Proto $scheme;
+          # Forward Authorization header so the backend can verify Supabase JWT
+          proxy_set_header Authorization $http_authorization;
         }
 
       }

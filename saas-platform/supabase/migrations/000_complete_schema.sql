@@ -98,9 +98,6 @@ CREATE TABLE instances (
     matrix_url TEXT, -- Synapse Matrix server URL
     matrix_server_url TEXT, -- Alias for compatibility
 
-    -- Authentication
-    auth_token TEXT, -- Bearer token for instance API access
-
     -- Resource limits
     memory_limit_mb INTEGER DEFAULT 512,
     cpu_limit DECIMAL(3,2) DEFAULT 0.5,
@@ -120,7 +117,6 @@ CREATE INDEX idx_instances_subscription_id ON instances(subscription_id);
 CREATE INDEX idx_instances_status ON instances(status);
 CREATE INDEX idx_instances_subdomain ON instances(subdomain);
 CREATE INDEX idx_instances_instance_id ON instances(instance_id);
-CREATE INDEX idx_instances_auth_token ON instances(auth_token);
 
 -- ============================================================================
 -- USAGE METRICS TABLE
@@ -373,7 +369,6 @@ COMMENT ON TABLE audit_logs IS 'Audit trail for significant events';
 COMMENT ON COLUMN accounts.id IS 'Same as auth.users.id for perfect linking';
 COMMENT ON COLUMN accounts.tier IS 'Account tier - determines features and limits';
 COMMENT ON COLUMN instances.instance_id IS 'Unique numeric identifier for the Kubernetes instance (e.g., 1, 2)';
-COMMENT ON COLUMN instances.auth_token IS 'Bearer token for authenticating with the instance API';
 COMMENT ON COLUMN instances.config IS 'JSON configuration for the instance';
 COMMENT ON COLUMN accounts.is_admin IS 'Whether this account has admin privileges for the platform';
 
