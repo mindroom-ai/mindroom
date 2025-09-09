@@ -1,4 +1,4 @@
-"""MindRoom Backend - Simple single-file FastAPI backend."""  # noqa: INP001
+"""MindRoom Backend - Simple single-file FastAPI backend."""
 
 import asyncio
 import logging
@@ -28,12 +28,21 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="MindRoom Backend")
 
 # CORS middleware
+# Configure CORS with specific origins for better security and debugging
+allowed_origins = [
+    "https://app.staging.mindroom.chat",
+    "https://app.mindroom.chat",
+    "http://localhost:3000",
+    "http://localhost:3001",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Initialize Supabase
@@ -97,7 +106,7 @@ async def verify_user(authorization: str = Header(None)) -> dict:
         # Verify account exists (use service client to bypass RLS)
         # First, try to get the account
         try:
-            result = supabase.from_("accounts").select("*").eq("id", account_id).single().execute()
+            result = supabase.table("accounts").select("*").eq("id", account_id).single().execute()
             if not result.data:
                 msg = "No data"
                 raise ValueError(msg)  # noqa: TRY301
@@ -106,7 +115,7 @@ async def verify_user(authorization: str = Header(None)) -> dict:
             logger.info(f"Account not found for user {account_id}, creating...")
             try:
                 create_result = (
-                    supabase.from_("accounts")
+                    supabase.table("accounts")
                     .insert(
                         {
                             "id": account_id,
@@ -124,7 +133,7 @@ async def verify_user(authorization: str = Header(None)) -> dict:
             except Exception:
                 logger.exception("Failed to create account")
                 # Try to fetch again in case it was a race condition
-                result = supabase.from_("accounts").select("*").eq("id", account_id).single().execute()
+                result = supabase.table("accounts").select("*").eq("id", account_id).single().execute()
                 if not result.data:
                     raise HTTPException(status_code=404, detail="Account creation failed. Please contact support.")  # noqa: B904
 
@@ -915,7 +924,7 @@ async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-i
 
 # === Instance Provisioner API (for customer portal compatibility) ===
 @app.post("/api/v1/provision")
-async def provision_instance(  # noqa: C901
+async def provision_instance(  # noqa: C901, PLR0915
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
@@ -962,6 +971,10 @@ async def provision_instance(  # noqa: C901
             stderr=asyncio.subprocess.PIPE,
         )
         await proc.communicate()
+    except FileNotFoundError:
+        error_msg = "Kubectl command not found. Kubernetes provisioning not available in this environment."
+        logger.exception(error_msg)
+        raise HTTPException(status_code=503, detail=error_msg) from None
     except Exception as e:
         logger.warning(f"Could not create namespace (may already exist): {e}")
 
@@ -971,27 +984,32 @@ async def provision_instance(  # noqa: C901
     try:
         # Run helm install command
         # Note: API keys should be configured by the customer after provisioning
-        proc = await asyncio.create_subprocess_exec(
-            "helm",
-            "install",
-            helm_release_name,
-            "/app/k8s/instance/",  # Path to instance chart
-            "--namespace",
-            namespace,
-            "--create-namespace",
-            "--set",
-            f"customer={customer_id}",
-            "--set",
-            f"baseDomain={PLATFORM_DOMAIN}",
-            "--set",
-            "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
-            "--wait",
-            "--timeout",
-            "5m",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "helm",
+                "install",
+                helm_release_name,
+                "/app/k8s/instance/",  # Path to instance chart
+                "--namespace",
+                namespace,
+                "--create-namespace",
+                "--set",
+                f"customer={customer_id}",
+                "--set",
+                f"baseDomain={PLATFORM_DOMAIN}",
+                "--set",
+                "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
+                "--wait",
+                "--timeout",
+                "5m",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+        except FileNotFoundError:
+            error_msg = "Helm command not found. Kubernetes provisioning not available."
+            logger.exception(error_msg)
+            raise HTTPException(status_code=503, detail=error_msg) from None
 
         if proc.returncode != 0:
             error_msg = stderr.decode()
