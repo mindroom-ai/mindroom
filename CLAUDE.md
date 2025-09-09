@@ -66,16 +66,40 @@ pnpm install && pnpm run dev
 
 #### Deployment
 ```bash
+# Set kubeconfig path
+export KUBECONFIG=./saas-platform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
+
 # Deploy platform
 cd saas-platform/k8s/platform
-helm upgrade --install platform . -f values.yaml
+helm upgrade --install platform . -f values.yaml --namespace mindroom-staging
 
-# Deploy instance
-cd saas-platform/k8s/instance
-helm upgrade --install instance-1 . --set customer=1
+# Deploy instance - ALWAYS use the provisioner API:
+./scripts/mindroom-cli.sh provision 1
 
-# Quick redeploy of MindRoom backend
-./saas-platform/redeploy-mindroom-backend.sh
+# The provisioner handles everything:
+# - Creates database records
+# - Manages secrets securely
+# - Deploys via Helm with proper values
+# - Tracks status
+
+# Manual Helm deployment (debugging only, not for production):
+# helm upgrade --install instance-1 ./k8s/instance \
+#   --namespace mindroom-instances \
+#   -f values-with-secrets.yaml  # Never commit this file!
+
+# Quick redeploy of MindRoom backend (updates all instances)
+cd saas-platform
+./redeploy-mindroom-backend.sh
+
+# Deploy platform frontend or backend
+cd saas-platform
+./deploy.sh platform-frontend  # Build, push, and deploy frontend
+./deploy.sh platform-backend   # Build, push, and deploy backend
+
+# Use the CLI helper for common operations
+./scripts/mindroom-cli.sh status
+./scripts/mindroom-cli.sh list
+./scripts/mindroom-cli.sh logs 1
 ```
 
 ### Step 3: Development & Git
