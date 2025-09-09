@@ -1,24 +1,63 @@
-import { createServerClientSupabase } from '@/lib/supabase/server'
+'use client'
+
+import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { apiCall } from '@/lib/api'
 
-export default async function SubscriptionsPage() {
-  const supabase = await createServerClientSupabase()
-
-  const { data: subscriptions, error } = await supabase
-    .from('subscriptions')
-    .select('*, accounts(email, full_name)')
-    .order('created_at', { ascending: false })
-
-  if (error) {
-    console.error('Error fetching subscriptions:', error)
+interface Subscription {
+  id: string
+  account_id: string
+  price_tier: string
+  tier: string
+  status: string
+  price: number
+  billing_period: string
+  current_period_end: string | null
+  created_at: string
+  accounts?: {
+    email: string
+    full_name: string | null
   }
+}
+
+export default function SubscriptionsPage() {
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const fetchSubscriptions = async () => {
+      try {
+        const response = await apiCall('/admin/subscriptions')
+        if (response.ok) {
+          const data = await response.json()
+          setSubscriptions(data.subscriptions || [])
+        } else {
+          console.error('Failed to fetch subscriptions:', response.statusText)
+        }
+      } catch (error) {
+        console.error('Error fetching subscriptions:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchSubscriptions()
+  }, [])
 
   const formatPrice = (amount: number) => {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
     }).format(amount / 100)
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-lg">Loading...</div>
+      </div>
+    )
   }
 
   return (

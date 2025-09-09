@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation'
 import { createServerClientSupabase } from '@/lib/supabase/server'
-import { createClient } from '@supabase/supabase-js'
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.staging.mindroom.chat'
 
 export async function requireAdmin() {
   const supabase = await createServerClientSupabase()
@@ -12,48 +13,51 @@ export async function requireAdmin() {
     redirect('/auth/login')
   }
 
-  // First try with regular client
-  let { data: account, error: accountError } = await supabase
-    .from('accounts')
-    .select('*')  // Select all fields to ensure we get is_admin
-    .eq('id', user.id)
-    .single()
+  // Get session token for API call
+  const { data: { session } } = await supabase.auth.getSession()
 
-  // If RLS is blocking, try with service role key (if available)
-  if ((accountError || account?.is_admin === undefined) && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-
-    const serviceSupabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-      {
-        auth: {
-          persistSession: false,
-          autoRefreshToken: false
-        }
-      }
-    )
-
-    const serviceResult = await serviceSupabase
-      .from('accounts')
-      .select('*')
-      .eq('id', user.id)
-      .single()
-
-    account = serviceResult.data
-    accountError = serviceResult.error
+  if (!session) {
+    redirect('/auth/login')
   }
 
+  // Check admin status via API
+  try {
+    const response = await fetch(`${API_URL}/my/account/admin-status`, {
+      headers: {
+        'Authorization': `Bearer ${session.access_token}`,
+        'Content-Type': 'application/json',
+      },
+    })
 
-  if (accountError) {
-    console.error('[Admin Auth] Database error:', accountError)
+    if (!response.ok) {
+      console.error('[Admin Auth] API error:', response.status)
+      redirect('/dashboard')
+    }
+
+    const data = await response.json()
+
+    if (!data.is_admin) {
+      redirect('/dashboard')  // Redirect non-admins to regular dashboard
+    }
+
+    // Also get full account info
+    const accountResponse = await fetch(`${API_URL}/my/account`, {
+      headers: {
+        'Authorization': `Bearer ${session.access_token}`,
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (accountResponse.ok) {
+      const account = await accountResponse.json()
+      return { user, account }
+    }
+
+    return { user, account: { id: user.id, email: user.email, is_admin: true } }
+  } catch (err) {
+    console.error('[Admin Auth] Request error:', err)
     redirect('/dashboard')
   }
-
-  if (!account?.is_admin) {
-    redirect('/dashboard')  // Redirect non-admins to regular dashboard
-  }
-
-  return { user, account }
 }
 
 export async function isAdmin() {
@@ -65,11 +69,28 @@ export async function isAdmin() {
     return false
   }
 
-  const { data: account } = await supabase
-    .from('accounts')
-    .select('is_admin')
-    .eq('id', user.id)
-    .single()
+  // Get session token for API call
+  const { data: { session } } = await supabase.auth.getSession()
 
-  return account?.is_admin === true
+  if (!session) {
+    return false
+  }
+
+  try {
+    const response = await fetch(`${API_URL}/my/account/admin-status`, {
+      headers: {
+        'Authorization': `Bearer ${session.access_token}`,
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (!response.ok) {
+      return false
+    }
+
+    const data = await response.json()
+    return data.is_admin === true
+  } catch {
+    return false
+  }
 }

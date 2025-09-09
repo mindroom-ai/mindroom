@@ -1,17 +1,57 @@
-import { createServerClientSupabase } from '@/lib/supabase/server'
+'use client'
+
+import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { apiCall } from '@/lib/api'
 
-export default async function AuditLogsPage() {
-  const supabase = await createServerClientSupabase()
+interface AuditLog {
+  id: string
+  created_at: string
+  account_id: string | null
+  action: string
+  resource_type: string
+  resource_id: string | null
+  details: any
+  ip_address: string | null
+  accounts?: {
+    email: string
+  }
+}
 
-  const { data: logs, error } = await supabase
-    .from('audit_logs')
-    .select('*, accounts(email)')
-    .order('created_at', { ascending: false })
-    .limit(100)
+export default function AuditLogsPage() {
+  const [logs, setLogs] = useState<AuditLog[]>([])
+  const [loading, setLoading] = useState(true)
 
-  if (error) {
-    console.error('Error fetching audit logs:', error)
+  useEffect(() => {
+    const fetchAuditLogs = async () => {
+      try {
+        // Get last 100 audit logs
+        const response = await apiCall(
+          '/admin/audit_logs?_sort=created_at&_order=DESC&_start=0&_end=100'
+        )
+
+        if (response.ok) {
+          const data = await response.json()
+          setLogs(data.data || [])
+        } else {
+          console.error('Failed to fetch audit logs:', response.statusText)
+        }
+      } catch (error) {
+        console.error('Error fetching audit logs:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchAuditLogs()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-lg">Loading...</div>
+      </div>
+    )
   }
 
   return (

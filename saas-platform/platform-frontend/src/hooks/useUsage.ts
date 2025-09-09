@@ -1,8 +1,8 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
-import { useSubscription } from './useSubscription'
+import { useAuth } from './useAuth'
+import { apiCall } from '@/lib/api'
 
 export interface UsageMetrics {
   id: string
@@ -24,37 +24,29 @@ export interface AggregatedUsage {
 export function useUsage(days: number = 30) {
   const [usage, setUsage] = useState<AggregatedUsage | null>(null)
   const [loading, setLoading] = useState(true)
-  const { subscription } = useSubscription()
-  const supabase = createClient()
+  const { user } = useAuth()
 
   useEffect(() => {
-    if (!subscription) {
+    if (!user) {
       setLoading(false)
       return
     }
 
-    // Get usage metrics for the last N days
+    // Get usage metrics through API
     const fetchUsage = async () => {
       try {
-        const startDate = new Date()
-        startDate.setDate(startDate.getDate() - days)
+        const response = await apiCall(`/my/usage?days=${days}`)
 
-        const { data } = await supabase
-          .from('usage_metrics')
-          .select('*')
-          .eq('subscription_id', subscription.id)
-          .gte('date', startDate.toISOString().split('T')[0])
-          .order('date', { ascending: true })
-
-        if (data) {
-          // Aggregate the usage data
-          const aggregated: AggregatedUsage = {
-            totalMessages: data.reduce((sum, d) => sum + d.messages_sent, 0),
-            totalAgents: Math.max(...data.map(d => d.agents_used), 0),
-            totalStorage: Math.max(...data.map(d => d.storage_used_gb), 0),
-            dailyUsage: data,
-          }
-          setUsage(aggregated)
+        if (response.ok) {
+          const data = await response.json()
+          setUsage({
+            totalMessages: data.aggregated.totalMessages,
+            totalAgents: data.aggregated.totalAgents,
+            totalStorage: data.aggregated.totalStorage,
+            dailyUsage: data.usage,
+          })
+        } else {
+          console.error('Error fetching usage:', response.statusText)
         }
       } catch (error) {
         console.error('Error fetching usage:', error)
@@ -64,7 +56,7 @@ export function useUsage(days: number = 30) {
     }
 
     fetchUsage()
-  }, [subscription, days, supabase])
+  }, [user, days])
 
   return { usage, loading }
 }

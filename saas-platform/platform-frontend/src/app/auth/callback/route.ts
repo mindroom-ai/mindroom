@@ -2,6 +2,8 @@ import { createServerClientSupabase } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import { NextRequest } from 'next/server'
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.staging.mindroom.chat'
+
 export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url)
   const code = requestUrl.searchParams.get('code')
@@ -12,22 +14,33 @@ export async function GET(request: NextRequest) {
     const { error } = await supabase.auth.exchangeCodeForSession(code)
 
     if (!error) {
-      // Check if user is admin to determine redirect
-      const { data: { user } } = await supabase.auth.getUser()
+      // Get the session to make API call
+      const { data: { session } } = await supabase.auth.getSession()
 
-      if (user) {
-        const { data: account } = await supabase
-          .from('accounts')
-          .select('is_admin')
-          .eq('id', user.id)
-          .single()
+      if (session && next.startsWith('/admin')) {
+        // Check if user is admin via API
+        try {
+          const response = await fetch(`${API_URL}/my/account/admin-status`, {
+            headers: {
+              'Authorization': `Bearer ${session.access_token}`,
+              'Content-Type': 'application/json',
+            },
+          })
 
-        // If user is admin and was trying to go to admin, redirect there
-        if (account?.is_admin && next.startsWith('/admin')) {
-          const publicUrl = process.env.APP_URL ||
-            `https://${request.headers.get('host')}` ||
-            request.url
-          return NextResponse.redirect(new URL(next, publicUrl))
+          if (response.ok) {
+            const data = await response.json()
+
+            // If user is admin and was trying to go to admin, redirect there
+            if (data.is_admin) {
+              const publicUrl = process.env.APP_URL ||
+                `https://${request.headers.get('host')}` ||
+                request.url
+              // Use normal admin redirect
+              return NextResponse.redirect(new URL(next, publicUrl))
+            }
+          }
+        } catch (err) {
+          console.error('Error checking admin status:', err)
         }
       }
     }
@@ -39,5 +52,8 @@ export async function GET(request: NextRequest) {
     `https://${request.headers.get('host')}` ||
     request.url
 
-  return NextResponse.redirect(new URL(next, publicUrl))
+  // Redirect to a client page that sets the SSO cookie before navigating to `next`
+  const completeUrl = new URL('/auth/complete', publicUrl)
+  completeUrl.searchParams.set('next', next)
+  return NextResponse.redirect(completeUrl)
 }

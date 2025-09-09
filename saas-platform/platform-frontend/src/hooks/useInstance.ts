@@ -3,12 +3,14 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
+import { listInstances, restartInstance as apiRestartInstance } from '@/lib/api'
 
 export interface Instance {
-  id: string
+  id: string // UUID
+  instance_id: number | string
   subscription_id: string
   subdomain: string
-  status: 'provisioning' | 'running' | 'failed' | 'stopped'
+  status: 'provisioning' | 'running' | 'failed' | 'stopped' | 'error'
   frontend_url: string | null
   backend_url: string | null
   created_at: string
@@ -18,10 +20,11 @@ export interface Instance {
 export function useInstance() {
   const [instance, setInstance] = useState<Instance | null>(null)
   const [loading, setLoading] = useState(true)
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
   const supabase = createClient()
 
   useEffect(() => {
+    if (authLoading) return
     if (!user) {
       setLoading(false)
       return
@@ -30,14 +33,9 @@ export function useInstance() {
     // Get user's instance through the API endpoint (avoids RLS issues)
     const fetchInstance = async () => {
       try {
-        const response = await fetch('/api/instance/status')
-        if (response.ok) {
-          const data = await response.json()
-          if (data.instance) {
-            setInstance(data.instance)
-          }
-        } else {
-          console.error('Failed to fetch instance status')
+        const data = await listInstances()
+        if (data.instances && data.instances.length > 0) {
+          setInstance(data.instances[0])
         }
       } catch (error) {
         console.error('Error fetching instance:', error)
@@ -50,38 +48,29 @@ export function useInstance() {
 
     // Poll for changes every 10 seconds instead of realtime subscription
     // (avoids RLS issues with direct Supabase access)
-    const interval = setInterval(() => {
-      fetch('/api/instance/status')
-        .then(res => res.json())
-        .then(data => {
-          if (data.instance) {
-            setInstance(data.instance)
-          }
-        })
-        .catch(err => console.error('Error polling instance status:', err))
+    const interval = setInterval(async () => {
+      try {
+        const data = await listInstances()
+        if (data.instances && data.instances.length > 0) {
+          setInstance(data.instances[0])
+        }
+      } catch (err) {
+        console.error('Error polling instance status:', err)
+      }
     }, 10000)
 
     return () => {
       clearInterval(interval)
     }
-  }, [user, supabase])
+  }, [user, authLoading, supabase])
 
   const restartInstance = async () => {
     if (!instance) return
 
     try {
-      const response = await fetch('/api/instance/restart', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ instanceId: instance.id }),
-      })
-
-      if (response.ok) {
-        // Update local state to show provisioning
-        setInstance(prev => prev ? { ...prev, status: 'provisioning' } : null)
-      }
+      await apiRestartInstance(String(instance.instance_id))
+      // Update local state to show provisioning
+      setInstance(prev => prev ? { ...prev, status: 'provisioning' } : null)
     } catch (error) {
       console.error('Error restarting instance:', error)
     }

@@ -1,18 +1,51 @@
-import { createServerClientSupabase } from '@/lib/supabase/server'
+'use client'
+
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { apiCall } from '@/lib/api'
 
-export default async function AccountsPage() {
-  const supabase = await createServerClientSupabase()
+interface Account {
+  id: string
+  email: string
+  full_name: string | null
+  company_name: string | null
+  status: string
+  is_admin: boolean
+  created_at: string
+}
 
-  const { data: accounts, error } = await supabase
-    .from('accounts')
-    .select('*')
-    .order('created_at', { ascending: false })
+export default function AccountsPage() {
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [loading, setLoading] = useState(true)
 
-  if (error) {
-    console.error('Error fetching accounts:', error)
+  useEffect(() => {
+    const fetchAccounts = async () => {
+      try {
+        const response = await apiCall('/admin/accounts')
+        if (response.ok) {
+          const data = await response.json()
+          setAccounts(data.accounts || [])
+        } else {
+          console.error('Failed to fetch accounts:', response.statusText)
+        }
+      } catch (error) {
+        console.error('Error fetching accounts:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchAccounts()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-lg">Loading...</div>
+      </div>
+    )
   }
 
   return (

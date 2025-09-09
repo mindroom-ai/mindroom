@@ -50,7 +50,7 @@ case "$1" in
             exit 1
         fi
         echo "Provisioning instance for: $2"
-        curl -k -X POST https://api.staging.mindroom.chat/api/v1/provision \
+        curl -k -X POST https://api.staging.mindroom.chat/system/provision \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${PROVISIONER_API_KEY}" \
             -d "{
@@ -70,10 +70,8 @@ case "$1" in
             exit 1
         fi
         echo "Deprovisioning instance for: $2"
-        curl -k -X DELETE https://api.staging.mindroom.chat/api/v1/deprovision \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${PROVISIONER_API_KEY}" \
-            -d "{\"customer_id\": \"$2\", \"subscription_id\": \"sub-$2\"}" | jq
+        curl -k -X DELETE https://api.staging.mindroom.chat/system/instances/$2/uninstall \
+            -H "Authorization: Bearer ${PROVISIONER_API_KEY}" | jq
         ;;
 
     *)

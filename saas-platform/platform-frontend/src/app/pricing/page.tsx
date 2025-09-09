@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { Check, X } from 'lucide-react'
 import { useRouter } from 'next/navigation'
+import { createCheckoutSession } from '@/lib/api'
 
 type PricingTier = {
   id: string
@@ -118,28 +119,7 @@ export default function PricingPage() {
     setLoading(tier.id)
 
     try {
-      // Create checkout session
-      const response = await fetch('/api/stripe/checkout', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          priceId: tier.priceId,
-          tier: tier.id,
-        }),
-      })
-
-      const { url, error } = await response.json()
-
-      if (error) {
-        console.error('Checkout error:', error)
-        alert('Failed to create checkout session. Please try again.')
-        setLoading(null)
-        return
-      }
-
-      // Redirect to Stripe Checkout
+      const { url } = await createCheckoutSession(tier.priceId, tier.id)
       window.location.href = url
     } catch (error) {
       console.error('Error creating checkout session:', error)

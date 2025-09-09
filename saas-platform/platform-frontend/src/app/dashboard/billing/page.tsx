@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useSubscription } from '@/hooks/useSubscription'
-import { getStripe } from '@/lib/stripe/client'
+import { createPortalSession } from '@/lib/api'
 import { Loader2, CreditCard, TrendingUp, Check } from 'lucide-react'
 
 export default function BillingPage() {
@@ -13,12 +13,7 @@ export default function BillingPage() {
     setRedirecting(true)
 
     try {
-      // Call API to create portal session
-      const response = await fetch('/api/stripe/portal', {
-        method: 'POST',
-      })
-
-      const { url } = await response.json()
+      const { url } = await createPortalSession()
       window.location.href = url
     } catch (error) {
       console.error('Error opening Stripe portal:', error)

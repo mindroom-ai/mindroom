@@ -13,13 +13,19 @@ Provides APIs for:
 
 ## Architecture
 
-Single-file FastAPI application (`main.py`) designed for simplicity and maintainability.
+Modular FastAPI application with a thin entrypoint (`main.py`) that includes
+routers defined under `backend/`:
+
+- `backend/config.py` – env, clients, and settings
+- `backend/deps.py` – shared auth dependencies
+- `backend/k8s.py` – Kubernetes helpers
+- `backend/routes/*` – route modules (accounts, admin, instances, etc.)
 
 ### API Structure
 
-- `/api/admin/*` - Admin CRUD operations (React Admin compatible)
-- `/api/admin/metrics/*` - Dashboard and monitoring endpoints
-- `/api/admin/instances/*` - Instance control (start/stop/restart)
+- `/admin/*` - Admin CRUD operations (React Admin compatible)
+- `/admin/metrics/*` - Dashboard and monitoring endpoints
+- `/admin/instances/*` - Instance control (start/stop/restart)
 - `/webhooks/stripe` - Payment event processing
 - `/health` - Service health check
 
@@ -38,6 +44,12 @@ Single-file FastAPI application (`main.py`) designed for simplicity and maintain
 ## Development
 
 Runs on port 8000 by default. Supports hot-reload in development mode.
+
+Run locally:
+
+```
+uvicorn platform-backend.main:app --reload
+```
 
 ## Environment Variables
 

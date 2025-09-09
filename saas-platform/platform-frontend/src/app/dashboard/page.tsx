@@ -9,32 +9,45 @@ import { QuickActions } from '@/components/dashboard/QuickActions'
 import { Loader2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { setSsoCookie, setupAccount } from '@/lib/api'
 
 export default function DashboardPage() {
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
   const { instance, loading: instanceLoading } = useInstance()
   const { subscription, loading: subscriptionLoading } = useSubscription()
   const [isSettingUp, setIsSettingUp] = useState(false)
+  const [setupAttempted, setSetupAttempted] = useState(false)
   const router = useRouter()
 
   useEffect(() => {
+    // Ensure SSO cookie for instance access (no-op if not logged in)
+    setSsoCookie().catch((e) => console.warn('Failed to set SSO cookie', e))
+    // Refresh cookie periodically for longer sessions
+    const id = setInterval(() => { setSsoCookie().catch((e) => console.warn('Failed to refresh SSO cookie', e)) }, 15 * 60 * 1000)
+
     // Auto-setup free tier if user has no subscription
     const setupFreeTier = async () => {
-      if (!user || subscriptionLoading || subscription || isSettingUp) {
+      // Skip if: not logged in, still loading, already has subscription, already setting up,
+      // an instance already exists, or we've already attempted setup once in this session.
+      if (
+        authLoading ||
+        !user ||
+        subscriptionLoading ||
+        instanceLoading ||
+        subscription ||
+        isSettingUp ||
+        instance ||
+        setupAttempted
+      ) {
         return
       }
 
+      setSetupAttempted(true)
       setIsSettingUp(true)
       try {
-        const response = await fetch('/api/auth/setup', {
-          method: 'POST',
-        })
-
-        if (response.ok) {
-          router.refresh()
-        } else {
-          console.error('Failed to setup free tier:', await response.text())
-        }
+        await setupAccount()
+        // Trigger a refresh; hooks poll and will pick up the new subscription
+        router.refresh()
       } catch (error) {
         console.error('Error setting up free tier:', error)
       } finally {
@@ -43,9 +56,10 @@ export default function DashboardPage() {
     }
 
     setupFreeTier()
-  }, [user, subscriptionLoading, subscription, isSettingUp])
+    return () => clearInterval(id)
+  }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, instance, instanceLoading, setupAttempted])
 
-  if (instanceLoading || subscriptionLoading) {
+  if (authLoading || instanceLoading || subscriptionLoading) {
     return (
       <div className="flex items-center justify-center h-96">
         <div className="text-center">
@@ -56,8 +70,8 @@ export default function DashboardPage() {
     )
   }
 
-  // Show setup message only when actually setting up a new free tier
-  if (isSettingUp && !subscription) {
+  // Show setup message only when actively setting up AND no instance exists yet
+  if (isSettingUp && !subscription && !instance) {
     return (
       <div className="flex items-center justify-center h-96">
         <div className="text-center">

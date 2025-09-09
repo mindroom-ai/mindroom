@@ -1,0 +1,14 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: platform-tls-cert
+  namespace: mindroom-staging
+spec:
+  secretName: platform-tls-cert
+  issuerRef:
+    name: letsencrypt-staging
+    kind: ClusterIssuer
+  dnsNames:
+  - app.staging.mindroom.chat
+  - api.staging.mindroom.chat
+  - webhooks.staging.mindroom.chat

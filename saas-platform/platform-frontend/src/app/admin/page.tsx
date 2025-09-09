@@ -1,39 +1,71 @@
-import { createServerClientSupabase } from '@/lib/supabase/server'
+'use client'
+
+import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Users, CreditCard, Server, Activity } from 'lucide-react'
+import { apiCall } from '@/lib/api'
 
-export default async function AdminDashboard() {
-  const supabase = await createServerClientSupabase()
+interface AdminStats {
+  accounts_count: number
+  subscriptions_count: number
+  instances_count: number
+  recent_activity: Array<{
+    type: string
+    description: string
+    timestamp: string
+  }>
+}
 
-  // Fetch statistics
-  const [
-    { count: accountCount },
-    { count: subscriptionCount },
-    { count: instanceCount },
-  ] = await Promise.all([
-    supabase.from('accounts').select('*', { count: 'exact', head: true }),
-    supabase.from('subscriptions').select('*', { count: 'exact', head: true }),
-    supabase.from('instances').select('*', { count: 'exact', head: true }),
-  ])
+export default function AdminDashboard() {
+  const [stats, setStats] = useState<AdminStats | null>(null)
+  const [loading, setLoading] = useState(true)
 
-  const stats = [
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const response = await apiCall('/admin/stats')
+        if (response.ok) {
+          const data = await response.json()
+          setStats(data)
+        } else {
+          console.error('Failed to fetch admin stats:', response.statusText)
+        }
+      } catch (error) {
+        console.error('Error fetching admin stats:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchStats()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-lg">Loading...</div>
+      </div>
+    )
+  }
+
+  const statCards = [
     {
       title: 'Total Accounts',
-      value: accountCount || 0,
+      value: stats?.accounts_count || 0,
       icon: Users,
       change: '+12%',
       changeType: 'positive' as const
     },
     {
       title: 'Active Subscriptions',
-      value: subscriptionCount || 0,
+      value: stats?.subscriptions_count || 0,
       icon: CreditCard,
       change: '+8%',
       changeType: 'positive' as const
     },
     {
       title: 'Running Instances',
-      value: instanceCount || 0,
+      value: stats?.instances_count || 0,
       icon: Server,
       change: '+23%',
       changeType: 'positive' as const
@@ -55,7 +87,7 @@ export default async function AdminDashboard() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        {stats.map((stat) => (
+        {statCards.map((stat) => (
           <Card key={stat.title}>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">
@@ -84,24 +116,35 @@ export default async function AdminDashboard() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">New account registered</p>
-                <p className="text-xs text-gray-500">user@example.com - 2 minutes ago</p>
+            {stats?.recent_activity?.map((activity, index) => (
+              <div key={index} className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">{activity.type}</p>
+                  <p className="text-xs text-gray-500">{activity.description} - {activity.timestamp}</p>
+                </div>
               </div>
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">Instance deployed</p>
-                <p className="text-xs text-gray-500">customer-123 - 15 minutes ago</p>
-              </div>
-            </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">Subscription upgraded</p>
-                <p className="text-xs text-gray-500">Pro plan - 1 hour ago</p>
-              </div>
-            </div>
+            )) || (
+              <>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">New account registered</p>
+                    <p className="text-xs text-gray-500">user@example.com - 2 minutes ago</p>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">Instance deployed</p>
+                    <p className="text-xs text-gray-500">customer-123 - 15 minutes ago</p>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">Subscription upgraded</p>
+                    <p className="text-xs text-gray-500">Pro plan - 1 hour ago</p>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </CardContent>
       </Card>

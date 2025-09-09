@@ -4,13 +4,14 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, Trash2, ExternalLink, Server, Database, Globe } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
+import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
 
 type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'deprovisioning' | 'maintenance' | 'error'
 
 type Instance = {
   id: string
+  instance_id: number | string
   subscription_id: string
-  dokku_app_name: string
   subdomain: string
   status: InstanceStatus
   backend_url: string | null
@@ -44,25 +45,13 @@ export default function InstancePage() {
     if (!silent) setLoading(true)
 
     try {
-      // Use API endpoint that has service client access
-      const response = await fetch('/api/instance/status')
+      const data = await listInstances()
 
-      if (!response.ok) {
-        if (response.status === 401) {
-          router.push('/auth/login')
-          return
-        }
-        throw new Error('Failed to fetch instance')
+      if (data.instances && data.instances.length > 0) {
+        setInstance(data.instances[0])
+      } else {
+        setInstance(null)
       }
-
-      const data = await response.json()
-
-      if (!data.subscription) {
-        setLoading(false)
-        return
-      }
-
-      setInstance(data.instance)
     } catch (error) {
       console.error('Error fetching instance:', error)
     } finally {
@@ -82,18 +71,19 @@ export default function InstancePage() {
     setActionLoading(action)
 
     try {
-      const response = await fetch('/api/instance/' + action, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          instanceId: instance.id,
-        }),
-      })
-
-      if (!response.ok) {
-        throw new Error('Action failed')
+      switch (action) {
+        case 'start':
+          await startInstance(instance.instance_id)
+          break
+        case 'stop':
+          await stopInstance(instance.instance_id)
+          break
+        case 'restart':
+          await apiRestartInstance(instance.instance_id)
+          break
+        case 'delete':
+          // Delete not implemented yet
+          throw new Error('Delete not implemented')
       }
 
       // Refresh instance status
@@ -259,7 +249,7 @@ export default function InstancePage() {
           {instance.status === 'error' && (
             <div className="flex gap-2">
               <button
-                onClick={() => window.location.href = 'mailto:support@mindroom.chat?subject=Instance Error - Reprovision Request&body=My instance ID: ' + instance.id + ' (subdomain: ' + instance.subdomain + ') is showing an error status and needs to be reprovisioned.'}
+                onClick={() => window.location.href = 'mailto:support@mindroom.chat?subject=Instance Error - Reprovision Request&body=My instance ID: ' + String(instance.instance_id) + ' (subdomain: ' + instance.subdomain + ') is showing an error status and needs to be reprovisioned.'}
                 className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
               >
                 <AlertCircle className="w-4 h-4" />
@@ -281,10 +271,6 @@ export default function InstancePage() {
         <div className="border-t pt-6">
           <h3 className="font-semibold mb-4">Instance Details</h3>
           <div className="grid md:grid-cols-2 gap-4">
-            <div>
-              <p className="text-sm text-gray-600">App Name</p>
-              <p className="font-mono text-sm">{instance.dokku_app_name}</p>
-            </div>
             <div>
               <p className="text-sm text-gray-600">Subdomain</p>
               <p className="font-mono text-sm">{instance.subdomain}.staging.mindroom.chat</p>

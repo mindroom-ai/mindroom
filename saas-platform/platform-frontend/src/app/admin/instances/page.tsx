@@ -1,17 +1,57 @@
-import { createServerClientSupabase } from '@/lib/supabase/server'
+'use client'
+
+import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { InstanceActions } from '@/components/admin/InstanceActions'
+import { apiCall } from '@/lib/api'
 
-export default async function InstancesPage() {
-  const supabase = await createServerClientSupabase()
+interface Instance {
+  id: string
+  account_id: string
+  instance_id: number | string
+  subdomain: string
+  status: string
+  instance_url: string | null
+  agent_count: number
+  created_at: string
+  accounts?: {
+    email: string
+    full_name: string | null
+  }
+}
 
-  const { data: instances, error } = await supabase
-    .from('instances')
-    .select('*, accounts(email, full_name)')
-    .order('created_at', { ascending: false })
+export default function InstancesPage() {
+  const [instances, setInstances] = useState<Instance[]>([])
+  const [loading, setLoading] = useState(true)
 
-  if (error) {
-    console.error('Error fetching instances:', error)
+  useEffect(() => {
+    const fetchInstances = async () => {
+      try {
+        const response = await apiCall('/admin/instances')
+        if (response.ok) {
+          const data = await response.json()
+          // Generic admin list endpoint returns { data, total }
+          setInstances(data.data || [])
+        } else {
+          console.error('Failed to fetch instances:', response.statusText)
+        }
+      } catch (error) {
+        console.error('Error fetching instances:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchInstances()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-lg">Loading...</div>
+      </div>
+    )
   }
 
   return (
@@ -65,10 +105,11 @@ export default async function InstancesPage() {
                     </td>
                     <td className="py-3 px-4">
                       <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                        instance.status === 'active' ? 'bg-green-100 text-green-800' :
+                        instance.status === 'running' ? 'bg-green-100 text-green-800' :
                         instance.status === 'stopped' ? 'bg-gray-100 text-gray-800' :
                         instance.status === 'error' ? 'bg-red-100 text-red-800' :
                         instance.status === 'provisioning' ? 'bg-blue-100 text-blue-800' :
+                        instance.status === 'deprovisioned' ? 'bg-gray-100 text-gray-800' :
                         'bg-yellow-100 text-yellow-800'
                       }`}>
                         {instance.status}
@@ -97,17 +138,10 @@ export default async function InstancesPage() {
                       {new Date(instance.created_at).toLocaleDateString()}
                     </td>
                     <td className="py-3 px-4">
-                      <div className="flex space-x-2">
-                        <button className="text-blue-600 hover:text-blue-900 text-sm">
-                          View
-                        </button>
-                        <button className="text-green-600 hover:text-green-900 text-sm">
-                          Restart
-                        </button>
-                        <button className="text-red-600 hover:text-red-900 text-sm">
-                          Stop
-                        </button>
-                      </div>
+                      <InstanceActions
+                        instanceId={instance.instance_id || instance.subdomain}
+                        currentStatus={instance.status}
+                      />
                     </td>
                   </tr>
                 ))}

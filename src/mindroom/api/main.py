@@ -1,13 +1,15 @@
 # ruff: noqa: D100
+import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from supabase import create_client
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -59,6 +61,48 @@ config: dict[str, Any] = {}
 config_lock = threading.Lock()
 
 
+# =========================
+# Supabase JWT verification
+# =========================
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
+
+_supabase_auth = None
+if SUPABASE_URL and SUPABASE_ANON_KEY:
+    try:
+        _supabase_auth = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    except Exception:
+        _supabase_auth = None
+
+
+async def verify_user(authorization: str | None = Header(None)) -> dict:
+    """Validate Supabase JWT from Authorization header; enforce owner if ACCOUNT_ID set.
+
+    In standalone mode (no Supabase), returns a default user to allow access.
+    """
+    if _supabase_auth is None:
+        # Standalone mode - no auth configured, allow access
+        return {"user_id": "standalone", "email": None}
+
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        user = _supabase_auth.auth.get_user(token)
+    except Exception as err:
+        raise HTTPException(status_code=401, detail="Invalid token") from err
+
+    if not user or not user.user:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    if ACCOUNT_ID and user.user.id != ACCOUNT_ID:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return {"user_id": user.user.id, "email": user.user.email}
+
+
 class TestModelRequest(BaseModel):
     """Request model for testing AI model connections."""
 
@@ -98,12 +142,12 @@ observer.schedule(ConfigFileHandler(), path=str(CONFIG_PATH.parent), recursive=F
 observer.start()
 
 # Include routers
-app.include_router(credentials_router)
-app.include_router(google_router)
-app.include_router(homeassistant_router)
-app.include_router(integrations_router)
-app.include_router(matrix_router)
-app.include_router(tools_router)
+app.include_router(credentials_router, dependencies=[Depends(verify_user)])
+app.include_router(google_router, dependencies=[Depends(verify_user)])
+app.include_router(homeassistant_router, dependencies=[Depends(verify_user)])
+app.include_router(integrations_router, dependencies=[Depends(verify_user)])
+app.include_router(matrix_router, dependencies=[Depends(verify_user)])
+app.include_router(tools_router, dependencies=[Depends(verify_user)])
 
 
 @app.get("/api/health")
@@ -131,7 +175,7 @@ async def shutdown_event() -> None:
 
 
 @app.post("/api/config/load")
-async def load_config() -> dict[str, Any]:
+async def load_config(_user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Load configuration from file."""
     with config_lock:
         if not config:
@@ -140,7 +184,7 @@ async def load_config() -> dict[str, Any]:
 
 
 @app.put("/api/config/save")
-async def save_config(new_config: Config) -> dict[str, bool]:
+async def save_config(new_config: Config, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, bool]:
     """Save configuration to file."""
     try:
         config_dict = new_config.model_dump(exclude_none=True)
@@ -156,7 +200,7 @@ async def save_config(new_config: Config) -> dict[str, bool]:
 
 
 @app.get("/api/config/agents")
-async def get_agents() -> list[dict[str, Any]]:
+async def get_agents(_user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all agents."""
     with config_lock:
         agents = config.get("agents", {})
@@ -169,7 +213,11 @@ async def get_agents() -> list[dict[str, Any]]:
 
 
 @app.put("/api/config/agents/{agent_id}")
-async def update_agent(agent_id: str, agent_data: dict[str, Any]) -> dict[str, bool]:
+async def update_agent(
+    agent_id: str,
+    agent_data: dict[str, Any],
+    _user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, bool]:
     """Update a specific agent."""
     with config_lock:
         if "agents" not in config:
@@ -191,7 +239,7 @@ async def update_agent(agent_id: str, agent_data: dict[str, Any]) -> dict[str, b
 
 
 @app.post("/api/config/agents")
-async def create_agent(agent_data: dict[str, Any]) -> dict[str, Any]:
+async def create_agent(agent_data: dict[str, Any], _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Create a new agent."""
     agent_id = agent_data.get("display_name", "new_agent").lower().replace(" ", "_")
 
@@ -223,7 +271,7 @@ async def create_agent(agent_data: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.delete("/api/config/agents/{agent_id}")
-async def delete_agent(agent_id: str) -> dict[str, bool]:
+async def delete_agent(agent_id: str, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, bool]:
     """Delete an agent."""
     with config_lock:
         if "agents" not in config or agent_id not in config["agents"]:

@@ -6,26 +6,38 @@ metadata:
   name: platform-backend
   namespace: mindroom-{{ .Values.environment }}
 ---
-# ClusterRole for managing instances
+# ClusterRole for managing instance resources via Helm
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: platform-backend
 rules:
-# Allow creating namespaces for instances
-- apiGroups: [""]
-  resources: ["namespaces"]
-  verbs: ["get", "list", "create", "delete"]
-# Allow managing deployments for scaling instances
-- apiGroups: ["apps"]
-  resources: ["deployments", "deployments/scale"]
-  verbs: ["get", "list", "update", "patch"]
-# Allow managing pods for instance operations
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "list", "delete"]
+  # Allow creating the instances namespace (best-effort in code)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "delete"]
+
+  # Core resources used by the instance chart
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "services", "pods", "persistentvolumeclaims", "events", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Workloads
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Batch (not currently used, but safe for future jobs)
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Ingress
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses", "networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
-# ClusterRoleBinding
+# Bind the ClusterRole to the service account cluster-wide (simple setup)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -35,6 +47,6 @@ roleRef:
   kind: ClusterRole
   name: platform-backend
 subjects:
-- kind: ServiceAccount
-  name: platform-backend
-  namespace: mindroom-{{ .Values.environment }}
+  - kind: ServiceAccount
+    name: platform-backend
+    namespace: mindroom-{{ .Values.environment }}
