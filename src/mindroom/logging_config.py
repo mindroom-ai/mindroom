@@ -13,6 +13,29 @@ import structlog
 __all__ = ["emoji", "get_logger", "setup_logging"]
 
 
+class NioValidationFilter(logging.Filter):
+    """Filter out harmless nio validation warnings that confuse AI agents."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Filter out specific nio validation warnings.
+
+        Returns:
+            False to suppress the log record, True to keep it
+
+        """
+        # Filter out only the specific user_id and room_id validation warnings from nio
+        if record.name == "nio.responses":
+            msg = record.getMessage()
+            if "Error validating response: 'user_id' is a required property" in msg:
+                # This warning occurs when Matrix server responses don't include user_id
+                # which happens during registration checks. It's harmless.
+                return False
+            if "Error validating response: 'room_id' is a required property" in msg:
+                # Similar harmless warning for room_id
+                return False
+        return True
+
+
 def emoji(agent_name: str) -> str:
     """Get an emoji-prefixed agent name string with consistent emoji based on the name.
 
@@ -102,12 +125,18 @@ def setup_logging(level: str = "INFO") -> None:
                     "foreign_pre_chain": pre_chain,
                 },
             },
+            "filters": {
+                "nio_validation": {
+                    "()": NioValidationFilter,
+                },
+            },
             "handlers": {
                 "console": {
                     "level": level.upper(),
                     "class": "logging.StreamHandler",
                     "stream": "ext://sys.stderr",
                     "formatter": "colored",
+                    "filters": ["nio_validation"],
                 },
                 "file": {
                     "level": level.upper(),
@@ -116,6 +145,7 @@ def setup_logging(level: str = "INFO") -> None:
                     "mode": "a",
                     "encoding": "utf-8",
                     "formatter": "plain",
+                    "filters": ["nio_validation"],
                 },
             },
             "loggers": {

@@ -65,6 +65,11 @@ def create_matrix_client(
 
     client = nio.AsyncClient(homeserver, user_id, store_path=store_path, ssl=ssl_context)
 
+    # Manually set user_id due to matrix-nio bug where constructor parameter doesn't work
+    # See: https://github.com/matrix-nio/matrix-nio/issues/492
+    if user_id:
+        client.user_id = user_id
+
     if access_token:
         client.access_token = access_token
 

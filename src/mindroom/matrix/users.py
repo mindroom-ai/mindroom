@@ -96,14 +96,13 @@ async def create_agent_user(
         username = existing_creds["username"]
         password = existing_creds["password"]
         logger.info(f"Using existing credentials for agent {agent_name} from matrix_state.yaml")
+        registration_needed = False
     else:
         # Generate new credentials
         username = f"mindroom_{agent_name}"
         password = f"{agent_name}_secure_password"  # _{os.urandom(8).hex()}"
-
-        # Save to matrix_state.yaml
-        save_agent_credentials(agent_name, username, password)
         logger.info(f"Generated new credentials for agent {agent_name}")
+        registration_needed = True
 
     # Extract server name from homeserver URL
     server_name = extract_server_name_from_homeserver(homeserver)
@@ -117,12 +116,20 @@ async def create_agent_user(
             password=password,
             display_name=agent_display_name,
         )
+        # Only save credentials after successful registration
+        if registration_needed:
+            save_agent_credentials(agent_name, username, password)
+            logger.info(f"Saved credentials for agent {agent_name} after successful registration")
     except ValueError as e:
         # If user already exists, that's fine
         error_msg = str(e) if e else ""
         logger.debug(f"ValueError when registering {username}: {error_msg}")
         if "already exists" not in error_msg and "RegisterErrorResponse" not in error_msg:
             raise
+        # Save credentials if the user already exists (registration succeeded in the past)
+        if registration_needed and "already exists" in error_msg:
+            save_agent_credentials(agent_name, username, password)
+            logger.info(f"Saved credentials for agent {agent_name} (user already exists)")
 
     return AgentMatrixUser(
         agent_name=agent_name,
