@@ -99,8 +99,8 @@ export default function DashboardPage() {
       </div>
 
       {/* Usage Overview */}
-      <div className="bg-white rounded-lg p-6 shadow-sm">
-        <h2 className="text-xl font-bold mb-4">Usage This Month</h2>
+      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
+        <h2 className="text-xl font-bold mb-4 dark:text-white">Usage This Month</h2>
         <UsageChart subscription={subscription} />
       </div>
     </div>

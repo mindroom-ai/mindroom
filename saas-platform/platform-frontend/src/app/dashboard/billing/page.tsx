@@ -172,11 +172,11 @@ export default function BillingPage() {
       </div>
 
       {/* Payment Method */}
-      <div className="bg-white rounded-lg p-6 shadow-sm">
-        <h2 className="text-xl font-bold mb-4">Payment Method</h2>
+      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
+        <h2 className="text-xl font-bold mb-4 dark:text-white">Payment Method</h2>
         {subscription?.stripe_customer_id ? (
           <>
-            <p className="text-gray-600 mb-4">
+            <p className="text-gray-600 dark:text-gray-400 mb-4">
               Manage your payment methods and billing information through the Stripe customer portal.
             </p>
             <button

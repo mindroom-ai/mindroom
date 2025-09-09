@@ -146,7 +146,7 @@ export default function InstancePage() {
   if (!instance) {
     return (
       <div className="max-w-4xl mx-auto p-6">
-        <div className="bg-white rounded-lg p-8 text-center">
+        <div className="bg-white dark:bg-gray-800 rounded-lg p-8 text-center">
           <Server className="w-16 h-16 text-gray-400 mx-auto mb-4" />
           <h2 className="text-2xl font-bold mb-2">No Instance Found</h2>
           <p className="text-gray-600 mb-6">
@@ -179,7 +179,7 @@ export default function InstancePage() {
       </div>
 
       {/* Status Card */}
-      <div className="bg-white rounded-lg p-6 shadow-sm">
+      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
         <div className="flex items-start justify-between mb-6">
           <div>
             <h2 className="text-xl font-bold mb-2">Instance Status</h2>
@@ -289,7 +289,7 @@ export default function InstancePage() {
 
       {/* Access URLs (only show when running) */}
       {instance.status === 'running' && instance.frontend_url && (
-        <div className="bg-white rounded-lg p-6 shadow-sm">
+        <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
           <h2 className="text-xl font-bold mb-4">Access Your MindRoom</h2>
           <div className="space-y-4">
             <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
@@ -348,7 +348,7 @@ export default function InstancePage() {
       )}
 
       {/* Configuration (collapsible) */}
-      <details className="bg-white rounded-lg shadow-sm">
+      <details className="bg-white dark:bg-gray-800 rounded-lg shadow-sm">
         <summary className="p-6 cursor-pointer hover:bg-gray-50 transition-colors">
           <span className="font-bold text-xl">Instance Configuration</span>
         </summary>
