@@ -57,8 +57,8 @@ export async function provisionInstance() {
   return response.json()
 }
 
-export async function startInstance(instanceId: string) {
-  const response = await apiCall(`/api/v1/instances/${instanceId}/start`, { method: 'POST' })
+export async function startInstance(instanceId: string | number) {
+  const response = await apiCall(`/api/v1/instances/${String(instanceId)}/start`, { method: 'POST' })
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to start instance')
@@ -66,8 +66,8 @@ export async function startInstance(instanceId: string) {
   return response.json()
 }
 
-export async function stopInstance(instanceId: string) {
-  const response = await apiCall(`/api/v1/instances/${instanceId}/stop`, { method: 'POST' })
+export async function stopInstance(instanceId: string | number) {
+  const response = await apiCall(`/api/v1/instances/${String(instanceId)}/stop`, { method: 'POST' })
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to stop instance')
@@ -75,8 +75,8 @@ export async function stopInstance(instanceId: string) {
   return response.json()
 }
 
-export async function restartInstance(instanceId: string) {
-  const response = await apiCall(`/api/v1/instances/${instanceId}/restart`, { method: 'POST' })
+export async function restartInstance(instanceId: string | number) {
+  const response = await apiCall(`/api/v1/instances/${String(instanceId)}/restart`, { method: 'POST' })
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to restart instance')

@@ -32,7 +32,7 @@ async def get_admin_stats(admin=Depends(verify_admin)) -> dict[str, Any]:  # noq
 
 
 @router.post("/api/admin/instances/{instance_id}/restart")
-async def restart_instance(instance_id: str, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
+async def restart_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Restart a customer instance (DB status only)."""
     sb = ensure_supabase()
 

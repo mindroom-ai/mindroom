@@ -6,7 +6,8 @@ import { useAuth } from './useAuth'
 import { listInstances, restartInstance as apiRestartInstance } from '@/lib/api'
 
 export interface Instance {
-  id: string
+  id: string // UUID
+  instance_id: number | string
   subscription_id: string
   subdomain: string
   status: 'provisioning' | 'running' | 'failed' | 'stopped'
@@ -66,7 +67,7 @@ export function useInstance() {
     if (!instance) return
 
     try {
-      await apiRestartInstance(instance.id)
+      await apiRestartInstance(String(instance.instance_id))
       // Update local state to show provisioning
       setInstance(prev => prev ? { ...prev, status: 'provisioning' } : null)
     } catch (error) {

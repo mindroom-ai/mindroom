@@ -157,7 +157,6 @@ async def provision_instance(
     except Exception:
         logger.warning("Failed to update instance status after readiness poll")
 
-    auth_token = ""  # Placeholder for future per-instance tokens
     if not ready and background_tasks is not None:
         # Fire-and-forget longer background wait to mark running later
         try:
@@ -170,7 +169,6 @@ async def provision_instance(
         "frontend_url": frontend_url,
         "api_url": api_url,
         "matrix_url": matrix_url,
-        "auth_token": auth_token,
         "success": True,
         "message": "Instance provisioned successfully" if ready else "Provisioning started; instance is getting ready",
     }
@@ -178,7 +176,7 @@ async def provision_instance(
 
 @router.post("/api/v1/start/{instance_id}")
 async def start_instance_provisioner(
-    instance_id: str,
+    instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Start an instance (provisioner API compatible)."""
@@ -213,7 +211,7 @@ async def start_instance_provisioner(
 
 @router.post("/api/v1/stop/{instance_id}")
 async def stop_instance_provisioner(
-    instance_id: str,
+    instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Stop an instance (provisioner API compatible)."""
@@ -248,7 +246,7 @@ async def stop_instance_provisioner(
 
 @router.post("/api/v1/restart/{instance_id}")
 async def restart_instance_provisioner(
-    instance_id: str,
+    instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Restart an instance (provisioner API compatible)."""
@@ -283,7 +281,7 @@ async def restart_instance_provisioner(
 
 @router.delete("/api/v1/uninstall/{instance_id}")
 async def uninstall_instance(
-    instance_id: str,
+    instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Completely uninstall/deprovision an instance."""
@@ -293,30 +291,16 @@ async def uninstall_instance(
     logger.info("Uninstalling instance %s", instance_id)
 
     try:
-        helm_release_name = f"instance-{instance_id}" if instance_id.isdigit() else instance_id
-
+        helm_release_name = f"instance-{instance_id}"
         code, stdout, stderr = await run_helm(["uninstall", helm_release_name, "--namespace=mindroom-instances"])
 
         if code != 0:
             error_msg = stderr
-            if "not found" not in error_msg.lower():
+            if "not found" in error_msg.lower():
+                logger.info("Instance %s was already uninstalled", instance_id)
+            else:
                 logger.error("Failed to uninstall instance: %s", error_msg)
                 raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {error_msg}")
-
-            if instance_id.isdigit():
-                logger.info("Trying old naming convention for instance %s", instance_id)
-                code2, stdout2, stderr2 = await run_helm(
-                    ["uninstall", instance_id, "--namespace=mindroom-instances"],
-                )
-                if code2 != 0:
-                    error_msg2 = stderr2
-                    if "not found" not in error_msg2.lower():
-                        logger.error("Failed to uninstall with old naming: %s", error_msg2)
-                    logger.info("Instance %s was already uninstalled", instance_id)
-                else:
-                    logger.info("Successfully uninstalled instance %s with old naming", instance_id)
-            else:
-                logger.info("Instance %s was already uninstalled", instance_id)
         else:
             logger.info("Successfully uninstalled instance %s: %s", instance_id, stdout)
 

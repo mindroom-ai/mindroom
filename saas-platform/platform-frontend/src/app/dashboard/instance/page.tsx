@@ -10,8 +10,8 @@ type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'depro
 
 type Instance = {
   id: string
+  instance_id: number | string
   subscription_id: string
-  dokku_app_name: string
   subdomain: string
   status: InstanceStatus
   backend_url: string | null
@@ -73,13 +73,13 @@ export default function InstancePage() {
     try {
       switch (action) {
         case 'start':
-          await startInstance(instance.id)
+          await startInstance(instance.instance_id)
           break
         case 'stop':
-          await stopInstance(instance.id)
+          await stopInstance(instance.instance_id)
           break
         case 'restart':
-          await apiRestartInstance(instance.id)
+          await apiRestartInstance(instance.instance_id)
           break
         case 'delete':
           // Delete not implemented yet
@@ -249,7 +249,7 @@ export default function InstancePage() {
           {instance.status === 'error' && (
             <div className="flex gap-2">
               <button
-                onClick={() => window.location.href = 'mailto:support@mindroom.chat?subject=Instance Error - Reprovision Request&body=My instance ID: ' + instance.id + ' (subdomain: ' + instance.subdomain + ') is showing an error status and needs to be reprovisioned.'}
+                onClick={() => window.location.href = 'mailto:support@mindroom.chat?subject=Instance Error - Reprovision Request&body=My instance ID: ' + String(instance.instance_id) + ' (subdomain: ' + instance.subdomain + ') is showing an error status and needs to be reprovisioned.'}
                 className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors"
               >
                 <AlertCircle className="w-4 h-4" />
@@ -271,10 +271,6 @@ export default function InstancePage() {
         <div className="border-t pt-6">
           <h3 className="font-semibold mb-4">Instance Details</h3>
           <div className="grid md:grid-cols-2 gap-4">
-            <div>
-              <p className="text-sm text-gray-600">App Name</p>
-              <p className="font-mono text-sm">{instance.dokku_app_name}</p>
-            </div>
             <div>
               <p className="text-sm text-gray-600">Subdomain</p>
               <p className="font-mono text-sm">{instance.subdomain}.staging.mindroom.chat</p>

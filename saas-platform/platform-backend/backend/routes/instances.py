@@ -59,7 +59,7 @@ async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]: 
 
 
 @router.post("/api/v1/instances/{instance_id}/start")
-async def start_user_instance(instance_id: str, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def start_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Start user's instance."""
     sb = ensure_supabase()
 
@@ -78,7 +78,7 @@ async def start_user_instance(instance_id: str, user=Depends(verify_user)) -> di
 
 
 @router.post("/api/v1/instances/{instance_id}/stop")
-async def stop_user_instance(instance_id: str, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def stop_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Stop user's instance."""
     sb = ensure_supabase()
 
@@ -97,7 +97,7 @@ async def stop_user_instance(instance_id: str, user=Depends(verify_user)) -> dic
 
 
 @router.post("/api/v1/instances/{instance_id}/restart")
-async def restart_user_instance(instance_id: str, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def restart_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Restart user's instance."""
     sb = ensure_supabase()
 
