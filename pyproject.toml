@@ -183,39 +183,6 @@ lint.ignore = [
   "TD002",   # Missing author in TODO; try: `# TODO(<author_name>): ...`
   "TD003",   # Missing issue link on the line following this TODO
 ]
-lint.per-file-ignores."saas-platform/final_migration_test.py" = [
-  "ANN",    # no type annotations in quick test script
-  "D",      # docstrings not required for quick test script
-  "RUF001", # unicode hint glyph
-  "S602",   # allow subprocess shell=True in this script
-  "TRY300", # return in try block
-]
-lint.per-file-ignores."saas-platform/instance-backend-sample/**" = [
-  "ANN",     # annotations relaxed in samples
-  "B008",    # Depends in defaults (sample usage)
-  "B904",    # raise ... from err
-  "D",       # relax docstrings for samples
-  "EM101",   # literal exceptions
-  "FAST002", # fastapi annotated strictness in samples
-  "N999",    # hyphenated folder names
-  "TRY003",  # long messages
-]
-lint.per-file-ignores."saas-platform/platform-backend/**" = [
-  "ANN",     # type annotations relaxed for backend subproject
-  "ARG001",  # unused FastAPI dependency args in signatures
-  "B904",    # raise from e style
-  "C901",    # function complexity in handler
-  "D",       # docstrings not required in backend subproject
-  "EM101",   # string literal in exception
-  "N999",    # hyphenated directory name
-  "PLR0912", # too many branches
-  "PLR0915", # too many statements
-  "TID252",  # allow relative imports within backend package
-  "TRY002",  # generic exceptions in subprocess wrappers
-  "TRY003",  # long messages in exceptions
-  "TRY300",  # move return to else (style)
-  "TRY301",  # abstract raise to inner function (style)
-]
 lint.per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", #`import` should be at the top-level of a file"
 ]
