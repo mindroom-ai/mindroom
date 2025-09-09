@@ -6,7 +6,8 @@ from typing import Annotated, Any
 
 from backend.config import PLATFORM_DOMAIN, PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase
-from backend.k8s import check_deployment_exists, wait_for_deployment_ready
+from backend.k8s import check_deployment_exists, run_kubectl, wait_for_deployment_ready
+from backend.process import run_helm
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 
 router = APIRouter()
@@ -304,35 +305,21 @@ async def uninstall_instance(
     try:
         helm_release_name = f"instance-{instance_id}" if instance_id.isdigit() else instance_id
 
-        proc = await asyncio.create_subprocess_exec(
-            "helm",
-            "uninstall",
-            helm_release_name,
-            "--namespace=mindroom-instances",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
+        code, stdout, stderr = await run_helm(["uninstall", helm_release_name, "--namespace=mindroom-instances"])
 
-        if proc.returncode != 0:
-            error_msg = stderr.decode()
+        if code != 0:
+            error_msg = stderr
             if "not found" not in error_msg.lower():
                 logger.error("Failed to uninstall instance: %s", error_msg)
                 raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {error_msg}")
 
             if instance_id.isdigit():
                 logger.info("Trying old naming convention for instance %s", instance_id)
-                proc2 = await asyncio.create_subprocess_exec(
-                    "helm",
-                    "uninstall",
-                    instance_id,
-                    "--namespace=mindroom-instances",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                code2, stdout2, stderr2 = await run_helm(
+                    ["uninstall", instance_id, "--namespace=mindroom-instances"],
                 )
-                stdout2, stderr2 = await proc2.communicate()
-                if proc2.returncode != 0:
-                    error_msg2 = stderr2.decode()
+                if code2 != 0:
+                    error_msg2 = stderr2
                     if "not found" not in error_msg2.lower():
                         logger.error("Failed to uninstall with old naming: %s", error_msg2)
                     logger.info("Instance %s was already uninstalled", instance_id)
@@ -341,7 +328,7 @@ async def uninstall_instance(
             else:
                 logger.info("Instance %s was already uninstalled", instance_id)
         else:
-            logger.info("Successfully uninstalled instance %s: %s", instance_id, stdout.decode())
+            logger.info("Successfully uninstalled instance %s: %s", instance_id, stdout)
 
         try:
             sb = ensure_supabase()
@@ -417,18 +404,16 @@ async def sync_instances(
                     sync_results["synced"] += 1
             else:
                 try:
-                    proc = await asyncio.create_subprocess_exec(
-                        "kubectl",
-                        "get",
-                        f"deployment/mindroom-backend-{instance_id}",
-                        "--namespace=mindroom-instances",
-                        "-o=jsonpath={.spec.replicas}",
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
+                    code, out, _ = await run_kubectl(
+                        [
+                            "get",
+                            f"deployment/mindroom-backend-{instance_id}",
+                            "-o=jsonpath={.spec.replicas}",
+                        ],
+                        namespace="mindroom-instances",
                     )
-                    stdout, _ = await proc.communicate()
-                    if proc.returncode == 0:
-                        replicas = int(stdout.decode().strip() or "0")
+                    if code == 0:
+                        replicas = int(out.strip() or "0")
                         actual_status = "running" if replicas > 0 else "stopped"
 
                         if current_status != actual_status:

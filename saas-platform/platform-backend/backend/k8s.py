@@ -2,30 +2,22 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from backend.config import logger
+from backend.process import run_cmd
 
 
 async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-instances") -> bool:
     """Check if a Kubernetes deployment exists for an instance."""
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "kubectl",
-            "get",
-            f"deployment/mindroom-backend-{instance_id}",
-            f"--namespace={namespace}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        code, _out, err = await run_kubectl(
+            ["get", f"deployment/mindroom-backend-{instance_id}"],
+            namespace=namespace,
         )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            error_msg = stderr.decode()
-            if "not found" in error_msg.lower() or "notfound" in error_msg.lower():
+        if code != 0:
+            if "not found" in err.lower() or "notfound" in err.lower():
                 logger.info("Deployment mindroom-backend-%s not found in namespace %s", instance_id, namespace)
-                return False
             return False
-        return proc.returncode == 0
+        return True
     except Exception:
         logger.exception("Error checking deployment existence")
         return False
@@ -42,25 +34,19 @@ async def wait_for_deployment_ready(
     Returns True if ready; False on timeout or error.
     """
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "kubectl",
-            "rollout",
-            "status",
-            f"deployment/mindroom-backend-{instance_id}",
-            f"--namespace={namespace}",
-            f"--timeout={timeout_seconds}s",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        code, out, err = await run_kubectl(
+            [
+                "rollout",
+                "status",
+                f"deployment/mindroom-backend-{instance_id}",
+                f"--timeout={timeout_seconds}s",
+            ],
+            namespace=namespace,
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode == 0:
-            logger.info("Deployment %s ready: %s", instance_id, stdout.decode())
+        if code == 0:
+            logger.info("Deployment %s ready: %s", instance_id, out)
             return True
-        logger.warning(
-            "Deployment %s not ready within timeout: %s",
-            instance_id,
-            stderr.decode() or stdout.decode(),
-        )
+        logger.warning("Deployment %s not ready within timeout: %s", instance_id, err or out)
         return False
     except FileNotFoundError:
         logger.exception("kubectl not found when waiting for deployment readiness")
@@ -68,3 +54,15 @@ async def wait_for_deployment_ready(
     except Exception:
         logger.exception("Error waiting for deployment readiness")
         return False
+
+
+async def run_kubectl(args: list[str], namespace: str | None = None) -> tuple[int, str, str]:
+    """Run a kubectl command and return (returncode, stdout, stderr) as strings.
+
+    - args: positional arguments passed to kubectl (e.g., ["get", "pods"]).
+    - namespace: if provided, appended as --namespace=<namespace>.
+    """
+    cmd = ["kubectl", *args]
+    if namespace:
+        cmd.append(f"--namespace={namespace}")
+    return await run_cmd(cmd)
