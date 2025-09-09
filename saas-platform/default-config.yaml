@@ -289,12 +289,11 @@ memory:
     config:
       model: text-embedding-3-small
   llm:
+    provider: openrouter
     config:
-      host: http://192.168.1.143:11434
-      model: devstral:24b
+      model: google/gemini-2.5-flash
       temperature: 0.1
       top_p: 1
-    provider: ollama
 models:
   default:
     id: devstral:24b

@@ -23,11 +23,7 @@ def main() -> int:
     if target.get("models") != source.get("models"):
         target["models"] = source["models"]
 
-        # Also sync memory LLM and router if they exist
-        if "memory" in source and "llm" in source["memory"]:
-            if "memory" not in target:
-                target["memory"] = {}
-            target["memory"]["llm"] = source["memory"]["llm"]
+        # Also sync router if it exists (but NOT memory - keep those separate)
         if "router" in source:
             if "router" not in target:
                 target["router"] = {}
