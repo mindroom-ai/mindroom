@@ -24,7 +24,7 @@ class RoomTopic(BaseModel):
     topic: str = Field(description="The room topic - concise, informative, with emoji")
 
 
-async def generate_room_topic_ai(room_key: str, room_name: str, config: Config) -> str:
+async def generate_room_topic_ai(room_key: str, room_name: str, config: Config) -> str | None:
     """Generate a contextual topic for a room using AI based on its purpose and configured agents.
 
     Args:
@@ -89,13 +89,17 @@ Generate the topic:"""
     )
 
     session_id = f"topic_{room_key}"
-    response = await _cached_agent_run(
-        agent=agent,
-        full_prompt=prompt,
-        session_id=session_id,
-        agent_name="TopicGenerator",
-        storage_path=STORAGE_PATH_OBJ,
-    )
+    try:
+        response = await _cached_agent_run(
+            agent=agent,
+            full_prompt=prompt,
+            session_id=session_id,
+            agent_name="TopicGenerator",
+            storage_path=STORAGE_PATH_OBJ,
+        )
+    except Exception:
+        logger.exception(f"Error generating topic for room {room_key}")
+        return None
     content = response.content
     assert isinstance(content, RoomTopic)  # Type narrowing for mypy
     return content.topic
@@ -130,6 +134,9 @@ async def ensure_room_has_topic(
     # Generate and set topic
     logger.info(f"Generating AI topic for existing room {room_key}")
     topic = await generate_room_topic_ai(room_key, room_name, config)
+    if topic is None:
+        logger.warning(f"Failed to generate topic for room {room_key}")
+        return False
 
     # Set the topic
     response = await client.room_put_state(
