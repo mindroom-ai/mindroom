@@ -44,18 +44,33 @@ async def provision_instance(
     account_id = data.get("account_id")
     tier = data.get("tier", "free")
 
-    # Generate a numeric customer ID from next available subdomain digit
-    result = sb.table("instances").select("subdomain").execute()
-    existing_ids: list[int] = []
-    for instance in result.data or []:
-        subdomain = instance.get("subdomain", "")
-        if subdomain.isdigit():
-            existing_ids.append(int(subdomain))
-    next_id = max(existing_ids) + 1 if existing_ids else 1
-    customer_id = str(next_id)
+    # Insert instance first to get a generated numeric instance_id (as text)
+    try:
+        insert_res = (
+            sb.table("instances")
+            .insert(
+                {
+                    "subscription_id": subscription_id,
+                    "account_id": account_id,
+                    "status": "provisioning",
+                    "tier": tier,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            .execute()
+        )
+        if not insert_res.data:
+            raise HTTPException(status_code=500, detail="Failed to insert instance")
+        customer_id = insert_res.data[0]["instance_id"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to insert instance")
+        raise HTTPException(status_code=500, detail=f"Failed to insert instance: {e!s}") from e
 
     helm_release_name = f"instance-{customer_id}"
-    logger.info("Provisioning instance for subscription %s, tier: %s", subscription_id, tier)
+    logger.info("Provisioning instance for subscription %s, new id: %s, tier: %s", subscription_id, customer_id, tier)
 
     namespace = "mindroom-instances"
     try:
@@ -69,33 +84,25 @@ async def provision_instance(
 
     logger.info("Deploying instance %s to namespace %s", customer_id, namespace)
 
-    # Pre-create DB record as provisioning with URLs; update status later
+    # Compute URLs and persist them (subdomain is set via trigger if null)
     base_domain = PLATFORM_DOMAIN
     frontend_url = f"https://{customer_id}.{base_domain}"
     api_url = f"https://{customer_id}.api.{base_domain}"
     matrix_url = f"https://{customer_id}.matrix.{base_domain}"
-
     try:
-        sb.table("instances").insert(
+        sb.table("instances").update(
             {
-                "subscription_id": subscription_id,
-                "account_id": account_id,
-                "instance_id": customer_id,
-                "subdomain": customer_id,
-                "status": "provisioning",
-                "tier": tier,
                 "instance_url": frontend_url,
                 "frontend_url": frontend_url,
                 "backend_url": api_url,
                 "api_url": api_url,
                 "matrix_url": matrix_url,
                 "matrix_server_url": matrix_url,
-                "created_at": datetime.now(UTC).isoformat(),
                 "updated_at": datetime.now(UTC).isoformat(),
             },
-        ).execute()
+        ).eq("instance_id", customer_id).execute()
     except Exception:
-        logger.exception("Failed to create instance record in database (pre-provision)")
+        logger.warning("Failed to update URLs for instance %s", customer_id)
 
     try:
         # Install charts without waiting; we'll poll readiness ourselves
