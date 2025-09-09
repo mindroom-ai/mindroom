@@ -66,3 +66,39 @@ async def run_kubectl(args: list[str], namespace: str | None = None) -> tuple[in
     if namespace:
         cmd.append(f"--namespace={namespace}")
     return await run_cmd(cmd)
+
+
+async def ensure_docker_registry_secret(
+    secret_name: str,
+    server: str,
+    username: str,
+    password: str,
+    namespace: str = "mindroom-instances",
+) -> bool:
+    """Ensure a docker-registry secret exists; create if missing.
+
+    Returns True if the secret exists (already or created), False on creation failure.
+    """
+    try:
+        code, _out, _err = await run_kubectl(["get", "secret", secret_name], namespace=namespace)
+        if code == 0:
+            return True
+        # Create the secret
+        args = [
+            "create",
+            "secret",
+            "docker-registry",
+            secret_name,
+            f"--docker-server={server}",
+            f"--docker-username={username}",
+            f"--docker-password={password}",
+        ]
+        code, out, err = await run_kubectl(args, namespace=namespace)
+        if code != 0:
+            logger.error("Failed to create imagePullSecret %s: %s", secret_name, err or out)
+            return False
+        logger.info("Created imagePullSecret %s in namespace %s", secret_name, namespace)
+        return True
+    except Exception:
+        logger.exception("Error ensuring imagePullSecret %s", secret_name)
+        return False

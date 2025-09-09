@@ -46,6 +46,10 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 # Provisioner API key for internal provisioning actions
 PROVISIONER_API_KEY = os.getenv("PROVISIONER_API_KEY", "")
 
+# Gitea registry credentials (for pulling instance images)
+GITEA_USER = os.getenv("GITEA_USER", "")
+GITEA_TOKEN = os.getenv("GITEA_TOKEN", "")
+
 # CORS allowed origins
 ALLOWED_ORIGINS = [
     "https://app.staging.mindroom.chat",
@@ -57,6 +61,8 @@ ALLOWED_ORIGINS = [
 __all__ = [
     "ALLOWED_ORIGINS",
     "ENVIRONMENT",
+    "GITEA_TOKEN",
+    "GITEA_USER",
     "PLATFORM_DOMAIN",
     "PROVISIONER_API_KEY",
     "STRIPE_WEBHOOK_SECRET",

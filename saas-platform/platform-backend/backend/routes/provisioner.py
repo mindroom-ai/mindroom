@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.config import (
+    GITEA_TOKEN,
+    GITEA_USER,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
     SUPABASE_ANON_KEY,
@@ -11,7 +13,7 @@ from backend.config import (
     logger,
 )
 from backend.deps import ensure_supabase
-from backend.k8s import check_deployment_exists, run_kubectl, wait_for_deployment_ready
+from backend.k8s import check_deployment_exists, ensure_docker_registry_secret, run_kubectl, wait_for_deployment_ready
 from backend.process import run_helm
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 
@@ -109,6 +111,18 @@ async def provision_instance(
         ).eq("instance_id", customer_id).execute()
     except Exception:
         logger.warning("Failed to update URLs for instance %s", customer_id)
+
+    # Ensure image pull secret exists in namespace for private registry
+    if GITEA_USER and GITEA_TOKEN:
+        success = await ensure_docker_registry_secret(
+            secret_name="gitea-registry",  # noqa: S106
+            server="git.nijho.lt",
+            username=GITEA_USER,
+            password=GITEA_TOKEN,
+            namespace=namespace,
+        )
+        if not success:
+            logger.warning("Failed to create image pull secret, deployment may fail")
 
     try:
         # Install charts without waiting; we'll poll readiness ourselves
