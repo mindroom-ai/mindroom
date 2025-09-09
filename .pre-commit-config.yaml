@@ -39,7 +39,7 @@ repos:
         files: ^(src/mindroom/commands\.py|README\.md)$
 
       - id: sync-config-models
-        name: Sync config.yaml models with SaaS platform defaults
+        name: Push models from config.yaml to SaaS platform defaults
         entry: python scripts/sync-config.py
         language: system
         pass_filenames: false

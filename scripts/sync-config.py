@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync config.yaml models with saas-platform/default-config.yaml."""
+"""Sync models from config.yaml to saas-platform/default-config.yaml."""
 
 import sys
 from pathlib import Path
@@ -8,32 +8,36 @@ import yaml
 
 
 def main() -> int:
-    """Replace models in config.yaml with defaults from saas-platform."""
+    """Copy models from root config.yaml to saas-platform default."""
     root_dir = Path(__file__).parent.parent
-    config_path = root_dir / "config.yaml"
-    default_path = root_dir / "saas-platform" / "default-config.yaml"
+    source_path = root_dir / "config.yaml"
+    target_path = root_dir / "saas-platform" / "default-config.yaml"
 
     # Load both configs
-    with config_path.open() as f:
-        config = yaml.safe_load(f)
-    with default_path.open() as f:
-        default = yaml.safe_load(f)
+    with source_path.open() as f:
+        source = yaml.safe_load(f)
+    with target_path.open() as f:
+        target = yaml.safe_load(f)
 
-    # Replace models section entirely
-    if config.get("models") != default.get("models"):
-        config["models"] = default["models"]
-
+    # Copy models from source to target
+    if target.get("models") != source.get("models"):
+        target["models"] = source["models"]
+        
         # Also sync memory LLM and router if they exist
-        if "memory" in config and "llm" in config["memory"]:
-            config["memory"]["llm"] = default.get("memory", {}).get("llm", {})
-        if "router" in config:
-            config["router"]["model"] = "default"
+        if "memory" in source and "llm" in source["memory"]:
+            if "memory" not in target:
+                target["memory"] = {}
+            target["memory"]["llm"] = source["memory"]["llm"]
+        if "router" in source:
+            if "router" not in target:
+                target["router"] = {}
+            target["router"]["model"] = source["router"]["model"]
 
         # Save
-        with config_path.open("w") as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
+        with target_path.open("w") as f:
+            yaml.dump(target, f, default_flow_style=False, sort_keys=False, allow_unicode=True, width=120)
 
-        print("✅ Synced models")
+        print(f"✅ Synced models from {source_path.name} to {target_path.relative_to(root_dir)}")
         return 0
 
     print("✅ Already in sync")

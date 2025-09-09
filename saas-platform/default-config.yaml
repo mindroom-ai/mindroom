@@ -278,48 +278,69 @@ agents:
     - research
     - docs
     tools: []
-
 defaults:
   add_history_to_messages: true
   markdown: true
   num_history_runs: 5
   show_stop_button: true
-
 memory:
   embedder:
     provider: openai
     config:
       model: text-embedding-3-small
   llm:
-    provider: openrouter
     config:
-      model: google/gemini-2.5-flash
+      host: http://192.168.1.143:11434
+      model: devstral:24b
       temperature: 0.1
       top_p: 1
-
+    provider: ollama
 models:
   default:
-    provider: openrouter
-    id: google/gemini-2.5-flash
-  sonnet:
-    provider: openrouter
-    id: anthropic/claude-sonnet-4
+    id: devstral:24b
+    provider: ollama
+    host: http://192.168.1.143:11434
   deepseek:
+    id: deepseek-ai/deepseek-chat:free
     provider: openrouter
-    id: deepseek/deepseek-chat-v3.1:free
-  gemini_flash:
+  gpt_oss_120b:
+    id: openai/gpt-oss-120b
     provider: openrouter
-    id: google/gemini-2.5-flash
+  devstral:
+    id: devstral:24b
+    provider: ollama
   glm45:
+    id: z-ai/glm-4.5-air:free
     provider: openrouter
-    id: z-ai/glm-4.5
-
+  gpt4o:
+    id: gpt-4o
+    provider: openai
+  gpt5mini:
+    id: gpt-5-mini
+    provider: openai
+  gpt_oss:
+    id: openai/gpt-oss-120b
+    provider: openrouter
+  haiku:
+    id: claude-3-5-haiku-latest
+    provider: anthropic
+  ollama:
+    id: devstral:24b
+    provider: ollama
+    host: http://192.168.1.143:11434
+  opus:
+    id: claude-opus-4-latest
+    provider: anthropic
+  sonnet:
+    id: claude-sonnet-4-latest
+    provider: anthropic
+  gemini_flash:
+    id: gemini-2.5-flash
+    provider: google
 room_models:
   research: default
-
 router:
-  model: default
-
+  model: ollama
 teams:
   code_team:
     agents:
@@ -331,9 +352,7 @@ teams:
     rooms:
     - dev
     - automation
-
 timezone: UTC
-
 voice:
   enabled: false
   stt:
@@ -342,7 +361,6 @@ voice:
   intelligence:
     model: default
     confidence_threshold: 0.7
-
 authorization:
   global_users: []
   room_permissions: {}

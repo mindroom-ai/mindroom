@@ -318,31 +318,58 @@ memory:
       model: nomic-embed-text
     provider: ollama
   llm:
-    provider: openrouter
     config:
-      model: google/gemini-2.5-flash
+      host: http://192.168.1.143:11434
+      model: devstral:24b
       temperature: 0.1
       top_p: 1
+    provider: ollama
 models:
   default:
-    provider: openrouter
-    id: google/gemini-2.5-flash
-  sonnet:
-    provider: openrouter
-    id: anthropic/claude-sonnet-4
+    id: devstral:24b
+    provider: ollama
+    host: http://192.168.1.143:11434
   deepseek:
+    id: deepseek-ai/deepseek-chat:free
     provider: openrouter
-    id: deepseek/deepseek-chat-v3.1:free
-  gemini_flash:
+  gpt_oss_120b:
+    id: openai/gpt-oss-120b
     provider: openrouter
-    id: google/gemini-2.5-flash
+  devstral:
+    id: devstral:24b
+    provider: ollama
   glm45:
+    id: z-ai/glm-4.5-air:free
     provider: openrouter
-    id: z-ai/glm-4.5
+  gpt4o:
+    id: gpt-4o
+    provider: openai
+  gpt5mini:
+    id: gpt-5-mini
+    provider: openai
+  gpt_oss:
+    id: openai/gpt-oss-120b
+    provider: openrouter
+  haiku:
+    id: claude-3-5-haiku-latest
+    provider: anthropic
+  ollama:
+    id: devstral:24b
+    provider: ollama
+    host: http://192.168.1.143:11434
+  opus:
+    id: claude-opus-4-latest
+    provider: anthropic
+  sonnet:
+    id: claude-sonnet-4-latest
+    provider: anthropic
+  gemini_flash:
+    id: gemini-2.5-flash
+    provider: google
 room_models:
   research: haiku
 router:
-  model: default
+  model: ollama
 teams:
   code_team:
     agents:
@@ -364,17 +391,34 @@ teams:
     rooms:
     - research
     - lobby
+
+# Timezone for displaying scheduled tasks (Seattle/Pacific Time)
 timezone: America/Los_Angeles
+
+# Voice message handling configuration
+# Configure to enable voice message transcription
 voice:
   enabled: true
   stt:
     provider: openai
     model: whisper-1
+    # api_key: your-api-key-here  # Optional, uses OPENAI_API_KEY env var by default
+    # host: http://localhost:8080  # For self-hosted STT services
   intelligence:
-    model: sonnet
+    model: sonnet  # Model for command recognition
     confidence_threshold: 0.7
+
+# Authorization configuration with fine-grained permissions
 authorization:
+  # Users with access to all rooms
   global_users:
-  - '@test:m-test-4.mindroom.chat'
+    - '@test:m-test-4.mindroom.chat'
+
+  # Room-specific permissions (example)
   room_permissions: {}
+    # '!specific_room:example.com':
+    #   - '@user1:example.com'
+    #   - '@user2:example.com'
+
+  # Default permission for rooms not explicitly configured
   default_room_access: false
