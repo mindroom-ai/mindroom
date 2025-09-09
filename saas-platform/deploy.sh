@@ -20,10 +20,12 @@ else
     exit 1
 fi
 
-# Map app name to image name for consistency
-IMAGE_NAME=$APP
+# Map app names to Docker image names
 if [ "$APP" = "backend" ]; then
-    IMAGE_NAME="platform-backend"
+    APP="platform-backend"
+fi
+if [ "$APP" = "frontend" ]; then
+    APP="platform-frontend"
 fi
 
 # Build with appropriate args based on app
@@ -33,31 +35,26 @@ if [ "$APP" = "platform-frontend" ]; then
     docker build \
         --build-arg NEXT_PUBLIC_SUPABASE_URL="$SUPABASE_URL" \
         --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
-        -t git.nijho.lt/basnijholt/$IMAGE_NAME:latest \
+        -t git.nijho.lt/basnijholt/$APP:latest \
         -f Dockerfile.$APP .
 else
     # Other apps don't need build args - secrets stay server-side
-    docker build -t git.nijho.lt/basnijholt/$IMAGE_NAME:latest -f Dockerfile.$APP .
+    docker build -t git.nijho.lt/basnijholt/$APP:latest -f Dockerfile.$APP .
 fi
 
-echo "Pushing $IMAGE_NAME..."
-docker push git.nijho.lt/basnijholt/$IMAGE_NAME:latest
+echo "Pushing $APP..."
+docker push git.nijho.lt/basnijholt/$APP:latest
 
 echo "Updating deployment..."
 cd terraform-k8s
 
-# Map app name to deployment name
-DEPLOYMENT_NAME=$APP
-if [ "$APP" = "backend" ]; then
-    DEPLOYMENT_NAME="platform-backend"
-fi
 
 # Force Kubernetes to pull the new image by restarting the deployment
-echo "Restarting $DEPLOYMENT_NAME deployment to pull new image..."
-kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout restart deployment/$DEPLOYMENT_NAME -n mindroom-staging
+echo "Restarting $APP deployment to pull new image..."
+kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout restart deployment/$APP -n mindroom-staging
 
 # Wait for rollout to complete
 echo "Waiting for rollout to complete..."
-kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout status deployment/$DEPLOYMENT_NAME -n mindroom-staging
+kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout status deployment/$APP -n mindroom-staging
 
 echo "✅ Done!"

@@ -31,7 +31,7 @@ docker-compose up
 
 # Or directly with Python
 pip install -r requirements.txt
-uvicorn backend:app --reload
+uvicorn main:app --reload
 ```
 
 ### Production Deployment
