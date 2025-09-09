@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
+from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
 
 from . import config_confirmation, interactive, voice_handler
 from .agents import create_agent, get_rooms_for_entity
@@ -458,6 +459,55 @@ class AgentBot:
 
         # Note: Room joining is deferred until after invitations are handled
         self.logger.info(f"Agent setup complete: {self.agent_user.user_id}")
+
+    async def try_start(self) -> bool:
+        """Try to start the agent bot with smart retry logic.
+
+        Uses tenacity to retry transient failures (network, timeouts) but not
+        permanent ones (auth failures).
+
+        Returns:
+            True if the bot started successfully, False otherwise.
+
+        """
+
+        def should_retry_error(retry_state: RetryCallState) -> bool:
+            """Determine if we should retry based on the exception.
+
+            Don't retry on auth failures (M_FORBIDDEN, M_USER_DEACTIVATED, etc)
+            which come as ValueError with those strings in the message.
+            """
+            if retry_state.outcome is None:
+                return True
+            exception = retry_state.outcome.exception()
+            if exception is None:
+                return False
+
+            # Don't retry auth failures
+            if isinstance(exception, ValueError):
+                error_msg = str(exception)
+                # Matrix auth error codes that shouldn't be retried
+                permanent_errors = ["M_FORBIDDEN", "M_USER_DEACTIVATED", "M_UNKNOWN_TOKEN", "M_INVALID_USERNAME"]
+                return not any(err in error_msg for err in permanent_errors)
+
+            # Retry other exceptions (network errors, timeouts, etc)
+            return True
+
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            retry=should_retry_error,
+            reraise=True,
+        )
+        async def _start_with_retry() -> None:
+            await self.start()
+
+        try:
+            await _start_with_retry()
+            return True  # noqa: TRY300
+        except Exception:
+            logger.exception(f"Failed to start agent {self.agent_name}")
+            return False
 
     async def cleanup(self) -> None:
         """Clean up the agent by leaving all rooms and stopping.
@@ -1884,10 +1934,25 @@ class MultiAgentOrchestrator:
             await self.initialize()
 
         # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
-        start_tasks = [bot.start() for bot in self.agent_bots.values()]
-        await asyncio.gather(*start_tasks)
+        start_tasks = [bot.try_start() for bot in self.agent_bots.values()]
+        results = await asyncio.gather(*start_tasks)
+
+        # Check for failures
+        failed_agents = [bot.agent_name for bot, success in zip(self.agent_bots.values(), results) if not success]
+
+        if len(failed_agents) == len(self.agent_bots):
+            msg = "All agents failed to start - cannot proceed"
+            raise RuntimeError(msg)
+        if failed_agents:
+            logger.warning(
+                f"System starting in degraded mode. "
+                f"Failed agents: {', '.join(failed_agents)} "
+                f"({len(self.agent_bots) - len(failed_agents)}/{len(self.agent_bots)} operational)",
+            )
+        else:
+            logger.info("All agent bots started successfully")
+
         self.running = True
-        logger.info("All agent bots started successfully")
 
         # Setup rooms and have all bots join them
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
@@ -1956,10 +2021,13 @@ class MultiAgentOrchestrator:
                     bot.orchestrator = self
                     self.agent_bots[entity_name] = bot
                     # Agent handles its own setup (but doesn't join rooms yet)
-                    await bot.start()
-                    # Start sync loop with automatic restart
-                    sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
-                    self._sync_tasks[entity_name] = sync_task
+                    if await bot.try_start():
+                        # Start sync loop with automatic restart
+                        sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+                        self._sync_tasks[entity_name] = sync_task
+                    else:
+                        # Remove the failed bot from our registry
+                        del self.agent_bots[entity_name]
             # Entity was removed from config
             elif entity_name in self.agent_bots:
                 del self.agent_bots[entity_name]
@@ -1971,9 +2039,12 @@ class MultiAgentOrchestrator:
             if bot:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot
-                await bot.start()
-                sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
-                self._sync_tasks[entity_name] = sync_task
+                if await bot.try_start():
+                    sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
+                    self._sync_tasks[entity_name] = sync_task
+                else:
+                    # Remove the failed bot from our registry
+                    del self.agent_bots[entity_name]
 
         # Handle removed entities (cleanup)
         removed_entities = existing_entities - all_new_entities

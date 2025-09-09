@@ -3254,6 +3254,7 @@ dependencies = [
     { name = "streamlit" },
     { name = "structlog" },
     { name = "tavily-python" },
+    { name = "tenacity" },
     { name = "todoist-api-python" },
     { name = "tweepy" },
     { name = "twilio" },
@@ -3378,6 +3379,7 @@ requires-dist = [
     { name = "streamlit" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "tavily-python" },
+    { name = "tenacity", specifier = ">=9.1.2" },
     { name = "todoist-api-python" },
     { name = "tweepy" },
     { name = "twilio" },
@@ -3396,7 +3398,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aioresponses", specifier = ">=0.7.8" },
-    { name = "markdown-code-runner", specifier = ">=2.4.0" },
+    { name = "markdown-code-runner", specifier = ">=2.4" },
     { name = "matty", specifier = ">=0.3" },
     { name = "mypy", specifier = ">=1.17" },
     { name = "pre-commit", specifier = ">=4.2" },
