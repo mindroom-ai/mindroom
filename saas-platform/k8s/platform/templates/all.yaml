@@ -39,10 +39,6 @@ type: kubernetes.io/dockerconfigjson
 data:
   .dockerconfigjson: {{ printf "{\"auths\":{\"git.nijho.lt\":{\"username\":\"basnijholt\",\"password\":\"%s\",\"auth\":\"%s\"}}}" .Values.gitea.token (printf "basnijholt:%s" .Values.gitea.token | b64enc) | b64enc }}
 ---
-# Docker registry secret for instances namespace (used by instance pods)
-# Note: managed manually out-of-band to avoid Helm ownership conflicts if created ahead of time.
-# If you want Helm to manage it, delete the existing secret and re-enable this block.
----
 # Customer Portal
 apiVersion: apps/v1
 kind: Deployment
