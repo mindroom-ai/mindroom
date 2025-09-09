@@ -27,7 +27,7 @@ jobs:
             dockerfile: Dockerfile.platform-frontend
             context: saas-platform
           - name: platform-backend
-            dockerfile: Dockerfile.backend
+            dockerfile: Dockerfile.platform-backend
             context: saas-platform
 
     steps:

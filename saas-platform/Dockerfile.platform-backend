@@ -15,7 +15,7 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend
-COPY backend/ .
+COPY platform-backend/ .
 
 # Copy instance Helm chart for provisioning
 COPY k8s/instance /app/k8s/instance/

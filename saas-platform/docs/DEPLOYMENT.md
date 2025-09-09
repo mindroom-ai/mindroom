@@ -82,7 +82,7 @@ docker login git.nijho.lt -u username
 
 # Build services
 docker build -f Dockerfile.platform-frontend -t git.nijho.lt/username/platform-frontend:latest .
-docker build -f Dockerfile.backend -t git.nijho.lt/username/platform-backend:latest .
+docker build -f Dockerfile.platform-backend -t git.nijho.lt/username/platform-backend:latest .
 docker build -f Dockerfile.stripe-handler -t git.nijho.lt/username/stripe-handler:latest .
 docker build -f Dockerfile.instance-provisioner -t git.nijho.lt/username/instance-provisioner:latest .
 
