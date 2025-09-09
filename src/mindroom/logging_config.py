@@ -91,7 +91,13 @@ def setup_logging(level: str = "INFO") -> None:
                     "()": structlog.stdlib.ProcessorFormatter,
                     "processors": [
                         structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                        structlog.dev.ConsoleRenderer(colors=True),
+                        structlog.dev.ConsoleRenderer(
+                            colors=True,
+                            exception_formatter=structlog.dev.RichTracebackFormatter(
+                                # The locals can be very large, so we hide them by default
+                                show_locals=False,
+                            ),
+                        ),
                     ],
                     "foreign_pre_chain": pre_chain,
                 },
