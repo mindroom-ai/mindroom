@@ -43,6 +43,8 @@ spec:
           value: "@admin:{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: MATRIX_PASSWORD
           value: {{ .Values.matrix_admin_password }}
+        - name: MATRIX_SERVER_NAME
+          value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
         volumeMounts:
         - name: storage
           mountPath: /app/mindroom_data
