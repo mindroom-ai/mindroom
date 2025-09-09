@@ -6,7 +6,7 @@ from typing import Annotated, Any
 
 from backend.config import PLATFORM_DOMAIN, PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase
-from backend.k8s import check_deployment_exists
+from backend.k8s import check_deployment_exists, wait_for_deployment_ready
 from fastapi import APIRouter, Header, HTTPException
 
 router = APIRouter()
@@ -60,7 +60,36 @@ async def provision_instance(
 
     logger.info("Deploying instance %s to namespace %s", customer_id, namespace)
 
+    # Pre-create DB record as provisioning with URLs; update status later
+    base_domain = PLATFORM_DOMAIN
+    frontend_url = f"https://{customer_id}.{base_domain}"
+    api_url = f"https://{customer_id}.api.{base_domain}"
+    matrix_url = f"https://{customer_id}.matrix.{base_domain}"
+
     try:
+        sb.table("instances").insert(
+            {
+                "subscription_id": subscription_id,
+                "account_id": account_id,
+                "instance_id": customer_id,
+                "subdomain": customer_id,
+                "status": "provisioning",
+                "tier": tier,
+                "instance_url": frontend_url,
+                "frontend_url": frontend_url,
+                "backend_url": api_url,
+                "api_url": api_url,
+                "matrix_url": matrix_url,
+                "matrix_server_url": matrix_url,
+                "created_at": datetime.now(UTC).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        ).execute()
+    except Exception:
+        logger.exception("Failed to create instance record in database (pre-provision)")
+
+    try:
+        # Install charts without waiting; we'll poll readiness ourselves
         proc = await asyncio.create_subprocess_exec(
             "helm",
             "install",
@@ -75,61 +104,54 @@ async def provision_instance(
             f"baseDomain={PLATFORM_DOMAIN}",
             "--set",
             "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
-            "--wait",
-            "--timeout",
-            "5m",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
+            # Mark as error in DB
+            try:
+                sb.table("instances").update(
+                    {"status": "error", "updated_at": datetime.now(UTC).isoformat()},
+                ).eq("instance_id", customer_id).execute()
+            except Exception:
+                logger.warning("Failed to update instance status to error after helm failure")
             raise HTTPException(status_code=500, detail=f"Helm install failed: {stderr.decode()}")
         logger.info("Helm install output: %s", stdout.decode())
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Failed to deploy instance")
+        # Mark as error in DB
+        try:
+            sb.table("instances").update(
+                {"status": "error", "updated_at": datetime.now(UTC).isoformat()},
+            ).eq("instance_id", customer_id).execute()
+        except Exception:
+            logger.warning("Failed to update instance status to error after deploy exception")
         raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
 
-    # Create DB record for instance (include URLs for frontend convenience)
+    # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
+    ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
     try:
-        base_domain = PLATFORM_DOMAIN
-        frontend_url = f"https://{customer_id}.{base_domain}"
-        api_url = f"https://{customer_id}.api.{base_domain}"
-        matrix_url = f"https://{customer_id}.matrix.{base_domain}"
-
-        sb.table("instances").insert(
+        sb.table("instances").update(
             {
-                "subscription_id": subscription_id,
-                "account_id": account_id,
-                "instance_id": customer_id,
-                "subdomain": customer_id,
-                "status": "running",
-                "tier": tier,
-                "instance_url": frontend_url,
-                "frontend_url": frontend_url,
-                "backend_url": api_url,
-                "api_url": api_url,
-                "matrix_url": matrix_url,
-                "matrix_server_url": matrix_url,
-                "created_at": datetime.now(UTC).isoformat(),
+                "status": "running" if ready else "provisioning",
                 "updated_at": datetime.now(UTC).isoformat(),
             },
-        ).execute()
+        ).eq("instance_id", customer_id).execute()
     except Exception:
-        logger.exception("Failed to create instance record in database")
+        logger.warning("Failed to update instance status after readiness poll")
 
-    # Generate a simple auth token for instance API (placeholder)
-    auth_token = ""
-
+    auth_token = ""  # Placeholder for future per-instance tokens
     return {
         "customer_id": customer_id,
-        "frontend_url": f"https://{customer_id}.{PLATFORM_DOMAIN}",
-        "api_url": f"https://{customer_id}.api.{PLATFORM_DOMAIN}",
-        "matrix_url": f"https://{customer_id}.matrix.{PLATFORM_DOMAIN}",
+        "frontend_url": frontend_url,
+        "api_url": api_url,
+        "matrix_url": matrix_url,
         "auth_token": auth_token,
         "success": True,
-        "message": "Instance provisioned successfully",
+        "message": "Instance provisioned successfully" if ready else "Provisioning started; instance is getting ready",
     }
 
 
