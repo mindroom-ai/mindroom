@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Check, ArrowLeft } from 'lucide-react'
 import { useSubscription } from '@/hooks/useSubscription'
+import { createCheckoutSession } from '@/lib/api'
 
 type Plan = {
   id: string
@@ -93,27 +94,7 @@ export default function UpgradePage() {
     setIsProcessing(true)
 
     try {
-      const response = await fetch('/api/stripe/checkout', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          priceId: plan.priceId,
-          tier: plan.id,
-        }),
-      })
-
-      const { url, error } = await response.json()
-
-      if (error) {
-        console.error('Checkout error:', error)
-        alert('Failed to create checkout session. Please try again.')
-        setIsProcessing(false)
-        return
-      }
-
-      // Redirect to Stripe Checkout
+      const { url } = await createCheckoutSession(plan.priceId, plan.id)
       window.location.href = url
     } catch (error) {
       console.error('Error creating checkout session:', error)

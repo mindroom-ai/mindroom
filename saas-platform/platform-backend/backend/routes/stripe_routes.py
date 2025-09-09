@@ -72,9 +72,8 @@ async def create_portal_session(user=Depends(verify_user)) -> dict[str, Any]:  #
         raise HTTPException(status_code=500, detail="Stripe not configured")
     sb = ensure_supabase()
 
-    result = (
-        sb.table("subscriptions").select("stripe_customer_id").eq("account_id", user["account_id"]).single().execute()
-    )
+    # Stripe customer ID is stored on the accounts table
+    result = sb.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()
     if not result.data or not result.data.get("stripe_customer_id"):
         raise HTTPException(status_code=404, detail="No Stripe customer found")
 

@@ -91,8 +91,13 @@ async def provision_instance(
         logger.exception("Failed to deploy instance")
         raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
 
-    # Create DB record for instance
+    # Create DB record for instance (include URLs for frontend convenience)
     try:
+        base_domain = PLATFORM_DOMAIN
+        frontend_url = f"https://{customer_id}.{base_domain}"
+        api_url = f"https://{customer_id}.api.{base_domain}"
+        matrix_url = f"https://{customer_id}.matrix.{base_domain}"
+
         sb.table("instances").insert(
             {
                 "subscription_id": subscription_id,
@@ -101,6 +106,12 @@ async def provision_instance(
                 "subdomain": customer_id,
                 "status": "running",
                 "tier": tier,
+                "instance_url": frontend_url,
+                "frontend_url": frontend_url,
+                "backend_url": api_url,
+                "api_url": api_url,
+                "matrix_url": matrix_url,
+                "matrix_server_url": matrix_url,
                 "created_at": datetime.now(UTC).isoformat(),
                 "updated_at": datetime.now(UTC).isoformat(),
             },
