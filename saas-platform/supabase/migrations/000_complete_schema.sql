@@ -9,6 +9,16 @@
 -- ============================================================================
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- Global sequence for numeric instance IDs
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class WHERE relkind = 'S' AND relname = 'instance_id_seq'
+    ) THEN
+        CREATE SEQUENCE instance_id_seq START 1;
+    END IF;
+END$$;
+
 -- ============================================================================
 -- ACCOUNTS TABLE (Linked to auth.users)
 -- ============================================================================
@@ -72,12 +82,9 @@ CREATE TABLE instances (
     subscription_id UUID NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
 
     -- Instance identification
-    instance_id TEXT UNIQUE NOT NULL, -- K8s instance identifier (e.g., "1", "2", etc)
-    subdomain TEXT UNIQUE NOT NULL,   -- Customer subdomain
+    instance_id INTEGER UNIQUE NOT NULL DEFAULT nextval('instance_id_seq'), -- Numeric K8s instance id
+    subdomain TEXT UNIQUE NOT NULL,   -- Customer subdomain (defaults to instance_id as text)
     name TEXT, -- Display name for the instance
-
-    -- Legacy compatibility
-    dokku_app_name TEXT, -- Legacy field for potential migration
 
     -- Instance details
     status TEXT NOT NULL DEFAULT 'provisioning' CHECK (status IN ('provisioning', 'running', 'stopped', 'error', 'deprovisioned', 'restarting')),
@@ -125,8 +132,8 @@ CREATE TABLE usage_metrics (
 
     -- Basic metrics
     messages_sent INTEGER DEFAULT 0,
-    agents_active INTEGER DEFAULT 0,
-    api_calls INTEGER DEFAULT 0,
+    agents_used INTEGER DEFAULT 0,
+    storage_used_gb DECIMAL(10,2) DEFAULT 0,
 
     created_at TIMESTAMPTZ DEFAULT NOW(),
 
@@ -207,6 +214,22 @@ CREATE TRIGGER update_subscriptions_updated_at BEFORE UPDATE ON subscriptions
 
 CREATE TRIGGER update_instances_updated_at BEFORE UPDATE ON instances
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Subdomain default trigger to mirror numeric instance_id
+CREATE OR REPLACE FUNCTION set_subdomain_from_instance_id()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.subdomain IS NULL OR NEW.subdomain = '' THEN
+        NEW.subdomain := NEW.instance_id::text;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_set_subdomain_from_instance_id ON instances;
+CREATE TRIGGER trg_set_subdomain_from_instance_id
+BEFORE INSERT ON instances
+FOR EACH ROW EXECUTE PROCEDURE set_subdomain_from_instance_id();
 
 -- ============================================================================
 -- AUTOMATIC ACCOUNT CREATION ON SIGNUP
@@ -349,7 +372,7 @@ COMMENT ON TABLE audit_logs IS 'Audit trail for significant events';
 
 COMMENT ON COLUMN accounts.id IS 'Same as auth.users.id for perfect linking';
 COMMENT ON COLUMN accounts.tier IS 'Account tier - determines features and limits';
-COMMENT ON COLUMN instances.instance_id IS 'Unique identifier for the Kubernetes instance (e.g., "1", "2")';
+COMMENT ON COLUMN instances.instance_id IS 'Unique numeric identifier for the Kubernetes instance (e.g., 1, 2)';
 COMMENT ON COLUMN instances.auth_token IS 'Bearer token for authenticating with the instance API';
 COMMENT ON COLUMN instances.config IS 'JSON configuration for the instance';
 COMMENT ON COLUMN accounts.is_admin IS 'Whether this account has admin privileges for the platform';

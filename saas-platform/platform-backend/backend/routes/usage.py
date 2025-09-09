@@ -30,8 +30,8 @@ async def get_user_usage(
             sb.table("usage_metrics")
             .select("*")
             .eq("subscription_id", subscription_id)
-            .gte("date", start_date)
-            .order("date", desc=False)
+            .gte("metric_date", start_date)
+            .order("metric_date", desc=False)
             .execute()
         )
 
