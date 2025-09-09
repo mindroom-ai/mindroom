@@ -32,7 +32,7 @@ services:
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.tls.certresolver=porkbun
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.service=${INSTANCE_NAME:-mindroom}-api
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-api.priority=100
-      - traefik.http.services.${INSTANCE_NAME:-mindroom}-api.loadbalancer.server.port=${BACKEND_PORT:-8765}
+      - traefik.http.services.${INSTANCE_NAME:-mindroom}-api.loadbalancer.server.port=8765
 
   frontend:
     image: ${FRONTEND_IMAGE:-deploy-mindroom-frontend:latest}
