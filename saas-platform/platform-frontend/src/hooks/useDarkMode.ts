@@ -4,7 +4,6 @@ import { createContext, useContext, useEffect, useState } from 'react'
 
 type DarkModeContextType = {
   isDarkMode: boolean
-  toggleDarkMode: () => void
   mode: 'light' | 'dark' | 'system'
   setMode: (mode: 'light' | 'dark' | 'system') => void
 }
@@ -51,17 +50,10 @@ export function DarkModeProvider({ children }: { children: React.ReactNode }) {
     // Listen for system theme changes when in system mode
     if (mode === 'system') {
       const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-      const handler = () => updateDarkMode()
-      mediaQuery.addEventListener('change', handler)
-      return () => mediaQuery.removeEventListener('change', handler)
+      mediaQuery.addEventListener('change', updateDarkMode)
+      return () => mediaQuery.removeEventListener('change', updateDarkMode)
     }
   }, [mode])
-
-  const toggleDarkMode = () => {
-    const newMode = isDarkMode ? 'light' : 'dark'
-    setMode(newMode)
-    localStorage.setItem('darkMode', newMode)
-  }
 
   const handleSetMode = (newMode: 'light' | 'dark' | 'system') => {
     setMode(newMode)
@@ -69,7 +61,7 @@ export function DarkModeProvider({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <DarkModeContext.Provider value={{ isDarkMode, toggleDarkMode, mode, setMode: handleSetMode }}>
+    <DarkModeContext.Provider value={{ isDarkMode, mode, setMode: handleSetMode }}>
       {children}
     </DarkModeContext.Provider>
   )

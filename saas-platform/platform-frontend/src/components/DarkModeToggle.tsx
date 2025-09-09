@@ -5,7 +5,7 @@ import { useDarkMode } from '@/hooks/useDarkMode'
 import { useState, useRef, useEffect } from 'react'
 
 export function DarkModeToggle() {
-  const { isDarkMode, toggleDarkMode, mode, setMode } = useDarkMode()
+  const { isDarkMode, mode, setMode } = useDarkMode()
   const [showDropdown, setShowDropdown] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
