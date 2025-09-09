@@ -7,15 +7,32 @@ from typing import Annotated, Any
 from backend.config import PLATFORM_DOMAIN, PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase
 from backend.k8s import check_deployment_exists, wait_for_deployment_ready
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 
 router = APIRouter()
+
+
+async def _background_mark_running_when_ready(instance_id: str, namespace: str = "mindroom-instances") -> None:
+    """Background task: wait longer and mark instance running when ready."""
+    try:
+        ready = await wait_for_deployment_ready(instance_id, namespace=namespace, timeout_seconds=600)
+        if ready:
+            try:
+                sb = ensure_supabase()
+                sb.table("instances").update(
+                    {"status": "running", "updated_at": datetime.now(UTC).isoformat()},
+                ).eq("instance_id", instance_id).execute()
+            except Exception:
+                logger.warning("Background update: failed to mark instance %s as running", instance_id)
+    except Exception:
+        logger.exception("Background readiness wait failed for instance %s", instance_id)
 
 
 @router.post("/api/v1/provision")
 async def provision_instance(
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
+    background_tasks: BackgroundTasks | None = None,
 ) -> dict[str, Any]:
     """Provision a new instance (compatible with customer portal)."""
     if authorization != f"Bearer {PROVISIONER_API_KEY}":
@@ -144,6 +161,13 @@ async def provision_instance(
         logger.warning("Failed to update instance status after readiness poll")
 
     auth_token = ""  # Placeholder for future per-instance tokens
+    if not ready and background_tasks is not None:
+        # Fire-and-forget longer background wait to mark running later
+        try:
+            background_tasks.add_task(_background_mark_running_when_ready, customer_id, namespace)
+        except Exception:
+            logger.warning("Failed to schedule background readiness task for instance %s", customer_id)
+
     return {
         "customer_id": customer_id,
         "frontend_url": frontend_url,

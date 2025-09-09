@@ -198,6 +198,7 @@ lint.per-file-ignores."saas-platform/platform-backend/**" = [
   "D",       # docstrings not required in backend subproject
   "EM101",   # string literal in exception
   "N999",    # hyphenated directory name
+  "PLR0912", # too many branches
   "PLR0915", # too many statements
   "TID252",  # allow relative imports within backend package
   "TRY002",  # generic exceptions in subprocess wrappers
