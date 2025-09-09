@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { apiCall } from '@/lib/api'
 
 interface InstanceActionsProps {
   instanceId: string
@@ -14,18 +15,12 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
     setLoading(action)
 
     try {
-      const apiKey = process.env.NEXT_PUBLIC_PROVISIONER_API_KEY || 'test-key'
-      const baseUrl = process.env.NEXT_PUBLIC_PLATFORM_BACKEND_URL || '/api'
-
       const method = action === 'uninstall' ? 'DELETE' : 'POST'
-      const endpoint = `/v1/${action}/${instanceId}`
+      const endpoint = action === 'uninstall'
+        ? `/api/admin/instances/${instanceId}/uninstall`
+        : `/api/admin/instances/${instanceId}/${action}`
 
-      const response = await fetch(`${baseUrl}${endpoint}`, {
-        method,
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-        },
-      })
+      const response = await apiCall(endpoint, { method })
 
       if (!response.ok) {
         throw new Error(`Failed to ${action} instance`)
