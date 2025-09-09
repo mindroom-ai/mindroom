@@ -272,15 +272,15 @@ export default function InstancePage() {
           <h3 className="font-semibold mb-4">Instance Details</h3>
           <div className="grid md:grid-cols-2 gap-4">
             <div>
-              <p className="text-sm text-gray-600">Subdomain</p>
+              <p className="text-sm text-gray-600 dark:text-gray-400">Subdomain</p>
               <p className="font-mono text-sm">{instance.subdomain}.staging.mindroom.chat</p>
             </div>
             <div>
-              <p className="text-sm text-gray-600">Created</p>
+              <p className="text-sm text-gray-600 dark:text-gray-400">Created</p>
               <p className="text-sm">{new Date(instance.created_at).toLocaleString()}</p>
             </div>
             <div>
-              <p className="text-sm text-gray-600">Last Updated</p>
+              <p className="text-sm text-gray-600 dark:text-gray-400">Last Updated</p>
               <p className="text-sm">{new Date(instance.updated_at).toLocaleString()}</p>
             </div>
           </div>
@@ -294,10 +294,10 @@ export default function InstancePage() {
           <div className="space-y-4">
             <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
               <div className="flex items-center gap-3">
-                <Globe className="w-5 h-5 text-gray-600" />
+                <Globe className="w-5 h-5 text-gray-600 dark:text-gray-400" />
                 <div>
                   <p className="font-medium">MindRoom App</p>
-                  <p className="text-sm text-gray-600">{instance.frontend_url}</p>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">{instance.frontend_url}</p>
                 </div>
               </div>
               <a
@@ -314,10 +314,10 @@ export default function InstancePage() {
             {instance.backend_url && (
               <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
                 <div className="flex items-center gap-3">
-                  <Server className="w-5 h-5 text-gray-600" />
+                  <Server className="w-5 h-5 text-gray-600 dark:text-gray-400" />
                   <div>
                     <p className="font-medium">API Endpoint</p>
-                    <p className="text-sm text-gray-600">{instance.backend_url}</p>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">{instance.backend_url}</p>
                   </div>
                 </div>
                 <a
@@ -335,10 +335,10 @@ export default function InstancePage() {
             {instance.matrix_server_url && (
               <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
                 <div className="flex items-center gap-3">
-                  <Database className="w-5 h-5 text-gray-600" />
+                  <Database className="w-5 h-5 text-gray-600 dark:text-gray-400" />
                   <div>
                     <p className="font-medium">Matrix Server</p>
-                    <p className="text-sm text-gray-600">{instance.matrix_server_url}</p>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">{instance.matrix_server_url}</p>
                   </div>
                 </div>
               </div>

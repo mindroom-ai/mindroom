@@ -34,7 +34,7 @@ export default function UsagePage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Usage Analytics</h1>
+      <h1 className="text-2xl font-bold dark:text-white">Usage Analytics</h1>
 
       {/* Summary Cards */}
       <div className="grid md:grid-cols-4 gap-6">
@@ -42,9 +42,9 @@ export default function UsagePage() {
           <CardContent>
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-gray-600">Total Messages</p>
-                <p className="text-2xl font-bold">{usage?.totalMessages.toLocaleString() || 0}</p>
-                <p className="text-xs text-gray-500">Last 30 days</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400">Total Messages</p>
+                <p className="text-2xl font-bold dark:text-white">{usage?.totalMessages.toLocaleString() || 0}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400">Last 30 days</p>
               </div>
               <MessageSquare className="w-8 h-8 text-orange-500" />
             </div>

@@ -84,13 +84,13 @@ export default function BillingPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Billing & Subscription</h1>
+      <h1 className="text-2xl font-bold dark:text-white">Billing & Subscription</h1>
 
       {/* Current Plan */}
-      <div className="bg-white rounded-lg p-6 shadow-sm">
+      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
         <div className="flex items-start justify-between">
           <div>
-            <h2 className="text-xl font-bold mb-2">Current Plan</h2>
+            <h2 className="text-xl font-bold mb-2 dark:text-white">Current Plan</h2>
             <div className="flex items-center gap-3 mb-4">
               <span className={`px-3 py-1 rounded-full text-sm font-medium bg-orange-100 text-orange-700`}>
                 {tierInfo.name}
@@ -138,23 +138,23 @@ export default function BillingPage() {
           <h3 className="font-semibold mb-3">Usage Limits:</h3>
           <div className="grid md:grid-cols-3 gap-4">
             <div className="flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-gray-400" />
+              <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
               <div>
-                <p className="text-sm text-gray-600">AI Agents</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400">AI Agents</p>
                 <p className="font-semibold">{subscription?.max_agents || 1}</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-gray-400" />
+              <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
               <div>
-                <p className="text-sm text-gray-600">Messages/Day</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400">Messages/Day</p>
                 <p className="font-semibold">{subscription?.max_messages_per_day.toLocaleString() || 100}</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-gray-400" />
+              <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
               <div>
-                <p className="text-sm text-gray-600">Storage</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400">Storage</p>
                 <p className="font-semibold">{subscription?.max_storage_gb || 1}GB</p>
               </div>
             </div>
@@ -164,7 +164,7 @@ export default function BillingPage() {
         {/* Billing Period */}
         {subscription?.current_period_end && (
           <div className="mt-6 pt-6 border-t">
-            <p className="text-sm text-gray-600">
+            <p className="text-sm text-gray-600 dark:text-gray-400">
               Next billing date: <span className="font-medium">{new Date(subscription.current_period_end).toLocaleDateString()}</span>
             </p>
           </div>
