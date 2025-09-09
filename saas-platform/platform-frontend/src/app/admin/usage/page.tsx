@@ -1,27 +1,67 @@
-import { createServerClientSupabase } from '@/lib/supabase/server'
+'use client'
+
+import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { apiCall } from '@/lib/api'
 
-export default async function UsagePage() {
-  const supabase = await createServerClientSupabase()
-
-  // Get usage metrics for the last 30 days
-  const thirtyDaysAgo = new Date()
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
-
-  const { data: metrics, error } = await supabase
-    .from('usage_metrics')
-    .select('*, accounts(email, full_name)')
-    .gte('created_at', thirtyDaysAgo.toISOString())
-    .order('created_at', { ascending: false })
-
-  if (error) {
-    console.error('Error fetching usage metrics:', error)
+interface UsageMetric {
+  id: string
+  account_id: string
+  created_at: string
+  message_count: number
+  storage_mb: number
+  api_calls: number
+  agent_count: number
+  accounts?: {
+    email: string
+    full_name: string | null
   }
+}
+
+export default function UsagePage() {
+  const [metrics, setMetrics] = useState<UsageMetric[]>([])
+  const [loading, setLoading] = useState(true)
 
   // Calculate summary statistics
   const totalMessages = metrics?.reduce((sum, m) => sum + (m.message_count || 0), 0) || 0
   const totalStorage = metrics?.reduce((sum, m) => sum + (m.storage_mb || 0), 0) || 0
   const uniqueUsers = new Set(metrics?.map(m => m.account_id)).size
+
+  useEffect(() => {
+    const fetchUsageMetrics = async () => {
+      try {
+        // Get usage metrics for the last 30 days
+        const thirtyDaysAgo = new Date()
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+
+        // Use the generic admin endpoint with date filter
+        const response = await apiCall(
+          `/api/admin/usage_metrics?_sort=created_at&_order=DESC&created_at_gte=${thirtyDaysAgo.toISOString()}`
+        )
+
+        if (response.ok) {
+          const data = await response.json()
+          setMetrics(data.data || [])
+        } else {
+          console.error('Failed to fetch usage metrics:', response.statusText)
+        }
+      } catch (error) {
+        console.error('Error fetching usage metrics:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchUsageMetrics()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-lg">Loading...</div>
+      </div>
+    )
+  }
 
   return (
     <div>
@@ -87,7 +127,7 @@ export default async function UsagePage() {
                     <td className="py-3 px-4">
                       <div>
                         <div className="text-sm font-medium">
-                          {metric.accounts?.email}
+                          {metric.accounts?.email || 'Unknown'}
                         </div>
                         <div className="text-xs text-gray-500">
                           {metric.accounts?.full_name}

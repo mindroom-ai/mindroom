@@ -1,18 +1,56 @@
-import { createServerClientSupabase } from '@/lib/supabase/server'
+'use client'
+
+import { useEffect, useState } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { InstanceActions } from '@/components/admin/InstanceActions'
+import { apiCall } from '@/lib/api'
 
-export default async function InstancesPage() {
-  const supabase = await createServerClientSupabase()
+interface Instance {
+  id: string
+  account_id: string
+  instance_id: string
+  subdomain: string
+  status: string
+  instance_url: string | null
+  agent_count: number
+  created_at: string
+  accounts?: {
+    email: string
+    full_name: string | null
+  }
+}
 
-  const { data: instances, error } = await supabase
-    .from('instances')
-    .select('*, accounts(email, full_name)')
-    .order('created_at', { ascending: false })
+export default function InstancesPage() {
+  const [instances, setInstances] = useState<Instance[]>([])
+  const [loading, setLoading] = useState(true)
 
-  if (error) {
-    console.error('Error fetching instances:', error)
+  useEffect(() => {
+    const fetchInstances = async () => {
+      try {
+        const response = await apiCall('/api/admin/instances')
+        if (response.ok) {
+          const data = await response.json()
+          setInstances(data.instances || [])
+        } else {
+          console.error('Failed to fetch instances:', response.statusText)
+        }
+      } catch (error) {
+        console.error('Error fetching instances:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchInstances()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-lg">Loading...</div>
+      </div>
+    )
   }
 
   return (

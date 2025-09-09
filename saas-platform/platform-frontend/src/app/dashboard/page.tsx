@@ -9,6 +9,7 @@ import { QuickActions } from '@/components/dashboard/QuickActions'
 import { Loader2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { setupAccount } from '@/lib/api'
 
 export default function DashboardPage() {
   const { user } = useAuth()
@@ -26,15 +27,8 @@ export default function DashboardPage() {
 
       setIsSettingUp(true)
       try {
-        const response = await fetch('/api/auth/setup', {
-          method: 'POST',
-        })
-
-        if (response.ok) {
-          router.refresh()
-        } else {
-          console.error('Failed to setup free tier:', await response.text())
-        }
+        await setupAccount()
+        router.refresh()
       } catch (error) {
         console.error('Error setting up free tier:', error)
       } finally {

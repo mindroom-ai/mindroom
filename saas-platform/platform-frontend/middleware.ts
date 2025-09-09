@@ -66,34 +66,34 @@ export async function middleware(request: NextRequest) {
       return NextResponse.redirect(loginUrl)
     }
 
-    // Check admin status using service role key for reliable access
-    const adminSupabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-      {
-        cookies: {
-          get(name: string) {
-            return request.cookies.get(name)?.value
-          },
-          set() {}, // No-op for service role client
-          remove() {}, // No-op for service role client
-        },
-      }
-    )
+    // Get session for API call
+    const { data: { session } } = await supabase.auth.getSession()
+
+    if (!session) {
+      const loginUrl = new URL('/auth/login', request.url)
+      loginUrl.searchParams.set('redirectTo', request.nextUrl.pathname)
+      return NextResponse.redirect(loginUrl)
+    }
+
+    // Check admin status via API
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.staging.mindroom.chat'
 
     try {
-      const { data: account, error } = await adminSupabase
-        .from('accounts')
-        .select('is_admin')
-        .eq('id', user.id)
-        .single()
+      const apiResponse = await fetch(`${API_URL}/api/v1/account/is-admin`, {
+        headers: {
+          'Authorization': `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+      })
 
-      if (error) {
-        console.error('[Middleware] Admin check error:', error.message)
+      if (!apiResponse.ok) {
+        console.error('[Middleware] Admin check API error:', apiResponse.status)
         return NextResponse.redirect(new URL('/dashboard', request.url))
       }
 
-      if (!account?.is_admin) {
+      const data = await apiResponse.json()
+
+      if (!data.is_admin) {
         return NextResponse.redirect(new URL('/dashboard', request.url))
       }
     } catch (error) {

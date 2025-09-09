@@ -2,6 +2,7 @@ import { ExternalLink, CheckCircle, AlertCircle, Loader2, XCircle, Rocket } from
 import Link from 'next/link'
 import { useState } from 'react'
 import type { Instance } from '@/hooks/useInstance'
+import { provisionInstance } from '@/lib/api'
 
 export function InstanceCard({ instance }: { instance: Instance | null }) {
   const [isProvisioning, setIsProvisioning] = useState(false)
@@ -9,19 +10,11 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
   const handleProvision = async () => {
     setIsProvisioning(true)
     try {
-      const response = await fetch('/api/instance/provision', {
-        method: 'POST',
-      })
-
-      if (response.ok) {
-        // Refresh the page to show the new instance
-        window.location.reload()
-      } else {
-        const error = await response.json()
-        alert(`Failed to provision instance: ${error.error}`)
-      }
-    } catch (error) {
-      alert('Failed to provision instance')
+      await provisionInstance()
+      // Refresh the page to show the new instance
+      window.location.reload()
+    } catch (error: any) {
+      alert(`Failed to provision instance: ${error.message || 'Unknown error'}`)
     } finally {
       setIsProvisioning(false)
     }

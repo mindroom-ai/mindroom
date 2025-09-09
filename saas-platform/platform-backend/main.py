@@ -1,4 +1,4 @@
-"""MindRoom Backend - Simple single-file FastAPI backend."""
+"""MindRoom Backend - Simple single-file FastAPI backend."""  # noqa: INP001
 
 import asyncio
 import logging
@@ -13,6 +13,7 @@ import stripe
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from supabase import create_client
 
 # Load environment variables
@@ -40,10 +41,15 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+    # Create service client that bypasses RLS
+    # Using service key instead of anon key automatically bypasses RLS
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    # Create a separate auth client for user verification
+    auth_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 else:
     logger.warning("Supabase not configured")
     supabase = None
+    auth_client = None
 
 # Platform configuration
 PLATFORM_DOMAIN = os.getenv("PLATFORM_DOMAIN", "mindroom.chat")
@@ -68,6 +74,83 @@ async def health_check() -> dict[str, Any]:
     }
 
 
+# === Authentication Helpers ===
+async def verify_user(authorization: str = Header(None)) -> dict:
+    """Verify regular user (not admin) - works with new schema where account.id = auth.user.id."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+
+    token = authorization.replace("Bearer ", "")
+
+    if not auth_client or not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        # Verify the JWT token with Supabase (use auth client)
+        user = auth_client.auth.get_user(token)
+        if not user or not user.user:
+            raise HTTPException(status_code=401, detail="Invalid token")  # noqa: TRY301
+
+        # With new schema, account.id = auth.user.id
+        account_id = user.user.id
+
+        # Verify account exists (use service client to bypass RLS)
+        # First, try to get the account
+        try:
+            result = supabase.from_("accounts").select("*").eq("id", account_id).single().execute()
+            if not result.data:
+                msg = "No data"
+                raise ValueError(msg)  # noqa: TRY301
+        except Exception:
+            # Account doesn't exist - create it (trigger might have failed)
+            logger.info(f"Account not found for user {account_id}, creating...")
+            try:
+                create_result = (
+                    supabase.from_("accounts")
+                    .insert(
+                        {
+                            "id": account_id,
+                            "email": user.user.email,
+                            "full_name": user.user.user_metadata.get("full_name", "")
+                            if user.user.user_metadata
+                            else "",
+                            "created_at": datetime.now(UTC).isoformat(),
+                            "updated_at": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                    .execute()
+                )
+                result = create_result
+            except Exception:
+                logger.exception("Failed to create account")
+                # Try to fetch again in case it was a race condition
+                result = supabase.from_("accounts").select("*").eq("id", account_id).single().execute()
+                if not result.data:
+                    raise HTTPException(status_code=404, detail="Account creation failed. Please contact support.")  # noqa: B904
+
+        return {  # noqa: TRY300
+            "user_id": user.user.id,
+            "email": user.user.email,
+            "account_id": account_id,  # Same as user_id with new schema
+            "account": result.data,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("User verification error")
+        raise HTTPException(status_code=401, detail="Authentication failed") from e
+
+
+async def verify_user_optional(authorization: str = Header(None)) -> dict | None:
+    """Optional user verification for public endpoints."""
+    if not authorization:
+        return None
+    try:
+        return await verify_user(authorization)
+    except HTTPException:
+        return None
+
+
 # === Admin Authentication ===
 async def verify_admin(authorization: str = Header(None)) -> dict:
     """Verify admin access via Supabase auth."""
@@ -76,24 +159,430 @@ async def verify_admin(authorization: str = Header(None)) -> dict:
 
     token = authorization.replace("Bearer ", "")
 
+    if not auth_client or not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        # Verify the JWT token with Supabase (use auth client)
+        user = auth_client.auth.get_user(token)
+        if not user or not user.user:
+            raise HTTPException(status_code=401, detail="Invalid token")  # noqa: TRY301
+
+        # Check if user is admin (use service client to bypass RLS)
+        result = supabase.table("accounts").select("is_admin").eq("id", user.user.id).single().execute()
+        if not result.data or not result.data.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Admin access required")  # noqa: TRY301
+
+        return {"user_id": user.user.id, "email": user.user.email}  # noqa: TRY300
+    except Exception as e:
+        logger.exception("Admin verification error")
+        raise HTTPException(status_code=401, detail="Authentication failed") from e
+
+
+# === User Account Management ===
+@app.get("/api/v1/account/current")
+async def get_current_account(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: ANN001, B008
+    """Get current user's account with subscription and instances."""
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not configured")
 
     try:
-        # Verify the JWT token with Supabase
-        user = supabase.auth.get_user(token)
-        if not user or not user.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
+        account_id = user["account_id"]
 
-        # Check if user is admin
-        result = supabase.table("accounts").select("is_admin").eq("id", user.user.id).single().execute()
-        if not result.data or not result.data.get("is_admin"):
-            raise HTTPException(status_code=403, detail="Admin access required")
+        # Get account with subscription and instances
+        account_result = (
+            supabase.table("accounts")
+            .select(
+                "*, subscriptions(*, instances(*))",
+            )
+            .eq("id", account_id)
+            .single()
+            .execute()
+        )
 
-        return {"user_id": user.user.id, "email": user.user.email}
+        if not account_result.data:
+            raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
+
+        return account_result.data  # noqa: TRY300
     except Exception as e:
-        logger.error(f"Admin verification error: {e}")
-        raise HTTPException(status_code=401, detail="Authentication failed")
+        logger.exception("Error fetching account")
+        raise HTTPException(status_code=500, detail="Failed to fetch account") from e
+
+
+@app.get("/api/v1/account/is-admin")
+async def check_admin_status(user=Depends(verify_user)) -> dict[str, bool]:  # noqa: ANN001, B008
+    """Check if current user is an admin."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        account_id = user["account_id"]
+
+        # Get account admin status
+        account_result = supabase.table("accounts").select("is_admin").eq("id", account_id).single().execute()
+
+        if not account_result.data:
+            return {"is_admin": False}
+
+        return {"is_admin": account_result.data.get("is_admin", False)}
+    except Exception:
+        logger.exception("Error checking admin status")
+        return {"is_admin": False}
+
+
+@app.post("/api/v1/account/setup")
+async def setup_account(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: ANN001, B008
+    """Setup free tier account for new user."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        account_id = user["account_id"]
+
+        # Check if subscription already exists
+        sub_result = supabase.table("subscriptions").select("id").eq("account_id", account_id).execute()
+
+        if sub_result.data:
+            return {"message": "Account already setup", "account_id": account_id}
+
+        # Create free tier subscription
+        subscription_data = {
+            "account_id": account_id,
+            "tier": "free",
+            "status": "active",
+            "max_agents": 1,
+            "max_messages_per_day": 100,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+
+        sub_result = supabase.table("subscriptions").insert(subscription_data).execute()
+
+        return {
+            "message": "Free tier account created",
+            "account_id": account_id,
+            "subscription": sub_result.data[0] if sub_result.data else None,
+        }
+    except Exception as e:
+        logger.exception("Error setting up account")
+        raise HTTPException(status_code=500, detail="Failed to setup account") from e
+
+
+# === Subscription Management ===
+@app.get("/api/v1/subscription")
+async def get_user_subscription(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: ANN001, B008
+    """Get current user's subscription."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        account_id = user["account_id"]
+
+        # Get subscription for account
+        result = supabase.table("subscriptions").select("*").eq("account_id", account_id).single().execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Subscription not found")  # noqa: TRY301
+
+        return result.data  # noqa: TRY300
+    except Exception as e:
+        logger.exception("Error fetching subscription")
+        raise HTTPException(status_code=500, detail="Failed to fetch subscription") from e
+
+
+@app.get("/api/v1/usage")
+async def get_user_usage(
+    user=Depends(verify_user),  # noqa: ANN001, B008
+    days: int = 30,
+) -> dict[str, Any]:
+    """Get usage metrics for current user."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        account_id = user["account_id"]
+
+        # First get the subscription
+        sub_result = supabase.table("subscriptions").select("id").eq("account_id", account_id).single().execute()
+
+        if not sub_result.data:
+            return {"usage": [], "aggregated": {"totalMessages": 0, "totalAgents": 0, "totalStorage": 0}}
+
+        subscription_id = sub_result.data["id"]
+
+        # Get usage metrics for the last N days
+        start_date = (datetime.now(UTC) - timedelta(days=days)).date().isoformat()
+
+        usage_result = (
+            supabase.table("usage_metrics")
+            .select("*")
+            .eq("subscription_id", subscription_id)
+            .gte("date", start_date)
+            .order("date", desc=False)
+            .execute()
+        )
+
+        usage_data = usage_result.data or []
+
+        # Aggregate the usage data
+        total_messages = sum(d["messages_sent"] for d in usage_data)
+        total_agents = max((d["agents_used"] for d in usage_data), default=0)
+        total_storage = max((d["storage_used_gb"] for d in usage_data), default=0)
+
+        return {  # noqa: TRY300
+            "usage": usage_data,
+            "aggregated": {
+                "totalMessages": total_messages,
+                "totalAgents": total_agents,
+                "totalStorage": total_storage,
+            },
+        }
+    except Exception as e:
+        logger.exception("Error fetching usage")
+        raise HTTPException(status_code=500, detail="Failed to fetch usage") from e
+
+
+# === User Instance Management ===
+@app.get("/api/v1/instances")
+async def list_user_instances(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: ANN001, B008
+    """List instances for current user."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        account_id = user["account_id"]
+
+        # Get instances through subscription
+        result = (
+            supabase.table("instances")
+            .select(
+                "*",
+            )
+            .eq("account_id", account_id)
+            .execute()
+        )
+
+        return {"instances": result.data or []}  # noqa: TRY300
+    except Exception as e:
+        logger.exception("Error fetching instances")
+        raise HTTPException(status_code=500, detail="Failed to fetch instances") from e
+
+
+@app.post("/api/v1/instances/provision")
+async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: ANN001, B008
+    """Provision an instance for the current user."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    try:
+        account_id = user["account_id"]
+
+        # Get user's subscription
+        sub_result = supabase.table("subscriptions").select("*").eq("account_id", account_id).single().execute()
+
+        if not sub_result.data:
+            raise HTTPException(status_code=404, detail="No subscription found")  # noqa: TRY301
+
+        subscription = sub_result.data
+
+        # Check if instance already exists
+        inst_result = supabase.table("instances").select("id").eq("subscription_id", subscription["id"]).execute()
+
+        if inst_result.data:
+            raise HTTPException(status_code=400, detail="Instance already exists")  # noqa: TRY301
+
+        # Call the existing provision endpoint internally
+        return await provision_instance(
+            data={
+                "subscription_id": subscription["id"],
+                "account_id": account_id,
+                "tier": subscription["tier"],
+            },
+            authorization=f"Bearer {PROVISIONER_API_KEY}",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error provisioning instance")
+        raise HTTPException(status_code=500, detail="Failed to provision instance") from e
+
+
+@app.post("/api/v1/instances/{instance_id}/start")
+async def start_user_instance(instance_id: str, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: ANN001, B008
+    """Start user's instance."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    # Verify ownership
+    result = (
+        supabase.table("instances")
+        .select("id")
+        .eq("instance_id", instance_id)
+        .eq("account_id", user["account_id"])
+        .single()
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Instance not found or access denied")
+
+    # Use existing start logic
+    return await start_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+
+
+@app.post("/api/v1/instances/{instance_id}/stop")
+async def stop_user_instance(instance_id: str, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: ANN001, B008
+    """Stop user's instance."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    # Verify ownership
+    result = (
+        supabase.table("instances")
+        .select("id")
+        .eq("instance_id", instance_id)
+        .eq("account_id", user["account_id"])
+        .single()
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Instance not found or access denied")
+
+    # Use existing stop logic
+    return await stop_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+
+
+@app.post("/api/v1/instances/{instance_id}/restart")
+async def restart_user_instance(instance_id: str, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: ANN001, B008
+    """Restart user's instance."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    # Verify ownership
+    result = (
+        supabase.table("instances")
+        .select("id")
+        .eq("instance_id", instance_id)
+        .eq("account_id", user["account_id"])
+        .single()
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Instance not found or access denied")
+
+    # Use existing restart logic
+    return await restart_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+
+
+# === Stripe API Endpoints ===
+
+
+class CheckoutRequest(BaseModel):
+    """Request model for Stripe checkout session creation."""
+
+    price_id: str
+    tier: str
+
+
+@app.post("/api/v1/stripe/checkout")
+async def create_checkout_session(
+    request: CheckoutRequest,
+    user: Annotated[dict | None, Depends(verify_user_optional)],
+) -> dict[str, Any]:
+    """Create Stripe checkout session for subscription."""
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    # Get or create customer
+    customer_id = None
+
+    if user:
+        # Check if user already has a Stripe customer ID
+        result = supabase.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()
+
+        if result.data and result.data.get("stripe_customer_id"):
+            customer_id = result.data["stripe_customer_id"]
+        else:
+            # Create a new Stripe customer
+            customer = stripe.Customer.create(
+                email=user["email"],
+                metadata={
+                    "supabase_user_id": user["account_id"],
+                },
+            )
+            customer_id = customer.id
+
+            # Save the customer ID to the database
+            supabase.table("accounts").update(
+                {"stripe_customer_id": customer_id},
+            ).eq("id", user["account_id"]).execute()
+
+    # Create checkout session
+    checkout_params = {
+        "line_items": [
+            {
+                "price": request.price_id,
+                "quantity": 1,
+            },
+        ],
+        "mode": "subscription",
+        "success_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard?success=true&session_id={{CHECKOUT_SESSION_ID}}",
+        "cancel_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/pricing?cancelled=true",
+        "allow_promotion_codes": True,
+        "billing_address_collection": "required",
+        "payment_method_collection": "if_required",
+        "subscription_data": {
+            "trial_period_days": 14,  # 14-day free trial
+            "metadata": {
+                "tier": request.tier,
+                "supabase_user_id": user["account_id"] if user else "",
+            },
+        },
+        "metadata": {
+            "tier": request.tier,
+            "supabase_user_id": user["account_id"] if user else "",
+        },
+    }
+
+    # Add customer if we have one
+    if customer_id:
+        checkout_params["customer"] = customer_id
+
+    session = stripe.checkout.Session.create(**checkout_params)
+
+    return {"url": session.url}
+
+
+@app.post("/api/v1/stripe/portal")
+async def create_portal_session(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: ANN001, B008
+    """Create Stripe customer portal session for subscription management."""
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    # Get the user's subscription
+    result = (
+        supabase.table("subscriptions")
+        .select("stripe_customer_id")
+        .eq("account_id", user["account_id"])
+        .single()
+        .execute()
+    )
+
+    if not result.data or not result.data.get("stripe_customer_id"):
+        raise HTTPException(status_code=404, detail="No Stripe customer found")
+
+    # Create a Stripe billing portal session
+    session = stripe.billing_portal.Session.create(
+        customer=result.data["stripe_customer_id"],
+        return_url=f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard/billing",
+    )
+
+    return {"url": session.url}
 
 
 # === Admin API Endpoints ===
@@ -115,8 +604,8 @@ async def get_admin_stats(admin=Depends(verify_admin)) -> dict[str, Any]:  # noq
             "running_instances": len(instances.data) if instances.data else 0,
         }
     except Exception as e:
-        logger.error(f"Error fetching admin stats: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch statistics")
+        logger.exception("Error fetching admin stats")
+        raise HTTPException(status_code=500, detail="Failed to fetch statistics") from e
 
 
 @app.post("/api/admin/instances/{instance_id}/restart")
@@ -141,14 +630,14 @@ async def restart_instance(instance_id: str, admin=Depends(verify_admin)) -> dic
         )
 
         if not result.data:
-            raise HTTPException(status_code=404, detail="Instance not found")
+            raise HTTPException(status_code=404, detail="Instance not found")  # noqa: TRY301
 
         # TODO: Trigger actual Kubernetes restart
 
-        return {"status": "restarting", "instance_id": instance_id}
+        return {"status": "restarting", "instance_id": instance_id}  # noqa: TRY300
     except Exception as e:
-        logger.error(f"Error restarting instance: {e}")
-        raise HTTPException(status_code=500, detail="Failed to restart instance")
+        logger.exception("Error restarting instance")
+        raise HTTPException(status_code=500, detail="Failed to restart instance") from e
 
 
 @app.put("/api/admin/accounts/{account_id}/status")
@@ -179,7 +668,7 @@ async def update_account_status(
         )
 
         if not result.data:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
 
         # Log the action
         supabase.table("audit_logs").insert(
@@ -193,10 +682,10 @@ async def update_account_status(
             },
         ).execute()
 
-        return {"status": "success", "account_id": account_id, "new_status": status}
+        return {"status": "success", "account_id": account_id, "new_status": status}  # noqa: TRY300
     except Exception as e:
-        logger.error(f"Error updating account status: {e}")
-        raise HTTPException(status_code=500, detail="Failed to update account status")
+        logger.exception("Error updating account status")
+        raise HTTPException(status_code=500, detail="Failed to update account status") from e
 
 
 @app.post("/api/admin/auth/logout")
@@ -426,7 +915,7 @@ async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-i
 
 # === Instance Provisioner API (for customer portal compatibility) ===
 @app.post("/api/v1/provision")
-async def provision_instance(
+async def provision_instance(  # noqa: C901
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
@@ -439,7 +928,7 @@ async def provision_instance(
         raise HTTPException(status_code=503, detail="Database not configured")
 
     subscription_id = data.get("subscription_id")
-    account_id = data.get("account_id")  # noqa: F841
+    account_id = data.get("account_id")
     tier = data.get("tier", "free")
 
     # Generate a numeric customer ID
@@ -455,6 +944,9 @@ async def provision_instance(
     # Get next available ID
     next_id = max(existing_ids) + 1 if existing_ids else 1
     customer_id = str(next_id)
+
+    # Use a prefixed helm release name to avoid conflicts
+    helm_release_name = f"instance-{customer_id}"
 
     logger.info(f"Provisioning instance for subscription {subscription_id}, tier: {tier}")
 
@@ -482,7 +974,7 @@ async def provision_instance(
         proc = await asyncio.create_subprocess_exec(
             "helm",
             "install",
-            customer_id,
+            helm_release_name,
             "/app/k8s/instance/",  # Path to instance chart
             "--namespace",
             namespace,
@@ -508,7 +1000,7 @@ async def provision_instance(
             cleanup_proc = await asyncio.create_subprocess_exec(
                 "helm",
                 "uninstall",
-                customer_id,
+                helm_release_name,
                 "--namespace",
                 namespace,
                 stdout=asyncio.subprocess.PIPE,
@@ -518,6 +1010,48 @@ async def provision_instance(
             raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {error_msg}") from None  # noqa: TRY301
 
         logger.info(f"Successfully deployed instance {customer_id}")
+
+        # Generate auth token
+        auth_token = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))
+
+        # Create database record - this is the authoritative source
+        if supabase:
+            try:
+                # Determine resource limits based on tier
+                memory_limit = 512 if tier == "free" else 1024 if tier == "starter" else 2048
+                cpu_limit = 0.5 if tier == "free" else 1.0 if tier == "starter" else 2.0
+
+                instance_data = {
+                    "subscription_id": subscription_id,
+                    "instance_id": customer_id,
+                    "subdomain": customer_id,
+                    "name": f"Instance {customer_id}",
+                    "status": "running",
+                    "tier": tier,
+                    "instance_url": f"https://{customer_id}.{PLATFORM_DOMAIN}",
+                    "frontend_url": f"https://{customer_id}.{PLATFORM_DOMAIN}",
+                    "backend_url": f"https://{customer_id}.api.{PLATFORM_DOMAIN}",
+                    "api_url": f"https://{customer_id}.api.{PLATFORM_DOMAIN}",
+                    "matrix_url": f"https://{customer_id}.matrix.{PLATFORM_DOMAIN}",
+                    "matrix_server_url": f"https://{customer_id}.matrix.{PLATFORM_DOMAIN}",
+                    "auth_token": auth_token,
+                    "memory_limit_mb": memory_limit,
+                    "cpu_limit": cpu_limit,
+                    "agent_count": 0,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+
+                # Add account_id if provided (with new schema, this is the auth.user.id)
+                if account_id:
+                    instance_data["account_id"] = account_id
+
+                result = supabase.table("instances").insert(instance_data).execute()
+                logger.info(f"Created database record for instance {customer_id}")
+            except Exception:
+                logger.exception("Failed to create database record")
+                # Continue anyway - K8s deployment succeeded
+
     except Exception as e:
         logger.exception("Error deploying instance.")
         raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
@@ -527,7 +1061,7 @@ async def provision_instance(
         "frontend_url": f"https://{customer_id}.{PLATFORM_DOMAIN}",
         "api_url": f"https://{customer_id}.api.{PLATFORM_DOMAIN}",
         "matrix_url": f"https://{customer_id}.matrix.{PLATFORM_DOMAIN}",
-        "auth_token": "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32)),
+        "auth_token": auth_token,
         "success": True,
         "message": "Instance provisioned successfully",
     }
@@ -657,7 +1191,7 @@ async def restart_instance_provisioner(
 
 
 @app.delete("/api/v1/uninstall/{instance_id}")
-async def uninstall_instance(
+async def uninstall_instance(  # noqa: C901, PLR0912
     instance_id: str,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
@@ -668,11 +1202,14 @@ async def uninstall_instance(
     logger.info(f"Uninstalling instance {instance_id}")
 
     try:
+        # Try with new naming convention first (instance-X)
+        helm_release_name = f"instance-{instance_id}" if instance_id.isdigit() else instance_id
+
         # Uninstall the helm release
         proc = await asyncio.create_subprocess_exec(
             "helm",
             "uninstall",
-            instance_id,
+            helm_release_name,
             "--namespace=mindroom-instances",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -684,8 +1221,29 @@ async def uninstall_instance(
             # Check if it's already uninstalled
             if "not found" not in error_msg.lower():
                 logger.error(f"Failed to uninstall instance: {error_msg}")
-                raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {error_msg}")
-            logger.info(f"Instance {instance_id} was already uninstalled")
+                raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {error_msg}")  # noqa: TRY301
+
+            # Try with old naming convention if new one failed
+            if instance_id.isdigit():
+                logger.info(f"Trying old naming convention for instance {instance_id}")
+                proc2 = await asyncio.create_subprocess_exec(
+                    "helm",
+                    "uninstall",
+                    instance_id,
+                    "--namespace=mindroom-instances",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout2, stderr2 = await proc2.communicate()
+                if proc2.returncode != 0:
+                    error_msg2 = stderr2.decode()
+                    if "not found" not in error_msg2.lower():
+                        logger.error(f"Failed to uninstall with old naming: {error_msg2}")
+                    logger.info(f"Instance {instance_id} was already uninstalled")
+                else:
+                    logger.info(f"Successfully uninstalled instance {instance_id} with old naming")
+            else:
+                logger.info(f"Instance {instance_id} was already uninstalled")
         else:
             logger.info(f"Successfully uninstalled instance {instance_id}: {stdout.decode()}")
 

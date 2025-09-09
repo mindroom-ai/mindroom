@@ -1,8 +1,8 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
+import { apiCall } from '@/lib/api'
 
 export interface Subscription {
   id: string
@@ -23,7 +23,6 @@ export function useSubscription() {
   const [subscription, setSubscription] = useState<Subscription | null>(null)
   const [loading, setLoading] = useState(true)
   const { user } = useAuth()
-  const supabase = createClient()
 
   useEffect(() => {
     if (!user) {
@@ -31,27 +30,19 @@ export function useSubscription() {
       return
     }
 
-    // Get user's subscription through their account
+    // Get user's subscription through API
     const fetchSubscription = async () => {
       try {
-        // First get the account by email
-        const { data: account } = await supabase
-          .from('accounts')
-          .select('id')
-          .eq('email', user.email)
-          .single()
+        const response = await apiCall('/api/v1/subscription')
 
-        if (account) {
-          // Then get the subscription for that account
-          const { data } = await supabase
-            .from('subscriptions')
-            .select('*')
-            .eq('account_id', account.id)
-            .single()
-
-          if (data) {
-            setSubscription(data)
-          }
+        if (response.ok) {
+          const data = await response.json()
+          setSubscription(data)
+        } else if (response.status === 404) {
+          // User doesn't have a subscription yet
+          setSubscription(null)
+        } else {
+          console.error('Error fetching subscription:', response.statusText)
         }
       } catch (error) {
         console.error('Error fetching subscription:', error)
@@ -62,42 +53,13 @@ export function useSubscription() {
 
     fetchSubscription()
 
-    // Subscribe to changes (we need to get account ID first for proper filtering)
-    const setupRealtimeSubscription = async () => {
-      const { data: account } = await supabase
-        .from('accounts')
-        .select('id')
-        .eq('email', user.email)
-        .single()
+    // Poll for updates every 30 seconds instead of using real-time
+    const interval = setInterval(fetchSubscription, 30000)
 
-      if (account) {
-        const subscription = supabase
-          .channel('subscription-changes')
-          .on(
-            'postgres_changes',
-            {
-              event: '*',
-              schema: 'public',
-              table: 'subscriptions',
-              filter: `account_id=eq.${account.id}`,
-            },
-            (payload) => {
-              setSubscription(payload.new as Subscription)
-            }
-          )
-          .subscribe()
-
-        return () => {
-          subscription.unsubscribe()
-        }
-      }
-    }
-
-    const cleanup = setupRealtimeSubscription()
     return () => {
-      cleanup.then(fn => fn && fn())
+      clearInterval(interval)
     }
-  }, [user, supabase])
+  }, [user])
 
   return { subscription, loading }
 }

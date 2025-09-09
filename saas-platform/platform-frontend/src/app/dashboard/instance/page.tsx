@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, Trash2, ExternalLink, Server, Database, Globe } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
+import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
 
 type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'deprovisioning' | 'maintenance' | 'error'
 
@@ -44,25 +45,13 @@ export default function InstancePage() {
     if (!silent) setLoading(true)
 
     try {
-      // Use API endpoint that has service client access
-      const response = await fetch('/api/instance/status')
+      const data = await listInstances()
 
-      if (!response.ok) {
-        if (response.status === 401) {
-          router.push('/auth/login')
-          return
-        }
-        throw new Error('Failed to fetch instance')
+      if (data.instances && data.instances.length > 0) {
+        setInstance(data.instances[0])
+      } else {
+        setInstance(null)
       }
-
-      const data = await response.json()
-
-      if (!data.subscription) {
-        setLoading(false)
-        return
-      }
-
-      setInstance(data.instance)
     } catch (error) {
       console.error('Error fetching instance:', error)
     } finally {
@@ -82,18 +71,19 @@ export default function InstancePage() {
     setActionLoading(action)
 
     try {
-      const response = await fetch('/api/instance/' + action, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          instanceId: instance.id,
-        }),
-      })
-
-      if (!response.ok) {
-        throw new Error('Action failed')
+      switch (action) {
+        case 'start':
+          await startInstance(instance.id)
+          break
+        case 'stop':
+          await stopInstance(instance.id)
+          break
+        case 'restart':
+          await apiRestartInstance(instance.id)
+          break
+        case 'delete':
+          // Delete not implemented yet
+          throw new Error('Delete not implemented')
       }
 
       // Refresh instance status
