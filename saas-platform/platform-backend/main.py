@@ -656,6 +656,64 @@ async def restart_instance_provisioner(
     }
 
 
+@app.delete("/api/v1/uninstall/{instance_id}")
+async def uninstall_instance(
+    instance_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """Completely uninstall/deprovision an instance (remove all Kubernetes resources)."""
+    if authorization != f"Bearer {PROVISIONER_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    logger.info(f"Uninstalling instance {instance_id}")
+
+    try:
+        # Uninstall the helm release
+        proc = await asyncio.create_subprocess_exec(
+            "helm",
+            "uninstall",
+            instance_id,
+            "--namespace=mindroom-instances",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            error_msg = stderr.decode()
+            # Check if it's already uninstalled
+            if "not found" not in error_msg.lower():
+                logger.error(f"Failed to uninstall instance: {error_msg}")
+                raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {error_msg}")
+            logger.info(f"Instance {instance_id} was already uninstalled")
+        else:
+            logger.info(f"Successfully uninstalled instance {instance_id}: {stdout.decode()}")
+
+        # Update database status if configured
+        if supabase:
+            try:
+                supabase.table("instances").update(
+                    {
+                        "status": "deprovisioned",
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    },
+                ).or_(f"instance_id.eq.{instance_id},subdomain.eq.{instance_id}").execute()
+            except Exception as e:
+                logger.warning(f"Failed to update database for instance {instance_id}: {e}")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to uninstall instance {instance_id}")
+        raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {e}") from e
+
+    return {
+        "success": True,
+        "message": f"Instance {instance_id} uninstalled successfully",
+        "instance_id": instance_id,
+    }
+
+
 # === Instance Sync API ===
 @app.post("/api/v1/sync-instances")
 async def sync_instances(  # noqa: C901
