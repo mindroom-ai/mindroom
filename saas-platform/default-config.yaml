@@ -1,7 +1,3 @@
-# Default configuration for SaaS platform instances
-# This file is the source of truth for model configurations in deployed instances
-# It uses OpenRouter models exclusively for consistency and cost management
-
 agents:
   agent_builder:
     display_name: AgentBuilder
@@ -291,9 +287,9 @@ defaults:
 
 memory:
   embedder:
+    provider: openai
     config:
       model: text-embedding-3-small
-    provider: openai
   llm:
     provider: openrouter
     config:
@@ -301,55 +297,22 @@ memory:
       temperature: 0.1
       top_p: 1
 
-# OpenRouter model configurations for SaaS platform
-# All models use OpenRouter for consistency and unified billing
 models:
-  # Primary models
   default:
     provider: openrouter
     id: google/gemini-2.5-flash
   sonnet:
     provider: openrouter
     id: anthropic/claude-sonnet-4
-
-  # Cost-effective alternatives
   deepseek:
     provider: openrouter
     id: deepseek/deepseek-chat-v3.1:free
-
-  # Additional model options
   gemini_flash:
     provider: openrouter
     id: google/gemini-2.5-flash
   glm45:
     provider: openrouter
     id: z-ai/glm-4.5
-
-  # Legacy model name mappings (for compatibility)
-  gpt5mini:
-    provider: openrouter
-    id: google/gemini-2.5-flash
-  gpt_oss:
-    provider: openrouter
-    id: deepseek/deepseek-chat-v3.1:free
-  gpt_oss_120b:
-    provider: openrouter
-    id: deepseek/deepseek-chat-v3.1:free
-  haiku:
-    provider: openrouter
-    id: google/gemini-2.5-flash
-  opus:
-    provider: openrouter
-    id: anthropic/claude-sonnet-4
-  gpt4o:
-    provider: openrouter
-    id: anthropic/claude-sonnet-4
-  ollama:
-    provider: openrouter
-    id: google/gemini-2.5-flash
-  devstral:
-    provider: openrouter
-    id: google/gemini-2.5-flash
 
 room_models:
   research: default
@@ -369,10 +332,8 @@ teams:
     - dev
     - automation
 
-# Timezone for displaying scheduled tasks
 timezone: UTC
 
-# Voice message handling configuration
 voice:
   enabled: false
   stt:
@@ -382,11 +343,7 @@ voice:
     model: default
     confidence_threshold: 0.7
 
-# Authorization configuration with fine-grained permissions
 authorization:
-  # Users with access to all rooms (populated per instance)
   global_users: []
-  # Room-specific permissions (populated per instance)
   room_permissions: {}
-  # Default permission for rooms not explicitly configured
   default_room_access: false

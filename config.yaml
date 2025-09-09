@@ -339,30 +339,6 @@ models:
   glm45:
     provider: openrouter
     id: z-ai/glm-4.5
-  gpt5mini:
-    provider: openrouter
-    id: google/gemini-2.5-flash
-  gpt_oss:
-    provider: openrouter
-    id: deepseek/deepseek-chat-v3.1:free
-  gpt_oss_120b:
-    provider: openrouter
-    id: deepseek/deepseek-chat-v3.1:free
-  haiku:
-    provider: openrouter
-    id: google/gemini-2.5-flash
-  opus:
-    provider: openrouter
-    id: anthropic/claude-sonnet-4
-  gpt4o:
-    provider: openrouter
-    id: anthropic/claude-sonnet-4
-  ollama:
-    provider: openrouter
-    id: google/gemini-2.5-flash
-  devstral:
-    provider: openrouter
-    id: google/gemini-2.5-flash
 room_models:
   research: haiku
 router:
