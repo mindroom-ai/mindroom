@@ -77,9 +77,13 @@ if SUPABASE_URL and SUPABASE_ANON_KEY:
 
 
 async def verify_user(authorization: str | None = Header(None)) -> dict:
-    """Validate Supabase JWT from Authorization header; enforce owner if ACCOUNT_ID set."""
+    """Validate Supabase JWT from Authorization header; enforce owner if ACCOUNT_ID set.
+
+    In standalone mode (no Supabase), returns a default user to allow access.
+    """
     if _supabase_auth is None:
-        raise HTTPException(status_code=500, detail="Auth not configured")
+        # Standalone mode - no auth configured, allow access
+        return {"user_id": "standalone", "email": None}
 
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
