@@ -6,6 +6,7 @@ from typing import Annotated, Any
 
 from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, verify_admin
+from backend.models import ActionResult, AdminStatsOut, UpdateAccountStatusResponse
 from backend.routes.provisioner import (
     restart_instance_provisioner,
     start_instance_provisioner,
@@ -17,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 router = APIRouter()
 
 
-@router.get("/admin/stats")
+@router.get("/admin/stats", response_model=AdminStatsOut)
 async def get_admin_stats(admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Get platform statistics for admin dashboard."""
     sb = ensure_supabase()
@@ -37,31 +38,31 @@ async def get_admin_stats(admin=Depends(verify_admin)) -> dict[str, Any]:  # noq
         raise HTTPException(status_code=500, detail="Failed to fetch statistics") from e
 
 
-@router.post("/admin/instances/{instance_id}/start")
+@router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
 async def admin_start_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Proxy start to provisioner (no key exposed to browser)."""
     return await start_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.post("/admin/instances/{instance_id}/stop")
+@router.post("/admin/instances/{instance_id}/stop", response_model=ActionResult)
 async def admin_stop_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Proxy stop to provisioner (no key exposed to browser)."""
     return await stop_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.post("/admin/instances/{instance_id}/restart")
+@router.post("/admin/instances/{instance_id}/restart", response_model=ActionResult)
 async def admin_restart_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Proxy restart to provisioner (no key exposed to browser)."""
     return await restart_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.delete("/admin/instances/{instance_id}/uninstall")
+@router.delete("/admin/instances/{instance_id}/uninstall", response_model=ActionResult)
 async def admin_uninstall_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
     """Proxy uninstall to provisioner (no key exposed to browser)."""
     return await uninstall_instance(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.put("/admin/accounts/{account_id}/status")
+@router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
 async def update_account_status(
     account_id: str,
     status: str,

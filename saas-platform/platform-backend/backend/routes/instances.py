@@ -4,6 +4,7 @@ from typing import Any
 
 from backend.config import PROVISIONER_API_KEY
 from backend.deps import ensure_supabase, verify_user
+from backend.models import ActionResult, InstancesResponse, ProvisionResponse
 from backend.routes.provisioner import (
     provision_instance,
     restart_instance_provisioner,
@@ -15,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 router = APIRouter()
 
 
-@router.get("/my/instances")
+@router.get("/my/instances", response_model=InstancesResponse)
 async def list_user_instances(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """List instances for current user."""
     sb = ensure_supabase()
@@ -28,7 +29,7 @@ async def list_user_instances(user=Depends(verify_user)) -> dict[str, Any]:  # n
         raise HTTPException(status_code=500, detail="Failed to fetch instances") from e
 
 
-@router.post("/my/instances/provision")
+@router.post("/my/instances/provision", response_model=ProvisionResponse)
 async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Provision an instance for the current user."""
     sb = ensure_supabase()
@@ -47,11 +48,15 @@ async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]: 
             .execute()
         )
         if inst_result.data:
-            # Idempotent: return existing instance instead of 400
+            # Idempotent: return existing instance metadata
+            existing = inst_result.data[0]
             return {
-                "message": "Instance already exists",
-                "instance": inst_result.data[0],
                 "success": True,
+                "message": "Instance already exists",
+                "customer_id": existing.get("instance_id") or existing.get("subdomain") or "",
+                "frontend_url": existing.get("frontend_url") or existing.get("instance_url"),
+                "api_url": existing.get("backend_url") or existing.get("api_url"),
+                "matrix_url": existing.get("matrix_server_url") or existing.get("matrix_url"),
             }
 
         return await provision_instance(
@@ -68,7 +73,7 @@ async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]: 
         raise HTTPException(status_code=500, detail="Failed to provision instance") from e
 
 
-@router.post("/my/instances/{instance_id}/start")
+@router.post("/my/instances/{instance_id}/start", response_model=ActionResult)
 async def start_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Start user's instance."""
     sb = ensure_supabase()
@@ -87,7 +92,7 @@ async def start_user_instance(instance_id: int, user=Depends(verify_user)) -> di
     return await start_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.post("/my/instances/{instance_id}/stop")
+@router.post("/my/instances/{instance_id}/stop", response_model=ActionResult)
 async def stop_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Stop user's instance."""
     sb = ensure_supabase()
@@ -106,7 +111,7 @@ async def stop_user_instance(instance_id: int, user=Depends(verify_user)) -> dic
     return await stop_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
-@router.post("/my/instances/{instance_id}/restart")
+@router.post("/my/instances/{instance_id}/restart", response_model=ActionResult)
 async def restart_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Restart user's instance."""
     sb = ensure_supabase()

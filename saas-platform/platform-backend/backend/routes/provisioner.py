@@ -14,6 +14,7 @@ from backend.config import (
 )
 from backend.deps import ensure_supabase
 from backend.k8s import check_deployment_exists, ensure_docker_registry_secret, run_kubectl, wait_for_deployment_ready
+from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
 from backend.process import run_helm
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 
@@ -36,7 +37,7 @@ async def _background_mark_running_when_ready(instance_id: str, namespace: str =
         logger.exception("Background readiness wait failed for instance %s", instance_id)
 
 
-@router.post("/system/provision")
+@router.post("/system/provision", response_model=ProvisionResponse)
 async def provision_instance(
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
@@ -200,7 +201,7 @@ async def provision_instance(
     }
 
 
-@router.post("/system/instances/{instance_id}/start")
+@router.post("/system/instances/{instance_id}/start", response_model=ActionResult)
 async def start_instance_provisioner(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
@@ -246,7 +247,7 @@ async def start_instance_provisioner(
     return {"success": True, "message": f"Instance {instance_id} started successfully"}
 
 
-@router.post("/system/instances/{instance_id}/stop")
+@router.post("/system/instances/{instance_id}/stop", response_model=ActionResult)
 async def stop_instance_provisioner(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
@@ -292,7 +293,7 @@ async def stop_instance_provisioner(
     return {"success": True, "message": f"Instance {instance_id} stopped successfully"}
 
 
-@router.post("/system/instances/{instance_id}/restart")
+@router.post("/system/instances/{instance_id}/restart", response_model=ActionResult)
 async def restart_instance_provisioner(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
@@ -327,7 +328,7 @@ async def restart_instance_provisioner(
     return {"success": True, "message": f"Instance {instance_id} restarted successfully"}
 
 
-@router.delete("/system/instances/{instance_id}/uninstall")
+@router.delete("/system/instances/{instance_id}/uninstall", response_model=ActionResult)
 async def uninstall_instance(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
@@ -372,7 +373,7 @@ async def uninstall_instance(
     return {"success": True, "message": f"Instance {instance_id} uninstalled successfully", "instance_id": instance_id}
 
 
-@router.post("/system/sync-instances")
+@router.post("/system/sync-instances", response_model=SyncResult)
 async def sync_instances(
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
@@ -416,12 +417,12 @@ async def sync_instances(
                     ).eq("id", instance["id"]).execute()
 
                     sync_results["updates"].append(
-                        {
-                            "instance_id": instance_id,
-                            "old_status": current_status,
-                            "new_status": "error",
-                            "reason": "deployment_not_found",
-                        },
+                        SyncUpdateOut(
+                            instance_id=instance_id,
+                            old_status=current_status,
+                            new_status="error",
+                            reason="deployment_not_found",
+                        ).model_dump(),
                     )
                     sync_results["synced"] += 1
             else:
@@ -453,12 +454,12 @@ async def sync_instances(
                             ).eq("id", instance["id"]).execute()
 
                             sync_results["updates"].append(
-                                {
-                                    "instance_id": instance_id,
-                                    "old_status": current_status,
-                                    "new_status": actual_status,
-                                    "reason": "status_mismatch",
-                                },
+                                SyncUpdateOut(
+                                    instance_id=instance_id,
+                                    old_status=current_status,
+                                    new_status=actual_status,
+                                    reason="status_mismatch",
+                                ).model_dump(),
                             )
                             sync_results["synced"] += 1
                 except Exception:

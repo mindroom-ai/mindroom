@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from backend.deps import ensure_supabase, verify_user
+from backend.models import AdminStatusOut
 from fastapi import APIRouter, Depends, HTTPException
 
 router = APIRouter()
@@ -35,7 +36,7 @@ async def get_current_account(user=Depends(verify_user)) -> dict[str, Any]:  # n
         raise HTTPException(status_code=500, detail="Failed to fetch account") from e
 
 
-@router.get("/my/account/admin-status")
+@router.get("/my/account/admin-status", response_model=AdminStatusOut)
 async def check_admin_status(user=Depends(verify_user)) -> dict[str, bool]:  # noqa: B008
     """Check if current user is an admin."""
     sb = ensure_supabase()
@@ -44,10 +45,10 @@ async def check_admin_status(user=Depends(verify_user)) -> dict[str, bool]:  # n
         account_id = user["account_id"]
         account_result = sb.table("accounts").select("is_admin").eq("id", account_id).single().execute()
         if not account_result.data:
-            return {"is_admin": False}
-        return {"is_admin": account_result.data.get("is_admin", False)}
+            return AdminStatusOut(is_admin=False).model_dump()
+        return AdminStatusOut(is_admin=bool(account_result.data.get("is_admin", False))).model_dump()
     except Exception:
-        return {"is_admin": False}
+        return AdminStatusOut(is_admin=False).model_dump()
 
 
 @router.post("/my/account/setup")

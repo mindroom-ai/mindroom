@@ -5,12 +5,13 @@ from typing import Annotated
 
 from backend.config import PLATFORM_DOMAIN
 from backend.deps import verify_user
+from backend.models import StatusResponse
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
 router = APIRouter()
 
 
-@router.post("/my/sso-cookie")
+@router.post("/my/sso-cookie", response_model=StatusResponse)
 async def set_sso_cookie(
     response: Response,
     user: Annotated[dict, Depends(verify_user)],
@@ -44,7 +45,7 @@ async def set_sso_cookie(
     return {"status": "ok"}
 
 
-@router.delete("/my/sso-cookie")
+@router.delete("/my/sso-cookie", response_model=StatusResponse)
 async def clear_sso_cookie(response: Response) -> dict[str, str]:
     """Clear the SSO cookie on logout."""
     # Normalize cookie domain: ensure it applies to all subdomains

@@ -3,12 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 from backend.deps import ensure_supabase, verify_user
+from backend.models import SubscriptionOut
 from fastapi import APIRouter, Depends, HTTPException
 
 router = APIRouter()
 
 
-@router.get("/my/subscription")
+@router.get("/my/subscription", response_model=SubscriptionOut)
 async def get_user_subscription(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Get current user's subscription."""
     sb = ensure_supabase()

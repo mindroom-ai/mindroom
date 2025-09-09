@@ -5,6 +5,7 @@ from typing import Annotated, Any
 
 from backend.config import stripe
 from backend.deps import ensure_supabase, verify_user, verify_user_optional
+from backend.models import UrlResponse
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -16,7 +17,7 @@ class CheckoutRequest(BaseModel):
     tier: str
 
 
-@router.post("/stripe/checkout")
+@router.post("/stripe/checkout", response_model=UrlResponse)
 async def create_checkout_session(
     request: CheckoutRequest,
     user: Annotated[dict | None, Depends(verify_user_optional)],
@@ -65,7 +66,7 @@ async def create_checkout_session(
     return {"url": session.url}
 
 
-@router.post("/stripe/portal")
+@router.post("/stripe/portal", response_model=UrlResponse)
 async def create_portal_session(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
     """Create Stripe customer portal session for subscription management."""
     if not stripe.api_key:

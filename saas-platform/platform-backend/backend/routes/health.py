@@ -4,12 +4,13 @@ from typing import Any
 
 from backend.config import stripe
 from backend.deps import ensure_supabase
+from backend.models import HealthResponse
 from fastapi import APIRouter
 
 router = APIRouter()
 
 
-@router.get("/health")
+@router.get("/health", response_model=HealthResponse)
 async def health_check() -> dict[str, Any]:
     """Health check endpoint."""
     try:
