@@ -1,94 +1,48 @@
-# MindRoom Backend (Simplified)
+# Platform Backend
 
-## Overview
-Single-file FastAPI backend that handles:
-- Admin API endpoints (for customer portal admin interface)
-- Dashboard metrics
-- Instance management (start/stop/restart)
-- Stripe webhooks
-- Admin authentication via Supabase with is_admin flag
+FastAPI backend service for the MindRoom SaaS platform.
 
-## Setup
+## Purpose
 
-### Environment Variables
-```env
-# Supabase
-SUPABASE_URL=https://xxx.supabase.co
-SUPABASE_SERVICE_KEY=xxx
-
-# Stripe
-STRIPE_SECRET_KEY=sk_test_xxx
-STRIPE_WEBHOOK_SECRET=whsec_xxx
-
-# Admin users are managed through Supabase
-# Set is_admin=true in the accounts table for admin access
-```
-
-### Local Development
-```bash
-# Using Docker Compose
-docker-compose up
-
-# Or directly with Python
-pip install -r requirements.txt
-uvicorn main:app --reload
-```
-
-### Production Deployment
-```bash
-# Build Docker image
-docker build -t platform-backend .
-
-# Deploy to Kubernetes
-kubectl apply -f k8s/backend.yaml
-```
-
-## API Endpoints
-
-### Admin API
-- `POST /api/admin/auth/logout` - Admin logout
-- `GET /api/admin/{resource}` - List records (for admin interface)
-- `GET /api/admin/{resource}/{id}` - Get single record
-- `POST /api/admin/{resource}` - Create record
-- `PUT /api/admin/{resource}/{id}` - Update record
-- `DELETE /api/admin/{resource}/{id}` - Delete record
-
-### Metrics
-- `GET /api/admin/metrics/dashboard` - Dashboard metrics
-
-### Instance Management
-- `POST /api/admin/instances/{id}/start` - Start instance
-- `POST /api/admin/instances/{id}/stop` - Stop instance
-- `POST /api/admin/instances/{id}/restart` - Restart instance
-
-### Webhooks
-- `POST /webhooks/stripe` - Stripe webhook handler
-
-### Health
-- `GET /health` - Health check
+Provides APIs for:
+- Customer portal operations
+- Admin dashboard functionality
+- Instance management (Kubernetes)
+- Stripe webhook processing
+- Health monitoring
 
 ## Architecture
 
-```
-backend.py (400 lines)
-├── Supabase client (database)
-├── Stripe client (payments)
-├── FastAPI routes
-│   ├── Admin auth (simple)
-│   ├── React Admin CRUD
-│   ├── Dashboard metrics
-│   ├── Instance control (kubectl)
-│   └── Stripe webhooks
-└── Static file serving (production)
-```
+Single-file FastAPI application (`main.py`) designed for simplicity and maintainability.
 
-## Simplifications Made
+### API Structure
 
-1. **No JWT** - Simple admin auth with static credentials
-2. **No complex routers** - Everything in one file
-3. **No provisioning complexity** - Just kubectl commands
-4. **No webhook storage** - Process and forget
-5. **No user auth** - Customer portal uses Supabase directly
-6. **Single Dockerfile** - One simple container
+- `/api/admin/*` - Admin CRUD operations (React Admin compatible)
+- `/api/admin/metrics/*` - Dashboard and monitoring endpoints
+- `/api/admin/instances/*` - Instance control (start/stop/restart)
+- `/webhooks/stripe` - Payment event processing
+- `/health` - Service health check
 
-This is perfect for a solo developer who wants to focus on the product, not infrastructure complexity.
+### Authentication
+
+- Uses Supabase JWT tokens for authentication
+- Admin access controlled by `is_admin` flag in accounts table
+- Service-to-service auth via API keys
+
+### External Integrations
+
+- **Supabase**: Database and authentication
+- **Stripe**: Payment processing
+- **Kubernetes**: Instance management via kubectl
+
+## Development
+
+Runs on port 8000 by default. Supports hot-reload in development mode.
+
+## Environment Variables
+
+Requires:
+- `SUPABASE_URL` - Supabase project URL
+- `SUPABASE_SERVICE_KEY` - Service role key for admin operations
+- `STRIPE_SECRET_KEY` - Stripe API key
+- `STRIPE_WEBHOOK_SECRET` - Webhook endpoint secret

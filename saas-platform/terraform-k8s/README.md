@@ -23,10 +23,14 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
 
 4. **Docker Images:**
    The platform expects Docker images to be available in your Gitea registry.
-   Images needed:
+
+   Platform images needed:
    - `platform-frontend:latest`
-   - `stripe-handler:latest`
-   - `instance-provisioner:latest`
+   - `platform-backend:latest`
+
+   Customer instance images (from main MindRoom project):
+   - `mindroom-backend:latest`
+   - `mindroom-frontend:latest`
 
    These should be built and pushed to your registry before deployment.
 
@@ -39,7 +43,7 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
    - Longhorn for storage
 
 2. **DNS Records** via Porkbun
-   - Platform subdomains (app, admin, api, webhooks)
+   - Platform subdomains (app, api, webhooks)
    - Wildcard for customer instances
 
 3. **MindRoom Platform** via Helm
@@ -124,7 +128,7 @@ After deployment, configure OAuth providers in Supabase:
    http://localhost:3000/auth/callback
    ```
 
-See [setup-auth-instructions.md](../scripts/database/setup-auth-instructions.md) for detailed OAuth setup.
+Terraform will output OAuth setup instructions after deployment.
 
 ## Environments
 
