@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -60,15 +59,7 @@ async def provision_instance(
 
     namespace = "mindroom-instances"
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "kubectl",
-            "create",
-            "namespace",
-            namespace,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
+        await run_kubectl(["create", "namespace", namespace])
     except FileNotFoundError:
         error_msg = "Kubectl command not found. Kubernetes provisioning not available in this environment."
         logger.exception(error_msg)
@@ -108,25 +99,23 @@ async def provision_instance(
 
     try:
         # Install charts without waiting; we'll poll readiness ourselves
-        proc = await asyncio.create_subprocess_exec(
-            "helm",
-            "install",
-            helm_release_name,
-            "/app/k8s/instance/",
-            "--namespace",
-            namespace,
-            "--create-namespace",
-            "--set",
-            f"customer={customer_id}",
-            "--set",
-            f"baseDomain={PLATFORM_DOMAIN}",
-            "--set",
-            "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        code, stdout, stderr = await run_helm(
+            [
+                "install",
+                helm_release_name,
+                "/app/k8s/instance/",
+                "--namespace",
+                namespace,
+                "--create-namespace",
+                "--set",
+                f"customer={customer_id}",
+                "--set",
+                f"baseDomain={PLATFORM_DOMAIN}",
+                "--set",
+                "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
+            ],
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
+        if code != 0:
             # Mark as error in DB
             try:
                 sb.table("instances").update(
@@ -134,8 +123,8 @@ async def provision_instance(
                 ).eq("instance_id", customer_id).execute()
             except Exception:
                 logger.warning("Failed to update instance status to error after helm failure")
-            raise HTTPException(status_code=500, detail=f"Helm install failed: {stderr.decode()}")
-        logger.info("Helm install output: %s", stdout.decode())
+            raise HTTPException(status_code=500, detail=f"Helm install failed: {stderr}")
+        logger.info("Helm install output: %s", stdout)
     except HTTPException:
         raise
     except Exception as e:
@@ -197,19 +186,17 @@ async def start_instance_provisioner(
         raise HTTPException(status_code=404, detail=error_msg)
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "kubectl",
-            "scale",
-            f"deployment/mindroom-backend-{instance_id}",
-            "--replicas=1",
-            "--namespace=mindroom-instances",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        code, out, err = await run_kubectl(
+            [
+                "scale",
+                f"deployment/mindroom-backend-{instance_id}",
+                "--replicas=1",
+            ],
+            namespace="mindroom-instances",
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise Exception(stderr.decode())
-        logger.info("Started instance %s: %s", instance_id, stdout.decode())
+        if code != 0:
+            raise Exception(err)
+        logger.info("Started instance %s: %s", instance_id, out)
     except Exception as e:
         logger.exception("Failed to start instance %s", instance_id)
         raise HTTPException(status_code=500, detail=f"Failed to start instance: {e}") from e
@@ -234,19 +221,17 @@ async def stop_instance_provisioner(
         raise HTTPException(status_code=404, detail=error_msg)
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "kubectl",
-            "scale",
-            f"deployment/mindroom-backend-{instance_id}",
-            "--replicas=0",
-            "--namespace=mindroom-instances",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        code, out, err = await run_kubectl(
+            [
+                "scale",
+                f"deployment/mindroom-backend-{instance_id}",
+                "--replicas=0",
+            ],
+            namespace="mindroom-instances",
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise Exception(stderr.decode())
-        logger.info("Stopped instance %s: %s", instance_id, stdout.decode())
+        if code != 0:
+            raise Exception(err)
+        logger.info("Stopped instance %s: %s", instance_id, out)
     except Exception as e:
         logger.exception("Failed to stop instance %s", instance_id)
         raise HTTPException(status_code=500, detail=f"Failed to stop instance: {e}") from e
@@ -271,19 +256,17 @@ async def restart_instance_provisioner(
         raise HTTPException(status_code=404, detail=error_msg)
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "kubectl",
-            "rollout",
-            "restart",
-            f"deployment/mindroom-backend-{instance_id}",
-            "--namespace=mindroom-instances",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        code, out, err = await run_kubectl(
+            [
+                "rollout",
+                "restart",
+                f"deployment/mindroom-backend-{instance_id}",
+            ],
+            namespace="mindroom-instances",
         )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise Exception(stderr.decode())
-        logger.info("Restarted instance %s: %s", instance_id, stdout.decode())
+        if code != 0:
+            raise Exception(err)
+        logger.info("Restarted instance %s: %s", instance_id, out)
     except Exception as e:
         logger.exception("Failed to restart instance %s", instance_id)
         raise HTTPException(status_code=500, detail=f"Failed to restart instance: {e}") from e
