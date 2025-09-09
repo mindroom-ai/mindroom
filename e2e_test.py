@@ -73,6 +73,9 @@ class MindRoomE2ETest:
             config=config,
             ssl=False,  # Disable SSL verification for test server
         )
+        # Manually set user_id due to matrix-nio bug
+        # See: https://github.com/matrix-nio/matrix-nio/issues/492
+        self.client.user_id = f"@{self.username}:{domain}"
 
     async def login(self) -> None:
         """Login to Matrix."""

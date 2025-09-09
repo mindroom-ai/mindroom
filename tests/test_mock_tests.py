@@ -43,6 +43,8 @@ class TestMockingStrategy:
         homeserver = "https://matrix.example.org"
         user_id = "@test:example.org"
         client = nio.AsyncClient(homeserver, user_id)
+        # Manually set user_id due to matrix-nio bug
+        client.user_id = user_id
         yield client
         await client.close()
 
@@ -327,6 +329,8 @@ class TestMockingStrategyExtended:
         homeserver = "https://matrix.example.org"
         user_id = "@test:example.org"
         client = nio.AsyncClient(homeserver, user_id)
+        # Manually set user_id due to matrix-nio bug
+        client.user_id = user_id
         yield client
         await client.close()
 
