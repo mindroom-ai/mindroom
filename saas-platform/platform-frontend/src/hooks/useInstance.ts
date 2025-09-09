@@ -20,10 +20,11 @@ export interface Instance {
 export function useInstance() {
   const [instance, setInstance] = useState<Instance | null>(null)
   const [loading, setLoading] = useState(true)
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
   const supabase = createClient()
 
   useEffect(() => {
+    if (authLoading) return
     if (!user) {
       setLoading(false)
       return
@@ -61,7 +62,7 @@ export function useInstance() {
     return () => {
       clearInterval(interval)
     }
-  }, [user, supabase])
+  }, [user, authLoading, supabase])
 
   const restartInstance = async () => {
     if (!instance) return

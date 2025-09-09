@@ -1,4 +1,4 @@
-import { ExternalLink, CheckCircle, AlertCircle, Loader2, XCircle, Rocket } from 'lucide-react'
+import { ExternalLink, CheckCircle, AlertCircle, Loader2, XCircle, Rocket, Copy } from 'lucide-react'
 import Link from 'next/link'
 import { useState } from 'react'
 import type { Instance } from '@/hooks/useInstance'
@@ -6,6 +6,37 @@ import { provisionInstance } from '@/lib/api'
 
 export function InstanceCard({ instance }: { instance: Instance | null }) {
   const [isProvisioning, setIsProvisioning] = useState(false)
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // non-fatal
+    }
+  }
+
+  const getHostname = (url?: string | null) => {
+    if (!url) return null
+    try {
+      const u = new URL(url)
+      return u.hostname
+    } catch {
+      return null
+    }
+  }
+
+  const formatRelativeTime = (dateStr?: string) => {
+    if (!dateStr) return '—'
+    const date = new Date(dateStr)
+    const diff = Date.now() - date.getTime()
+    const seconds = Math.floor(diff / 1000)
+    const minutes = Math.floor(seconds / 60)
+    const hours = Math.floor(minutes / 60)
+    const days = Math.floor(hours / 24)
+    if (days > 0) return `${days}d ago`
+    if (hours > 0) return `${hours}h ago`
+    if (minutes > 0) return `${minutes}m ago`
+    return 'just now'
+  }
 
   const handleProvision = async () => {
     setIsProvisioning(true)
@@ -99,6 +130,10 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
     }
   }
 
+  const frontendHost = getHostname(instance.frontend_url)
+  const backendHost = getHostname(instance.backend_url)
+  const matrixHost = getHostname(instance.matrix_server_url)
+
   return (
     <div className="bg-white rounded-lg shadow-md p-6">
       <div className="flex justify-between items-start mb-4">
@@ -110,30 +145,68 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
       </div>
 
       <div className="space-y-3">
-        {/* Instance ID */}
-        <div className="flex items-center justify-between">
-          <span className="text-gray-600">Instance ID</span>
-          <span className="font-mono font-medium">{instance.instance_id}</span>
-        </div>
-
-        {/* Subdomain */}
-        <div className="flex items-center justify-between">
-          <span className="text-gray-600">Subdomain</span>
-          <span className="font-medium">{instance.subdomain}</span>
-        </div>
-
-        {/* URL */}
-        {instance.frontend_url && instance.status === 'running' && (
+        {/* Domain */}
+        {frontendHost && (
           <div className="flex items-center justify-between">
-            <span className="text-gray-600">URL</span>
-            <Link
-              href={instance.frontend_url}
-              target="_blank"
-              className="flex items-center gap-1 text-blue-600 hover:text-blue-700 font-medium"
-            >
-              Open
-              <ExternalLink className="w-3 h-3" />
-            </Link>
+            <span className="text-gray-600">Domain</span>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-sm">{frontendHost}</span>
+              <button
+                onClick={() => copyToClipboard(frontendHost)}
+                title="Copy domain"
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <Copy className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Frontend URL */}
+        {instance.frontend_url && (
+          <div className="flex items-center justify-between">
+            <span className="text-gray-600">Frontend</span>
+            <div className="flex items-center gap-2">
+              <Link
+                href={instance.frontend_url}
+                target="_blank"
+                className="flex items-center gap-1 text-blue-600 hover:text-blue-700 font-medium"
+              >
+                {frontendHost || 'Open'}
+                <ExternalLink className="w-3 h-3" />
+              </Link>
+              <button
+                onClick={() => copyToClipboard(instance.frontend_url!)}
+                title="Copy URL"
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <Copy className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Backend API */}
+        {instance.backend_url && (
+          <div className="flex items-center justify-between">
+            <span className="text-gray-600">API</span>
+            <div className="flex items-center gap-2">
+              <Link
+                href={instance.backend_url}
+                target="_blank"
+                className="flex items-center gap-1 text-blue-600 hover:text-blue-700 font-medium"
+              >
+                {backendHost || 'Open'}
+                <ExternalLink className="w-3 h-3" />
+              </Link>
+              <button
+                onClick={() => copyToClipboard(instance.backend_url!)}
+                title="Copy API URL"
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <Copy className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
 
@@ -144,17 +217,26 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
         </div>
 
         {/* Matrix Server */}
-        {instance.matrix_server_url && instance.status === 'running' && (
+        {instance.matrix_server_url && (
           <div className="flex items-center justify-between">
             <span className="text-gray-600">Matrix Server</span>
-            <Link
-              href={instance.matrix_server_url}
-              target="_blank"
-              className="flex items-center gap-1 text-purple-600 hover:text-purple-700 font-medium"
-            >
-              Connect
-              <ExternalLink className="w-3 h-3" />
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link
+                href={instance.matrix_server_url}
+                target="_blank"
+                className="flex items-center gap-1 text-purple-600 hover:text-purple-700 font-medium"
+              >
+                {matrixHost || 'Connect'}
+                <ExternalLink className="w-3 h-3" />
+              </Link>
+              <button
+                onClick={() => copyToClipboard(instance.matrix_server_url!)}
+                title="Copy Matrix URL"
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <Copy className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
 
@@ -162,8 +244,14 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
         <div className="flex items-center justify-between">
           <span className="text-gray-600">Last Updated</span>
           <span className="text-sm text-gray-500">
-            {new Date(instance.updated_at).toLocaleString()}
+            {formatRelativeTime(instance.updated_at)} · {new Date(instance.updated_at).toLocaleString()}
           </span>
+        </div>
+
+        {/* Instance ID */}
+        <div className="flex items-center justify-between">
+          <span className="text-gray-600">Instance ID</span>
+          <span className="font-mono font-medium">#{instance.instance_id}</span>
         </div>
       </div>
 

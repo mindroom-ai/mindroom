@@ -22,9 +22,10 @@ export interface Subscription {
 export function useSubscription() {
   const [subscription, setSubscription] = useState<Subscription | null>(null)
   const [loading, setLoading] = useState(true)
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
 
   useEffect(() => {
+    if (authLoading) return
     if (!user) {
       setLoading(false)
       return
@@ -59,7 +60,7 @@ export function useSubscription() {
     return () => {
       clearInterval(interval)
     }
-  }, [user])
+  }, [user, authLoading])
 
   return { subscription, loading }
 }

@@ -12,7 +12,7 @@ import { useRouter } from 'next/navigation'
 import { setSsoCookie, setupAccount } from '@/lib/api'
 
 export default function DashboardPage() {
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
   const { instance, loading: instanceLoading } = useInstance()
   const { subscription, loading: subscriptionLoading } = useSubscription()
   const [isSettingUp, setIsSettingUp] = useState(false)
@@ -30,6 +30,7 @@ export default function DashboardPage() {
       // Skip if: not logged in, still loading, already has subscription, already setting up,
       // an instance already exists, or we've already attempted setup once in this session.
       if (
+        authLoading ||
         !user ||
         subscriptionLoading ||
         instanceLoading ||
@@ -56,9 +57,9 @@ export default function DashboardPage() {
 
     setupFreeTier()
     return () => clearInterval(id)
-  }, [user, subscriptionLoading, subscription, isSettingUp, instance, instanceLoading, setupAttempted])
+  }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, instance, instanceLoading, setupAttempted])
 
-  if (instanceLoading || subscriptionLoading) {
+  if (authLoading || instanceLoading || subscriptionLoading) {
     return (
       <div className="flex items-center justify-center h-96">
         <div className="text-center">
