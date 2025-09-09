@@ -4,17 +4,17 @@ This document maps all backend API endpoints to their corresponding frontend usa
 
 ## Summary
 
-- **Total Backend Endpoints**: 39
-- **Endpoints Used in Frontend**: 15
-- **Unused Endpoints**: 24 (mostly admin panel features and internal system APIs)
+- **Total Backend Endpoints**: 35
+- **Endpoints Used in Frontend/Admin**: 24
+- **Unused Endpoints**: 11 (internal system APIs and admin mutating routes)
 
 ## 1. Health Check Endpoints
 
 ### GET `/health`
-- **Backend**: `backend/routes/health.py:12`
-- **Frontend Usage**: ❌ **NOT USED**
+- **Backend**: `backend/routes/health.py`
+- **Frontend Usage**:
+  - `platform-frontend/src/app/admin/page.tsx` (system health indicator)
 - **Purpose**: Health check for monitoring
-- **Note**: Should be used for frontend health monitoring
 
 ## 2. Account Management Endpoints
 
@@ -135,63 +135,74 @@ This document maps all backend API endpoints to their corresponding frontend usa
 - **Purpose**: Get platform statistics for admin dashboard
 
 ### POST `/admin/instances/{instance_id}/start`
-- **Backend**: `backend/routes/admin.py:40`
-- **Frontend Usage**: ❌ **NOT USED YET**
+- **Backend**: `backend/routes/admin.py`
+- **Frontend Usage**:
+  - `platform-frontend/src/components/admin/InstanceActions.tsx` (Start)
 - **Purpose**: Admin start any instance (proxies to provisioner)
 
 ### POST `/admin/instances/{instance_id}/stop`
-- **Backend**: `backend/routes/admin.py:46`
-- **Frontend Usage**: ❌ **NOT USED YET**
+- **Backend**: `backend/routes/admin.py`
+- **Frontend Usage**:
+  - `platform-frontend/src/components/admin/InstanceActions.tsx` (Stop)
 - **Purpose**: Admin stop any instance (proxies to provisioner)
 
 ### POST `/admin/instances/{instance_id}/restart`
-- **Backend**: `backend/routes/admin.py:52`
-- **Frontend Usage**: ❌ **NOT USED YET**
+- **Backend**: `backend/routes/admin.py`
+- **Frontend Usage**:
+  - `platform-frontend/src/components/admin/InstanceActions.tsx` (Restart)
 - **Purpose**: Admin restart any instance (proxies to provisioner)
 
 ### DELETE `/admin/instances/{instance_id}/uninstall`
-- **Backend**: `backend/routes/admin.py:58`
-- **Frontend Usage**: ❌ **NOT USED YET**
+- **Backend**: `backend/routes/admin.py`
+- **Frontend Usage**:
+  - `platform-frontend/src/components/admin/InstanceActions.tsx` (Uninstall)
 - **Purpose**: Admin uninstall any instance (proxies to provisioner)
 
 ### PUT `/admin/accounts/{account_id}/status`
-- **Backend**: `backend/routes/admin.py:64`
-- **Frontend Usage**: ❌ **NOT USED**
+- **Backend**: `backend/routes/admin.py`
+- **Frontend Usage**:
+  - `platform-frontend/src/app/admin/accounts/page.tsx` (inline status update control)
 - **Purpose**: Update account status (active, suspended, etc)
 
 ### POST `/admin/auth/logout`
-- **Backend**: `backend/routes/admin.py:110`
+- **Backend**: `backend/routes/admin.py`
 - **Frontend Usage**: ❌ **NOT USED**
 - **Purpose**: Admin logout placeholder
 
 ### GET `/admin/{resource}`
-- **Backend**: `backend/routes/admin.py:117` (React Admin generic list)
-- **Frontend Usage**: ❌ **NOT USED**
-- **Purpose**: Generic list endpoint for React Admin
+- **Backend**: `backend/routes/admin.py` (generic list)
+- **Frontend Usage**:
+  - `platform-frontend/src/app/admin/accounts/page.tsx` → `/admin/accounts`
+  - `platform-frontend/src/app/admin/subscriptions/page.tsx` → `/admin/subscriptions`
+  - `platform-frontend/src/app/admin/instances/page.tsx` → `/admin/instances`
+  - `platform-frontend/src/app/admin/audit-logs/page.tsx` → `/admin/audit_logs`
+  - `platform-frontend/src/app/admin/usage/page.tsx` → `/admin/usage_metrics`
+- **Purpose**: Generic list endpoint for admin resources
 
 ### GET `/admin/{resource}/{resource_id}`
-- **Backend**: `backend/routes/admin.py:160`
+- **Backend**: `backend/routes/admin.py`
 - **Frontend Usage**: ❌ **NOT USED**
-- **Purpose**: Get single record for React Admin
+- **Purpose**: Get single record for admin/React Admin
 
 ### POST `/admin/{resource}`
-- **Backend**: `backend/routes/admin.py:173`
+- **Backend**: `backend/routes/admin.py`
 - **Frontend Usage**: ❌ **NOT USED**
-- **Purpose**: Create record for React Admin
+- **Purpose**: Create record for admin/React Admin
 
 ### PUT `/admin/{resource}/{resource_id}`
-- **Backend**: `backend/routes/admin.py:185`
+- **Backend**: `backend/routes/admin.py`
 - **Frontend Usage**: ❌ **NOT USED**
-- **Purpose**: Update record for React Admin
+- **Purpose**: Update record for admin/React Admin
 
 ### DELETE `/admin/{resource}/{resource_id}`
-- **Backend**: `backend/routes/admin.py:198`
+- **Backend**: `backend/routes/admin.py`
 - **Frontend Usage**: ❌ **NOT USED**
-- **Purpose**: Delete record for React Admin
+- **Purpose**: Delete record for admin/React Admin
 
 ### GET `/admin/metrics/dashboard`
-- **Backend**: `backend/routes/admin.py:211`
-- **Frontend Usage**: ❌ **NOT USED**
+- **Backend**: `backend/routes/admin.py`
+- **Frontend Usage**:
+  - `platform-frontend/src/app/admin/page.tsx` (API-backed metrics cards)
 - **Purpose**: Get dashboard metrics for admin panel
 
 ## 8. Stripe Integration Endpoints
@@ -217,6 +228,20 @@ This document maps all backend API endpoints to their corresponding frontend usa
 - **Backend**: `backend/routes/webhooks.py:51`
 - **Frontend Usage**: ❌ **NOT USED** (External webhook from Stripe)
 - **Purpose**: Handle Stripe webhook events
+
+## 10. SSO Cookie Endpoints
+
+### POST `/my/sso-cookie`
+- **Backend**: `backend/routes/sso.py`
+- **Frontend Usage**:
+  - `platform-frontend/src/lib/api.ts` (setSsoCookie)
+- **Purpose**: Set SSO cookie for seamless instance access across subdomains
+
+### DELETE `/my/sso-cookie`
+- **Backend**: `backend/routes/sso.py`
+- **Frontend Usage**:
+  - `platform-frontend/src/lib/api.ts` (clearSsoCookie)
+- **Purpose**: Clear SSO cookie on logout
 
 ## Analysis & Recommendations
 
