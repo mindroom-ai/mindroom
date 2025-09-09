@@ -38,12 +38,12 @@ export function Header({ sidebarOpen, setSidebarOpen }: HeaderProps) {
           <div className="flex items-center gap-x-4">
             <div className="hidden sm:flex sm:flex-col sm:items-end">
               <p className="text-sm font-semibold leading-6 text-gray-900">
-                {user?.email}
+                {user.email}
               </p>
               <p className="text-xs leading-5 text-gray-500">Free Plan</p>
             </div>
             <div className="h-8 w-8 rounded-full bg-orange-500 flex items-center justify-center text-white font-semibold">
-              {user?.email?.[0]?.toUpperCase() || 'U'}
+              {user.email[0].toUpperCase()}
             </div>
           </div>
         </div>
