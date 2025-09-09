@@ -35,7 +35,7 @@ export function useUsage(days: number = 30) {
     // Get usage metrics through API
     const fetchUsage = async () => {
       try {
-        const response = await apiCall(`/api/v1/usage?days=${days}`)
+        const response = await apiCall(`/my/usage?days=${days}`)
 
         if (response.ok) {
           const data = await response.json()

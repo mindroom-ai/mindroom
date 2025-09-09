@@ -28,7 +28,7 @@ export default function SubscriptionsPage() {
   useEffect(() => {
     const fetchSubscriptions = async () => {
       try {
-        const response = await apiCall('/api/admin/subscriptions')
+        const response = await apiCall('/admin/subscriptions')
         if (response.ok) {
           const data = await response.json()
           setSubscriptions(data.subscriptions || [])

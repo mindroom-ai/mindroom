@@ -23,7 +23,7 @@ export default function AdminDashboard() {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const response = await apiCall('/api/admin/stats')
+        const response = await apiCall('/admin/stats')
         if (response.ok) {
           const data = await response.json()
           setStats(data)

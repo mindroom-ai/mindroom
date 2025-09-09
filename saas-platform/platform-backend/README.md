@@ -23,9 +23,9 @@ routers defined under `backend/`:
 
 ### API Structure
 
-- `/api/admin/*` - Admin CRUD operations (React Admin compatible)
-- `/api/admin/metrics/*` - Dashboard and monitoring endpoints
-- `/api/admin/instances/*` - Instance control (start/stop/restart)
+- `/admin/*` - Admin CRUD operations (React Admin compatible)
+- `/admin/metrics/*` - Dashboard and monitoring endpoints
+- `/admin/instances/*` - Instance control (start/stop/restart)
 - `/webhooks/stripe` - Payment event processing
 - `/health` - Service health check
 

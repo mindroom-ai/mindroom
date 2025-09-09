@@ -79,7 +79,7 @@ export async function middleware(request: NextRequest) {
     const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.staging.mindroom.chat'
 
     try {
-      const apiResponse = await fetch(`${API_URL}/api/v1/account/is-admin`, {
+      const apiResponse = await fetch(`${API_URL}/my/account/admin-status`, {
         headers: {
           'Authorization': `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',

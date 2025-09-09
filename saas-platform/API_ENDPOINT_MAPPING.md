@@ -18,21 +18,21 @@ This document maps all backend API endpoints to their corresponding frontend usa
 
 ## 2. Account Management Endpoints
 
-### GET `/api/v1/account/current`
+### GET `/my/account`
 - **Backend**: `backend/routes/accounts.py:12`
 - **Frontend Usage**:
   - `src/lib/api.ts:23` (getAccount function)
   - `src/lib/auth/admin.ts:44` (admin auth check)
 - **Purpose**: Get current user's account with subscription and instances
 
-### GET `/api/v1/account/is-admin`
+### GET `/my/account/admin-status`
 - **Backend**: `backend/routes/accounts.py:38`
 - **Frontend Usage**:
   - `src/lib/auth/admin.ts:25` (requireAdmin function)
   - `src/lib/auth/admin.ts:80` (isAdmin function)
 - **Purpose**: Check if current user is an admin
 
-### POST `/api/v1/account/setup`
+### POST `/my/account/setup`
 - **Backend**: `backend/routes/accounts.py:53`
 - **Frontend Usage**:
   - `src/lib/api.ts:32` (setupAccount function)
@@ -41,7 +41,7 @@ This document maps all backend API endpoints to their corresponding frontend usa
 
 ## 3. Subscription Endpoints
 
-### GET `/api/v1/subscription`
+### GET `/my/subscription`
 - **Backend**: `backend/routes/subscriptions.py:11`
 - **Frontend Usage**:
   - `src/lib/api.ts` (not directly exported)
@@ -50,7 +50,7 @@ This document maps all backend API endpoints to their corresponding frontend usa
 
 ## 4. Usage Metrics Endpoints
 
-### GET `/api/v1/usage`
+### GET `/my/usage`
 - **Backend**: `backend/routes/usage.py:12`
 - **Frontend Usage**:
   - `src/lib/api.ts` (not directly exported)
@@ -59,7 +59,7 @@ This document maps all backend API endpoints to their corresponding frontend usa
 
 ## 5. Instance Management Endpoints (User-facing)
 
-### GET `/api/v1/instances`
+### GET `/my/instances`
 - **Backend**: `backend/routes/instances.py:18`
 - **Frontend Usage**:
   - `src/lib/api.ts:42` (listInstances function)
@@ -67,28 +67,28 @@ This document maps all backend API endpoints to their corresponding frontend usa
   - `src/hooks/useInstance.ts` (imported)
 - **Purpose**: List instances for current user
 
-### POST `/api/v1/instances/provision`
+### POST `/my/instances/provision`
 - **Backend**: `backend/routes/instances.py:31`
 - **Frontend Usage**:
   - `src/lib/api.ts:51` (provisionInstance function)
   - `src/components/dashboard/InstanceCard.tsx` (imported)
 - **Purpose**: Provision an instance for the current user
 
-### POST `/api/v1/instances/{instance_id}/start`
+### POST `/my/instances/{instance_id}/start`
 - **Backend**: `backend/routes/instances.py:61`
 - **Frontend Usage**:
   - `src/lib/api.ts:60` (startInstance function)
   - `src/app/dashboard/instance/page.tsx` (imported)
 - **Purpose**: Start user's instance
 
-### POST `/api/v1/instances/{instance_id}/stop`
+### POST `/my/instances/{instance_id}/stop`
 - **Backend**: `backend/routes/instances.py:80`
 - **Frontend Usage**:
   - `src/lib/api.ts:69` (stopInstance function)
   - `src/app/dashboard/instance/page.tsx` (imported)
 - **Purpose**: Stop user's instance
 
-### POST `/api/v1/instances/{instance_id}/restart`
+### POST `/my/instances/{instance_id}/restart`
 - **Backend**: `backend/routes/instances.py:99`
 - **Frontend Usage**:
   - `src/lib/api.ts:78` (restartInstance function)
@@ -98,92 +98,92 @@ This document maps all backend API endpoints to their corresponding frontend usa
 
 ## 6. Provisioner Endpoints (API Key Protected)
 
-### POST `/api/v1/provision`
+### POST `/system/provision`
 - **Backend**: `backend/routes/provisioner.py:31`
 - **Frontend Usage**: ❌ **NOT USED** (Internal API)
 - **Purpose**: Provision a new instance (internal use)
 
-### POST `/api/v1/start/{instance_id}`
+### POST `/system/instances/{instance_id}/start`
 - **Backend**: `backend/routes/provisioner.py:182`
 - **Frontend Usage**: ❌ **NOT USED** (Internal API)
 - **Purpose**: Start an instance (internal use)
 
-### POST `/api/v1/stop/{instance_id}`
+### POST `/system/instances/{instance_id}/stop`
 - **Backend**: `backend/routes/provisioner.py:219`
 - **Frontend Usage**: ❌ **NOT USED** (Internal API)
 - **Purpose**: Stop an instance (internal use)
 
-### POST `/api/v1/restart/{instance_id}`
+### POST `/system/instances/{instance_id}/restart`
 - **Backend**: `backend/routes/provisioner.py:256`
 - **Frontend Usage**: ❌ **NOT USED** (Internal API)
 - **Purpose**: Restart an instance (internal use)
 
-### DELETE `/api/v1/uninstall/{instance_id}`
+### DELETE `/system/instances/{instance_id}/uninstall`
 - **Backend**: `backend/routes/provisioner.py:293`
 - **Frontend Usage**: ❌ **NOT USED** (Internal API)
 - **Purpose**: Completely uninstall/deprovision an instance
 
-### POST `/api/v1/sync-instances`
+### POST `/system/sync-instances`
 - **Backend**: `backend/routes/provisioner.py:352`
 - **Frontend Usage**: ❌ **NOT USED** (Internal API)
 - **Purpose**: Sync instance states between database and Kubernetes
 
 ## 7. Admin Endpoints
 
-### GET `/api/admin/stats`
+### GET `/admin/stats`
 - **Backend**: `backend/routes/admin.py:14`
 - **Frontend Usage**:
   - `src/app/admin/page.tsx:26` (via apiCall)
 - **Purpose**: Get platform statistics for admin dashboard
 
-### POST `/api/admin/instances/{instance_id}/restart`
+### POST `/admin/instances/{instance_id}/restart`
 - **Backend**: `backend/routes/admin.py:34`
 - **Frontend Usage**: ❌ **NOT USED**
 - **Purpose**: Restart a customer instance (admin action)
 
-### PUT `/api/admin/accounts/{account_id}/status`
+### PUT `/admin/accounts/{account_id}/status`
 - **Backend**: `backend/routes/admin.py:59`
 - **Frontend Usage**: ❌ **NOT USED**
 - **Purpose**: Update account status (admin action)
 
-### POST `/api/admin/auth/logout`
+### POST `/admin/auth/logout`
 - **Backend**: `backend/routes/admin.py:105`
 - **Frontend Usage**: ❌ **NOT USED**
 - **Purpose**: Admin logout placeholder
 
-### GET `/api/admin/{resource}`
+### GET `/admin/{resource}`
 - **Backend**: `backend/routes/admin.py:112` (React Admin generic list)
 - **Frontend Usage**: ❌ **NOT USED**
 - **Purpose**: Generic list endpoint for React Admin
 
-### GET `/api/admin/{resource}/{resource_id}`
+### GET `/admin/{resource}/{resource_id}`
 - **Backend**: `backend/routes/admin.py:151`
 - **Frontend Usage**: ❌ **NOT USED**
 - **Purpose**: Get single record for React Admin
 
-### POST `/api/admin/{resource}`
+### POST `/admin/{resource}`
 - **Backend**: `backend/routes/admin.py:164`
 - **Frontend Usage**: ❌ **NOT USED**
 - **Purpose**: Create record for React Admin
 
-### PUT `/api/admin/{resource}/{resource_id}`
+### PUT `/admin/{resource}/{resource_id}`
 - **Backend**: `backend/routes/admin.py:176`
 - **Frontend Usage**: ❌ **NOT USED**
 - **Purpose**: Update record for React Admin
 
-### DELETE `/api/admin/{resource}/{resource_id}`
+### DELETE `/admin/{resource}/{resource_id}`
 - **Backend**: `backend/routes/admin.py:189`
 - **Frontend Usage**: ❌ **NOT USED**
 - **Purpose**: Delete record for React Admin
 
-### GET `/api/admin/metrics/dashboard`
+### GET `/admin/metrics/dashboard`
 - **Backend**: `backend/routes/admin.py:202`
 - **Frontend Usage**: ❌ **NOT USED**
 - **Purpose**: Get dashboard metrics for admin panel
 
 ## 8. Stripe Integration Endpoints
 
-### POST `/api/v1/stripe/checkout`
+### POST `/stripe/checkout`
 - **Backend**: `backend/routes/stripe_routes.py:19`
 - **Frontend Usage**:
   - `src/lib/api.ts:88` (createCheckoutSession function)
@@ -191,7 +191,7 @@ This document maps all backend API endpoints to their corresponding frontend usa
   - `src/app/pricing/page.tsx` (imported)
 - **Purpose**: Create Stripe checkout session for subscription
 
-### POST `/api/v1/stripe/portal`
+### POST `/stripe/portal`
 - **Backend**: `backend/routes/stripe_routes.py:68`
 - **Frontend Usage**:
   - `src/lib/api.ts:100` (createPortalSession function)

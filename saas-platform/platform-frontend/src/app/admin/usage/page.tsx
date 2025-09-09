@@ -36,7 +36,7 @@ export default function UsagePage() {
 
         // Use the generic admin endpoint with date filter
         const response = await apiCall(
-          `/api/admin/usage_metrics?_sort=created_at&_order=DESC&created_at_gte=${thirtyDaysAgo.toISOString()}`
+          `/admin/usage_metrics?_sort=created_at&_order=DESC&created_at_gte=${thirtyDaysAgo.toISOString()}`
         )
 
         if (response.ok) {

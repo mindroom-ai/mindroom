@@ -17,8 +17,8 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
     try {
       const method = action === 'uninstall' ? 'DELETE' : 'POST'
       const endpoint = action === 'uninstall'
-        ? `/api/admin/instances/${instanceId}/uninstall`
-        : `/api/admin/instances/${instanceId}/${action}`
+        ? `/admin/instances/${instanceId}/uninstall`
+        : `/admin/instances/${instanceId}/${action}`
 
       const response = await apiCall(endpoint, { method })
 

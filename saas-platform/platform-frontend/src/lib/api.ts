@@ -21,7 +21,7 @@ export async function apiCall(
 
 // Account Management
 export async function getAccount() {
-  const response = await apiCall('/api/v1/account/current')
+  const response = await apiCall('/my/account')
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to fetch account')
@@ -30,7 +30,7 @@ export async function getAccount() {
 }
 
 export async function setupAccount() {
-  const response = await apiCall('/api/v1/account/setup', { method: 'POST' })
+  const response = await apiCall('/my/account/setup', { method: 'POST' })
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to setup account')
@@ -40,7 +40,7 @@ export async function setupAccount() {
 
 // Instance Management
 export async function listInstances() {
-  const response = await apiCall('/api/v1/instances')
+  const response = await apiCall('/my/instances')
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to fetch instances')
@@ -49,7 +49,7 @@ export async function listInstances() {
 }
 
 export async function provisionInstance() {
-  const response = await apiCall('/api/v1/instances/provision', { method: 'POST' })
+  const response = await apiCall('/my/instances/provision', { method: 'POST' })
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to provision instance')
@@ -58,7 +58,7 @@ export async function provisionInstance() {
 }
 
 export async function startInstance(instanceId: string | number) {
-  const response = await apiCall(`/api/v1/instances/${String(instanceId)}/start`, { method: 'POST' })
+  const response = await apiCall(`/my/instances/${String(instanceId)}/start`, { method: 'POST' })
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to start instance')
@@ -67,7 +67,7 @@ export async function startInstance(instanceId: string | number) {
 }
 
 export async function stopInstance(instanceId: string | number) {
-  const response = await apiCall(`/api/v1/instances/${String(instanceId)}/stop`, { method: 'POST' })
+  const response = await apiCall(`/my/instances/${String(instanceId)}/stop`, { method: 'POST' })
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to stop instance')
@@ -76,7 +76,7 @@ export async function stopInstance(instanceId: string | number) {
 }
 
 export async function restartInstance(instanceId: string | number) {
-  const response = await apiCall(`/api/v1/instances/${String(instanceId)}/restart`, { method: 'POST' })
+  const response = await apiCall(`/my/instances/${String(instanceId)}/restart`, { method: 'POST' })
   if (!response.ok) {
     const error = await response.text()
     throw new Error(error || 'Failed to restart instance')
@@ -86,7 +86,7 @@ export async function restartInstance(instanceId: string | number) {
 
 // Stripe Integration (to be added)
 export async function createCheckoutSession(priceId: string, tier: string) {
-  const response = await apiCall('/api/v1/stripe/checkout', {
+  const response = await apiCall('/stripe/checkout', {
     method: 'POST',
     body: JSON.stringify({ price_id: priceId, tier })
   })
@@ -98,7 +98,7 @@ export async function createCheckoutSession(priceId: string, tier: string) {
 }
 
 export async function createPortalSession() {
-  const response = await apiCall('/api/v1/stripe/portal', {
+  const response = await apiCall('/stripe/portal', {
     method: 'POST'
   })
   if (!response.ok) {

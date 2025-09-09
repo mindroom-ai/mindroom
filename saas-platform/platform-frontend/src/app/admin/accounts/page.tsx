@@ -23,7 +23,7 @@ export default function AccountsPage() {
   useEffect(() => {
     const fetchAccounts = async () => {
       try {
-        const response = await apiCall('/api/admin/accounts')
+        const response = await apiCall('/admin/accounts')
         if (response.ok) {
           const data = await response.json()
           setAccounts(data.accounts || [])

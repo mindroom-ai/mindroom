@@ -38,7 +38,7 @@ async def _background_mark_running_when_ready(instance_id: str, namespace: str =
 async def provision_instance(
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
-    background_tasks: BackgroundTasks | None = None,
+    background_tasks: BackgroundTasks = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Provision a new instance (compatible with customer portal)."""
     if authorization != f"Bearer {PROVISIONER_API_KEY}":

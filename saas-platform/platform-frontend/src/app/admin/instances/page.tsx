@@ -28,7 +28,7 @@ export default function InstancesPage() {
   useEffect(() => {
     const fetchInstances = async () => {
       try {
-        const response = await apiCall('/api/admin/instances')
+        const response = await apiCall('/admin/instances')
         if (response.ok) {
           const data = await response.json()
           // Generic admin list endpoint returns { data, total }

@@ -33,7 +33,7 @@ export function useSubscription() {
     // Get user's subscription through API
     const fetchSubscription = async () => {
       try {
-        const response = await apiCall('/api/v1/subscription')
+        const response = await apiCall('/my/subscription')
 
         if (response.ok) {
           const data = await response.json()

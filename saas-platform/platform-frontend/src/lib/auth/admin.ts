@@ -22,7 +22,7 @@ export async function requireAdmin() {
 
   // Check admin status via API
   try {
-    const response = await fetch(`${API_URL}/api/v1/account/is-admin`, {
+    const response = await fetch(`${API_URL}/my/account/admin-status`, {
       headers: {
         'Authorization': `Bearer ${session.access_token}`,
         'Content-Type': 'application/json',
@@ -41,7 +41,7 @@ export async function requireAdmin() {
     }
 
     // Also get full account info
-    const accountResponse = await fetch(`${API_URL}/api/v1/account/current`, {
+    const accountResponse = await fetch(`${API_URL}/my/account`, {
       headers: {
         'Authorization': `Bearer ${session.access_token}`,
         'Content-Type': 'application/json',
@@ -77,7 +77,7 @@ export async function isAdmin() {
   }
 
   try {
-    const response = await fetch(`${API_URL}/api/v1/account/is-admin`, {
+    const response = await fetch(`${API_URL}/my/account/admin-status`, {
       headers: {
         'Authorization': `Bearer ${session.access_token}`,
         'Content-Type': 'application/json',

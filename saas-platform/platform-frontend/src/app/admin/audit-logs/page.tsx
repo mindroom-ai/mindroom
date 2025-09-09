@@ -27,7 +27,7 @@ export default function AuditLogsPage() {
       try {
         // Get last 100 audit logs
         const response = await apiCall(
-          '/api/admin/audit_logs?_sort=created_at&_order=DESC&_start=0&_end=100'
+          '/admin/audit_logs?_sort=created_at&_order=DESC&_start=0&_end=100'
         )
 
         if (response.ok) {
