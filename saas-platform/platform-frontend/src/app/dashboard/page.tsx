@@ -16,6 +16,7 @@ export default function DashboardPage() {
   const { instance, loading: instanceLoading } = useInstance()
   const { subscription, loading: subscriptionLoading } = useSubscription()
   const [isSettingUp, setIsSettingUp] = useState(false)
+  const [setupAttempted, setSetupAttempted] = useState(false)
   const router = useRouter()
 
   useEffect(() => {
@@ -26,13 +27,25 @@ export default function DashboardPage() {
 
     // Auto-setup free tier if user has no subscription
     const setupFreeTier = async () => {
-      if (!user || subscriptionLoading || subscription || isSettingUp) {
+      // Skip if: not logged in, still loading, already has subscription, already setting up,
+      // an instance already exists, or we've already attempted setup once in this session.
+      if (
+        !user ||
+        subscriptionLoading ||
+        instanceLoading ||
+        subscription ||
+        isSettingUp ||
+        instance ||
+        setupAttempted
+      ) {
         return
       }
 
+      setSetupAttempted(true)
       setIsSettingUp(true)
       try {
         await setupAccount()
+        // Trigger a refresh; hooks poll and will pick up the new subscription
         router.refresh()
       } catch (error) {
         console.error('Error setting up free tier:', error)
@@ -43,7 +56,7 @@ export default function DashboardPage() {
 
     setupFreeTier()
     return () => clearInterval(id)
-  }, [user, subscriptionLoading, subscription, isSettingUp])
+  }, [user, subscriptionLoading, subscription, isSettingUp, instance, instanceLoading, setupAttempted])
 
   if (instanceLoading || subscriptionLoading) {
     return (
@@ -56,8 +69,8 @@ export default function DashboardPage() {
     )
   }
 
-  // Show setup message only when actually setting up a new free tier
-  if (isSettingUp && !subscription) {
+  // Show setup message only when actively setting up AND no instance exists yet
+  if (isSettingUp && !subscription && !instance) {
     return (
       <div className="flex items-center justify-center h-96">
         <div className="text-center">
