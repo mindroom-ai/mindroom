@@ -22,7 +22,7 @@ def main() -> int:
     # Copy models from source to target
     if target.get("models") != source.get("models"):
         target["models"] = source["models"]
-        
+
         # Also sync memory LLM and router if they exist
         if "memory" in source and "llm" in source["memory"]:
             if "memory" not in target:
