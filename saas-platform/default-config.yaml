@@ -298,6 +298,9 @@ models:
   default:
     provider: openrouter
     id: google/gemini-2.5-flash
+  gpt5nano:
+    provider: openai
+    id: gpt-5-nano-2025-08-07
   sonnet:
     provider: openrouter
     id: anthropic/claude-sonnet-4
@@ -328,7 +331,7 @@ models:
 room_models:
   research: haiku
 router:
-  model: default
+  model: gpt5nano
 teams:
   code_team:
     agents:

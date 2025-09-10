@@ -17,6 +17,10 @@ SAAS_MODELS = {
         "provider": "openrouter",
         "id": "google/gemini-2.5-flash",
     },
+    "gpt5nano": {
+        "provider": "openai",
+        "id": "gpt-5-nano-2025-08-07",
+    },
     "sonnet": {
         "provider": "openrouter",
         "id": "anthropic/claude-sonnet-4",
@@ -96,9 +100,9 @@ def main() -> int:
                 },
             }
 
-    # Override router to use default model
+    # Override router to use gpt5nano model for better structured output support
     if "router" in config:
-        config["router"]["model"] = "default"
+        config["router"]["model"] = "gpt5nano"
 
     # Save to target
     with target_path.open("w") as f:
