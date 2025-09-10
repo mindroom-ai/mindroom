@@ -1,132 +1,234 @@
+'use client'
+
 import Link from 'next/link'
-import { Check } from 'lucide-react'
+import { Check, X, Sparkles, Zap, Crown } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
 const plans = [
   {
     name: 'Free',
+    icon: Sparkles,
     price: '$0',
     period: 'forever',
     description: 'Perfect for trying out MindRoom',
     features: [
-      '1 AI Agent',
-      '100 messages/day',
-      '1GB storage',
-      'Community support',
-      'Basic integrations',
+      { text: '1 AI Agent', included: true },
+      { text: '100 messages/day', included: true },
+      { text: '1GB storage', included: true },
+      { text: 'Community support', included: true },
+      { text: 'Basic integrations', included: true },
+      { text: 'Custom workflows', included: false },
+      { text: 'Analytics dashboard', included: false },
+      { text: 'Priority support', included: false },
     ],
     cta: 'Start Free',
     href: '/auth/signup',
     featured: false,
+    gradient: 'from-gray-500 to-gray-600',
   },
   {
     name: 'Starter',
+    icon: Zap,
     price: '$49',
     period: '/month',
     description: 'Great for small teams',
     features: [
-      '5 AI Agents',
-      '5,000 messages/day',
-      '10GB storage',
-      'Priority support',
-      'All integrations',
-      'Custom workflows',
-      'Analytics dashboard',
+      { text: '5 AI Agents', included: true },
+      { text: '5,000 messages/day', included: true },
+      { text: '10GB storage', included: true },
+      { text: 'Priority support', included: true },
+      { text: 'All integrations', included: true },
+      { text: 'Custom workflows', included: true },
+      { text: 'Analytics dashboard', included: true },
+      { text: 'Team training', included: false },
     ],
-    cta: 'Start Trial',
+    cta: 'Start 14-Day Trial',
     href: '/auth/signup?plan=starter',
     featured: true,
+    gradient: 'from-orange-500 to-orange-600',
   },
   {
     name: 'Professional',
+    icon: Crown,
     price: '$199',
     period: '/month',
     description: 'For growing businesses',
     features: [
-      'Unlimited AI Agents',
-      '50,000 messages/day',
-      '100GB storage',
-      '24/7 phone support',
-      'Advanced analytics',
-      'Custom integrations',
-      'SLA guarantee',
-      'Team training',
+      { text: 'Unlimited AI Agents', included: true },
+      { text: '50,000 messages/day', included: true },
+      { text: '100GB storage', included: true },
+      { text: '24/7 phone support', included: true },
+      { text: 'Advanced analytics', included: true },
+      { text: 'Custom integrations', included: true },
+      { text: 'SLA guarantee', included: true },
+      { text: 'Team training', included: true },
     ],
-    cta: 'Start Trial',
+    cta: 'Start 14-Day Trial',
     href: '/auth/signup?plan=professional',
     featured: false,
+    gradient: 'from-purple-500 to-purple-600',
   },
 ]
 
 export function Pricing() {
+  const [isVisible, setIsVisible] = useState(false)
+  const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly')
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setIsVisible(true)
+        }
+      },
+      { threshold: 0.1 }
+    )
+
+    const element = document.getElementById('pricing')
+    if (element) observer.observe(element)
+
+    return () => {
+      if (element) observer.unobserve(element)
+    }
+  }, [])
+
   return (
-    <section className="py-20 px-6 dark:bg-gray-900">
-      <div className="container mx-auto max-w-6xl">
+    <section id="pricing" className="py-24 px-6 relative overflow-hidden bg-gradient-to-b from-gray-50 to-white dark:from-gray-900 dark:to-gray-800">
+      {/* Background decoration */}
+      <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-r from-orange-200 to-pink-200 dark:from-orange-900/10 dark:to-pink-900/10 rounded-full filter blur-3xl opacity-20"></div>
+      <div className="absolute bottom-0 left-0 w-96 h-96 bg-gradient-to-r from-blue-200 to-purple-200 dark:from-blue-900/10 dark:to-purple-900/10 rounded-full filter blur-3xl opacity-20"></div>
+
+      <div className="container mx-auto max-w-7xl relative z-10">
         <div className="text-center mb-12">
-          <h2 className="text-4xl font-bold mb-4 dark:text-white">
+          <h2 className="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
             Simple, Transparent Pricing
           </h2>
-          <p className="text-xl text-gray-600 dark:text-gray-300">
-            Start free, upgrade when you need more power
+          <p className="text-xl text-gray-600 dark:text-gray-300 max-w-3xl mx-auto mb-8">
+            Start free, upgrade when you need more power. No hidden fees, no surprises.
           </p>
-        </div>
 
-        <div className="grid md:grid-cols-3 gap-8">
-          {plans.map((plan, index) => (
-            <div
-              key={index}
-              className={`bg-white dark:bg-gray-800 rounded-2xl p-8 ${
-                plan.featured
-                  ? 'ring-2 ring-orange-500 shadow-xl scale-105'
-                  : 'shadow-lg'
+          {/* Billing toggle */}
+          <div className="inline-flex items-center gap-2 p-1 bg-gray-100 dark:bg-gray-800 rounded-full">
+            <button
+              onClick={() => setBillingCycle('monthly')}
+              className={`px-6 py-2.5 rounded-full font-medium transition-all duration-300 ${
+                billingCycle === 'monthly'
+                  ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-white shadow-lg transform scale-105'
+                  : 'text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white'
               }`}
             >
-              {plan.featured && (
-                <div className="text-center mb-4">
-                  <span className="bg-orange-500 text-white text-sm font-medium px-3 py-1 rounded-full">
-                    Most Popular
-                  </span>
-                </div>
-              )}
-
-              <div className="text-center mb-8">
-                <h3 className="text-2xl font-bold mb-2 dark:text-white">{plan.name}</h3>
-                <div className="flex items-baseline justify-center gap-1 mb-2">
-                  <span className="text-4xl font-bold dark:text-white">{plan.price}</span>
-                  <span className="text-gray-600 dark:text-gray-400">{plan.period}</span>
-                </div>
-                <p className="text-gray-600 dark:text-gray-400">{plan.description}</p>
-              </div>
-
-              <ul className="space-y-3 mb-8">
-                {plan.features.map((feature, featureIndex) => (
-                  <li key={featureIndex} className="flex items-start gap-3">
-                    <Check className="w-5 h-5 text-green-500 mt-0.5" />
-                    <span className="text-gray-700 dark:text-gray-300">{feature}</span>
-                  </li>
-                ))}
-              </ul>
-
-              <Link
-                href={plan.href}
-                className={`block text-center py-3 px-6 rounded-lg font-medium transition-colors ${
-                  plan.featured
-                    ? 'bg-orange-500 text-white hover:bg-orange-600'
-                    : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white hover:bg-gray-200 dark:hover:bg-gray-600'
-                }`}
-              >
-                {plan.cta}
-              </Link>
-            </div>
-          ))}
+              Monthly
+            </button>
+            <button
+              onClick={() => setBillingCycle('yearly')}
+              className={`px-6 py-2.5 rounded-full font-medium transition-all duration-300 flex items-center gap-2 ${
+                billingCycle === 'yearly'
+                  ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-white shadow-lg transform scale-105'
+                  : 'text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white'
+              }`}
+            >
+              Yearly
+              <span className={`text-xs px-2 py-0.5 rounded-full transition-all duration-300 ${
+                billingCycle === 'yearly'
+                  ? 'bg-white/20 text-white'
+                  : 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+              }`}>
+                Save 20%
+              </span>
+            </button>
+          </div>
         </div>
 
-        <div className="text-center mt-12">
-          <p className="text-gray-600 dark:text-gray-400">
-            Need a custom plan?{' '}
-            <Link href="/contact" className="text-orange-600 dark:text-orange-400 hover:text-orange-700 dark:hover:text-orange-300 font-medium">
-              Contact our sales team
-            </Link>
+        <div className="grid lg:grid-cols-3 gap-8 max-w-6xl mx-auto">
+          {plans.map((plan, index) => {
+            const Icon = plan.icon
+            const price = billingCycle === 'yearly' && plan.price !== '$0'
+              ? `$${Math.floor(parseInt(plan.price.slice(1)) * 0.8)}`
+              : plan.price
+
+            return (
+              <div
+                key={index}
+                className={`relative bg-white dark:bg-gray-800 rounded-3xl overflow-hidden transition-all duration-500 ${
+                  plan.featured
+                    ? 'shadow-2xl scale-105 border-2 border-orange-500'
+                    : 'shadow-xl hover:shadow-2xl border border-gray-200 dark:border-gray-700'
+                } ${isVisible ? 'fade-in-up' : 'opacity-0'}`}
+                style={{ animationDelay: `${index * 0.1}s` }}
+              >
+                {/* Featured badge */}
+                {plan.featured && (
+                  <div className="absolute top-0 right-0 bg-gradient-to-br from-orange-500 to-orange-600 text-white text-sm font-bold px-6 py-2 rounded-bl-2xl">
+                    MOST POPULAR
+                  </div>
+                )}
+
+                {/* Card content */}
+                <div className="p-8">
+                  {/* Icon and name */}
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className={`w-12 h-12 bg-gradient-to-br ${plan.gradient} rounded-xl flex items-center justify-center`}>
+                      <Icon className="w-6 h-6 text-white" />
+                    </div>
+                    <h3 className="text-2xl font-bold text-gray-900 dark:text-white">{plan.name}</h3>
+                  </div>
+
+                  {/* Price */}
+                  <div className="mb-4">
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-5xl font-bold text-gray-900 dark:text-white">{price}</span>
+                      <span className="text-gray-600 dark:text-gray-400">
+                        {plan.period === 'forever' ? plan.period : billingCycle === 'yearly' ? '/year' : plan.period}
+                      </span>
+                    </div>
+                    <p className="text-gray-600 dark:text-gray-400 mt-2">{plan.description}</p>
+                  </div>
+
+                  {/* CTA Button */}
+                  <Link
+                    href={plan.href}
+                    className={`block text-center py-3 px-6 rounded-full font-semibold mb-8 cursor-pointer ${
+                      plan.featured
+                        ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-white transition-all duration-300 hover:from-orange-600 hover:to-orange-700 hover:shadow-2xl hover:shadow-orange-500/40 hover:-translate-y-1 transform'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white transition-all duration-300 hover:bg-gradient-to-r hover:from-gray-200 hover:to-gray-300 dark:hover:from-gray-600 dark:hover:to-gray-500 hover:shadow-2xl hover:-translate-y-1 transform'
+                    }`}
+                  >
+                    {plan.cta}
+                  </Link>
+
+                  {/* Features list */}
+                  <ul className="space-y-4">
+                    {plan.features.map((feature, featureIndex) => (
+                      <li key={featureIndex} className="flex items-start gap-3">
+                        {feature.included ? (
+                          <Check className="w-5 h-5 text-green-500 mt-0.5 flex-shrink-0" />
+                        ) : (
+                          <X className="w-5 h-5 text-gray-300 dark:text-gray-600 mt-0.5 flex-shrink-0" />
+                        )}
+                        <span className={feature.included ? 'text-gray-700 dark:text-gray-300' : 'text-gray-400 dark:text-gray-600'}>
+                          {feature.text}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Enterprise CTA */}
+        <div className="mt-16 text-center p-8 bg-gradient-to-r from-gray-900 to-gray-800 dark:from-gray-800 dark:to-gray-700 rounded-2xl max-w-4xl mx-auto">
+          <h3 className="text-2xl font-bold text-white mb-3">Need an Enterprise Solution?</h3>
+          <p className="text-gray-300 mb-6">
+            Get custom AI agents, dedicated support, and enterprise-grade security for your organization.
           </p>
+          <Link
+            href="/contact"
+            className="inline-flex items-center px-8 py-3 bg-white text-gray-900 font-semibold rounded-full hover:shadow-xl hover:scale-105 transition-all duration-300"
+          >
+            Contact Sales Team
+          </Link>
         </div>
       </div>
     </section>

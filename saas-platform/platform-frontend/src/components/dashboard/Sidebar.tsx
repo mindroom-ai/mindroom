@@ -13,6 +13,7 @@ import {
   X
 } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
+import { MindRoomLogo } from '@/components/MindRoomLogo'
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: Home },
@@ -63,7 +64,7 @@ export function Sidebar({ sidebarOpen, setSidebarOpen }: SidebarProps) {
   // Extract common logo with dark mode support
   const logo = (
     <Link href="/dashboard" className="flex items-center gap-2">
-      <span className="text-3xl">🧠</span>
+      <MindRoomLogo className="text-orange-500" size={32} />
       <span className="text-xl font-bold dark:text-white">MindRoom</span>
     </Link>
   )
