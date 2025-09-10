@@ -1,7 +1,10 @@
+'use client'
+
 import Link from 'next/link'
 import { Hero } from '@/components/landing/Hero'
 import { Features } from '@/components/landing/Features'
 import { Pricing } from '@/components/landing/Pricing'
+import { DarkModeToggle } from '@/components/DarkModeToggle'
 
 export default function LandingPage() {
   return (
@@ -13,7 +16,8 @@ export default function LandingPage() {
             <span className="text-3xl">🧠</span>
             <span className="text-2xl font-bold dark:text-white">MindRoom</span>
           </div>
-          <div className="flex gap-4">
+          <div className="flex items-center gap-4">
+            <DarkModeToggle />
             <Link href="/auth/login" className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white">
               Sign In
             </Link>
