@@ -61,6 +61,8 @@ export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) 
       redirectTo={computedRedirect}
       providers={['google', 'github']}
       showLinks={view === 'sign_in'}
+      magicLink={false}
+      onlyThirdPartyProviders={false}
     />
   )
 }
