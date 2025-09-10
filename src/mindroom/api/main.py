@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from supabase import create_client
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -71,6 +70,8 @@ ACCOUNT_ID = os.getenv("ACCOUNT_ID")  # optional: enforce instance ownership
 _supabase_auth = None
 if SUPABASE_URL and SUPABASE_ANON_KEY:
     try:
+        from supabase import create_client
+
         _supabase_auth = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     except Exception:
         _supabase_auth = None

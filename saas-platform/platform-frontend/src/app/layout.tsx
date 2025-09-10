@@ -17,7 +17,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={inter.className} suppressHydrationWarning>
-      <body className="min-h-screen bg-gradient-to-br from-amber-50 via-orange-50/40 to-yellow-50/50 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900 antialiased">
+      <body className="min-h-screen bg-background text-foreground antialiased transition-colors">
         <DarkModeProvider>
           {children}
         </DarkModeProvider>

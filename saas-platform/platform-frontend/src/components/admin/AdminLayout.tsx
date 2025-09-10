@@ -25,11 +25,11 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
 
   return (
-    <div className="flex h-screen bg-gray-100">
+    <div className="flex h-screen bg-background">
       {/* Sidebar */}
-      <div className="w-64 bg-white shadow-lg">
+      <div className="w-64 bg-white dark:bg-gray-900 shadow-lg">
         <div className="p-6">
-          <h1 className="text-2xl font-bold text-gray-800">MindRoom Admin</h1>
+          <h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100">MindRoom Admin</h1>
         </div>
 
         <nav className="mt-6">
@@ -44,8 +44,8 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
                 href={item.href}
                 className={`flex items-center px-6 py-3 text-sm font-medium transition-colors ${
                   isActive
-                    ? 'bg-orange-50 text-orange-600 border-r-4 border-orange-600'
-                    : 'text-gray-700 hover:bg-gray-50 hover:text-gray-900'
+                    ? 'bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 border-r-4 border-orange-600 dark:border-orange-400'
+                    : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
                 }`}
               >
                 <Icon className="w-5 h-5 mr-3" />
@@ -58,7 +58,7 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
         <div className="absolute bottom-0 w-64 p-6">
           <Link
             href="/dashboard"
-            className="flex items-center text-sm text-gray-600 hover:text-gray-900"
+            className="flex items-center text-sm text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100"
           >
             <LogOut className="w-4 h-4 mr-2" />
             Exit Admin
