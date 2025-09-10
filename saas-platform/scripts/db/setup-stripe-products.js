@@ -66,8 +66,6 @@ async function createProducts() {
     console.log('# Stripe Price IDs');
     console.log(`STRIPE_PRICE_STARTER=${prices[0].id}`);
     console.log(`STRIPE_PRICE_PROFESSIONAL=${prices[1].id}`);
-    console.log(`STRIPE_PRICE_STARTER=${prices[0].id}`);
-    console.log(`STRIPE_PRICE_PROFESSIONAL=${prices[1].id}`);
 
     console.log('\n✨ Setup complete!');
 

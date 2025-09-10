@@ -87,7 +87,7 @@ export async function middleware(request: NextRequest) {
       })
 
       if (!apiResponse.ok) {
-        console.error('[Middleware] Admin check API error:', apiResponse.status)
+        // Admin check failed - redirect to dashboard
         return NextResponse.redirect(new URL('/dashboard', request.url))
       }
 
@@ -97,7 +97,7 @@ export async function middleware(request: NextRequest) {
         return NextResponse.redirect(new URL('/dashboard', request.url))
       }
     } catch (error) {
-      console.error('[Middleware] Admin check exception:', error instanceof Error ? error.message : 'Unknown error')
+      // Admin check exception - redirect to dashboard
       return NextResponse.redirect(new URL('/dashboard', request.url))
     }
   }

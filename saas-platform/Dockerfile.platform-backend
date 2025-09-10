@@ -19,6 +19,8 @@ COPY platform-backend/ .
 
 # Copy instance Helm chart for provisioning
 COPY k8s/instance /app/k8s/instance/
+# Copy default-config.yaml to where the symlink expects it
+COPY default-config.yaml /app/default-config.yaml
 
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

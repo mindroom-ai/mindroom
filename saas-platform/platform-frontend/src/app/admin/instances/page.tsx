@@ -24,25 +24,45 @@ interface Instance {
 export default function InstancesPage() {
   const [instances, setInstances] = useState<Instance[]>([])
   const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
+
+  const fetchInstances = async () => {
+    try {
+      setLoading(true)
+      const response = await apiCall('/admin/instances')
+      if (response.ok) {
+        const data = await response.json()
+        // Generic admin list endpoint returns { data, total }
+        setInstances(data.data || [])
+      } else {
+        console.error('Failed to fetch instances:', response.statusText)
+      }
+    } catch (error) {
+      console.error('Error fetching instances:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const syncInstances = async () => {
+    setSyncing(true)
+    try {
+      const response = await apiCall('/admin/sync-instances', { method: 'POST' })
+      if (response.ok) {
+        await response.json()
+        // Refresh the instances list after sync
+        await fetchInstances()
+      } else {
+        console.error('Failed to sync instances')
+      }
+    } catch (error) {
+      console.error('Failed to sync instances:', error)
+    } finally {
+      setSyncing(false)
+    }
+  }
 
   useEffect(() => {
-    const fetchInstances = async () => {
-      try {
-        const response = await apiCall('/admin/instances')
-        if (response.ok) {
-          const data = await response.json()
-          // Generic admin list endpoint returns { data, total }
-          setInstances(data.data || [])
-        } else {
-          console.error('Failed to fetch instances:', response.statusText)
-        }
-      } catch (error) {
-        console.error('Error fetching instances:', error)
-      } finally {
-        setLoading(false)
-      }
-    }
-
     fetchInstances()
   }, [])
 
@@ -62,7 +82,13 @@ export default function InstancesPage() {
           <p className="text-gray-600 mt-2">Manage customer MindRoom instances</p>
         </div>
         <div className="space-x-2">
-          <Button variant="outline">Refresh All</Button>
+          <Button
+            variant="outline"
+            onClick={syncInstances}
+            disabled={syncing}
+          >
+            {syncing ? 'Syncing...' : 'Refresh All'}
+          </Button>
           <Button>Deploy New</Button>
         </div>
       </div>

@@ -16,6 +16,7 @@ from backend.config import (
     SUPABASE_URL,
     logger,
 )
+from backend.db_utils import update_instance_status
 from backend.deps import ensure_supabase
 from backend.k8s import check_deployment_exists, ensure_docker_registry_secret, run_kubectl, wait_for_deployment_ready
 from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
@@ -56,32 +57,58 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     subscription_id = data.get("subscription_id")
     account_id = data.get("account_id")
     tier = data.get("tier", "free")
+    existing_instance_id = data.get("instance_id")  # For re-provisioning
 
-    # Insert instance first to get a generated numeric instance_id (as text)
-    try:
-        insert_res = (
-            sb.table("instances")
-            .insert(
-                {
-                    "subscription_id": subscription_id,
-                    "account_id": account_id,
-                    "status": "provisioning",
-                    "tier": tier,
-                    "created_at": datetime.now(UTC).isoformat(),
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
+    # If re-provisioning, update existing instance; otherwise insert new
+    if existing_instance_id:
+        customer_id = str(existing_instance_id)
+        try:
+            update_res = (
+                sb.table("instances")
+                .update(
+                    {
+                        "status": "provisioning",
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+                .eq("instance_id", customer_id)
+                .execute()
             )
-            .execute()
-        )
-        if not insert_res.data:
-            msg = "Failed to insert instance"
-            raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
-        customer_id = insert_res.data[0]["instance_id"]
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Failed to insert instance")
-        raise HTTPException(status_code=500, detail=f"Failed to insert instance: {e!s}") from e
+            if not update_res.data:
+                msg = f"Instance {customer_id} not found"
+                raise HTTPException(status_code=404, detail=msg)  # noqa: TRY301
+            logger.info("Re-provisioning existing instance %s", customer_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Failed to update instance for re-provisioning")
+            raise HTTPException(status_code=500, detail=f"Failed to update instance: {e!s}") from e
+    else:
+        # Insert instance first to get a generated numeric instance_id (as text)
+        try:
+            insert_res = (
+                sb.table("instances")
+                .insert(
+                    {
+                        "subscription_id": subscription_id,
+                        "account_id": account_id,
+                        "status": "provisioning",
+                        "tier": tier,
+                        "created_at": datetime.now(UTC).isoformat(),
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+                .execute()
+            )
+            if not insert_res.data:
+                msg = "Failed to insert instance"
+                raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
+            customer_id = insert_res.data[0]["instance_id"]
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Failed to insert instance")
+            raise HTTPException(status_code=500, detail=f"Failed to insert instance: {e!s}") from e
 
     helm_release_name = f"instance-{customer_id}"
     logger.info("Provisioning instance for subscription %s, new id: %s, tier: %s", subscription_id, customer_id, tier)
@@ -131,10 +158,11 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             logger.warning("Failed to create image pull secret, deployment may fail")
 
     try:
-        # Install charts without waiting; we'll poll readiness ourselves
+        # Use upgrade --install to handle both new and re-provisioning cases
         code, stdout, stderr = await run_helm(
             [
-                "install",
+                "upgrade",
+                "--install",
                 helm_release_name,
                 "/app/k8s/instance/",
                 "--namespace",
@@ -241,15 +269,7 @@ async def start_instance_provisioner(
             raise RuntimeError(msg)  # noqa: TRY301
         logger.info("Started instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
-        try:
-            sb = ensure_supabase()
-            sb.table("instances").update(
-                {
-                    "status": "running",
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
-            ).eq("instance_id", instance_id).execute()
-        except Exception:
+        if not update_instance_status(instance_id, "running"):
             logger.warning("Failed to update DB status to running for instance %s", instance_id)
     except Exception as e:
         logger.exception("Failed to start instance %s", instance_id)
@@ -288,15 +308,7 @@ async def stop_instance_provisioner(
             raise RuntimeError(msg)  # noqa: TRY301
         logger.info("Stopped instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
-        try:
-            sb = ensure_supabase()
-            sb.table("instances").update(
-                {
-                    "status": "stopped",
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
-            ).eq("instance_id", instance_id).execute()
-        except Exception:
+        if not update_instance_status(instance_id, "stopped"):
             logger.warning("Failed to update DB status to stopped for instance %s", instance_id)
     except Exception as e:
         logger.exception("Failed to stop instance %s", instance_id)
@@ -367,16 +379,8 @@ async def uninstall_instance(
         else:
             logger.info("Successfully uninstalled instance %s: %s", instance_id, stdout)
 
-        try:
-            sb = ensure_supabase()
-            sb.table("instances").update(
-                {
-                    "status": "deprovisioned",
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
-            ).or_(f"instance_id.eq.{instance_id},subdomain.eq.{instance_id}").execute()
-        except Exception as e:
-            logger.warning("Failed to update database for instance %s: %s", instance_id, e)
+        if not update_instance_status(instance_id, "deprovisioned"):
+            logger.warning("Failed to update database for instance %s", instance_id)
 
     except HTTPException:
         raise

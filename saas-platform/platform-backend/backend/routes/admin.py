@@ -4,18 +4,23 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, verify_admin
 from backend.models import ActionResult, AdminStatsOut, UpdateAccountStatusResponse
 from backend.routes.provisioner import (
+    provision_instance,
     restart_instance_provisioner,
     start_instance_provisioner,
     stop_instance_provisioner,
+    sync_instances,
     uninstall_instance,
 )
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 router = APIRouter()
 
@@ -40,28 +45,73 @@ async def get_admin_stats(admin: Annotated[dict, Depends(verify_admin)]) -> dict
         raise HTTPException(status_code=500, detail="Failed to fetch statistics") from e
 
 
+# Generic proxy for instance management actions
+async def _proxy_to_provisioner(
+    provisioner_func: Callable,
+    instance_id: int,
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001
+) -> dict[str, Any]:
+    """Proxy request to provisioner with API key."""
+    return await provisioner_func(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+
+
 @router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
-async def admin_start_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
-    """Proxy start to provisioner (no key exposed to browser)."""
-    return await start_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+async def admin_start_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+    """Start an instance (admin proxy)."""
+    return await _proxy_to_provisioner(start_instance_provisioner, instance_id, admin)
 
 
 @router.post("/admin/instances/{instance_id}/stop", response_model=ActionResult)
-async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
-    """Proxy stop to provisioner (no key exposed to browser)."""
-    return await stop_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+    """Stop an instance (admin proxy)."""
+    return await _proxy_to_provisioner(stop_instance_provisioner, instance_id, admin)
 
 
 @router.post("/admin/instances/{instance_id}/restart", response_model=ActionResult)
-async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
-    """Proxy restart to provisioner (no key exposed to browser)."""
-    return await restart_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+    """Restart an instance (admin proxy)."""
+    return await _proxy_to_provisioner(restart_instance_provisioner, instance_id, admin)
 
 
 @router.delete("/admin/instances/{instance_id}/uninstall", response_model=ActionResult)
-async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
-    """Proxy uninstall to provisioner (no key exposed to browser)."""
-    return await uninstall_instance(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+    """Uninstall an instance (admin proxy)."""
+    return await _proxy_to_provisioner(uninstall_instance, instance_id, admin)
+
+
+@router.post("/admin/instances/{instance_id}/provision")
+async def admin_provision_instance(
+    instance_id: int,
+    background_tasks: BackgroundTasks,
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001
+) -> dict[str, Any]:
+    """Provision a deprovisioned instance."""
+    sb = ensure_supabase()
+
+    # Get instance details
+    result = sb.table("instances").select("*").eq("instance_id", str(instance_id)).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    instance = result.data[0]
+    if instance.get("status") not in ["deprovisioned", "error"]:
+        raise HTTPException(status_code=400, detail="Instance must be deprovisioned or in error state to provision")
+
+    # Call provisioner with existing instance data
+    data = {
+        "subscription_id": instance.get("subscription_id"),
+        "account_id": instance.get("account_id"),
+        "tier": instance.get("tier", "free"),
+        "instance_id": instance_id,  # Re-use existing instance ID
+    }
+
+    return await provision_instance(data, f"Bearer {PROVISIONER_API_KEY}", background_tasks)
+
+
+@router.post("/admin/sync-instances")
+async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
+    """Sync instance states between database and Kubernetes (admin proxy)."""
+    return await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
 
 
 @router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
