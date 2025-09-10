@@ -290,13 +290,13 @@ export default function InstancePage() {
       {/* Access URLs (only show when running) */}
       {instance.status === 'running' && instance.frontend_url && (
         <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-          <h2 className="text-xl font-bold mb-4">Access Your MindRoom</h2>
+          <h2 className="text-xl font-bold mb-4 dark:text-white">Access Your MindRoom</h2>
           <div className="space-y-4">
-            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
               <div className="flex items-center gap-3">
                 <Globe className="w-5 h-5 text-gray-600 dark:text-gray-400" />
                 <div>
-                  <p className="font-medium">MindRoom App</p>
+                  <p className="font-medium dark:text-white">MindRoom App</p>
                   <p className="text-sm text-gray-600 dark:text-gray-400">{instance.frontend_url}</p>
                 </div>
               </div>
@@ -312,11 +312,11 @@ export default function InstancePage() {
             </div>
 
             {instance.backend_url && (
-              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+              <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
                 <div className="flex items-center gap-3">
                   <Server className="w-5 h-5 text-gray-600 dark:text-gray-400" />
                   <div>
-                    <p className="font-medium">API Endpoint</p>
+                    <p className="font-medium dark:text-white">API Endpoint</p>
                     <p className="text-sm text-gray-600 dark:text-gray-400">{instance.backend_url}</p>
                   </div>
                 </div>
@@ -324,7 +324,7 @@ export default function InstancePage() {
                   href={`${instance.backend_url}/docs`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                  className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors"
                 >
                   API Docs
                   <ExternalLink className="w-4 h-4" />
@@ -333,11 +333,11 @@ export default function InstancePage() {
             )}
 
             {instance.matrix_server_url && (
-              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+              <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
                 <div className="flex items-center gap-3">
                   <Database className="w-5 h-5 text-gray-600 dark:text-gray-400" />
                   <div>
-                    <p className="font-medium">Matrix Server</p>
+                    <p className="font-medium dark:text-white">Matrix Server</p>
                     <p className="text-sm text-gray-600 dark:text-gray-400">{instance.matrix_server_url}</p>
                   </div>
                 </div>
@@ -349,11 +349,11 @@ export default function InstancePage() {
 
       {/* Configuration (collapsible) */}
       <details className="bg-white dark:bg-gray-800 rounded-lg shadow-sm">
-        <summary className="p-6 cursor-pointer hover:bg-gray-50 transition-colors">
-          <span className="font-bold text-xl">Instance Configuration</span>
+        <summary className="p-6 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+          <span className="font-bold text-xl dark:text-white">Instance Configuration</span>
         </summary>
         <div className="px-6 pb-6">
-          <pre className="bg-gray-50 p-4 rounded-lg overflow-x-auto text-sm">
+          <pre className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg overflow-x-auto text-sm dark:text-gray-300">
             {JSON.stringify(instance.config, null, 2)}
           </pre>
         </div>
