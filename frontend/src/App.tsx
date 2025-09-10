@@ -41,6 +41,18 @@ function AppContent() {
     navigate(`/${value}`);
   };
 
+  const getPlatformUrl = () => {
+    const configured = (import.meta as any).env?.VITE_PLATFORM_URL as string | undefined;
+    if (configured && configured.length > 0) return configured;
+    if (typeof window !== 'undefined') {
+      const host = window.location.host;
+      const firstDot = host.indexOf('.');
+      const base = firstDot > 0 ? host.slice(firstDot + 1) : host; // 1.staging.mindroom.chat -> staging.mindroom.chat
+      return `https://app.${base}`;
+    }
+    return 'https://app.mindroom.chat';
+  };
+
   if (error) {
     const isAuthError =
       error.includes('Authentication required') || error.includes('Access denied');
@@ -70,9 +82,7 @@ function AppContent() {
                     <li>Return to your dashboard</li>
                   </ul>
                   <a
-                    href={`${
-                      import.meta.env.VITE_PLATFORM_URL || 'https://app.mindroom.chat'
-                    }/dashboard`}
+                    href={`${getPlatformUrl()}/dashboard`}
                     className="block w-full text-center px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
                   >
                     Go to Dashboard
@@ -84,9 +94,7 @@ function AppContent() {
                     Please log in to access this MindRoom instance.
                   </p>
                   <a
-                    href={`${
-                      import.meta.env.VITE_PLATFORM_URL || 'https://app.mindroom.chat'
-                    }/auth/login`}
+                    href={`${getPlatformUrl()}/auth/login`}
                     className="block w-full text-center px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
                   >
                     Log In
