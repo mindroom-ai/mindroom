@@ -26,37 +26,21 @@ FROM public.ecr.aws/nginx/nginx:alpine AS final
 # Copy built static files to nginx serve directory
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html
 
-# Copy custom nginx configuration for SPA routing
+# Create minimal nginx config for SPA (K8s ingress handles security)
 COPY <<EOF /etc/nginx/conf.d/default.conf
 server {
     listen 3003;
-    listen [::]:3003;
-    server_name localhost;
+    server_name _;
     root /usr/share/nginx/html;
-    index index.html;
 
-    # SPA routing - serve index.html for all routes
+    # SPA routing - all routes serve index.html
     location / {
-        try_files \$uri \$uri/ /index.html;
+        try_files \$uri /index.html;
     }
 
-    # API health check endpoint
-    location /api/health {
-        access_log off;
-        add_header 'Content-Type' 'application/json';
-        return 200 '{"status":"healthy"}';
-    }
-
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-
-    # Gzip compression
+    # Enable gzip (K8s ingress may override)
     gzip on;
-    gzip_vary on;
-    gzip_min_length 1024;
-    gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
+    gzip_types text/css application/javascript application/json;
 }
 EOF
 
@@ -64,9 +48,7 @@ EOF
 # Expose port
 EXPOSE 3003
 
-# Health check using nginx
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3003/api/health || exit 1
+# No health check needed - K8s handles this via readiness/liveness probes
 
-# nginx runs automatically
+# Run nginx
 CMD ["nginx", "-g", "daemon off;"]
