@@ -1,16 +1,16 @@
-name: Build Platform Services
+name: Build Platform
 
 on:
   push:
     branches: [main]
     paths:
       - 'saas-platform/**'
-      - '.github/workflows/platform-services.yml'
+      - '.gitea/workflows/build-platform.yml'
   pull_request:
     branches: [main]
     paths:
       - 'saas-platform/**'
-      - '.github/workflows/platform-services.yml'
+      - '.gitea/workflows/build-platform.yml'
   workflow_dispatch:
 
 env:

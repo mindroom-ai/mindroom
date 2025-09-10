@@ -1,5 +1,5 @@
-name: Build Docker Images
-# Builds images in parallel for maximum speed with change detection
+name: Build MindRoom
+# Builds MindRoom instance images in parallel for maximum speed with change detection
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
       - 'Dockerfile.frontend'
       - 'pyproject.toml'
       - 'uv.lock'
-      - '.gitea/workflows/**'
+      - '.gitea/workflows/build-mindroom.yml'
   workflow_dispatch:
     inputs:
       force_build:
