@@ -40,7 +40,7 @@ repos:
 
       - id: sync-config-models
         name: Push models from config.yaml to SaaS platform defaults
-        entry: python scripts/sync-config.py
+        entry: python scripts/sync_config.py
         language: system
         pass_filenames: false
         files: ^(config\.yaml|saas-platform/default-config\.yaml)$
