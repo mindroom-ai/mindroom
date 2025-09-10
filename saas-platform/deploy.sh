@@ -13,12 +13,15 @@ set -e
 APP=${1:-platform-frontend}
 
 # Load env vars from saas-platform directory
-if [ -f .env ]; then
-    source .env
-else
+if [ ! -f .env ]; then
     echo "Error: .env file not found in saas-platform directory"
     exit 1
 fi
+
+# Use python-dotenv for proper .env parsing
+set -a
+eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
+set +a
 
 # Map app names to Docker image names
 if [ "$APP" = "backend" ]; then

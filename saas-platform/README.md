@@ -68,3 +68,5 @@ Each customer instance runs in isolation with:
 - Admin access controlled by `is_admin` flag in database
 - API keys for service-to-service communication
 - Network isolation between customer instances
+
+For a detailed explanation of the end-to-end authentication flow across the platform (customer portal) and per-instance deployments (nginx sidecar + backend JWT verification), see docs/authentication.md.

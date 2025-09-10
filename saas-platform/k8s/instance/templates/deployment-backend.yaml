@@ -18,6 +18,25 @@ spec:
         app: mindroom-backend
         customer: {{ .Values.customer | quote }}
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+      - name: init-permissions
+        image: busybox:1.36
+        command:
+          - sh
+          - -exc
+          - |
+            set -euo pipefail
+            install -d -o 1000 -g 1000 -m 0750 "{{ .Values.storagePath }}"
+            # Fix ownership on existing content (idempotent)
+            chown -R 1000:1000 "{{ .Values.storagePath }}" || true
+        volumeMounts:
+        - name: storage
+          mountPath: {{ .Values.storagePath }}
       containers:
       - name: mindroom-backend
         image: {{ .Values.mindroom_backend_image | default "git.nijho.lt/basnijholt/mindroom-backend:latest" }}
@@ -36,26 +55,26 @@ spec:
         - name: CUSTOMER_ID
           value: {{ .Values.customer | quote }}
         - name: STORAGE_PATH
-          value: /app/mindroom_data
+          value: {{ .Values.storagePath }}
         - name: LOG_LEVEL
           value: "INFO"
         - name: MATRIX_HOMESERVER
           value: "http://synapse-{{ .Values.customer }}:8008"
-        - name: MATRIX_USER
-          value: "@admin:{{ .Values.customer }}.{{ .Values.baseDomain }}"
-        - name: MATRIX_PASSWORD
-          value: {{ .Values.matrix_admin_password }}
         - name: MATRIX_SERVER_NAME
           value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: SUPABASE_URL
           value: {{ .Values.supabaseUrl | quote }}
+        - name: SUPABASE_SERVICE_KEY
+          value: {{ .Values.supabaseServiceKey | quote }}
         - name: SUPABASE_ANON_KEY
           value: {{ .Values.supabaseAnonKey | quote }}
         - name: OPENROUTER_API_KEY
           value: {{ .Values.openrouter_key | quote }}
+        - name: HOME
+          value: {{ .Values.storagePath }}
         volumeMounts:
         - name: storage
-          mountPath: /app/mindroom_data
+          mountPath: {{ .Values.storagePath }}
         - name: config
           mountPath: /app/config.yaml
           subPath: config.yaml

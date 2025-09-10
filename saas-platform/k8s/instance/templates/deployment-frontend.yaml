@@ -49,12 +49,7 @@ spec:
           value: "https://{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: VITE_API_URL
           value: ""  # Use relative URLs to proxy to backend
-        # Frontend no longer needs API keys or Matrix credentials
-        volumeMounts:
-        - name: storage
-          mountPath: /app/config
-        - name: logs
-          mountPath: /app/logs
+        # Frontend UI is stateless; no persistent volumes needed
         resources:
           requests:
             memory: "1Gi"
@@ -68,8 +63,3 @@ spec:
       - name: nginx-config
         configMap:
           name: nginx-auth-config-{{ .Values.customer }}
-      - name: storage
-        persistentVolumeClaim:
-          claimName: mindroom-storage-{{ .Values.customer }}
-      - name: logs
-        emptyDir: {}
