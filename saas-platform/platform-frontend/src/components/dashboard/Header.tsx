@@ -28,13 +28,15 @@ export function Header({ sidebarOpen, setSidebarOpen }: HeaderProps) {
         <div className="flex items-center gap-x-4 lg:gap-x-6">
           <DarkModeToggle />
 
-          <button
-            type="button"
-            className="-m-2.5 p-2.5 text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
-          >
-            <span className="sr-only">View notifications</span>
-            <Bell className="h-6 w-6" />
-          </button>
+          <div className="relative">
+            <button
+              type="button"
+              className="-m-2.5 p-2.5 text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
+            >
+              <span className="sr-only">View notifications</span>
+              <Bell className="h-6 w-6" />
+            </button>
+          </div>
 
           <div className="hidden lg:block lg:h-6 lg:w-px lg:bg-gray-200 dark:bg-gray-700" />
 
