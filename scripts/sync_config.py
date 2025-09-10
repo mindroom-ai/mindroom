@@ -65,16 +65,27 @@ def main() -> int:
     # Override models with OpenRouter versions
     config["models"] = SAAS_MODELS
 
-    # Override memory LLM to use OpenRouter
-    if "memory" in config and "llm" in config["memory"]:
-        config["memory"]["llm"] = {
-            "provider": "openrouter",
-            "config": {
-                "model": "google/gemini-2.5-flash",
-                "temperature": 0.1,
-                "top_p": 1,
-            },
-        }
+    # Override memory configuration for SaaS
+    if "memory" in config:
+        # Override LLM to use OpenRouter
+        if "llm" in config["memory"]:
+            config["memory"]["llm"] = {
+                "provider": "openrouter",
+                "config": {
+                    "model": "google/gemini-2.5-flash",
+                    "temperature": 0.1,
+                    "top_p": 1,
+                },
+            }
+
+        # Override embedder to use OpenAI's text-embedding-3-small
+        if "embedder" in config["memory"]:
+            config["memory"]["embedder"] = {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                },
+            }
 
     # Override router to use default model
     if "router" in config:
