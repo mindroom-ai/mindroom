@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.config import (
     GITEA_TOKEN,
     GITEA_USER,
+    OPENAI_API_KEY,
+    OPENROUTER_API_KEY,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
     SUPABASE_ANON_KEY,
@@ -147,7 +148,9 @@ async def provision_instance(
                 "--set",
                 f"supabaseAnonKey={SUPABASE_ANON_KEY or ''}",
                 "--set",
-                f"openrouter_key={os.getenv('OPENROUTER_API_KEY', '')}",
+                f"openrouter_key={OPENROUTER_API_KEY}",
+                "--set",
+                f"openai_key={OPENAI_API_KEY}",
                 "--set",
                 "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
             ],
