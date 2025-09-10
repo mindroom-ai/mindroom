@@ -11,13 +11,15 @@ interface InstanceActionsProps {
 export function InstanceActions({ instanceId, currentStatus }: InstanceActionsProps) {
   const [loading, setLoading] = useState<string | null>(null)
 
-  const performAction = async (action: 'start' | 'stop' | 'restart' | 'uninstall') => {
+  const performAction = async (action: 'start' | 'stop' | 'restart' | 'uninstall' | 'provision') => {
     setLoading(action)
 
     try {
       const method = action === 'uninstall' ? 'DELETE' : 'POST'
       const endpoint = action === 'uninstall'
         ? `/admin/instances/${instanceId}/uninstall`
+        : action === 'provision'
+        ? `/admin/instances/${instanceId}/provision`
         : `/admin/instances/${instanceId}/${action}`
 
       const response = await apiCall(endpoint, { method })
@@ -37,6 +39,16 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
 
   return (
     <div className="flex gap-1">
+      {(currentStatus === 'deprovisioned' || currentStatus === 'error') && (
+        <button
+          className="text-green-600 hover:underline text-sm"
+          onClick={() => performAction('provision')}
+          disabled={loading !== null}
+        >
+          {loading === 'provision' ? '...' : 'Provision'}
+        </button>
+      )}
+
       {currentStatus === 'stopped' && (
         <button
           className="text-green-600 hover:underline text-sm"

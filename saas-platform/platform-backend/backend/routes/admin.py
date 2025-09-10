@@ -10,12 +10,13 @@ from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, verify_admin
 from backend.models import ActionResult, AdminStatsOut, UpdateAccountStatusResponse
 from backend.routes.provisioner import (
+    provision_instance,
     restart_instance_provisioner,
     start_instance_provisioner,
     stop_instance_provisioner,
     uninstall_instance,
 )
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 router = APIRouter()
 
@@ -62,6 +63,35 @@ async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depend
 async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
     """Proxy uninstall to provisioner (no key exposed to browser)."""
     return await uninstall_instance(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+
+
+@router.post("/admin/instances/{instance_id}/provision")
+async def admin_provision_instance(
+    instance_id: int,
+    background_tasks: BackgroundTasks,
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001
+) -> dict[str, Any]:
+    """Provision a deprovisioned instance."""
+    sb = ensure_supabase()
+
+    # Get instance details
+    result = sb.table("instances").select("*").eq("instance_id", str(instance_id)).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    instance = result.data[0]
+    if instance.get("status") not in ["deprovisioned", "error"]:
+        raise HTTPException(status_code=400, detail="Instance must be deprovisioned or in error state to provision")
+
+    # Call provisioner with existing instance data
+    data = {
+        "subscription_id": instance.get("subscription_id"),
+        "account_id": instance.get("account_id"),
+        "tier": instance.get("tier", "free"),
+        "instance_id": instance_id,  # Re-use existing instance ID
+    }
+
+    return await provision_instance(data, f"Bearer {PROVISIONER_API_KEY}", background_tasks)
 
 
 @router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
