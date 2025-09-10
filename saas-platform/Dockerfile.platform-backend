@@ -1,38 +1,54 @@
 # Multi-stage build for MindRoom Platform Backend
-FROM public.ecr.aws/docker/library/python:3.13-slim AS base
+FROM ghcr.io/astral-sh/uv:latest AS uv
 
 # Tools stage - install kubectl and helm separately
-FROM base AS tools
+FROM public.ecr.aws/docker/library/python:3.13-slim AS tools
 RUN apt-get update && apt-get install -y curl \
     && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
     && chmod +x kubectl \
     && curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Dependencies stage
-FROM base AS deps
-WORKDIR /app
-COPY platform-backend/requirements.txt .
-# Use pip cache mount for faster rebuilds
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir -r requirements.txt
+# Builder stage with uv for dependencies
+FROM public.ecr.aws/docker/library/python:3.13-slim AS builder
+# Copy uv from the uv image
+COPY --from=uv /uv /uvx /bin/
 
-# Final stage
-FROM base AS final
+WORKDIR /app
+
+# Copy project files
+COPY platform-backend/pyproject.toml platform-backend/uv.lock /app/
+
+# Install dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-install-project --no-dev
+
+# Copy source code
+COPY platform-backend/src /app/src
+
+# Install the project itself
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev
+
+# Final production stage
+FROM public.ecr.aws/docker/library/python:3.13-slim AS final
+# Copy uv for runtime
+COPY --from=uv /uv /uvx /bin/
+
 WORKDIR /app
 
 # Copy kubectl and helm from tools stage
 COPY --from=tools /kubectl /usr/local/bin/kubectl
 COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
 
-# Copy Python packages from deps stage
-COPY --from=deps /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
-COPY --from=deps /usr/local/bin /usr/local/bin
+# Copy the app with venv from builder
+COPY --from=builder /app /app
 
-# Copy application files
-COPY platform-backend/ .
+# Copy instance Helm chart for provisioning
 COPY k8s/instance /app/k8s/instance/
+# Copy default-config.yaml
 COPY default-config.yaml /app/default-config.yaml
 
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the app
+CMD ["uv", "run", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

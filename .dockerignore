@@ -40,7 +40,7 @@ coverage.xml
 .cache
 htmlcov/
 mindroom_output.log
-saas-platform/
+# saas-platform/ is needed for platform-backend Docker build
 .mypy_cache/
 .ruff_cache/
 

@@ -12,6 +12,7 @@ from datetime import UTC
 
 import stripe
 from dotenv import load_dotenv
+
 from supabase import create_client
 
 # Load environment variables from repo root and backend dir if present
