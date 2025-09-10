@@ -1,19 +1,18 @@
 import { ReactElement } from 'react';
-import {
-  Ollama,
-  OpenRouter,
-  Groq,
-  DeepSeek,
-  Together,
-  Mistral,
-  Cohere,
-  XAI,
-  Cerebras,
-  OpenAI,
-  Anthropic,
-  Google,
-  Perplexity,
-} from '@lobehub/icons';
+// Import just the Mono (simple) variant of each icon to avoid heavy dependencies
+import Ollama from '@lobehub/icons/es/Ollama/components/Mono';
+import OpenRouter from '@lobehub/icons/es/OpenRouter/components/Mono';
+import Groq from '@lobehub/icons/es/Groq/components/Mono';
+import DeepSeek from '@lobehub/icons/es/DeepSeek/components/Mono';
+import Together from '@lobehub/icons/es/Together/components/Mono';
+import Mistral from '@lobehub/icons/es/Mistral/components/Mono';
+import Cohere from '@lobehub/icons/es/Cohere/components/Mono';
+import XAI from '@lobehub/icons/es/XAI/components/Mono';
+import Cerebras from '@lobehub/icons/es/Cerebras/components/Mono';
+import OpenAI from '@lobehub/icons/es/OpenAI/components/Mono';
+import Anthropic from '@lobehub/icons/es/Anthropic/components/Mono';
+import Google from '@lobehub/icons/es/Google/components/Mono';
+import Perplexity from '@lobehub/icons/es/Perplexity/components/Mono';
 import { Brain } from 'lucide-react';
 
 export interface ProviderInfo {
