@@ -5,10 +5,10 @@ set -e
 
 echo "📦 Building mindroom-backend..."
 cd /home/basnijholt/Work/mindroom-2
-docker build -t git.nijho.lt/basnijholt/mindroom-backend:prod -f deploy/Dockerfile.backend .
+docker build -t git.nijho.lt/basnijholt/mindroom-backend:latest -f deploy/Dockerfile.backend .
 
 echo "⬆️ Pushing to registry..."
-docker push git.nijho.lt/basnijholt/mindroom-backend:prod
+docker push git.nijho.lt/basnijholt/mindroom-backend:latest
 
 echo "🔄 Restarting all customer backend deployments..."
 cd /home/basnijholt/Work/mindroom-2/saas-platform
