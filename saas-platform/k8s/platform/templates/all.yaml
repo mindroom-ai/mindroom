@@ -28,6 +28,9 @@ stringData:
   PLATFORM_BACKEND_URL: "http://platform-backend:8000"
   GITEA_USER: {{ .Values.gitea.user }}
   GITEA_TOKEN: {{ .Values.gitea.token }}
+  OPENAI_API_KEY: {{ .Values.apiKeys.openai | default "" }}
+  ANTHROPIC_API_KEY: {{ .Values.apiKeys.anthropic | default "" }}
+  OPENROUTER_API_KEY: {{ .Values.apiKeys.openrouter | default "" }}
 ---
 # Docker registry secret
 apiVersion: v1
