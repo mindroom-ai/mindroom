@@ -65,6 +65,10 @@ def main() -> int:
     # Override models with OpenRouter versions
     config["models"] = SAAS_MODELS
 
+    # Remove sleepy_paws agent for SaaS
+    if "agents" in config and "sleepy_paws" in config["agents"]:
+        del config["agents"]["sleepy_paws"]
+
     # Override memory configuration for SaaS
     if "memory" in config:
         # Override LLM to use OpenRouter
