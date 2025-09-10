@@ -24,22 +24,15 @@ ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
 # Build production bundle with optimizations
 RUN cd platform-frontend && pnpm run build
 
-# Production stage - minimal image with only runtime needs
-FROM public.ecr.aws/docker/library/node:20-slim AS final
-# Install curl for health checks
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-RUN npm install -g pnpm
+# Production stage - optimized for Next.js
+FROM public.ecr.aws/docker/library/node:20-alpine AS final
 WORKDIR /app
 
-# Copy built application
+# Only copy what's needed for production
 COPY --from=builder /app/platform-frontend/.next ./platform-frontend/.next
 COPY --from=builder /app/platform-frontend/public ./platform-frontend/public
 COPY --from=builder /app/platform-frontend/package.json ./platform-frontend/package.json
-COPY --from=builder /app/platform-frontend/pnpm-lock.yaml ./platform-frontend/pnpm-lock.yaml
-
-# Install only production dependencies
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    cd platform-frontend && pnpm install --frozen-lockfile --production
+COPY --from=builder /app/platform-frontend/node_modules ./platform-frontend/node_modules
 
 # Set environment variables
 # Next.js needs to know it's running in production
@@ -48,9 +41,7 @@ ENV NODE_ENV=production
 # Expose port
 EXPOSE 3000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:3000/api/health || exit 1
+# No health check needed - K8s handles this via readiness/liveness probes
 
-# Start application in production mode
-CMD ["sh", "-c", "cd platform-frontend && pnpm start"]
+# Start Next.js server
+CMD ["sh", "-c", "cd platform-frontend && npm start"]
