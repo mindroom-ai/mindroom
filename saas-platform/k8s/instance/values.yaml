@@ -1,9 +1,11 @@
 customer: demo
 baseDomain: mindroom.chat  # Base domain for all services
 storage: 10Gi  # More storage for Matrix data
+storagePath: "/mindroom_data"  # Base path inside container for persisted state
 
 # Docker images
 mindroom_image: git.nijho.lt/basnijholt/mindroom-frontend:latest
+mindroom_backend_image: git.nijho.lt/basnijholt/mindroom-backend:latest
 synapse_image: matrixdotorg/synapse:latest
 
 # API Keys (set via --set)
@@ -14,6 +16,7 @@ openrouter_key: ""
 # Supabase (shared auth)
 supabaseUrl: ""
 supabaseAnonKey: ""
+supabaseServiceKey: ""
 
 # Matrix admin user
 matrix_admin_password: "changeme"

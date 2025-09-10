@@ -24,14 +24,14 @@ spec:
   - host: {{ .Values.customer }}.{{ .Values.baseDomain }}
     http:
       paths:
-      # API calls go to backend service
+      # API calls go to frontend (nginx-auth) so it can inject Authorization from cookie
       - path: /api
         pathType: Prefix
         backend:
           service:
-            name: mindroom-backend-{{ .Values.customer }}
+            name: mindroom-frontend-{{ .Values.customer }}
             port:
-              number: 8765
+              number: 3003
       # Everything else goes to frontend
       - path: /
         pathType: Prefix

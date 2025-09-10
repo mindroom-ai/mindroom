@@ -10,17 +10,23 @@ data:
     }
 
     http {
+      # Log to container stdout/stderr for easier debugging
+      access_log /dev/stdout;
+      error_log /dev/stderr warn;
+
       server {
         listen 80;
 
         {{- if .Values.supabaseUrl }}
-        # SSO cookie provided by platform backend (no tokens in URL)
+        # Platform mode: Use SSO cookie set by platform backend.
+        # The cookie is forwarded by the ingress and read here for UI gating
+        # and for injecting Authorization on /api.
         set $jwt_token $cookie_mindroom_jwt;
         {{- end }}
 
         location / {
           {{- if .Values.supabaseUrl }}
-          # Platform mode: Require SSO cookie
+          # Require SSO cookie; redirect to platform login if missing.
           if ($jwt_token = "") {
             return 302 https://app.{{ .Values.baseDomain }}/auth/login?redirect_to=$scheme://$host$request_uri;
           }
@@ -36,6 +42,8 @@ data:
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
           proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_read_timeout 3600;
+          proxy_send_timeout 3600;
         }
 
         location /api {
@@ -46,8 +54,10 @@ data:
           }
           {{- end }}
 
-          proxy_pass http://127.0.0.1:8765;
+          proxy_pass http://mindroom-backend-{{ .Values.customer }}:8765;
           proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -57,6 +67,8 @@ data:
           {{- else }}
           proxy_set_header Authorization $http_authorization;
           {{- end }}
+          proxy_read_timeout 3600;
+          proxy_send_timeout 3600;
         }
 
       }
