@@ -62,7 +62,7 @@ export async function middleware(request: NextRequest) {
   if (request.nextUrl.pathname.startsWith('/admin')) {
     if (!user) {
       const loginUrl = new URL('/auth/login', request.url)
-      loginUrl.searchParams.set('redirectTo', request.nextUrl.pathname)
+      loginUrl.searchParams.set('redirect_to', request.nextUrl.pathname)
       return NextResponse.redirect(loginUrl)
     }
 
@@ -71,7 +71,7 @@ export async function middleware(request: NextRequest) {
 
     if (!session) {
       const loginUrl = new URL('/auth/login', request.url)
-      loginUrl.searchParams.set('redirectTo', request.nextUrl.pathname)
+      loginUrl.searchParams.set('redirect_to', request.nextUrl.pathname)
       return NextResponse.redirect(loginUrl)
     }
 

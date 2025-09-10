@@ -3,7 +3,8 @@
 import { Auth } from '@supabase/auth-ui-react'
 import { ThemeSupa } from '@supabase/auth-ui-shared'
 import { createClient } from '@/lib/supabase/client'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { useDarkMode } from '@/hooks/useDarkMode'
 
 interface AuthWrapperProps {
@@ -14,6 +15,7 @@ interface AuthWrapperProps {
 export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) {
   const [origin, setOrigin] = useState('')
   const { isDarkMode } = useDarkMode()
+  const router = useRouter()
 
   useEffect(() => {
     setOrigin(window.location.origin)
@@ -21,9 +23,22 @@ export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) 
 
   const supabase = createClient()
 
-  const computedRedirect = redirectTo && redirectTo.startsWith('http')
-    ? redirectTo
-    : `${origin}${redirectTo || '/auth/callback'}`
+  const computedRedirect = useMemo(() => {
+    if (redirectTo && redirectTo.startsWith('http')) return redirectTo
+    const target = redirectTo || '/auth/callback'
+    return origin ? `${origin}${target}` : target
+  }, [redirectTo, origin])
+
+  // For password sign-in flows, the Auth UI does not auto-redirect.
+  // Redirect on SIGNED_IN so email/password follows the same callback chain as OAuth.
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN' && session) {
+        router.replace(computedRedirect)
+      }
+    })
+    return () => subscription.unsubscribe()
+  }, [router, supabase.auth, computedRedirect])
 
   return (
     <Auth

@@ -1,8 +1,13 @@
 import { AuthWrapper } from '@/components/auth/auth-wrapper'
+import { headers } from 'next/headers'
 import Link from 'next/link'
 
-export default function LoginPage({ searchParams }: { searchParams: { redirect_to?: string } }) {
-  const redirectTo = searchParams?.redirect_to || '/dashboard'
+export default async function LoginPage({ searchParams }: { searchParams: { redirect_to?: string } }) {
+  const nextTarget = searchParams?.redirect_to || '/dashboard'
+  const hdrs = await headers()
+  const host = hdrs.get('host') || ''
+  const base = process.env.APP_URL || (host ? `https://${host}` : '')
+  const callback = `${base}/auth/callback?next=${encodeURIComponent(nextTarget)}`
 
   return (
     <div className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-gray-900">
@@ -15,7 +20,7 @@ export default function LoginPage({ searchParams }: { searchParams: { redirect_t
           <p className="text-gray-600 dark:text-gray-400 mt-2">Sign in to access your MindRoom</p>
         </div>
 
-        <AuthWrapper view="sign_in" redirectTo={`/auth/callback?next=${encodeURIComponent(redirectTo)}`} />
+        <AuthWrapper view="sign_in" redirectTo={callback} />
 
         <div className="mt-6 text-center">
           <p className="text-gray-600 dark:text-gray-400">
