@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { Hero } from '@/components/landing/Hero'
+import { HowItWorks } from '@/components/landing/HowItWorks'
 import { Features } from '@/components/landing/Features'
 import { Pricing } from '@/components/landing/Pricing'
 import { Testimonials } from '@/components/landing/Testimonials'
@@ -75,6 +76,9 @@ export default function LandingPage() {
 
       {/* Hero Section */}
       <Hero />
+
+      {/* How It Works - Immediately explain what MindRoom is */}
+      <HowItWorks />
 
       {/* Stats Section */}
       <Stats />

@@ -30,41 +30,41 @@ export function WhyItMatters() {
       <div className="container mx-auto max-w-6xl">
         <div className="text-center mb-16">
           <h2 className="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
-            Why This Changes Everything
+            Why MindRoom is Revolutionary
           </h2>
           <p className="text-xl text-gray-600 dark:text-gray-300 max-w-3xl mx-auto">
-            Every other platform locks your AI in their silo. We built the first truly open AI ecosystem.
+            Not just another chatbot. A complete AI workforce that actually gets work done.
           </p>
         </div>
 
         <div className="grid md:grid-cols-2 gap-12 items-center mb-16">
           <div className={`space-y-6 ${isVisible ? 'fade-in-up' : 'opacity-0'}`}>
             <h3 className="text-3xl font-bold text-gray-900 dark:text-white">
-              The Problem with Today's AI
+              What Others Can't Do
             </h3>
             <div className="space-y-4">
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>ChatGPT knows your coding style</strong> — but can't join your team's Slack
+                  <strong>ChatGPT/Claude</strong> — Can't use tools, can't remember between sessions, trapped in one interface
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Claude understands your writing</strong> — but can't access your email
+                  <strong>Slack/Discord AI</strong> — Single agent, limited tools, locked to one platform
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Your company's AI can't collaborate</strong> — with your client's AI
+                  <strong>AutoGPT/AgentGPT</strong> — No real collaboration, no persistent memory, no cross-platform
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Every platform wants your data</strong> — but gives you no control
+                  <strong>Every AI platform</strong> — Your agents can't work with other companies' agents
                 </p>
               </div>
             </div>
@@ -72,31 +72,31 @@ export function WhyItMatters() {
 
           <div className={`space-y-6 ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.2s' }}>
             <h3 className="text-3xl font-bold text-gray-900 dark:text-white">
-              The MindRoom Difference
+              What MindRoom Does
             </h3>
             <div className="space-y-4">
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Your agents follow you everywhere</strong> — Slack, Discord, Teams, all platforms
+                  <strong>Multiple specialized agents</strong> — Each with 80+ tools, doing real work
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Permanent memory across everything</strong> — context preserved forever
+                  <strong>Work everywhere</strong> — Same agents in Slack, Discord, Teams, email
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>True cross-organization collaboration</strong> — like email for AI
+                  <strong>Room-based privacy</strong> — Local models for sensitive data, cloud for general
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>You own everything</strong> — self-host or cloud, switch anytime
+                  <strong>Cross-company collaboration</strong> — Your agents + their agents = one conversation
                 </p>
               </div>
             </div>

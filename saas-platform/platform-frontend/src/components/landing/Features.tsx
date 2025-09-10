@@ -5,60 +5,60 @@ import { useEffect, useState } from 'react'
 
 const features = [
   {
-    icon: Globe,
-    title: 'Cross-Organization Federation',
-    description: 'Your calendar AI joins their Slack. Their security AI audits your code. True agent collaboration across companies.',
+    icon: Bot,
+    title: 'Multiple Specialized Agents',
+    description: 'Create researcher, analyst, writer, coder agents. Each with unique skills, persistent memory, and real Matrix accounts.',
     gradient: 'from-blue-500 to-cyan-500',
   },
   {
-    icon: Shield,
-    title: 'Military-Grade Matrix Security',
-    description: 'Built on Matrix protocol trusted by NATO, Space Force, and German healthcare. End-to-end encryption you control.',
-    gradient: 'from-purple-500 to-pink-500',
-  },
-  {
-    icon: Brain,
-    title: 'Permanent Agent Memory',
-    description: 'Each agent has a real Matrix account with persistent memory across all conversations and platforms.',
-    gradient: 'from-green-500 to-emerald-500',
-  },
-  {
     icon: Zap,
-    title: 'Work Everywhere via Bridges',
-    description: 'One agent works simultaneously in Slack, Discord, Telegram, WhatsApp, and 50+ platforms.',
+    title: '80+ Tools & Integrations',
+    description: 'Gmail, GitHub, Spotify, Home Assistant, Google Drive, databases, APIs. Your agents can actually DO things, not just talk.',
     gradient: 'from-yellow-500 to-orange-500',
   },
   {
+    icon: Brain,
+    title: 'Room-Based Organization',
+    description: 'Different rooms for different projects. Private rooms use local models, work rooms use GPT-4. You control the boundaries.',
+    gradient: 'from-green-500 to-emerald-500',
+  },
+  {
     icon: Users,
-    title: 'Team Collaboration',
-    description: 'Multiple specialized agents work together in threaded conversations with full transparency.',
+    title: 'True Agent Collaboration',
+    description: 'Agents work together in threaded conversations. @researcher finds data, @analyst processes it, @writer creates the report.',
     gradient: 'from-indigo-500 to-purple-500',
   },
   {
-    icon: Lock,
-    title: 'Zero Lock-in Architecture',
-    description: 'Self-host on a Raspberry Pi or use our cloud. Switch anytime. Export everything. MIT licensed.',
+    icon: Globe,
+    title: 'Works Everywhere You Do',
+    description: 'Through Matrix bridges, your agents work in Slack, Discord, Teams, WhatsApp — anywhere your team communicates.',
+    gradient: 'from-purple-500 to-pink-500',
+  },
+  {
+    icon: Shield,
+    title: 'Federation & Security',
+    description: 'Built on Matrix (115M users). Agents from different companies can collaborate. Military-grade encryption.',
     gradient: 'from-red-500 to-orange-500',
   },
 ]
 
 const additionalFeatures = [
   {
-    icon: Bot,
+    icon: Lock,
     title: 'Your Models, Your Control',
-    description: 'Use GPT-4 for complex tasks, local Ollama for sensitive data, Claude for writing.',
+    description: 'Mix and match: GPT-4, Claude, Llama, Mistral. Route by sensitivity and cost.',
     gradient: 'from-teal-500 to-cyan-500',
   },
   {
     icon: BarChart,
-    title: 'Battle-Tested at Scale',
-    description: '115M+ Matrix users. German healthcare (150K orgs). French government (5.5M users).',
+    title: 'Self-Host or Cloud',
+    description: 'Run on your infrastructure or use our service. Switch anytime. No lock-in.',
     gradient: 'from-gray-600 to-gray-800',
   },
   {
     icon: Rocket,
-    title: 'Chat-Native Architecture',
-    description: 'Chat is the database, API, and interface. Every decision transparent in threads.',
+    title: 'Deploy in Minutes',
+    description: 'Not months. Simple configuration, instant agent deployment, immediate value.',
     gradient: 'from-rose-500 to-pink-500',
   },
 ]
@@ -96,10 +96,10 @@ export function Features() {
       <div className="container mx-auto max-w-7xl relative z-10">
         <div className="text-center mb-16">
           <h2 className="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
-            Why MindRoom is Different
+            Not Just Another Chatbot
           </h2>
           <p className="text-xl text-gray-600 dark:text-gray-300 max-w-3xl mx-auto">
-            The first truly open AI ecosystem. Built on proven infrastructure, not startup experiments.
+            Real AI agents that use real tools, work in real places, and solve real problems
           </p>
         </div>
 
