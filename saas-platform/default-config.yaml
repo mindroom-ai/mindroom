@@ -289,9 +289,9 @@ memory:
     config:
       model: text-embedding-3-small
   llm:
-    provider: openrouter
+    provider: openai
     config:
-      model: google/gemini-2.5-flash
+      model: gpt-4o-mini
       temperature: 0.1
       top_p: 1
 models:
