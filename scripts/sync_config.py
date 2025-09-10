@@ -81,7 +81,7 @@ def main() -> int:
             config["memory"]["llm"] = {
                 "provider": "openai",
                 "config": {
-                    "model": "gpt-4o-mini",
+                    "model": "gpt-5-nano-2025-08-07",
                     "temperature": 0.1,
                     "top_p": 1,
                 },
