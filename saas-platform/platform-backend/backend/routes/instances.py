@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from backend.config import PROVISIONER_API_KEY
 from backend.deps import ensure_supabase, verify_user
@@ -75,9 +78,13 @@ async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -
         raise HTTPException(status_code=500, detail="Failed to provision instance") from e
 
 
-@router.post("/my/instances/{instance_id}/start", response_model=ActionResult)
-async def start_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
-    """Start user's instance."""
+# Helper function for user instance actions
+async def _verify_instance_ownership_and_proxy(
+    instance_id: int,
+    user: dict,
+    provisioner_func: Callable,
+) -> dict[str, Any]:
+    """Verify user owns instance and proxy to provisioner."""
     sb = ensure_supabase()
 
     result = (
@@ -91,42 +98,22 @@ async def start_user_instance(instance_id: int, user: Annotated[dict, Depends(ve
     if not result.data:
         raise HTTPException(status_code=404, detail="Instance not found or access denied")
 
-    return await start_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+    return await provisioner_func(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+
+
+@router.post("/my/instances/{instance_id}/start", response_model=ActionResult)
+async def start_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+    """Start user's instance."""
+    return await _verify_instance_ownership_and_proxy(instance_id, user, start_instance_provisioner)
 
 
 @router.post("/my/instances/{instance_id}/stop", response_model=ActionResult)
 async def stop_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Stop user's instance."""
-    sb = ensure_supabase()
-
-    result = (
-        sb.table("instances")
-        .select("id")
-        .eq("instance_id", instance_id)
-        .eq("account_id", user["account_id"])
-        .limit(1)
-        .execute()
-    )
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Instance not found or access denied")
-
-    return await stop_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+    return await _verify_instance_ownership_and_proxy(instance_id, user, stop_instance_provisioner)
 
 
 @router.post("/my/instances/{instance_id}/restart", response_model=ActionResult)
 async def restart_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Restart user's instance."""
-    sb = ensure_supabase()
-
-    result = (
-        sb.table("instances")
-        .select("id")
-        .eq("instance_id", instance_id)
-        .eq("account_id", user["account_id"])
-        .limit(1)
-        .execute()
-    )
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Instance not found or access denied")
-
-    return await restart_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+    return await _verify_instance_ownership_and_proxy(instance_id, user, restart_instance_provisioner)
