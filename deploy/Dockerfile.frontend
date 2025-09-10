@@ -36,10 +36,6 @@ COPY --from=builder /app/frontend/pnpm-lock.yaml ./frontend/pnpm-lock.yaml
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     cd frontend && pnpm install --frozen-lockfile --production
 
-# Copy run script
-COPY run-frontend.sh ./run-frontend.sh
-RUN chmod +x ./run-frontend.sh
-
 # Set environment variables
 ENV DOCKER_CONTAINER=1
 ENV VITE_API_URL=""
@@ -52,4 +48,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:3003/api/health || exit 1
 
 # Start application in production mode
-CMD ["./run-frontend.sh", "prod"]
+CMD ["sh", "-c", "cd frontend && pnpm run preview -- --host 0.0.0.0 --port 3003"]
