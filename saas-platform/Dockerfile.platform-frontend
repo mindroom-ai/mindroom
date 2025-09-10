@@ -1,46 +1,49 @@
-# Multi-stage build for customer portal
+# Multi-stage build for production frontend
 # Using public ECR to avoid Docker Hub rate limits
 FROM public.ecr.aws/docker/library/node:20-slim AS base
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 RUN npm install -g pnpm
 
 # Dependencies stage
 FROM base AS deps
 WORKDIR /app
-COPY platform-frontend/package.json platform-frontend/pnpm-lock.yaml ./
+COPY platform-frontend/package.json platform-frontend/pnpm-lock.yaml ./platform-frontend/
 # Use cache mount for pnpm store to speed up builds
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile
+    cd platform-frontend && pnpm install --frozen-lockfile
 
 # Build stage
 FROM deps AS builder
 WORKDIR /app
-COPY platform-frontend/ ./
+COPY platform-frontend/ ./platform-frontend/
 # Accept build arguments for Next.js public env vars
 ARG NEXT_PUBLIC_SUPABASE_URL
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
 # Set them as environment variables for the build
 ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
 ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
-# Build Next.js app with the environment variables
-RUN pnpm run build
+# Build production bundle with optimizations
+RUN cd platform-frontend && pnpm run build
 
-# Production stage
+# Production stage - minimal image with only runtime needs
 FROM public.ecr.aws/docker/library/node:20-slim AS final
-RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
+# Install curl for health checks
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 RUN npm install -g pnpm
 WORKDIR /app
 
 # Copy built application
-COPY --from=builder /app/.next /app/.next
-COPY --from=builder /app/public /app/public
-COPY --from=builder /app/package.json /app/package.json
-COPY --from=builder /app/pnpm-lock.yaml /app/pnpm-lock.yaml
-# Don't copy next.config.ts - it's already compiled into .next
+COPY --from=builder /app/platform-frontend/.next ./platform-frontend/.next
+COPY --from=builder /app/platform-frontend/public ./platform-frontend/public
+COPY --from=builder /app/platform-frontend/package.json ./platform-frontend/package.json
+COPY --from=builder /app/platform-frontend/pnpm-lock.yaml ./platform-frontend/pnpm-lock.yaml
 
 # Install only production dependencies
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile --production
+    cd platform-frontend && pnpm install --frozen-lockfile --production
+
+# Set environment variables
+# Next.js needs to know it's running in production
+ENV NODE_ENV=production
 
 # Expose port
 EXPOSE 3000
@@ -49,5 +52,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:3000/api/health || exit 1
 
-# Start Next.js in production mode
-CMD ["pnpm", "start"]
+# Start application in production mode
+CMD ["sh", "-c", "cd platform-frontend && pnpm start"]

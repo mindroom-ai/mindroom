@@ -1,32 +1,51 @@
-# Frontend container with configurable dev/prod mode
+# Multi-stage build for production frontend
 # Using public ECR to avoid Docker Hub rate limits
-FROM public.ecr.aws/docker/library/node:20-slim
-
-RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
+FROM public.ecr.aws/docker/library/node:20-slim AS base
 RUN npm install -g pnpm
 
+# Dependencies stage
+FROM base AS deps
 WORKDIR /app
-
-# Copy package files and install dependencies
 COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
-RUN cd frontend && pnpm install --frozen-lockfile
+# Use cache mount for pnpm store to speed up builds
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    cd frontend && pnpm install --frozen-lockfile
 
-# Copy only what frontend needs
-COPY frontend /app/frontend
-COPY src/mindroom/tools_metadata.json /app/src/mindroom/tools_metadata.json
-
-# Build production bundle during image build
+# Build stage
+FROM deps AS builder
+WORKDIR /app
+COPY frontend/ ./frontend/
+# Copy additional required files for build
+COPY src/mindroom/tools_metadata.json ./src/mindroom/tools_metadata.json
+# Build production bundle with optimizations
 RUN cd frontend && pnpm run build
 
-# Copy run script
-COPY run-frontend.sh /app/run-frontend.sh
-RUN chmod +x /app/run-frontend.sh
+# Production stage - minimal image with only runtime needs
+FROM public.ecr.aws/docker/library/node:20-slim AS final
+# Install curl for health checks
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+RUN npm install -g pnpm
+WORKDIR /app
+
+# Copy built application
+COPY --from=builder /app/frontend/dist ./frontend/dist
+COPY --from=builder /app/frontend/package.json ./frontend/package.json
+COPY --from=builder /app/frontend/pnpm-lock.yaml ./frontend/pnpm-lock.yaml
+
+# Install only production dependencies
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    cd frontend && pnpm install --frozen-lockfile --production
 
 # Set environment variables
 ENV DOCKER_CONTAINER=1
 ENV VITE_API_URL=""
 
+# Expose port
 EXPOSE 3003
 
-# Run in production mode in Docker
-CMD ["./run-frontend.sh", "prod"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3003/api/health || exit 1
+
+# Start application in production mode
+CMD ["sh", "-c", "cd frontend && pnpm run preview -- --host 0.0.0.0 --port 3003"]

@@ -1,0 +1,16 @@
+[project]
+name = "platform-backend"
+version = "0.1.0"
+description = "MindRoom SaaS Platform Backend"
+requires-python = ">=3.13"
+classifiers = [ "Programming Language :: Python :: 3 :: Only", "Programming Language :: Python :: 3.13" ]
+dependencies = [
+  "fastapi>=0.104.1",
+  "python-dotenv>=1",
+  "stripe>=7",
+  "supabase>=2.18.1",
+  "uvicorn[standard]>=0.24",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = [ "src" ]
