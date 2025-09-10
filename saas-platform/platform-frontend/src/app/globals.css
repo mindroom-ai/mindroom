@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "../styles/buttons.css";
 
 @custom-variant dark (&:where(.dark, .dark *));
 

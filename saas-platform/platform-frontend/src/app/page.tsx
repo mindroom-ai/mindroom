@@ -10,6 +10,7 @@ import { CTA } from '@/components/landing/CTA'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
 import { useState, useEffect } from 'react'
+import { navLinks, footerLinks } from '@/lib/constants'
 
 export default function LandingPage() {
   const [scrolled, setScrolled] = useState(false)
@@ -40,15 +41,15 @@ export default function LandingPage() {
             </div>
 
             <div className="hidden md:flex items-center gap-8">
-              <Link href="#features" className="text-gray-600 dark:text-gray-300 hover:text-orange-500 dark:hover:text-orange-400 transition-colors">
-                Features
-              </Link>
-              <Link href="#pricing" className="text-gray-600 dark:text-gray-300 hover:text-orange-500 dark:hover:text-orange-400 transition-colors">
-                Pricing
-              </Link>
-              <Link href="#testimonials" className="text-gray-600 dark:text-gray-300 hover:text-orange-500 dark:hover:text-orange-400 transition-colors">
-                Testimonials
-              </Link>
+              {navLinks.map((link) => (
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  className="nav-link"
+                >
+                  {link.label}
+                </Link>
+              ))}
             </div>
 
             <div className="flex items-center gap-4">
@@ -61,7 +62,7 @@ export default function LandingPage() {
               </Link>
               <Link
                 href="/auth/signup"
-                className="px-6 py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-medium rounded-full hover:shadow-lg hover:shadow-orange-500/25 transform hover:scale-105 transition-all duration-300 shimmer"
+                className="btn-primary"
               >
                 Get Started Free
               </Link>
@@ -103,32 +104,20 @@ export default function LandingPage() {
               </p>
             </div>
 
-            <div>
-              <h4 className="font-semibold mb-4">Product</h4>
-              <ul className="space-y-2">
-                <li><Link href="#features" className="text-gray-400 hover:text-white transition-colors">Features</Link></li>
-                <li><Link href="#pricing" className="text-gray-400 hover:text-white transition-colors">Pricing</Link></li>
-                <li><Link href="/docs" className="text-gray-400 hover:text-white transition-colors">Documentation</Link></li>
-              </ul>
-            </div>
-
-            <div>
-              <h4 className="font-semibold mb-4">Company</h4>
-              <ul className="space-y-2">
-                <li><Link href="/about" className="text-gray-400 hover:text-white transition-colors">About</Link></li>
-                <li><Link href="/blog" className="text-gray-400 hover:text-white transition-colors">Blog</Link></li>
-                <li><Link href="/careers" className="text-gray-400 hover:text-white transition-colors">Careers</Link></li>
-              </ul>
-            </div>
-
-            <div>
-              <h4 className="font-semibold mb-4">Support</h4>
-              <ul className="space-y-2">
-                <li><Link href="/contact" className="text-gray-400 hover:text-white transition-colors">Contact</Link></li>
-                <li><Link href="/help" className="text-gray-400 hover:text-white transition-colors">Help Center</Link></li>
-                <li><Link href="/status" className="text-gray-400 hover:text-white transition-colors">Status</Link></li>
-              </ul>
-            </div>
+            {Object.entries(footerLinks).map(([category, links]) => (
+              <div key={category}>
+                <h4 className="font-semibold mb-4 capitalize">{category}</h4>
+                <ul className="space-y-2">
+                  {links.map((link) => (
+                    <li key={link.href}>
+                      <Link href={link.href} className="footer-link">
+                        {link.label}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
           </div>
 
           <div className="border-t border-gray-700 pt-8 text-center">

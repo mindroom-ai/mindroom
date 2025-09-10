@@ -2,6 +2,7 @@
 
 import { Star, Quote } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { trustCompanies } from '@/lib/constants'
 
 const testimonials = [
   {
@@ -112,8 +113,8 @@ export function Testimonials() {
         <div className="mt-16 text-center">
           <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">TRUSTED BY LEADING COMPANIES</p>
           <div className="flex flex-wrap justify-center items-center gap-8 opacity-60 grayscale">
-            {['Google', 'Microsoft', 'Amazon', 'Meta', 'Apple'].map((company, index) => (
-              <div key={index} className="text-2xl font-bold text-gray-600 dark:text-gray-400">
+            {trustCompanies.map((company) => (
+              <div key={company} className="text-2xl font-bold text-gray-600 dark:text-gray-400">
                 {company}
               </div>
             ))}

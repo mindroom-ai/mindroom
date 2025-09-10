@@ -1,33 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-
-const stats = [
-  {
-    value: '10,000+',
-    label: 'Active Agents',
-    suffix: '',
-    gradient: 'from-blue-500 to-cyan-500',
-  },
-  {
-    value: '99.9',
-    label: 'Uptime',
-    suffix: '%',
-    gradient: 'from-green-500 to-emerald-500',
-  },
-  {
-    value: '2M+',
-    label: 'Messages Processed',
-    suffix: '',
-    gradient: 'from-purple-500 to-pink-500',
-  },
-  {
-    value: '500+',
-    label: 'Enterprise Customers',
-    suffix: '',
-    gradient: 'from-orange-500 to-red-500',
-  },
-]
+import { stats } from '@/lib/constants'
 
 export function Stats() {
   const [isVisible, setIsVisible] = useState(false)
@@ -69,7 +43,7 @@ export function Stats() {
                 {isVisible && (
                   <span className="inline-block">
                     {stat.value}
-                    <span className="text-orange-200">{stat.suffix}</span>
+                    {stat.suffix && <span className="text-orange-200">{stat.suffix}</span>}
                   </span>
                 )}
               </div>
