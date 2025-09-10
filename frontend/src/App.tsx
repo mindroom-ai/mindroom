@@ -42,11 +42,75 @@ function AppContent() {
   };
 
   if (error) {
+    const isAuthError =
+      error.includes('Authentication required') || error.includes('Access denied');
+    const isDifferentInstance = error.includes('Access denied');
+
     return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-red-600">
-          <h2 className="text-xl font-semibold">Error Loading Configuration</h2>
-          <p>{error}</p>
+      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-amber-50 via-orange-50/40 to-yellow-50/50 dark:from-stone-950 dark:via-stone-900 dark:to-amber-950/20">
+        <div className="max-w-md w-full mx-4 p-6 bg-white dark:bg-stone-900 rounded-lg shadow-lg">
+          <div className="flex items-center mb-4">
+            <span className="text-3xl mr-3">🔒</span>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
+              {isAuthError ? 'Access Required' : 'Configuration Error'}
+            </h2>
+          </div>
+          <p className="text-gray-600 dark:text-gray-300 mb-6">{error}</p>
+
+          {isAuthError && (
+            <div className="space-y-3">
+              {isDifferentInstance ? (
+                <>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    You are logged in but don't have access to this instance. You may need to:
+                  </p>
+                  <ul className="text-sm text-gray-500 dark:text-gray-400 list-disc ml-5 space-y-1">
+                    <li>Switch to an instance you have access to</li>
+                    <li>Request access from your administrator</li>
+                    <li>Return to your dashboard</li>
+                  </ul>
+                  <a
+                    href={`https://app.${window.location.hostname
+                      .split('.')
+                      .slice(-2)
+                      .join('.')}/dashboard`}
+                    className="block w-full text-center px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
+                  >
+                    Go to Dashboard
+                  </a>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    Please log in to access this MindRoom instance.
+                  </p>
+                  <a
+                    href={`https://app.${window.location.hostname
+                      .split('.')
+                      .slice(-2)
+                      .join('.')}/auth/login`}
+                    className="block w-full text-center px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
+                  >
+                    Log In
+                  </a>
+                </>
+              )}
+            </div>
+          )}
+
+          {!isAuthError && (
+            <div className="space-y-3">
+              <button
+                onClick={() => window.location.reload()}
+                className="w-full px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
+              >
+                Retry
+              </button>
+              <p className="text-sm text-gray-500 dark:text-gray-400 text-center">
+                If the problem persists, please contact support.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );
