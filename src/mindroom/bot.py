@@ -323,7 +323,9 @@ class AgentBot:
     @cached_property
     def response_tracker(self) -> ResponseTracker:
         """Get or create the response tracker for this agent."""
-        return ResponseTracker(self.agent_name, base_path=self.storage_path)
+        # Use the tracking subdirectory, not the root storage path
+        tracking_dir = self.storage_path / "tracking"
+        return ResponseTracker(self.agent_name, base_path=tracking_dir)
 
     @cached_property
     def stop_manager(self) -> StopManager:
