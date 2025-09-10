@@ -22,6 +22,7 @@ COPY config.yaml /app/
 COPY run-backend.sh /app/
 COPY scripts /app/scripts/
 COPY tools /app/tools/
+COPY avatars /app/avatars/
 
 # Install the project itself (fast, dependencies already installed)
 RUN --mount=type=cache,target=/root/.cache/uv \

@@ -38,7 +38,6 @@ deploy/instance_data/
 instance_data/
 coverage.xml
 .cache
-avatars/
 htmlcov/
 mindroom_output.log
 saas-platform/
