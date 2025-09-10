@@ -49,8 +49,7 @@ export default function InstancesPage() {
     try {
       const response = await apiCall('/admin/sync-instances', { method: 'POST' })
       if (response.ok) {
-        const result = await response.json()
-        console.log('Sync result:', result)
+        await response.json()
         // Refresh the instances list after sync
         await fetchInstances()
       } else {
