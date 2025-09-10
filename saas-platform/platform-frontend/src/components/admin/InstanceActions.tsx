@@ -79,17 +79,19 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
         </button>
       )}
 
-      <button
-        className="text-red-600 hover:underline text-sm"
-        onClick={() => {
-          if (confirm(`Uninstall instance ${instanceId}?`)) {
-            performAction('uninstall')
-          }
-        }}
-        disabled={loading !== null}
-      >
-        {loading === 'uninstall' ? '...' : 'Uninstall'}
-      </button>
+      {currentStatus !== 'deprovisioned' && (
+        <button
+          className="text-red-600 hover:underline text-sm"
+          onClick={() => {
+            if (confirm(`Uninstall instance ${instanceId}?`)) {
+              performAction('uninstall')
+            }
+          }}
+          disabled={loading !== null}
+        >
+          {loading === 'uninstall' ? '...' : 'Uninstall'}
+        </button>
+      )}
     </div>
   )
 }
