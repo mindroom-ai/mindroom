@@ -99,6 +99,7 @@ dependencies = [
   "sqlalchemy",                                  # for SQL tool
   "streamlit",                                   # for Streamlit components
   "structlog>=24.1",                             # for structured logging
+  "supabase>=2.18.1",
   "tavily-python",                               # for Tavily tool
   "tenacity>=9.1.2",
   "todoist-api-python",                          # for Todoist tool
