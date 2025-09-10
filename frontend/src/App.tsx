@@ -70,10 +70,9 @@ function AppContent() {
                     <li>Return to your dashboard</li>
                   </ul>
                   <a
-                    href={`https://app.${window.location.hostname
-                      .split('.')
-                      .slice(-2)
-                      .join('.')}/dashboard`}
+                    href={`${
+                      import.meta.env.VITE_PLATFORM_URL || 'https://app.mindroom.chat'
+                    }/dashboard`}
                     className="block w-full text-center px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
                   >
                     Go to Dashboard
@@ -85,10 +84,9 @@ function AppContent() {
                     Please log in to access this MindRoom instance.
                   </p>
                   <a
-                    href={`https://app.${window.location.hostname
-                      .split('.')
-                      .slice(-2)
-                      .join('.')}/auth/login`}
+                    href={`${
+                      import.meta.env.VITE_PLATFORM_URL || 'https://app.mindroom.chat'
+                    }/auth/login`}
                     className="block w-full text-center px-4 py-2 bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
                   >
                     Log In
