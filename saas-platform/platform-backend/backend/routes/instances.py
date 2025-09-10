@@ -25,13 +25,9 @@ router = APIRouter()
 async def list_user_instances(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """List instances for current user."""
     sb = ensure_supabase()
-
-    try:
-        account_id = user["account_id"]
-        result = sb.table("instances").select("*").eq("account_id", account_id).execute()
-        return {"instances": result.data or []}  # noqa: TRY300
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to fetch instances") from e
+    account_id = user["account_id"]
+    result = sb.table("instances").select("*").eq("account_id", account_id).execute()
+    return {"instances": result.data or []}
 
 
 @router.post("/my/instances/provision", response_model=ProvisionResponse)
@@ -39,43 +35,38 @@ async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -
     """Provision an instance for the current user."""
     sb = ensure_supabase()
 
-    try:
-        account_id = user["account_id"]
-        sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
-        if not sub_result.data:
-            raise HTTPException(status_code=404, detail="No subscription found")  # noqa: TRY301
-        subscription = sub_result.data[0]
-        inst_result = (
-            sb.table("instances")
-            .select("*")
-            .eq("subscription_id", subscription["id"])  # one instance per subscription
-            .limit(1)
-            .execute()
-        )
-        if inst_result.data:
-            # Idempotent: return existing instance metadata
-            existing = inst_result.data[0]
-            return {
-                "success": True,
-                "message": "Instance already exists",
-                "customer_id": existing.get("instance_id") or existing.get("subdomain") or "",
-                "frontend_url": existing.get("frontend_url") or existing.get("instance_url"),
-                "api_url": existing.get("backend_url") or existing.get("api_url"),
-                "matrix_url": existing.get("matrix_server_url") or existing.get("matrix_url"),
-            }
+    account_id = user["account_id"]
+    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
+    if not sub_result.data:
+        raise HTTPException(status_code=404, detail="No subscription found")
+    subscription = sub_result.data[0]
+    inst_result = (
+        sb.table("instances")
+        .select("*")
+        .eq("subscription_id", subscription["id"])  # one instance per subscription
+        .limit(1)
+        .execute()
+    )
+    if inst_result.data:
+        # Idempotent: return existing instance metadata
+        existing = inst_result.data[0]
+        return {
+            "success": True,
+            "message": "Instance already exists",
+            "customer_id": existing.get("instance_id") or existing.get("subdomain") or "",
+            "frontend_url": existing.get("frontend_url") or existing.get("instance_url"),
+            "api_url": existing.get("backend_url") or existing.get("api_url"),
+            "matrix_url": existing.get("matrix_server_url") or existing.get("matrix_url"),
+        }
 
-        return await provision_instance(
-            data={
-                "subscription_id": subscription["id"],
-                "account_id": account_id,
-                "tier": subscription["tier"],
-            },
-            authorization=f"Bearer {PROVISIONER_API_KEY}",
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to provision instance") from e
+    return await provision_instance(
+        data={
+            "subscription_id": subscription["id"],
+            "account_id": account_id,
+            "tier": subscription["tier"],
+        },
+        authorization=f"Bearer {PROVISIONER_API_KEY}",
+    )
 
 
 # Helper function for user instance actions
