@@ -8,6 +8,7 @@ import { Testimonials } from '@/components/landing/Testimonials'
 import { Stats } from '@/components/landing/Stats'
 import { CTA } from '@/components/landing/CTA'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
+import { MindRoomLogo } from '@/components/MindRoomLogo'
 import { useState, useEffect } from 'react'
 
 export default function LandingPage() {
@@ -32,7 +33,7 @@ export default function LandingPage() {
         <div className="container mx-auto px-6 py-4">
           <div className="flex justify-between items-center">
             <div className="flex items-center gap-3 group">
-              <span className="text-3xl group-hover:scale-110 transition-transform duration-300">🧠</span>
+              <MindRoomLogo className="text-orange-500 group-hover:scale-110 transition-transform duration-300" size={36} />
               <span className="text-2xl font-bold bg-gradient-to-r from-orange-500 to-orange-600 bg-clip-text text-transparent">
                 MindRoom
               </span>
@@ -94,7 +95,7 @@ export default function LandingPage() {
           <div className="grid md:grid-cols-4 gap-8 mb-8">
             <div>
               <div className="flex items-center gap-2 mb-4">
-                <span className="text-3xl">🧠</span>
+                <MindRoomLogo className="text-white" size={32} />
                 <span className="text-xl font-bold">MindRoom</span>
               </div>
               <p className="text-gray-400">
