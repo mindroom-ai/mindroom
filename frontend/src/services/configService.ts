@@ -8,7 +8,16 @@ export async function loadConfig(): Promise<Config> {
   });
 
   if (!response.ok) {
-    throw new Error('Failed to load configuration');
+    if (response.status === 401) {
+      throw new Error('Authentication required. Please log in to access this instance.');
+    }
+    if (response.status === 403) {
+      throw new Error('Access denied. You do not have permission to access this instance.');
+    }
+    if (response.status === 500) {
+      throw new Error('Server error. Please try again later or contact support.');
+    }
+    throw new Error(`Failed to load configuration (Error ${response.status})`);
   }
 
   return response.json();

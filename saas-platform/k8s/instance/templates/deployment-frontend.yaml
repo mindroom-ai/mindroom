@@ -49,6 +49,8 @@ spec:
           value: "https://{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: VITE_API_URL
           value: ""  # Use relative URLs to proxy to backend
+        - name: VITE_PLATFORM_URL
+          value: "https://app.{{ .Values.baseDomain }}"
         # Frontend UI is stateless; no persistent volumes needed
         resources:
           requests:
