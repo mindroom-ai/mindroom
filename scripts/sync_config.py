@@ -76,12 +76,12 @@ def main() -> int:
 
     # Override memory configuration for SaaS
     if "memory" in config:
-        # Override LLM to use OpenRouter
+        # Override LLM to use OpenAI (mem0 doesn't support OpenRouter)
         if "llm" in config["memory"]:
             config["memory"]["llm"] = {
-                "provider": "openrouter",
+                "provider": "openai",
                 "config": {
-                    "model": "google/gemini-2.5-flash",
+                    "model": "gpt-4o-mini",
                     "temperature": 0.1,
                     "top_p": 1,
                 },
