@@ -203,9 +203,9 @@ export default function BillingPage() {
 
       {/* Upgrade CTA for Free Users */}
       {subscription?.tier === 'free' && (
-        <div className="bg-gradient-to-r from-orange-50 to-yellow-50 rounded-lg p-6 border border-orange-200">
-          <h2 className="text-xl font-bold mb-2">Ready to scale?</h2>
-          <p className="text-gray-600 mb-4">
+        <div className="bg-gradient-to-r from-orange-50 to-yellow-50 dark:from-orange-900/20 dark:to-yellow-900/20 rounded-lg p-6 border border-orange-200 dark:border-orange-800">
+          <h2 className="text-xl font-bold mb-2 dark:text-white">Ready to scale?</h2>
+          <p className="text-gray-600 dark:text-gray-400 mb-4">
             Unlock more agents, higher limits, and premium features with our paid plans.
           </p>
           <button

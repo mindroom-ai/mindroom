@@ -119,17 +119,17 @@ export default function UpgradePage() {
       <div className="mb-8">
         <button
           onClick={() => router.push('/dashboard/billing')}
-          className="flex items-center text-gray-600 hover:text-gray-900 mb-4"
+          className="flex items-center text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 mb-4"
         >
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back to Billing
         </button>
-        <h1 className="text-3xl font-bold">Upgrade Your Plan</h1>
-        <p className="text-gray-600 mt-2">
+        <h1 className="text-3xl font-bold dark:text-white">Upgrade Your Plan</h1>
+        <p className="text-gray-600 dark:text-gray-400 mt-2">
           Choose a plan that fits your needs. You can change or cancel anytime.
         </p>
         {currentTier !== 'free' && (
-          <p className="text-sm text-orange-600 mt-2">
+          <p className="text-sm text-orange-600 dark:text-orange-400 mt-2">
             Currently on {currentTier} plan. Upgrading will prorate your billing.
           </p>
         )}
@@ -147,7 +147,7 @@ export default function UpgradePage() {
               onClick={() => !isCurrentPlan && !isDowngrade && setSelectedPlan(plan.id)}
               className={`
                 relative rounded-lg border-2 p-6 cursor-pointer transition-all
-                ${selectedPlan === plan.id ? 'border-orange-500 bg-orange-50' : 'border-gray-200 hover:border-gray-300'}
+                ${selectedPlan === plan.id ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/10' : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'}
                 ${isCurrentPlan ? 'opacity-50 cursor-not-allowed' : ''}
                 ${isDowngrade ? 'opacity-50 cursor-not-allowed' : ''}
               `}
@@ -169,20 +169,20 @@ export default function UpgradePage() {
               )}
 
               <div className="mb-4">
-                <h3 className="text-xl font-bold">{plan.name}</h3>
-                <p className="text-gray-600 text-sm mt-1">{plan.description}</p>
+                <h3 className="text-xl font-bold dark:text-white">{plan.name}</h3>
+                <p className="text-gray-600 dark:text-gray-400 text-sm mt-1">{plan.description}</p>
               </div>
 
               <div className="mb-6">
-                <span className="text-3xl font-bold">{plan.price}</span>
-                {plan.price !== 'Custom' && <span className="text-gray-600">/month</span>}
+                <span className="text-3xl font-bold dark:text-white">{plan.price}</span>
+                {plan.price !== 'Custom' && <span className="text-gray-600 dark:text-gray-400">/month</span>}
               </div>
 
               <ul className="space-y-3">
                 {plan.features.map((feature, index) => (
                   <li key={index} className="flex items-start">
                     <Check className="w-5 h-5 text-green-500 mr-2 flex-shrink-0 mt-0.5" />
-                    <span className="text-sm">{feature}</span>
+                    <span className="text-sm dark:text-gray-300">{feature}</span>
                   </li>
                 ))}
               </ul>
@@ -196,18 +196,18 @@ export default function UpgradePage() {
       </div>
 
       {/* Action Buttons */}
-      <div className="flex items-center justify-between p-6 bg-gray-50 rounded-lg">
+      <div className="flex items-center justify-between p-6 bg-gray-50 dark:bg-gray-800 rounded-lg">
         <div>
           {selectedPlan && (
-            <p className="text-sm text-gray-600">
-              Selected: <span className="font-semibold">{plans.find(p => p.id === selectedPlan)?.name}</span>
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              Selected: <span className="font-semibold dark:text-white">{plans.find(p => p.id === selectedPlan)?.name}</span>
             </p>
           )}
         </div>
         <div className="flex gap-4">
           <button
             onClick={() => router.push('/dashboard/billing')}
-            className="px-6 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            className="px-6 py-2 border border-gray-300 dark:border-gray-600 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
           >
             Cancel
           </button>
@@ -240,9 +240,9 @@ export default function UpgradePage() {
       </div>
 
       {/* Info Box */}
-      <div className="mt-8 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-        <h4 className="font-semibold text-blue-900 mb-2">Good to know</h4>
-        <ul className="text-sm text-blue-800 space-y-1">
+      <div className="mt-8 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+        <h4 className="font-semibold text-blue-900 dark:text-blue-300 mb-2">Good to know</h4>
+        <ul className="text-sm text-blue-800 dark:text-blue-400 space-y-1">
           <li>• All plans include a 14-day free trial</li>
           <li>• Cancel or change your plan anytime</li>
           <li>• Upgrades are prorated to your billing cycle</li>

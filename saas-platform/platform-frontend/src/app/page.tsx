@@ -7,14 +7,14 @@ export default function LandingPage() {
   return (
     <main className="min-h-screen">
       {/* Navigation */}
-      <nav className="fixed top-0 w-full bg-white/80 backdrop-blur-xl border-b z-50">
+      <nav className="fixed top-0 w-full bg-white/80 dark:bg-gray-900/80 backdrop-blur-xl border-b dark:border-gray-700 z-50">
         <div className="container mx-auto px-6 py-4 flex justify-between items-center">
           <div className="flex items-center gap-2">
             <span className="text-3xl">🧠</span>
-            <span className="text-2xl font-bold">MindRoom</span>
+            <span className="text-2xl font-bold dark:text-white">MindRoom</span>
           </div>
           <div className="flex gap-4">
-            <Link href="/auth/login" className="px-4 py-2 text-gray-600 hover:text-gray-900">
+            <Link href="/auth/login" className="px-4 py-2 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white">
               Sign In
             </Link>
             <Link href="/auth/signup" className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors">

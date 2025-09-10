@@ -35,13 +35,13 @@ const features = [
 
 export function Features() {
   return (
-    <section id="features" className="py-20 px-6 bg-white">
+    <section id="features" className="py-20 px-6 bg-white dark:bg-gray-800">
       <div className="container mx-auto max-w-6xl">
         <div className="text-center mb-12">
-          <h2 className="text-4xl font-bold mb-4">
+          <h2 className="text-4xl font-bold mb-4 dark:text-white">
             Everything You Need to Deploy AI
           </h2>
-          <p className="text-xl text-gray-600">
+          <p className="text-xl text-gray-600 dark:text-gray-300">
             Powerful features that make AI deployment simple and effective
           </p>
         </div>
@@ -51,11 +51,11 @@ export function Features() {
             const Icon = feature.icon
             return (
               <div key={index} className="p-6">
-                <div className="w-12 h-12 bg-orange-100 rounded-lg flex items-center justify-center mb-4">
-                  <Icon className="w-6 h-6 text-orange-600" />
+                <div className="w-12 h-12 bg-orange-100 dark:bg-orange-900/20 rounded-lg flex items-center justify-center mb-4">
+                  <Icon className="w-6 h-6 text-orange-600 dark:text-orange-400" />
                 </div>
-                <h3 className="text-xl font-semibold mb-2">{feature.title}</h3>
-                <p className="text-gray-600">{feature.description}</p>
+                <h3 className="text-xl font-semibold mb-2 dark:text-white">{feature.title}</h3>
+                <p className="text-gray-600 dark:text-gray-300">{feature.description}</p>
               </div>
             )
           })}
