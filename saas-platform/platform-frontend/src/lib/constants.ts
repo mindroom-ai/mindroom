@@ -24,13 +24,13 @@ export const footerLinks = {
   ],
 }
 
-// Stats data
+// Stats data - Matrix protocol that MindRoom is built on
 export const stats = [
-  { value: '10,000+', label: 'Active Agents' },
-  { value: '99.9', label: 'Uptime', suffix: '%' },
-  { value: '2M+', label: 'Messages Processed' },
-  { value: '500+', label: 'Enterprise Customers' },
+  { value: '115M', label: 'Users on Matrix Protocol', suffix: '+' },
+  { value: '150K', label: 'Orgs Trust Matrix Security', suffix: '+' },
+  { value: '10', label: 'Years of Matrix Development', suffix: '+' },
+  { value: '€30M', label: 'Invested in Matrix Foundation', suffix: '+' },
 ]
 
-// Trust companies
-export const trustCompanies = ['Google', 'Microsoft', 'Amazon', 'Meta', 'Apple']
+// Trust organizations - Real Matrix users
+export const trustCompanies = ['German Healthcare', 'French Government', 'NATO', 'U.S. Space Force', 'Matrix Foundation']

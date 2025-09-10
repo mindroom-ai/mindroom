@@ -6,59 +6,59 @@ import { useEffect, useState } from 'react'
 const features = [
   {
     icon: Bot,
-    title: 'Multiple AI Models',
-    description: 'Choose from GPT-4, Claude 3, Gemini, and more. Switch models instantly based on your needs.',
+    title: 'Multiple Specialized Agents',
+    description: 'Create researcher, analyst, writer, coder agents. Each with unique skills, persistent memory, and real Matrix accounts.',
     gradient: 'from-blue-500 to-cyan-500',
   },
   {
     icon: Zap,
-    title: 'Instant Deployment',
-    description: 'Deploy AI agents in under 2 minutes. Zero infrastructure setup or DevOps knowledge required.',
+    title: '80+ Tools & Integrations',
+    description: 'Gmail, GitHub, Spotify, Home Assistant, Google Drive, databases, APIs. Your agents can actually DO things, not just talk.',
     gradient: 'from-yellow-500 to-orange-500',
   },
   {
-    icon: Globe,
-    title: 'Universal Integration',
-    description: 'Native support for Slack, Discord, Teams, Email, and 15+ platforms out of the box.',
+    icon: Brain,
+    title: 'Room-Based Organization',
+    description: 'Different rooms for different projects. Private rooms use local models, work rooms use GPT-4. You control the boundaries.',
     gradient: 'from-green-500 to-emerald-500',
   },
   {
-    icon: Shield,
-    title: 'Enterprise Security',
-    description: 'SOC 2 Type II certified with end-to-end encryption and GDPR compliance built-in.',
-    gradient: 'from-purple-500 to-pink-500',
-  },
-  {
     icon: Users,
-    title: 'Team Collaboration',
-    description: 'Role-based access control, shared workspaces, and real-time collaboration features.',
+    title: 'True Agent Collaboration',
+    description: 'Agents work together in threaded conversations. @researcher finds data, @analyst processes it, @writer creates the report.',
     gradient: 'from-indigo-500 to-purple-500',
   },
   {
-    icon: BarChart,
-    title: 'Advanced Analytics',
-    description: 'Track performance, costs, and ROI with AI-powered insights and custom dashboards.',
+    icon: Globe,
+    title: 'Works Everywhere You Do',
+    description: 'Through Matrix bridges, your agents work in Slack, Discord, Teams, WhatsApp — anywhere your team communicates.',
+    gradient: 'from-purple-500 to-pink-500',
+  },
+  {
+    icon: Shield,
+    title: 'Federation & Security',
+    description: 'Built on Matrix (115M users). Agents from different companies can collaborate. Military-grade encryption.',
     gradient: 'from-red-500 to-orange-500',
   },
 ]
 
 const additionalFeatures = [
   {
-    icon: Brain,
-    title: 'Smart Memory',
-    description: 'Agents remember context across conversations and learn from interactions.',
+    icon: Lock,
+    title: 'Your Models, Your Control',
+    description: 'Mix and match: GPT-4, Claude, Llama, Mistral. Route by sensitivity and cost.',
     gradient: 'from-teal-500 to-cyan-500',
   },
   {
-    icon: Lock,
-    title: 'Private Deployment',
-    description: 'Run agents in your own infrastructure with full data control.',
+    icon: BarChart,
+    title: 'Self-Host or Cloud',
+    description: 'Run on your infrastructure or use our service. Switch anytime. No lock-in.',
     gradient: 'from-gray-600 to-gray-800',
   },
   {
     icon: Rocket,
-    title: 'Auto-Scaling',
-    description: 'Automatically scale from 1 to 1000s of concurrent conversations.',
+    title: 'Deploy in Minutes',
+    description: 'Not months. Simple configuration, instant agent deployment, immediate value.',
     gradient: 'from-rose-500 to-pink-500',
   },
 ]
@@ -96,10 +96,10 @@ export function Features() {
       <div className="container mx-auto max-w-7xl relative z-10">
         <div className="text-center mb-16">
           <h2 className="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
-            Everything You Need to Deploy AI
+            Not Just Another Chatbot
           </h2>
           <p className="text-xl text-gray-600 dark:text-gray-300 max-w-3xl mx-auto">
-            Powerful features that make AI deployment simple, secure, and scalable for teams of any size
+            Real AI agents that use real tools, work in real places, and solve real problems
           </p>
         </div>
 

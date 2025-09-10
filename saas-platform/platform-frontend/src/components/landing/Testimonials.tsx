@@ -6,27 +6,27 @@ import { trustCompanies } from '@/lib/constants'
 
 const testimonials = [
   {
+    name: 'Dr. Stefan Mueller',
+    role: 'CTO Healthcare Network',
+    company: 'German Healthcare System',
+    content: 'We needed self-hosted AI that could still collaborate with partners. MindRoom\'s federation is revolutionary - our agents can securely join external organizations while our data stays on-premise.',
+    avatar: 'SM',
+    rating: 5,
+  },
+  {
     name: 'Sarah Chen',
-    role: 'CTO at TechFlow',
-    company: 'TechFlow Inc.',
-    content: 'MindRoom transformed how we handle customer support. Our response times dropped by 80% while satisfaction scores increased. The AI agents feel like natural extensions of our team.',
+    role: 'Head of AI Strategy',
+    company: 'Global Consulting Firm',
+    content: 'Our AI consultants can finally join client workspaces directly. They maintain context across Slack, Discord, and Teams - all while preserving our IP security. Game-changing for professional services.',
     avatar: 'SC',
     rating: 5,
   },
   {
     name: 'Michael Rodriguez',
-    role: 'Head of Operations',
-    company: 'ScaleUp Solutions',
-    content: 'The ease of deployment is incredible. We had our first AI agent running in production within 30 minutes. The platform handles everything from scaling to security.',
+    role: 'Engineering Director',
+    company: 'Enterprise SaaS Platform',
+    content: 'Migrated from ChatGPT. Now our agents remember every conversation across all platforms. The fact that two companies\' AIs can collaborate in one thread? That\'s the future we\'ve been waiting for.',
     avatar: 'MR',
-    rating: 5,
-  },
-  {
-    name: 'Emily Thompson',
-    role: 'Product Manager',
-    company: 'InnovateCo',
-    content: 'What impressed me most is the flexibility. We can switch between AI models based on the task, and the integrations with our existing tools were seamless.',
-    avatar: 'ET',
     rating: 5,
   },
 ]
@@ -57,10 +57,10 @@ export function Testimonials() {
       <div className="container mx-auto max-w-6xl">
         <div className="text-center mb-16">
           <h2 className="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
-            Loved by Teams Worldwide
+            Trusted by Organizations That Can't Compromise
           </h2>
           <p className="text-xl text-gray-600 dark:text-gray-300 max-w-3xl mx-auto">
-            Join thousands of companies using MindRoom to supercharge their operations with AI
+            From government agencies to healthcare systems, organizations that demand security and sovereignty choose MindRoom
           </p>
         </div>
 
@@ -111,7 +111,7 @@ export function Testimonials() {
 
         {/* Trust badges */}
         <div className="mt-16 text-center">
-          <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">TRUSTED BY LEADING COMPANIES</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">BUILT ON INFRASTRUCTURE TRUSTED BY</p>
           <div className="flex flex-wrap justify-center items-center gap-8 opacity-60 grayscale">
             {trustCompanies.map((company) => (
               <div key={company} className="text-2xl font-bold text-gray-600 dark:text-gray-400">

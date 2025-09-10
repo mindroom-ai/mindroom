@@ -32,6 +32,16 @@ export function Stats() {
       </div>
 
       <div className="container mx-auto max-w-6xl relative z-10">
+        {/* Context about Matrix */}
+        <div className="text-center mb-8">
+          <h3 className="text-2xl md:text-3xl font-bold text-white mb-2">
+            Built on Matrix Protocol's Proven Infrastructure
+          </h3>
+          <p className="text-orange-100 max-w-2xl mx-auto">
+            MindRoom inherits the security, scale, and reliability of Matrix — the same protocol trusted by governments and militaries worldwide
+          </p>
+        </div>
+
         <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
           {stats.map((stat, index) => (
             <div
