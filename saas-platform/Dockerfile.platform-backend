@@ -1,8 +1,9 @@
 # Multi-stage build for MindRoom Platform Backend
 FROM ghcr.io/astral-sh/uv:latest AS uv
 
-# Tools stage - install kubectl and helm separately
+# Tools stage with kubectl and helm for provisioning
 FROM public.ecr.aws/docker/library/python:3.13-slim AS tools
+# Install provisioning tools (kubectl and helm)
 RUN apt-get update && apt-get install -y curl \
     && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
     && chmod +x kubectl \
@@ -37,16 +38,15 @@ COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /app
 
-# Copy kubectl and helm from tools stage
+# Copy provisioning tools from tools stage
 COPY --from=tools /kubectl /usr/local/bin/kubectl
 COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
 
 # Copy the app with venv from builder
 COPY --from=builder /app /app
 
-# Copy instance Helm chart for provisioning
+# Copy additional files needed by platform-backend
 COPY k8s/instance /app/k8s/instance/
-# Copy default-config.yaml
 COPY default-config.yaml /app/default-config.yaml
 
 EXPOSE 8000

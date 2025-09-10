@@ -1,47 +1,47 @@
-# Multi-stage build for production backend
-# Using public ECR to avoid Docker Hub rate limits
+# Multi-stage build for MindRoom Backend
 FROM ghcr.io/astral-sh/uv:latest AS uv
 
+# Builder stage with uv for dependencies
 FROM public.ecr.aws/docker/library/python:3.12-slim AS builder
 # Copy uv from the uv image
 COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /app
 
-# Install only essential build dependencies
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-
-# Copy dependency files first (changes less frequently)
+# Copy project files
 COPY pyproject.toml uv.lock README.md /app/
 
-# Install dependencies without the project itself
+# Install dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev
 
-# Copy source code and other files (changes more frequently)
+# Copy source code
 COPY src /app/src
-COPY config.yaml /app/
-COPY run-backend.sh /app/
-COPY scripts /app/scripts/
-COPY tools /app/tools/
-COPY avatars /app/avatars/
 
 # Install the project itself
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
-# Production stage - minimal image
+# Final production stage
 FROM public.ecr.aws/docker/library/python:3.12-slim AS final
-# Copy uv for runtime (needed for running the app)
+# Copy uv for runtime
 COPY --from=uv /uv /uvx /bin/
-
-# Install only runtime dependencies
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy the entire app with venv from builder
+# Install runtime dependencies (curl for health checks)
+RUN apt-get update && apt-get install -y curl \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy the app with venv from builder
 COPY --from=builder /app /app
+
+# Copy additional files needed by MindRoom
+COPY config.yaml /app/
+COPY run-backend.sh /app/
+COPY scripts /app/scripts/
+COPY tools /app/tools/
+COPY avatars /app/avatars/
 
 # Make startup script executable
 RUN chmod +x /app/run-backend.sh
@@ -49,11 +49,9 @@ RUN chmod +x /app/run-backend.sh
 # Create necessary directories
 RUN mkdir -p /app/logs /app/mindroom_data
 
-# Expose API port
-EXPOSE 8765
-
 # Set environment variable to indicate Docker mode
 ENV DOCKER_CONTAINER=1
 
-# Run both bot and API using the startup script
+EXPOSE 8765
+# Run the app
 CMD ["/app/run-backend.sh"]
