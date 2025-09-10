@@ -50,5 +50,6 @@ COPY k8s/instance /app/k8s/instance/
 COPY default-config.yaml /app/default-config.yaml
 
 EXPOSE 8000
+
 # Run the app
-CMD ["uv", "run", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
