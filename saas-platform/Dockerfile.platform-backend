@@ -1,25 +1,37 @@
-# Simple MindRoom Backend
-FROM public.ecr.aws/docker/library/python:3.13-slim
+# Multi-stage build for MindRoom Platform Backend
+FROM public.ecr.aws/docker/library/python:3.13-slim AS base
 
-# Install kubectl and helm for instance management
+# Tools stage - install kubectl and helm separately
+FROM base AS tools
 RUN apt-get update && apt-get install -y curl \
     && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
-    && chmod +x kubectl && mv kubectl /usr/local/bin/ \
+    && chmod +x kubectl \
     && curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Dependencies stage
+FROM base AS deps
+WORKDIR /app
+COPY platform-backend/requirements.txt .
+# Use pip cache mount for faster rebuilds
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir -r requirements.txt
+
+# Final stage
+FROM base AS final
 WORKDIR /app
 
-# Install Python dependencies
-COPY platform-backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy kubectl and helm from tools stage
+COPY --from=tools /kubectl /usr/local/bin/kubectl
+COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
 
-# Copy backend
+# Copy Python packages from deps stage
+COPY --from=deps /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
+COPY --from=deps /usr/local/bin /usr/local/bin
+
+# Copy application files
 COPY platform-backend/ .
-
-# Copy instance Helm chart for provisioning
 COPY k8s/instance /app/k8s/instance/
-# Copy default-config.yaml to where the symlink expects it
 COPY default-config.yaml /app/default-config.yaml
 
 EXPOSE 8000

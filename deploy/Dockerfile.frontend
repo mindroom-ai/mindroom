@@ -1,22 +1,36 @@
-# Frontend container with configurable dev/prod mode
+# Multi-stage build for MindRoom Frontend
 # Using public ECR to avoid Docker Hub rate limits
-FROM public.ecr.aws/docker/library/node:20-slim
-
-RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
+FROM public.ecr.aws/docker/library/node:20-slim AS base
 RUN npm install -g pnpm
 
+# Dependencies stage
+FROM base AS deps
 WORKDIR /app
-
-# Copy package files and install dependencies
 COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
-RUN cd frontend && pnpm install --frozen-lockfile
+# Use cache mount for pnpm store to speed up builds
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    cd frontend && pnpm install --frozen-lockfile
 
-# Copy only what frontend needs
+# Build stage
+FROM deps AS builder
+WORKDIR /app
 COPY frontend /app/frontend
 COPY src/mindroom/tools_metadata.json /app/src/mindroom/tools_metadata.json
-
-# Build production bundle during image build
+# Build production bundle
 RUN cd frontend && pnpm run build
+
+# Production stage - minimal image with only runtime needs
+FROM public.ecr.aws/docker/library/node:20-slim AS final
+RUN npm install -g pnpm
+WORKDIR /app
+
+# Copy built application
+COPY --from=builder /app/frontend/dist /app/frontend/dist
+COPY --from=builder /app/frontend/package.json /app/frontend/pnpm-lock.yaml /app/frontend/
+
+# Install only production dependencies
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    cd frontend && pnpm install --frozen-lockfile --prod
 
 # Copy run script
 COPY run-frontend.sh /app/run-frontend.sh
