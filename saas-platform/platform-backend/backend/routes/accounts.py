@@ -20,13 +20,7 @@ async def get_current_account(user: Annotated[dict, Depends(verify_user)]) -> di
     account_id = user["account_id"]
 
     account_result = (
-        sb.table("accounts")
-        .select(
-            "*, subscriptions(*, instances(*))",
-        )
-        .eq("id", account_id)
-        .single()
-        .execute()
+        sb.table("accounts").select("*, subscriptions(*, instances(*))").eq("id", account_id).single().execute()
     )
 
     if not account_result.data:

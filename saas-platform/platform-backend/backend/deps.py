@@ -19,7 +19,7 @@ def ensure_supabase() -> Client:
     return supabase
 
 
-def ensure_auth_client() -> Client:
+def _ensure_auth_client() -> Client:
     """Return configured Supabase auth client or raise 500 if missing."""
     if not auth_client:
         raise HTTPException(status_code=500, detail="Supabase auth not configured")
@@ -38,7 +38,7 @@ async def verify_user(authorization: str = Header(None)) -> dict:
     token = authorization.replace("Bearer ", "")
 
     sb = ensure_supabase()
-    ac = ensure_auth_client()
+    ac = _ensure_auth_client()
 
     try:
         user = ac.auth.get_user(token)
@@ -113,7 +113,7 @@ async def verify_admin(authorization: str = Header(None)) -> dict:
     token = authorization.replace("Bearer ", "")
 
     sb = ensure_supabase()
-    ac = ensure_auth_client()
+    ac = _ensure_auth_client()
 
     try:
         user = ac.auth.get_user(token)
