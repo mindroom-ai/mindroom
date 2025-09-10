@@ -16,6 +16,7 @@ from backend.config import (
     SUPABASE_URL,
     logger,
 )
+from backend.db_utils import update_instance_status
 from backend.deps import ensure_supabase
 from backend.k8s import check_deployment_exists, ensure_docker_registry_secret, run_kubectl, wait_for_deployment_ready
 from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
@@ -268,15 +269,7 @@ async def start_instance_provisioner(
             raise RuntimeError(msg)  # noqa: TRY301
         logger.info("Started instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
-        try:
-            sb = ensure_supabase()
-            sb.table("instances").update(
-                {
-                    "status": "running",
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
-            ).eq("instance_id", instance_id).execute()
-        except Exception:
+        if not update_instance_status(instance_id, "running"):
             logger.warning("Failed to update DB status to running for instance %s", instance_id)
     except Exception as e:
         logger.exception("Failed to start instance %s", instance_id)
@@ -315,15 +308,7 @@ async def stop_instance_provisioner(
             raise RuntimeError(msg)  # noqa: TRY301
         logger.info("Stopped instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
-        try:
-            sb = ensure_supabase()
-            sb.table("instances").update(
-                {
-                    "status": "stopped",
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
-            ).eq("instance_id", instance_id).execute()
-        except Exception:
+        if not update_instance_status(instance_id, "stopped"):
             logger.warning("Failed to update DB status to stopped for instance %s", instance_id)
     except Exception as e:
         logger.exception("Failed to stop instance %s", instance_id)
@@ -394,16 +379,8 @@ async def uninstall_instance(
         else:
             logger.info("Successfully uninstalled instance %s: %s", instance_id, stdout)
 
-        try:
-            sb = ensure_supabase()
-            sb.table("instances").update(
-                {
-                    "status": "deprovisioned",
-                    "updated_at": datetime.now(UTC).isoformat(),
-                },
-            ).eq("instance_id", str(instance_id)).execute()
-        except Exception as e:
-            logger.warning("Failed to update database for instance %s: %s", instance_id, e)
+        if not update_instance_status(instance_id, "deprovisioned"):
+            logger.warning("Failed to update database for instance %s", instance_id)
 
     except HTTPException:
         raise
