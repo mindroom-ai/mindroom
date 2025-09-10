@@ -1,6 +1,6 @@
 /* Common button styles */
 .btn-primary {
-  @apply px-6 py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-medium rounded-full hover:shadow-lg hover:shadow-orange-500/25 transform hover:scale-105 transition-all duration-300 shimmer;
+  @apply px-6 py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-medium rounded-full hover:shadow-lg hover:shadow-orange-500/25 transform hover:scale-105 transition-all duration-300;
 }
 
 .btn-secondary {

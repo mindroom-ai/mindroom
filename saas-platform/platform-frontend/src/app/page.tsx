@@ -62,7 +62,7 @@ export default function LandingPage() {
               </Link>
               <Link
                 href="/auth/signup"
-                className="btn-primary"
+                className="btn-primary shimmer"
               >
                 Get Started Free
               </Link>

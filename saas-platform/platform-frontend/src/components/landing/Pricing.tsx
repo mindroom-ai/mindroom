@@ -149,7 +149,7 @@ export function Pricing() {
             return (
               <div
                 key={index}
-                className={`group relative bg-white dark:bg-gray-800 rounded-3xl overflow-hidden transition-all duration-500 ${
+                className={`relative bg-white dark:bg-gray-800 rounded-3xl overflow-hidden transition-all duration-500 ${
                   plan.featured
                     ? 'shadow-2xl scale-105 border-2 border-orange-500'
                     : 'shadow-xl hover:shadow-2xl border border-gray-200 dark:border-gray-700'
@@ -187,10 +187,10 @@ export function Pricing() {
                   {/* CTA Button */}
                   <Link
                     href={plan.href}
-                    className={`block text-center py-3 px-6 rounded-full font-semibold transition-all duration-300 mb-8 ${
+                    className={`block text-center py-3 px-6 rounded-full font-semibold mb-8 cursor-pointer ${
                       plan.featured
-                        ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-white hover:shadow-lg hover:scale-105 shimmer'
-                        : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white hover:bg-gray-200 dark:hover:bg-gray-600'
+                        ? 'bg-gradient-to-r from-orange-500 to-orange-600 text-white transition-all duration-300 hover:from-orange-600 hover:to-orange-700 hover:shadow-2xl hover:shadow-orange-500/40 hover:-translate-y-1 transform'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white transition-all duration-300 hover:bg-gradient-to-r hover:from-gray-200 hover:to-gray-300 dark:hover:from-gray-600 dark:hover:to-gray-500 hover:shadow-2xl hover:-translate-y-1 transform'
                     }`}
                   >
                     {plan.cta}
@@ -212,9 +212,6 @@ export function Pricing() {
                     ))}
                   </ul>
                 </div>
-
-                {/* Hover gradient effect */}
-                <div className={`absolute inset-0 bg-gradient-to-br ${plan.gradient} opacity-0 group-hover:opacity-5 transition-opacity duration-500`}></div>
               </div>
             )
           })}
