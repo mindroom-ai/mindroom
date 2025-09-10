@@ -374,7 +374,7 @@ async def uninstall_instance(
                     "status": "deprovisioned",
                     "updated_at": datetime.now(UTC).isoformat(),
                 },
-            ).or_(f"instance_id.eq.{instance_id},subdomain.eq.{instance_id}").execute()
+            ).eq("instance_id", str(instance_id)).execute()
         except Exception as e:
             logger.warning("Failed to update database for instance %s: %s", instance_id, e)
 
