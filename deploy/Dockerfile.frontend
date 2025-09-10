@@ -20,32 +20,53 @@ COPY src/mindroom/tools_metadata.json ./src/mindroom/tools_metadata.json
 # Build production bundle with optimizations
 RUN cd frontend && pnpm run build
 
-# Production stage - minimal image with only runtime needs
-FROM public.ecr.aws/docker/library/node:20-slim AS final
-# Install curl for health checks
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-RUN npm install -g pnpm
-WORKDIR /app
+# Production stage - ultra-minimal nginx image
+FROM public.ecr.aws/nginx/nginx:alpine AS final
 
-# Copy built application
-COPY --from=builder /app/frontend/dist ./frontend/dist
-COPY --from=builder /app/frontend/package.json ./frontend/package.json
-COPY --from=builder /app/frontend/pnpm-lock.yaml ./frontend/pnpm-lock.yaml
+# Copy built static files to nginx serve directory
+COPY --from=builder /app/frontend/dist /usr/share/nginx/html
 
-# Install only production dependencies
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    cd frontend && pnpm install --frozen-lockfile --production
+# Copy custom nginx configuration for SPA routing
+COPY <<EOF /etc/nginx/conf.d/default.conf
+server {
+    listen 3003;
+    listen [::]:3003;
+    server_name localhost;
+    root /usr/share/nginx/html;
+    index index.html;
 
-# Set environment variables
-ENV DOCKER_CONTAINER=1
-ENV VITE_API_URL=""
+    # SPA routing - serve index.html for all routes
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+
+    # API health check endpoint
+    location /api/health {
+        access_log off;
+        add_header 'Content-Type' 'application/json';
+        return 200 '{"status":"healthy"}';
+    }
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
+}
+EOF
+
 
 # Expose port
 EXPOSE 3003
 
-# Health check
+# Health check using nginx
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:3003/api/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3003/api/health || exit 1
 
-# Start application in production mode
-CMD ["sh", "-c", "cd frontend && pnpm run preview -- --host 0.0.0.0 --port 3003"]
+# nginx runs automatically
+CMD ["nginx", "-g", "daemon off;"]
