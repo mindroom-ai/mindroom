@@ -9,6 +9,7 @@ synapse_image: matrixdotorg/synapse:latest
 # API Keys (set via --set)
 openai_key: ""
 anthropic_key: ""
+openrouter_key: ""
 
 # Supabase (shared auth)
 supabaseUrl: ""

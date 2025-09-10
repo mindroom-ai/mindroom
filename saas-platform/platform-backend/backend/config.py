@@ -48,6 +48,12 @@ PROVISIONER_API_KEY = os.getenv("PROVISIONER_API_KEY", "")
 
 # Gitea registry credentials (for pulling instance images)
 GITEA_USER = os.getenv("GITEA_USER", "")
+
+# OpenRouter API key for AI model access
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
+# OpenAI API key for embeddings
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GITEA_TOKEN = os.getenv("GITEA_TOKEN", "")
 
 # CORS allowed origins

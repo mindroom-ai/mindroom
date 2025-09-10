@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mindroom-config-{{ .Values.customer }}
+  namespace: mindroom-instances
+data:
+  config.yaml: |
+{{ .Files.Get "default-config.yaml" | indent 4 }}
