@@ -1,7 +1,9 @@
+"""Account management routes."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
 from backend.deps import ensure_supabase, verify_user
 from backend.models import AdminStatusOut
@@ -11,7 +13,7 @@ router = APIRouter()
 
 
 @router.get("/my/account")
-async def get_current_account(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def get_current_account(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get current user's account with subscription and instances."""
     sb = ensure_supabase()
 
@@ -29,15 +31,15 @@ async def get_current_account(user=Depends(verify_user)) -> dict[str, Any]:  # n
         )
 
         if not account_result.data:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
 
-        return account_result.data
+        return account_result.data  # noqa: TRY300
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to fetch account") from e
 
 
 @router.get("/my/account/admin-status", response_model=AdminStatusOut)
-async def check_admin_status(user=Depends(verify_user)) -> dict[str, bool]:  # noqa: B008
+async def check_admin_status(user: Annotated[dict, Depends(verify_user)]) -> dict[str, bool]:
     """Check if current user is an admin."""
     sb = ensure_supabase()
 
@@ -52,7 +54,7 @@ async def check_admin_status(user=Depends(verify_user)) -> dict[str, bool]:  # n
 
 
 @router.post("/my/account/setup")
-async def setup_account(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def setup_account(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Setup free tier account for new user."""
     sb = ensure_supabase()
 

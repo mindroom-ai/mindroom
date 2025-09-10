@@ -1,3 +1,5 @@
+"""Admin-only routes for platform management."""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -19,7 +21,7 @@ router = APIRouter()
 
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
-async def get_admin_stats(admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
+async def get_admin_stats(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
     """Get platform statistics for admin dashboard."""
     sb = ensure_supabase()
 
@@ -39,25 +41,25 @@ async def get_admin_stats(admin=Depends(verify_admin)) -> dict[str, Any]:  # noq
 
 
 @router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
-async def admin_start_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
+async def admin_start_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
     """Proxy start to provisioner (no key exposed to browser)."""
     return await start_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
 @router.post("/admin/instances/{instance_id}/stop", response_model=ActionResult)
-async def admin_stop_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
+async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
     """Proxy stop to provisioner (no key exposed to browser)."""
     return await stop_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
 @router.post("/admin/instances/{instance_id}/restart", response_model=ActionResult)
-async def admin_restart_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
+async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
     """Proxy restart to provisioner (no key exposed to browser)."""
     return await restart_instance_provisioner(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
 @router.delete("/admin/instances/{instance_id}/uninstall", response_model=ActionResult)
-async def admin_uninstall_instance(instance_id: int, admin=Depends(verify_admin)) -> dict[str, Any]:  # noqa: B008
+async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
     """Proxy uninstall to provisioner (no key exposed to browser)."""
     return await uninstall_instance(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
@@ -66,7 +68,7 @@ async def admin_uninstall_instance(instance_id: int, admin=Depends(verify_admin)
 async def update_account_status(
     account_id: str,
     status: str,
-    admin=Depends(verify_admin),  # noqa: B008
+    admin: Annotated[dict, Depends(verify_admin)],
 ) -> dict[str, Any]:
     """Update account status (active, suspended, etc)."""
     sb = ensure_supabase()
@@ -89,7 +91,7 @@ async def update_account_status(
         )
 
         if not result.data:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
 
         sb.table("audit_logs").insert(
             {
@@ -102,7 +104,7 @@ async def update_account_status(
             },
         ).execute()
 
-        return {"status": "success", "account_id": account_id, "new_status": status}
+        return {"status": "success", "account_id": account_id, "new_status": status}  # noqa: TRY300
     except Exception as e:
         logger.exception("Error updating account status")
         raise HTTPException(status_code=500, detail="Failed to update account status") from e

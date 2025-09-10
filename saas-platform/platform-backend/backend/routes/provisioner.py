@@ -1,3 +1,5 @@
+"""Instance provisioning and management routes."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -38,7 +40,7 @@ async def _background_mark_running_when_ready(instance_id: str, namespace: str =
 
 
 @router.post("/system/provision", response_model=ProvisionResponse)
-async def provision_instance(
+async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
     background_tasks: BackgroundTasks = None,  # type: ignore[assignment]
@@ -70,7 +72,8 @@ async def provision_instance(
             .execute()
         )
         if not insert_res.data:
-            raise HTTPException(status_code=500, detail="Failed to insert instance")
+            msg = "Failed to insert instance"
+            raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
         customer_id = insert_res.data[0]["instance_id"]
     except HTTPException:
         raise
@@ -157,7 +160,8 @@ async def provision_instance(
                 ).eq("instance_id", customer_id).execute()
             except Exception:
                 logger.warning("Failed to update instance status to error after helm failure")
-            raise HTTPException(status_code=500, detail=f"Helm install failed: {stderr}")
+            msg = f"Helm install failed: {stderr}"
+            raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
         logger.info("Helm install output: %s", stdout)
     except HTTPException:
         raise
@@ -227,7 +231,8 @@ async def start_instance_provisioner(
             namespace="mindroom-instances",
         )
         if code != 0:
-            raise Exception(err)
+            msg = f"kubectl command failed: {err}"
+            raise RuntimeError(msg)  # noqa: TRY301
         logger.info("Started instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
         try:
@@ -273,7 +278,8 @@ async def stop_instance_provisioner(
             namespace="mindroom-instances",
         )
         if code != 0:
-            raise Exception(err)
+            msg = f"kubectl command failed: {err}"
+            raise RuntimeError(msg)  # noqa: TRY301
         logger.info("Stopped instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
         try:
@@ -319,7 +325,8 @@ async def restart_instance_provisioner(
             namespace="mindroom-instances",
         )
         if code != 0:
-            raise Exception(err)
+            msg = f"kubectl command failed: {err}"
+            raise RuntimeError(msg)  # noqa: TRY301
         logger.info("Restarted instance %s: %s", instance_id, out)
     except Exception as e:
         logger.exception("Failed to restart instance %s", instance_id)
@@ -349,7 +356,8 @@ async def uninstall_instance(
                 logger.info("Instance %s was already uninstalled", instance_id)
             else:
                 logger.error("Failed to uninstall instance: %s", error_msg)
-                raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {error_msg}")
+                msg = f"Failed to uninstall instance: {error_msg}"
+                raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
         else:
             logger.info("Successfully uninstalled instance %s: %s", instance_id, stdout)
 
@@ -467,7 +475,7 @@ async def sync_instances(
                     sync_results["errors"] += 1
 
         logger.info("Instance sync completed: %s", sync_results)
-        return sync_results
+        return sync_results  # noqa: TRY300
     except Exception as e:
         logger.exception("Failed to sync instances")
         raise HTTPException(status_code=500, detail=f"Failed to sync instances: {e}") from e

@@ -17,7 +17,7 @@ async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-i
             if "not found" in err.lower() or "notfound" in err.lower():
                 logger.info("Deployment mindroom-backend-%s not found in namespace %s", instance_id, namespace)
             return False
-        return True
+        return True  # noqa: TRY300
     except Exception:
         logger.exception("Error checking deployment existence")
         return False
@@ -47,7 +47,7 @@ async def wait_for_deployment_ready(
             logger.info("Deployment %s ready: %s", instance_id, out)
             return True
         logger.warning("Deployment %s not ready within timeout: %s", instance_id, err or out)
-        return False
+        return False  # noqa: TRY300
     except FileNotFoundError:
         logger.exception("kubectl not found when waiting for deployment readiness")
         return False
@@ -98,7 +98,7 @@ async def ensure_docker_registry_secret(
             logger.error("Failed to create imagePullSecret %s: %s", secret_name, err or out)
             return False
         logger.info("Created imagePullSecret %s in namespace %s", secret_name, namespace)
-        return True
+        return True  # noqa: TRY300
     except Exception:
         logger.exception("Error ensuring imagePullSecret %s", secret_name)
         return False

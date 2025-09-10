@@ -43,7 +43,8 @@ async def verify_user(authorization: str = Header(None)) -> dict:
     try:
         user = ac.auth.get_user(token)
         if not user or not user.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            msg = "Invalid token"
+            raise HTTPException(status_code=401, detail=msg)  # noqa: TRY301
 
         account_id = user.user.id
 
@@ -51,7 +52,8 @@ async def verify_user(authorization: str = Header(None)) -> dict:
         try:
             result = sb.table("accounts").select("*").eq("id", account_id).single().execute()
             if not result.data:
-                raise ValueError("No data")
+                msg = "No data"
+                raise ValueError(msg)  # noqa: TRY301
         except Exception:
             logger.info(f"Account not found for user {account_id}, creating...")
             try:
@@ -76,19 +78,21 @@ async def verify_user(authorization: str = Header(None)) -> dict:
                 # Try to fetch again in case it was a race condition
                 result = sb.table("accounts").select("*").eq("id", account_id).single().execute()
                 if not result.data:
-                    raise HTTPException(status_code=404, detail="Account creation failed. Please contact support.")
-
-        return {
-            "user_id": user.user.id,
-            "email": user.user.email,
-            "account_id": account_id,
-            "account": result.data,
-        }
+                    msg = "Account creation failed. Please contact support."
+                    raise HTTPException(status_code=404, detail=msg) from None
+        else:
+            return {
+                "user_id": user.user.id,
+                "email": user.user.email,
+                "account_id": account_id,
+                "account": result.data,
+            }
     except HTTPException:
         raise
     except Exception:
         logger.exception("User verification error")
-        raise HTTPException(status_code=401, detail="Authentication failed")
+        msg = "Authentication failed"
+        raise HTTPException(status_code=401, detail=msg) from None
 
 
 async def verify_user_optional(authorization: str = Header(None)) -> dict | None:
@@ -114,13 +118,15 @@ async def verify_admin(authorization: str = Header(None)) -> dict:
     try:
         user = ac.auth.get_user(token)
         if not user or not user.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            msg = "Invalid token"
+            raise HTTPException(status_code=401, detail=msg)  # noqa: TRY301
 
         result = sb.table("accounts").select("is_admin").eq("id", user.user.id).single().execute()
         if not result.data or not result.data.get("is_admin"):
-            raise HTTPException(status_code=403, detail="Admin access required")
-
-        return {"user_id": user.user.id, "email": user.user.email}
+            msg = "Admin access required"
+            raise HTTPException(status_code=403, detail=msg)  # noqa: TRY301
+        return {"user_id": user.user.id, "email": user.user.email}  # noqa: TRY300
     except Exception:
         logger.exception("Admin verification error")
-        raise HTTPException(status_code=401, detail="Authentication failed")
+        msg = "Authentication failed"
+        raise HTTPException(status_code=401, detail=msg) from None

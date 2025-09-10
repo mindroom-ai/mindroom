@@ -1,3 +1,5 @@
+"""Webhook handlers for external services."""
+
 from __future__ import annotations
 
 from typing import Annotated, Any
@@ -10,6 +12,7 @@ router = APIRouter()
 
 
 def handle_subscription_created(subscription: dict) -> None:
+    """Handle Stripe subscription creation events."""
     logger.info("Subscription created: %s", subscription["id"])
     sb = ensure_supabase()
     sb.table("subscriptions").upsert(
@@ -25,6 +28,7 @@ def handle_subscription_created(subscription: dict) -> None:
 
 
 def handle_subscription_deleted(subscription: dict) -> None:
+    """Handle Stripe subscription deletion events."""
     logger.info("Subscription deleted: %s", subscription["id"])
     sb = ensure_supabase()
     sb.table("subscriptions").update({"status": "cancelled"}).eq(
@@ -34,6 +38,7 @@ def handle_subscription_deleted(subscription: dict) -> None:
 
 
 def handle_payment_succeeded(invoice: dict) -> None:
+    """Handle successful Stripe payment events."""
     logger.info("Payment succeeded: %s", invoice["id"])
     sb = ensure_supabase()
     sb.table("payments").insert(
@@ -53,6 +58,7 @@ async def stripe_webhook(
     request: Request,
     stripe_signature: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
+    """Handle incoming Stripe webhook events."""
     if not stripe_signature:
         raise HTTPException(status_code=400, detail="Missing signature")
 

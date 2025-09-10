@@ -1,1 +1,1 @@
-"""Route modules for the backend FastAPI app."""
+"""Route modules for the backend FastAPI app."""  # noqa: N999

@@ -1,3 +1,5 @@
+"""Stripe payment and subscription routes."""
+
 from __future__ import annotations
 
 import os
@@ -13,6 +15,8 @@ router = APIRouter()
 
 
 class CheckoutRequest(BaseModel):
+    """Request model for creating Stripe checkout sessions."""
+
     price_id: str
     tier: str
 
@@ -67,7 +71,7 @@ async def create_checkout_session(
 
 
 @router.post("/stripe/portal", response_model=UrlResponse)
-async def create_portal_session(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def create_portal_session(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Create Stripe customer portal session for subscription management."""
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")

@@ -1,6 +1,8 @@
+"""Instance management routes."""
+
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from backend.config import PROVISIONER_API_KEY
 from backend.deps import ensure_supabase, verify_user
@@ -17,20 +19,20 @@ router = APIRouter()
 
 
 @router.get("/my/instances", response_model=InstancesResponse)
-async def list_user_instances(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def list_user_instances(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """List instances for current user."""
     sb = ensure_supabase()
 
     try:
         account_id = user["account_id"]
         result = sb.table("instances").select("*").eq("account_id", account_id).execute()
-        return {"instances": result.data or []}
+        return {"instances": result.data or []}  # noqa: TRY300
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to fetch instances") from e
 
 
 @router.post("/my/instances/provision", response_model=ProvisionResponse)
-async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Provision an instance for the current user."""
     sb = ensure_supabase()
 
@@ -38,7 +40,7 @@ async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]: 
         account_id = user["account_id"]
         sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
         if not sub_result.data:
-            raise HTTPException(status_code=404, detail="No subscription found")
+            raise HTTPException(status_code=404, detail="No subscription found")  # noqa: TRY301
         subscription = sub_result.data[0]
         inst_result = (
             sb.table("instances")
@@ -74,7 +76,7 @@ async def provision_user_instance(user=Depends(verify_user)) -> dict[str, Any]: 
 
 
 @router.post("/my/instances/{instance_id}/start", response_model=ActionResult)
-async def start_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def start_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Start user's instance."""
     sb = ensure_supabase()
 
@@ -93,7 +95,7 @@ async def start_user_instance(instance_id: int, user=Depends(verify_user)) -> di
 
 
 @router.post("/my/instances/{instance_id}/stop", response_model=ActionResult)
-async def stop_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def stop_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Stop user's instance."""
     sb = ensure_supabase()
 
@@ -112,7 +114,7 @@ async def stop_user_instance(instance_id: int, user=Depends(verify_user)) -> dic
 
 
 @router.post("/my/instances/{instance_id}/restart", response_model=ActionResult)
-async def restart_user_instance(instance_id: int, user=Depends(verify_user)) -> dict[str, Any]:  # noqa: B008
+async def restart_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Restart user's instance."""
     sb = ensure_supabase()
 

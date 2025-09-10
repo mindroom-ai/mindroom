@@ -1,7 +1,9 @@
+"""Usage metrics and monitoring routes."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 
 from backend.deps import ensure_supabase, verify_user
 from backend.models import UsageAggregateOut, UsageMetricOut, UsageResponse
@@ -12,7 +14,7 @@ router = APIRouter()
 
 @router.get("/my/usage", response_model=UsageResponse)
 async def get_user_usage(
-    user=Depends(verify_user),  # noqa: B008
+    user: Annotated[dict, Depends(verify_user)],
     days: int = 30,
 ) -> dict[str, Any]:
     """Get usage metrics for current user."""

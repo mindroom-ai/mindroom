@@ -1,3 +1,5 @@
+"""Process execution utilities for backend operations."""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,5 @@
+"""SSO cookie management routes."""
+
 from __future__ import annotations
 
 from datetime import timedelta
@@ -14,7 +16,7 @@ router = APIRouter()
 @router.post("/my/sso-cookie", response_model=StatusResponse)
 async def set_sso_cookie(
     response: Response,
-    user: Annotated[dict, Depends(verify_user)],
+    user: Annotated[dict, Depends(verify_user)],  # noqa: ARG001
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, str]:
     """Set a superdomain SSO cookie with the current Supabase access token.

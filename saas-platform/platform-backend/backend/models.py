@@ -1,3 +1,5 @@
+"""Data models for the platform backend."""
+
 from __future__ import annotations
 
 from typing import Literal
@@ -6,6 +8,8 @@ from pydantic import BaseModel, Field
 
 
 class InstanceOut(BaseModel):
+    """Instance information output model."""
+
     id: str
     instance_id: int | str
     subscription_id: str
@@ -20,10 +24,14 @@ class InstanceOut(BaseModel):
 
 
 class InstancesResponse(BaseModel):
+    """Response model for listing multiple instances."""
+
     instances: list[InstanceOut]
 
 
 class SubscriptionOut(BaseModel):
+    """Subscription information output model."""
+
     id: str
     account_id: str
     tier: Literal["free", "starter", "professional", "enterprise"]
@@ -39,11 +47,15 @@ class SubscriptionOut(BaseModel):
 
 
 class ActionResult(BaseModel):
+    """Result model for action operations."""
+
     success: bool
     message: str
 
 
 class ProvisionResponse(BaseModel):
+    """Response model for provisioning operations."""
+
     success: bool
     message: str
     customer_id: int | str
@@ -53,6 +65,8 @@ class ProvisionResponse(BaseModel):
 
 
 class UsageMetricOut(BaseModel):
+    """Usage metric output model."""
+
     id: str | None = None
     subscription_id: str
     metric_date: str
@@ -63,35 +77,49 @@ class UsageMetricOut(BaseModel):
 
 
 class UsageAggregateOut(BaseModel):
+    """Aggregated usage statistics model."""
+
     total_messages: int = Field(alias="totalMessages")
     total_agents: int = Field(alias="totalAgents")
     total_storage: float | int = Field(alias="totalStorage")
 
 
 class UsageResponse(BaseModel):
+    """Response model for usage metrics."""
+
     usage: list[UsageMetricOut]
     aggregated: UsageAggregateOut
 
 
 class UrlResponse(BaseModel):
+    """Response model containing a URL."""
+
     url: str
 
 
 class AdminStatusOut(BaseModel):
+    """Admin status response model."""
+
     is_admin: bool
 
 
 class StatusResponse(BaseModel):
+    """Generic status response model."""
+
     status: str
 
 
 class HealthResponse(BaseModel):
+    """Health check response model."""
+
     status: str
     supabase: bool
     stripe: bool
 
 
 class SyncUpdateOut(BaseModel):
+    """Sync update information model."""
+
     instance_id: int | str
     old_status: str
     new_status: str
@@ -99,6 +127,8 @@ class SyncUpdateOut(BaseModel):
 
 
 class SyncResult(BaseModel):
+    """Sync operation result model."""
+
     total: int
     synced: int
     errors: int
@@ -106,12 +136,16 @@ class SyncResult(BaseModel):
 
 
 class AdminStatsOut(BaseModel):
+    """Admin statistics output model."""
+
     accounts: int
     active_subscriptions: int
     running_instances: int
 
 
 class UpdateAccountStatusResponse(BaseModel):
+    """Update account status response model."""
+
     status: str
     account_id: str
     new_status: str
