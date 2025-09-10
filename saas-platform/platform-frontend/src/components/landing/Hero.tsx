@@ -31,25 +31,25 @@ export function Hero() {
           <div className={`inline-flex items-center gap-2 px-5 py-2 bg-gradient-to-r from-orange-100 to-orange-50 dark:from-orange-900/30 dark:to-orange-800/20 rounded-full mb-8 ${mounted ? 'fade-in-up' : 'opacity-0'}`}>
             <Sparkles className="w-4 h-4 text-orange-600 dark:text-orange-400" />
             <span className="text-orange-700 dark:text-orange-400 text-sm font-semibold">
-              Deploy AI agents in minutes, not months
+              The only AI platform where agents from different companies can collaborate
             </span>
           </div>
 
           {/* Main heading with animated gradient */}
           <h1 className={`text-5xl md:text-7xl font-bold mb-6 ${mounted ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.1s' }}>
             <span className="bg-gradient-to-r from-gray-900 via-gray-700 to-gray-900 dark:from-white dark:via-gray-200 dark:to-white bg-clip-text text-transparent bg-300% animate-gradient">
-              Your AI Agents,
+              Your AI is trapped
             </span>
             <br />
             <span className="bg-gradient-to-r from-orange-600 via-orange-500 to-orange-600 bg-clip-text text-transparent bg-300% animate-gradient" style={{ animationDelay: '0.5s' }}>
-              Everywhere You Work
+              in apps. We set it free.
             </span>
           </h1>
 
           {/* Subheading */}
           <p className={`text-xl md:text-2xl text-gray-600 dark:text-gray-300 mb-10 max-w-3xl mx-auto leading-relaxed ${mounted ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.2s' }}>
-            Deploy intelligent AI assistants across all your communication platforms.
-            From Slack to Discord to your custom app — MindRoom brings powerful AI to where your team already works.
+            Built on Matrix's battle-tested federation protocol. Your agents remember everything,
+            work everywhere, and can even collaborate with agents from other organizations.
           </p>
 
           {/* CTA Buttons */}
@@ -77,15 +77,15 @@ export function Hero() {
           <div className={`flex flex-wrap gap-4 justify-center ${mounted ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.4s' }}>
             <div className="group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
               <Bot className="w-5 h-5 text-orange-500 group-hover:rotate-12 transition-transform" />
-              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">GPT-4, Claude, Gemini</span>
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">True Federation</span>
             </div>
             <div className="group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
               <MessageSquare className="w-5 h-5 text-orange-500 group-hover:rotate-12 transition-transform" />
-              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">15+ Integrations</span>
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Military-Grade Encryption</span>
             </div>
             <div className="group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
               <Shield className="w-5 h-5 text-orange-500 group-hover:rotate-12 transition-transform" />
-              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">SOC 2 Compliant</span>
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">115M+ Matrix Users</span>
             </div>
           </div>
 

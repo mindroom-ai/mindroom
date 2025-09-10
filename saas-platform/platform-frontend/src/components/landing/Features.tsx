@@ -5,60 +5,60 @@ import { useEffect, useState } from 'react'
 
 const features = [
   {
-    icon: Bot,
-    title: 'Multiple AI Models',
-    description: 'Choose from GPT-4, Claude 3, Gemini, and more. Switch models instantly based on your needs.',
+    icon: Globe,
+    title: 'Cross-Organization Federation',
+    description: 'Your calendar AI joins their Slack. Their security AI audits your code. True agent collaboration across companies.',
     gradient: 'from-blue-500 to-cyan-500',
   },
   {
-    icon: Zap,
-    title: 'Instant Deployment',
-    description: 'Deploy AI agents in under 2 minutes. Zero infrastructure setup or DevOps knowledge required.',
-    gradient: 'from-yellow-500 to-orange-500',
+    icon: Shield,
+    title: 'Military-Grade Matrix Security',
+    description: 'Built on Matrix protocol trusted by NATO, Space Force, and German healthcare. End-to-end encryption you control.',
+    gradient: 'from-purple-500 to-pink-500',
   },
   {
-    icon: Globe,
-    title: 'Universal Integration',
-    description: 'Native support for Slack, Discord, Teams, Email, and 15+ platforms out of the box.',
+    icon: Brain,
+    title: 'Permanent Agent Memory',
+    description: 'Each agent has a real Matrix account with persistent memory across all conversations and platforms.',
     gradient: 'from-green-500 to-emerald-500',
   },
   {
-    icon: Shield,
-    title: 'Enterprise Security',
-    description: 'SOC 2 Type II certified with end-to-end encryption and GDPR compliance built-in.',
-    gradient: 'from-purple-500 to-pink-500',
+    icon: Zap,
+    title: 'Work Everywhere via Bridges',
+    description: 'One agent works simultaneously in Slack, Discord, Telegram, WhatsApp, and 50+ platforms.',
+    gradient: 'from-yellow-500 to-orange-500',
   },
   {
     icon: Users,
     title: 'Team Collaboration',
-    description: 'Role-based access control, shared workspaces, and real-time collaboration features.',
+    description: 'Multiple specialized agents work together in threaded conversations with full transparency.',
     gradient: 'from-indigo-500 to-purple-500',
   },
   {
-    icon: BarChart,
-    title: 'Advanced Analytics',
-    description: 'Track performance, costs, and ROI with AI-powered insights and custom dashboards.',
+    icon: Lock,
+    title: 'Zero Lock-in Architecture',
+    description: 'Self-host on a Raspberry Pi or use our cloud. Switch anytime. Export everything. MIT licensed.',
     gradient: 'from-red-500 to-orange-500',
   },
 ]
 
 const additionalFeatures = [
   {
-    icon: Brain,
-    title: 'Smart Memory',
-    description: 'Agents remember context across conversations and learn from interactions.',
+    icon: Bot,
+    title: 'Your Models, Your Control',
+    description: 'Use GPT-4 for complex tasks, local Ollama for sensitive data, Claude for writing.',
     gradient: 'from-teal-500 to-cyan-500',
   },
   {
-    icon: Lock,
-    title: 'Private Deployment',
-    description: 'Run agents in your own infrastructure with full data control.',
+    icon: BarChart,
+    title: 'Battle-Tested at Scale',
+    description: '115M+ Matrix users. German healthcare (150K orgs). French government (5.5M users).',
     gradient: 'from-gray-600 to-gray-800',
   },
   {
     icon: Rocket,
-    title: 'Auto-Scaling',
-    description: 'Automatically scale from 1 to 1000s of concurrent conversations.',
+    title: 'Chat-Native Architecture',
+    description: 'Chat is the database, API, and interface. Every decision transparent in threads.',
     gradient: 'from-rose-500 to-pink-500',
   },
 ]
@@ -96,10 +96,10 @@ export function Features() {
       <div className="container mx-auto max-w-7xl relative z-10">
         <div className="text-center mb-16">
           <h2 className="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
-            Everything You Need to Deploy AI
+            Why MindRoom is Different
           </h2>
           <p className="text-xl text-gray-600 dark:text-gray-300 max-w-3xl mx-auto">
-            Powerful features that make AI deployment simple, secure, and scalable for teams of any size
+            The first truly open AI ecosystem. Built on proven infrastructure, not startup experiments.
           </p>
         </div>
 
