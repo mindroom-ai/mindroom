@@ -14,6 +14,7 @@ from backend.routes.provisioner import (
     restart_instance_provisioner,
     start_instance_provisioner,
     stop_instance_provisioner,
+    sync_instances,
     uninstall_instance,
 )
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -92,6 +93,12 @@ async def admin_provision_instance(
     }
 
     return await provision_instance(data, f"Bearer {PROVISIONER_API_KEY}", background_tasks)
+
+
+@router.post("/admin/sync-instances")
+async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
+    """Sync instance states between database and Kubernetes (admin proxy)."""
+    return await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
 
 
 @router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
