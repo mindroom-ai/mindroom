@@ -116,9 +116,11 @@ export function HowItWorks() {
         </div>
 
         {/* Visual example */}
-        <div className="mt-16 bg-gradient-to-r from-orange-50 to-orange-100 dark:from-orange-900/20 dark:to-orange-800/20 rounded-2xl p-8">
-          <h3 className="text-2xl font-bold text-center mb-8 text-gray-900 dark:text-white">
-            See It In Action
+        <div className="mt-12 rounded-2xl p-8 bg-gradient-to-r from-gray-50 to-white dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-gray-700">
+          {/* Top accent bar */}
+          <div className="h-1 w-20 mx-auto mb-6 rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600"></div>
+          <h3 className="text-2xl font-bold text-center mb-6 text-gray-900 dark:text-white">
+            Agents Collaborating
           </h3>
 
           <div className="bg-white dark:bg-gray-800 rounded-xl p-6 font-mono text-sm">

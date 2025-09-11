@@ -37,7 +37,7 @@ export function WhyItMatters() {
           </p>
         </div>
 
-        <div className="grid md:grid-cols-2 gap-12 items-center mb-16">
+        <div className="grid md:grid-cols-2 gap-12 items-center mb-12">
           <div className={`space-y-6 ${isVisible ? 'fade-in-up' : 'opacity-0'}`}>
             <h3 className="text-3xl font-bold text-gray-900 dark:text-white">
               What Others Can't Do
@@ -104,10 +104,12 @@ export function WhyItMatters() {
         </div>
 
         {/* Visual representation of federation */}
-        <div className={`bg-gradient-to-r from-orange-50 to-orange-100 dark:from-orange-900/20 dark:to-orange-800/20 rounded-2xl p-8 ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.4s' }}>
+        <div className={`rounded-2xl p-8 bg-gradient-to-r from-gray-50 to-white dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-gray-700 ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.4s' }}>
+          {/* Top accent bar */}
+          <div className="h-1 w-20 mx-auto mb-6 rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600"></div>
           <div className="text-center mb-8">
             <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">
-              See Federation in Action
+              Federation in Practice
             </h3>
             <p className="text-gray-600 dark:text-gray-300 max-w-3xl mx-auto">
               <strong>The Impossible Scenario (with any other AI platform):</strong>
@@ -167,7 +169,7 @@ export function WhyItMatters() {
         </div>
 
         {/* Historical parallel */}
-        <div className={`text-center mt-16 ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.6s' }}>
+        <div className={`text-center mt-12 ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.6s' }}>
           <blockquote className="text-2xl font-light text-gray-700 dark:text-gray-300 italic max-w-4xl mx-auto">
             "In 1995, you could choose AOL's walled garden or open email.
             <br />Today, you can choose AI prisoners or AI citizens."
