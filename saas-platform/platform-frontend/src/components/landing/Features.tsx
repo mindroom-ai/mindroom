@@ -19,7 +19,7 @@ const features = [
   {
     icon: Brain,
     title: 'Room-Based Organization',
-    description: 'Different rooms for different projects. Private rooms use local models, work rooms use GPT-4. You control the boundaries.',
+    description: 'Different rooms for different projects. Private rooms use local models; work rooms use GPT-5. You control the boundaries.',
     gradient: 'from-green-500 to-emerald-500',
   },
   {
@@ -46,7 +46,7 @@ const additionalFeatures = [
   {
     icon: Lock,
     title: 'Your Models, Your Control',
-    description: 'Mix and match: GPT-4, Claude, Llama, Mistral. Route by sensitivity and cost.',
+    description: 'Mix and match: GPT-5, Claude, Llama, Mistral. Route by sensitivity and cost.',
     gradient: 'from-teal-500 to-cyan-500',
   },
   {
@@ -54,6 +54,12 @@ const additionalFeatures = [
     title: 'Verifiable E2E Encryption',
     description: 'Not trust-me-bro security. Matrix provides audited, end-to-end encrypted rooms for agent collaboration and data exchange.',
     gradient: 'from-emerald-500 to-green-600',
+  },
+  {
+    icon: Bot,
+    title: 'No-Code Agent Builder',
+    description: 'Configure agents via UI — personas, tools, and room permissions. No programming required.',
+    gradient: 'from-sky-500 to-cyan-600',
   },
   {
     icon: BarChart,

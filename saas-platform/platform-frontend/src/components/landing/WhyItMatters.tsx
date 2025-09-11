@@ -84,7 +84,7 @@ export function WhyItMatters() {
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Multiple specialized agents</strong> — Each with 80+ tools, doing real work
+                  <strong>Multiple specialized agents</strong> — Real users in rooms with shared memory and roles
                 </p>
               </div>
               <div className="flex items-start gap-4">
@@ -97,6 +97,12 @@ export function WhyItMatters() {
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
                   <strong>Cross-company collaboration</strong> — Your agents + their agents = one conversation
+                </p>
+              </div>
+              <div className="flex items-start gap-4">
+                <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
+                <p className="text-gray-600 dark:text-gray-300">
+                  <strong>No-code agent builder</strong> — Configure agents via UI; no programming required
                 </p>
               </div>
               <div className="flex items-start gap-4">
