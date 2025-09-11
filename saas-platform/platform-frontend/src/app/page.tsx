@@ -59,16 +59,6 @@ export default function LandingPage() {
               <span className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-orange-500 to-orange-600 bg-clip-text text-transparent">
                 MindRoom
               </span>
-              {/* Option 1: Indie badge in nav */}
-              <a
-                href="https://github.com/basnijholt"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="ml-3 hidden md:flex items-center gap-1 px-2 py-1 text-xs font-medium bg-gradient-to-r from-purple-500/10 to-blue-500/10 dark:from-purple-500/20 dark:to-blue-500/20 text-purple-700 dark:text-purple-300 rounded-full border border-purple-200/30 dark:border-purple-700/30 hover:border-purple-300/50 dark:hover:border-purple-600/50 transition-all"
-              >
-                <span className="animate-pulse">🚀</span>
-                <span>Just launched by an indie maker</span>
-              </a>
             </div>
 
             <div className="hidden lg:flex items-center gap-8">
