@@ -24,14 +24,14 @@ export function DarkModeToggle() {
     <div className="relative" ref={dropdownRef}>
       <button
         type="button"
-        className="p-2 text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400 transition-colors"
+        className="p-2 text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
         onClick={() => setShowDropdown(!showDropdown)}
         aria-label="Toggle dark mode"
       >
         {isDarkMode ? (
-          <Moon className="h-6 w-6" />
+          <Moon className="h-5 w-5" />
         ) : (
-          <Sun className="h-6 w-6" />
+          <Sun className="h-5 w-5" />
         )}
       </button>
 

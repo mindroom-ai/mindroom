@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import { useState } from 'react'
 import {
   Home,
   Server,
@@ -10,7 +11,8 @@ import {
   Settings,
   HelpCircle,
   LogOut,
-  X
+  X,
+  Loader2
 } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
@@ -32,6 +34,7 @@ interface SidebarProps {
 export function Sidebar({ sidebarOpen, setSidebarOpen }: SidebarProps) {
   const pathname = usePathname()
   const { signOut } = useAuth()
+  const [isSigningOut, setIsSigningOut] = useState(false)
 
   // Extract common navigation rendering with dark mode support
   const renderNavigation = (onLinkClick?: () => void) => (
@@ -45,11 +48,12 @@ export function Sidebar({ sidebarOpen, setSidebarOpen }: SidebarProps) {
               href={item.href}
               onClick={onLinkClick}
               className={`
-                group flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold
+                group flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold transition-all duration-150
                 ${isActive
                   ? 'bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400'
                   : 'text-gray-700 dark:text-gray-300 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-gray-50 dark:hover:bg-gray-800'
                 }
+                active:scale-95 active:bg-orange-100 dark:active:bg-orange-900/30
               `}
             >
               <Icon className={`h-6 w-6 shrink-0 ${isActive ? 'text-orange-600 dark:text-orange-400' : 'text-gray-400 dark:text-gray-500 group-hover:text-orange-600 dark:group-hover:text-orange-400'}`} />
@@ -70,13 +74,27 @@ export function Sidebar({ sidebarOpen, setSidebarOpen }: SidebarProps) {
   )
 
   // Extract sign out button with dark mode support
+  const handleSignOut = async () => {
+    setIsSigningOut(true)
+    try {
+      await signOut()
+    } finally {
+      setIsSigningOut(false)
+    }
+  }
+
   const signOutButton = (
     <button
-      onClick={signOut}
-      className="group -mx-2 flex gap-x-3 rounded-md p-2 text-sm font-semibold leading-6 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-orange-600 dark:hover:text-orange-400 w-full"
+      onClick={handleSignOut}
+      disabled={isSigningOut}
+      className="group -mx-2 flex gap-x-3 rounded-md p-2 text-sm font-semibold leading-6 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 hover:text-orange-600 dark:hover:text-orange-400 w-full transition-all duration-150 active:scale-95 active:bg-orange-100 dark:active:bg-orange-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
     >
-      <LogOut className="h-6 w-6 shrink-0 text-gray-400 dark:text-gray-500 group-hover:text-orange-600 dark:group-hover:text-orange-400" />
-      Sign out
+      {isSigningOut ? (
+        <Loader2 className="h-6 w-6 shrink-0 text-gray-400 dark:text-gray-500 animate-spin" />
+      ) : (
+        <LogOut className="h-6 w-6 shrink-0 text-gray-400 dark:text-gray-500 group-hover:text-orange-600 dark:group-hover:text-orange-400" />
+      )}
+      <span className="select-none">{isSigningOut ? 'Signing out...' : 'Sign out'}</span>
     </button>
   )
 
@@ -95,12 +113,12 @@ export function Sidebar({ sidebarOpen, setSidebarOpen }: SidebarProps) {
         fixed inset-y-0 left-0 z-50 w-72 transform transition-transform duration-300 ease-in-out lg:hidden
         ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
       `}>
-        <div className="flex grow flex-col gap-y-5 overflow-y-auto border-r border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-6 pb-4">
+        <div className="flex h-full flex-col gap-y-5 overflow-y-auto border-r border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-6 pb-4">
           <div className="flex h-16 shrink-0 items-center justify-between">
             {logo}
             <button
               type="button"
-              className="-m-2.5 p-2.5 text-gray-700 dark:text-gray-300"
+              className="-m-2.5 p-2.5 text-gray-700 dark:text-gray-300 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
               onClick={() => setSidebarOpen(false)}
             >
               <span className="sr-only">Close sidebar</span>

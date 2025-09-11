@@ -25,18 +25,16 @@ export function Header({ sidebarOpen, setSidebarOpen }: HeaderProps) {
 
       <div className="flex flex-1 gap-x-4 self-stretch lg:gap-x-6">
         <div className="flex flex-1" />
-        <div className="flex items-center gap-x-4 lg:gap-x-6">
+        <div className="flex items-center gap-x-2 sm:gap-x-4 lg:gap-x-6">
           <DarkModeToggle />
 
-          <div className="relative">
-            <button
-              type="button"
-              className="-m-2.5 p-2.5 text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
-            >
-              <span className="sr-only">View notifications</span>
-              <Bell className="h-6 w-6" />
-            </button>
-          </div>
+          <button
+            type="button"
+            className="p-2 text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+          >
+            <span className="sr-only">View notifications</span>
+            <Bell className="h-5 w-5" />
+          </button>
 
           <div className="hidden lg:block lg:h-6 lg:w-px lg:bg-gray-200 dark:bg-gray-700" />
 
