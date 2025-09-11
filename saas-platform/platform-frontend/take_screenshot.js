@@ -136,6 +136,24 @@ async function takeScreenshots() {
     // Add timestamp to filenames
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
 
+    // Helper to scroll to bottom to trigger IntersectionObserver animations
+    async function autoScrollPage() {
+      await page.evaluate(async () => {
+        await new Promise((resolve) => {
+          let totalHeight = 0;
+          const distance = 600;
+          const timer = setInterval(() => {
+            window.scrollBy(0, distance);
+            totalHeight += distance;
+            if (totalHeight >= document.body.scrollHeight - window.innerHeight) {
+              clearInterval(timer);
+              resolve();
+            }
+          }, 150);
+        });
+      });
+    }
+
     // Take screenshots for each route
     for (const route of ROUTES) {
       try {
@@ -150,8 +168,10 @@ async function takeScreenshots() {
           timeout: 30000
         });
 
-        // Wait a bit for any animations to complete
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Scroll through page to trigger lazy animations
+        await autoScrollPage();
+        // Brief settle time
+        await new Promise(resolve => setTimeout(resolve, 400));
 
         // Take screenshot
         const filename = `${route.name}_${timestamp}.png`;
