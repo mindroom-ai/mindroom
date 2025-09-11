@@ -43,13 +43,20 @@ function ChatBubble({
   isAgent?: boolean
   orgDomain?: string
 }) {
-  // Extract domain for visual differentiation
-  const domainColor = orgDomain?.includes('org-a') ? 'blue' : orgDomain?.includes('org-b') ? 'green' : 'gray'
+  // Extract domain for visual differentiation (only for federation scenarios)
+  const domainColor = orgDomain?.includes('org-a') ? 'blue' : orgDomain?.includes('org-b') ? 'green' : ''
   const borderAccent =
     isAgent ? 'border-l-4 border-orange-400/60' :
     domainColor === 'blue' ? 'border-l-4 border-blue-400/60' :
     domainColor === 'green' ? 'border-l-4 border-green-400/60' :
     ''
+
+  // Consistent bubble styling for all user messages
+  const bubbleStyle = isAgent
+    ? 'bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 border-gray-200 dark:border-gray-600'
+    : side === 'right'
+    ? 'bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 border-gray-200 dark:border-gray-600'
+    : 'bg-white/90 dark:bg-gray-800/80 text-gray-800 dark:text-gray-200 border-gray-200 dark:border-gray-700'
 
   return (
     <div className={`flex ${side === 'right' ? 'justify-end' : 'justify-start'}`}>
@@ -72,11 +79,7 @@ function ChatBubble({
           ))}
         </div>
         <div
-          className={`rounded-2xl px-3 py-2 text-sm border ${borderAccent} ${
-            side === 'right'
-              ? 'bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 border-gray-200 dark:border-gray-600'
-              : 'bg-white/90 dark:bg-gray-800/80 text-gray-800 dark:text-gray-200 border-gray-200 dark:border-gray-700'
-          }`}
+          className={`rounded-2xl px-3 py-2 text-sm border ${borderAccent} ${bubbleStyle}`}
         >
           {text}
         </div>
