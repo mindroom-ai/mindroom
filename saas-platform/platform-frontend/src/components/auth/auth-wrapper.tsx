@@ -59,18 +59,19 @@ export function AuthWrapper({ view = 'sign_in', redirectTo }: AuthWrapperProps) 
               inputPlaceholder: isDarkMode ? '#9ca3af' : '#6b7280',
             },
             radii: {
-              borderRadiusButton: '0.5rem',
-              buttonBorderRadius: '0.5rem',
-              inputBorderRadius: '0.5rem',
+              borderRadiusButton: '0.75rem',
+              buttonBorderRadius: '0.75rem',
+              inputBorderRadius: '0.75rem',
             },
           },
         },
         className: {
-          button: 'w-full px-4 py-2.5 font-medium rounded-lg transition-colors',
-          input: 'w-full px-4 py-2.5 border rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent',
-          label: 'block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5',
-          anchor: 'text-orange-600 dark:text-orange-400 hover:text-orange-700 dark:hover:text-orange-300',
+          button: 'w-full px-4 py-3 font-semibold rounded-xl transition-all hover:shadow-lg hover:scale-[1.02]',
+          input: 'w-full px-4 py-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all',
+          label: 'block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2',
+          anchor: 'text-orange-600 dark:text-orange-400 hover:text-orange-700 dark:hover:text-orange-300 font-medium transition-colors',
           message: 'text-red-600 dark:text-red-400 text-sm',
+          container: 'space-y-4',
         },
       }}
       redirectTo={computedRedirect}
