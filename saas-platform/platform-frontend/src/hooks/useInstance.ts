@@ -10,13 +10,14 @@ export interface Instance {
   instance_id: number | string
   subscription_id: string
   subdomain: string
-  status: 'provisioning' | 'running' | 'failed' | 'stopped' | 'error'
+  status: 'provisioning' | 'running' | 'failed' | 'stopped' | 'error' | 'deprovisioned' | 'restarting'
   frontend_url: string | null
   backend_url: string | null
   created_at: string
   updated_at: string
   tier?: string
   matrix_server_url?: string | null
+  kubernetes_synced_at?: string | null
 }
 
 // Development-only mock instance

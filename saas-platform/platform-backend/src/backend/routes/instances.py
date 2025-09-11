@@ -21,33 +21,60 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 router = APIRouter()
 
+# Simple in-memory set to track instances being synced to prevent race conditions
+_syncing_instances: set[str] = set()
+
 
 async def _background_sync_instance_status(instance_id: str) -> None:
     """Background task to sync a single instance's Kubernetes status."""
     try:
-        from backend.k8s import check_deployment_exists, run_kubectl  # noqa: PLC0415
+        # Add instance to syncing set
+        _syncing_instances.add(instance_id)
+
+        try:
+            from backend.k8s import check_deployment_exists, run_kubectl  # noqa: PLC0415
+        except ImportError:
+            logger.error("Kubernetes functions not available, skipping sync for instance %s", instance_id)
+            return
 
         sb = ensure_supabase()
 
+        # Get current status from DB to make better decisions
+        result = sb.table("instances").select("status").eq("instance_id", instance_id).single().execute()
+        current_status = result.data.get("status") if result.data else None
+
         # Check if deployment exists
-        exists = await check_deployment_exists(instance_id)
+        try:
+            exists = await check_deployment_exists(instance_id)
+        except FileNotFoundError:
+            logger.warning("kubectl not found, cannot sync instance %s", instance_id)
+            return
 
         if exists:
             # Get actual replicas count to determine if running or stopped
-            code, out, _ = await run_kubectl(
-                [
-                    "get",
-                    f"deployment/mindroom-backend-{instance_id}",
-                    "-o=jsonpath={.spec.replicas}",
-                ],
-                namespace="mindroom-instances",
-            )
-            if code == 0:
-                replicas = int(out.strip() or "0")
-                actual_status = "running" if replicas > 0 else "stopped"
-            else:
+            try:
+                code, out, _ = await run_kubectl(
+                    [
+                        "get",
+                        f"deployment/mindroom-backend-{instance_id}",
+                        "-o=jsonpath={.spec.replicas}",
+                    ],
+                    namespace="mindroom-instances",
+                )
+                if code == 0:
+                    replicas = int(out.strip() or "0")
+                    actual_status = "running" if replicas > 0 else "stopped"
+                else:
+                    actual_status = "error"
+            except Exception:
+                logger.exception("Failed to get replica count for instance %s", instance_id)
                 actual_status = "error"
+        # Deployment doesn't exist - determine if it's deprovisioned or error
+        elif current_status in ["deprovisioned", "provisioning"]:
+            # Keep the current status if it makes sense
+            actual_status = current_status
         else:
+            # Otherwise mark as error
             actual_status = "error"
 
         # Update database with current status and sync timestamp
@@ -62,6 +89,9 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         logger.info("Background sync completed for instance %s: status=%s", instance_id, actual_status)
     except Exception:
         logger.exception("Background sync failed for instance %s", instance_id)
+    finally:
+        # Remove from syncing set
+        _syncing_instances.discard(instance_id)
 
 
 @router.get("/my/instances", response_model=InstancesResponse)
@@ -82,6 +112,10 @@ async def list_user_instances(
         for instance in instances:
             instance_id = instance.get("instance_id")
             if not instance_id:
+                continue
+
+            # Skip if already being synced (prevent race condition)
+            if str(instance_id) in _syncing_instances:
                 continue
 
             # Check if kubernetes_synced_at is missing or stale
