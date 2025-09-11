@@ -430,6 +430,7 @@ async def sync_instances(
                     sb.table("instances").update(
                         {
                             "status": "error",
+                            "kubernetes_synced_at": datetime.now(UTC).isoformat(),
                             "updated_at": datetime.now(UTC).isoformat(),
                         },
                     ).eq("id", instance["id"]).execute()
@@ -467,6 +468,7 @@ async def sync_instances(
                             sb.table("instances").update(
                                 {
                                     "status": actual_status,
+                                    "kubernetes_synced_at": datetime.now(UTC).isoformat(),
                                     "updated_at": datetime.now(UTC).isoformat(),
                                 },
                             ).eq("id", instance["id"]).execute()

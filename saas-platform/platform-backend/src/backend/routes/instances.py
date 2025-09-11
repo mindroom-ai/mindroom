@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from backend.config import PROVISIONER_API_KEY
+from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, verify_user
 from backend.models import ActionResult, InstancesResponse, ProvisionResponse
 from backend.routes.provisioner import (
@@ -16,18 +17,89 @@ from backend.routes.provisioner import (
     start_instance_provisioner,
     stop_instance_provisioner,
 )
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 router = APIRouter()
 
 
+async def _background_sync_instance_status(instance_id: str) -> None:
+    """Background task to sync a single instance's Kubernetes status."""
+    try:
+        from backend.k8s import check_deployment_exists, run_kubectl  # noqa: PLC0415
+
+        sb = ensure_supabase()
+
+        # Check if deployment exists
+        exists = await check_deployment_exists(instance_id)
+
+        if exists:
+            # Get actual replicas count to determine if running or stopped
+            code, out, _ = await run_kubectl(
+                [
+                    "get",
+                    f"deployment/mindroom-backend-{instance_id}",
+                    "-o=jsonpath={.spec.replicas}",
+                ],
+                namespace="mindroom-instances",
+            )
+            if code == 0:
+                replicas = int(out.strip() or "0")
+                actual_status = "running" if replicas > 0 else "stopped"
+            else:
+                actual_status = "error"
+        else:
+            actual_status = "error"
+
+        # Update database with current status and sync timestamp
+        sb.table("instances").update(
+            {
+                "status": actual_status,
+                "kubernetes_synced_at": datetime.now(UTC).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        ).eq("instance_id", instance_id).execute()
+
+        logger.info("Background sync completed for instance %s: status=%s", instance_id, actual_status)
+    except Exception:
+        logger.exception("Background sync failed for instance %s", instance_id)
+
+
 @router.get("/my/instances", response_model=InstancesResponse)
-async def list_user_instances(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
-    """List instances for current user."""
+async def list_user_instances(
+    user: Annotated[dict, Depends(verify_user)],
+    background_tasks: BackgroundTasks = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    """List instances for current user with background status refresh."""
     sb = ensure_supabase()
     account_id = user["account_id"]
     result = sb.table("instances").select("*").eq("account_id", account_id).execute()
-    return {"instances": result.data or []}
+
+    instances = result.data or []
+
+    # Check if any instance needs a background sync (older than 30 seconds)
+    if background_tasks:
+        stale_threshold = datetime.now(UTC) - timedelta(seconds=30)
+        for instance in instances:
+            instance_id = instance.get("instance_id")
+            if not instance_id:
+                continue
+
+            # Check if kubernetes_synced_at is missing or stale
+            synced_at = instance.get("kubernetes_synced_at")
+            if not synced_at:
+                needs_sync = True
+            else:
+                # Parse ISO timestamp - fromisoformat handles both Z and +00:00 in Python 3.11+
+                # For compatibility, we still need to replace Z with +00:00
+                synced_time = datetime.fromisoformat(synced_at.replace("Z", "+00:00"))  # noqa: FURB162
+                needs_sync = synced_time < stale_threshold
+
+            if needs_sync:
+                logger.info("Instance %s has stale K8s status, scheduling background sync", instance_id)
+                background_tasks.add_task(_background_sync_instance_status, str(instance_id))
+
+    # Return cached data immediately
+    return {"instances": instances}
 
 
 @router.post("/my/instances/provision", response_model=ProvisionResponse)
