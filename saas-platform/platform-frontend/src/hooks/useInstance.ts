@@ -15,7 +15,28 @@ export interface Instance {
   backend_url: string | null
   created_at: string
   updated_at: string
+  tier?: string
+  matrix_server_url?: string | null
 }
+
+// Development-only mock instance
+const DEV_INSTANCE: Instance | null =
+  process.env.NODE_ENV === 'development' &&
+  process.env.NEXT_PUBLIC_DEV_AUTH === 'true'
+    ? {
+        id: 'dev-instance-123',
+        instance_id: 1,
+        subscription_id: 'dev-sub-123',
+        subdomain: 'dev',
+        status: 'running',
+        frontend_url: 'https://dev.mindroom.local',
+        backend_url: 'https://api.dev.mindroom.local',
+        matrix_server_url: 'https://matrix.dev.mindroom.local',
+        tier: 'starter',
+        created_at: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days ago
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // 1 hour ago
+      }
+    : null
 
 export function useInstance() {
   const [instance, setInstance] = useState<Instance | null>(null)
@@ -26,6 +47,13 @@ export function useInstance() {
   useEffect(() => {
     if (authLoading) return
     if (!user) {
+      setLoading(false)
+      return
+    }
+
+    // Use dev instance if in development mode
+    if (DEV_INSTANCE) {
+      setInstance(DEV_INSTANCE)
       setLoading(false)
       return
     }
@@ -45,6 +73,11 @@ export function useInstance() {
     }
 
     fetchInstance()
+
+    // Skip polling in dev mode
+    if (DEV_INSTANCE) {
+      return
+    }
 
     // Poll for changes every 10 seconds instead of realtime subscription
     // (avoids RLS issues with direct Supabase access)
