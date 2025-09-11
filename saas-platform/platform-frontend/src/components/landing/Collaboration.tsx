@@ -31,6 +31,8 @@ function ChatBubble({
   text,
   chips = [],
   color,
+  isAgent = false,
+  orgDomain = '',
 }: {
   side: 'left' | 'right'
   name: string
@@ -38,20 +40,39 @@ function ChatBubble({
   text: React.ReactNode
   chips?: string[]
   color: string
+  isAgent?: boolean
+  orgDomain?: string
 }) {
+  // Extract domain for visual differentiation
+  const domainColor = orgDomain?.includes('org-a') ? 'blue' : orgDomain?.includes('org-b') ? 'green' : 'gray'
+  const borderAccent =
+    isAgent ? 'border-l-4 border-orange-400/60' :
+    domainColor === 'blue' ? 'border-l-4 border-blue-400/60' :
+    domainColor === 'green' ? 'border-l-4 border-green-400/60' :
+    ''
+
   return (
     <div className={`flex ${side === 'right' ? 'justify-end' : 'justify-start'}`}>
       {side === 'left' && <Avatar name={name} color={color} />}
       <div className={`mx-2 max-w-[90%] ${side === 'right' ? 'items-end text-right' : ''}`}>
         <div className={`flex items-center gap-2 mb-1 ${side === 'right' ? 'justify-end' : ''}`}>
-          <span className="text-xs md:text-sm font-semibold text-gray-700 dark:text-gray-200">{name}</span>
-          <span className="hidden sm:inline text-[10px] text-gray-500">{org}</span>
+          <span className="text-xs md:text-sm font-semibold text-gray-700 dark:text-gray-200">
+            {name}
+            {!isAgent && orgDomain && (
+              <span className="font-normal text-gray-500">:{orgDomain}</span>
+            )}
+          </span>
+          {isAgent && (
+            <span className="text-[10px] px-1.5 py-0.5 bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400 rounded">
+              AI Agent
+            </span>
+          )}
           {chips.map((c, i) => (
             <Chip key={i} label={c} className="hidden md:inline-flex" />
           ))}
         </div>
         <div
-          className={`rounded-2xl px-3 py-2 text-sm border ${
+          className={`rounded-2xl px-3 py-2 text-sm border ${borderAccent} ${
             side === 'right'
               ? 'bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 border-gray-200 dark:border-gray-600'
               : 'bg-white/90 dark:bg-gray-800/80 text-gray-800 dark:text-gray-200 border-gray-200 dark:border-gray-700'
@@ -120,7 +141,9 @@ export function Collaboration() {
                 {tab === 'business' ? (
                   <div>
                     <div className="text-sm font-semibold text-gray-800 dark:text-gray-200">#q4‑planning</div>
-                    <div className="text-[11px] md:text-xs text-gray-500">Encrypted room · org‑a.com</div>
+                    <div className="text-[11px] md:text-xs text-gray-500">
+                      Federated room · org‑a.com ⇄ org‑b.net
+                    </div>
                   </div>
                 ) : (
                   <div>
@@ -161,10 +184,29 @@ export function Collaboration() {
             <div className="p-3 md:p-4 space-y-2 md:space-y-3">
               {tab === 'business' ? (
                 <>
+                  {/* Federation indicator */}
+                  <div className="flex items-center justify-center gap-6 mb-3 py-2 text-xs text-gray-500 dark:text-gray-400">
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-0.5 bg-blue-400/60"></div>
+                      <span>org-a.com</span>
+                    </div>
+                    <span className="text-gray-400">×</span>
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-0.5 bg-green-400/60"></div>
+                      <span>org-b.net</span>
+                    </div>
+                    <span className="text-gray-400">×</span>
+                    <div className="flex items-center gap-2">
+                      <div className="w-3 h-0.5 bg-orange-400/60"></div>
+                      <span>AI Agents</span>
+                    </div>
+                  </div>
+
                   <ChatBubble
                     side="left"
                     name="alice"
                     org="Matrix · org‑a.com"
+                    orgDomain="org-a.com"
                     color="bg-indigo-500"
                     text={<>@mindroom_analyst pull Q4 conversion vs target and propose actions</>}
                   />
@@ -172,14 +214,16 @@ export function Collaboration() {
                     side="right"
                     name="@mindroom_analyst"
                     org="Matrix · agent"
+                    isAgent={true}
                     color="bg-orange-500"
                     chips={["DB", "Analytics"]}
-                    text={<>Fetching from DB + analytics… Chart attached. We’re 13% below target on paid; suggest realloc + SEO refresh.</>}
+                    text={<>Fetching from DB + analytics… Chart attached. We're 13% below target on paid; suggest realloc + SEO refresh.</>}
                   />
                   <ChatBubble
                     side="left"
                     name="bob"
                     org="Matrix · org‑b.net"
+                    orgDomain="org-b.net"
                     color="bg-emerald-600"
                     text={<>@client_architect is this compatible with our data model?</>}
                   />
@@ -187,6 +231,7 @@ export function Collaboration() {
                     side="right"
                     name="@client_architect"
                     org="Matrix · agent"
+                    isAgent={true}
                     color="bg-sky-600"
                     text={<>Yes, schema v2 OK; can push PR to your repo when you approve.</>}
                   />
@@ -194,6 +239,7 @@ export function Collaboration() {
                     side="left"
                     name="alice"
                     org="Matrix · org‑a.com"
+                    orgDomain="org-a.com"
                     color="bg-indigo-500"
                     text={<>Approved. @mindroom_analyst sync brief to Slack #marketing (via bridge).</>}
                   />
@@ -201,6 +247,7 @@ export function Collaboration() {
                     side="right"
                     name="@mindroom_analyst"
                     org="Matrix · agent"
+                    isAgent={true}
                     color="bg-orange-500"
                     chips={["Slack bridge"]}
                     text={<>Posted in Slack and invited @client_architect (read‑only).</>}
@@ -219,6 +266,7 @@ export function Collaboration() {
                     side="right"
                     name="@alice_calendar"
                     org="Matrix · agent"
+                    isAgent={true}
                     color="bg-orange-500"
                     chips={["Calendar"]}
                     text={<>Checking weekends for Alice…</>}
@@ -227,6 +275,7 @@ export function Collaboration() {
                     side="right"
                     name="@bob_calendar"
                     org="Matrix · agent"
+                    isAgent={true}
                     color="bg-sky-600"
                     chips={["Calendar"]}
                     text={<>Bob is free Sat 14:00–18:00; busy Sunday morning.</>}
@@ -235,6 +284,7 @@ export function Collaboration() {
                     side="right"
                     name="@carol_calendar"
                     org="Matrix · agent"
+                    isAgent={true}
                     color="bg-emerald-600"
                     chips={["Calendar"]}
                     text={<>Carol is free Sunday 10:00–13:00; Sat is open after 17:00.</>}
@@ -244,12 +294,13 @@ export function Collaboration() {
                     name="bob"
                     org="Matrix"
                     color="bg-emerald-600"
-                    text={<>Let’s do Sunday 11:00 at the trailhead.</>}
+                    text={<>Let's do Sunday 11:00 at the trailhead.</>}
                   />
                   <ChatBubble
                     side="right"
                     name="@alice_calendar"
                     org="Matrix · agent"
+                    isAgent={true}
                     color="bg-orange-500"
                     chips={["Invites", "Discord bridge"]}
                     text={<>Invites sent and summary posted to Discord #friends (via bridge).</>}
@@ -261,8 +312,13 @@ export function Collaboration() {
         </div>
         {/* Simple federation/bridge callout */}
         <div className="text-center mt-2 text-[13px] md:text-sm text-gray-600 dark:text-gray-300 max-w-3xl mx-auto">
-          <p>Federation: independent Matrix servers share one encrypted room; participants are real, verifiable accounts.</p>
-          <p className="mt-1">Bridges: connect Matrix rooms with Slack/Discord/Telegram. The bridged side is not Matrix end‑to‑end encrypted.</p>
+          <p>
+            <strong>True Federation:</strong> Different organizations (org-a.com, org-b.net) collaborate in one encrypted room.
+            Each participant is a real, verifiable Matrix account on their own server.
+          </p>
+          <p className="mt-1">
+            <strong>Bridges:</strong> Connect existing tools (Slack, Discord, Telegram) to Matrix rooms. Bridge connections are not end-to-end encrypted.
+          </p>
         </div>
       </div>
     </section>
