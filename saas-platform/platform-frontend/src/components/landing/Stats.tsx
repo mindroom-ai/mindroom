@@ -25,19 +25,19 @@ export function Stats() {
   }, [])
 
   return (
-    <section id="stats" className="py-20 px-6 bg-gradient-to-r from-orange-500 to-orange-600 relative overflow-hidden">
-      {/* Pattern overlay */}
-      <div className="absolute inset-0 opacity-10">
-        <div className="absolute inset-0 bg-[url('data:image/svg+xml,%3Csvg%20width%3D%2260%22%20height%3D%2260%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cdefs%3E%3Cpattern%20id%3D%22dots%22%20width%3D%2260%22%20height%3D%2260%22%20patternUnits%3D%22userSpaceOnUse%22%3E%3Ccircle%20cx%3D%2230%22%20cy%3D%2230%22%20r%3D%223%22%20fill%3D%22white%22%2F%3E%3C%2Fpattern%3E%3C%2Fdefs%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22url(%23dots)%22%2F%3E%3C%2Fsvg%3E')]"></div>
-      </div>
+    <section id="stats" className="py-16 md:py-20 px-6 bg-gradient-to-b from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 relative overflow-hidden">
+      {/* Subtle decorative gradient blobs for pop */}
+      <div className="absolute top-0 left-0 w-96 h-96 bg-gradient-to-r from-orange-200 to-pink-200 dark:from-orange-900/20 dark:to-pink-900/20 rounded-full filter blur-3xl opacity-25"></div>
+      <div className="absolute bottom-0 right-0 w-96 h-96 bg-gradient-to-r from-blue-200 to-purple-200 dark:from-blue-900/20 dark:to-purple-900/20 rounded-full filter blur-3xl opacity-25"></div>
 
       <div className="container mx-auto max-w-6xl relative z-10">
         {/* Context about Matrix */}
         <div className="text-center mb-8">
-          <h3 className="text-2xl md:text-3xl font-bold text-white mb-2">
+          <div className="h-1 w-16 md:w-20 mx-auto mb-4 rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600"></div>
+          <h3 className="text-2xl md:text-3xl font-bold text-gray-900 dark:text-white mb-2">
             Built on Matrix Protocol's Proven Infrastructure
           </h3>
-          <p className="text-orange-100 max-w-2xl mx-auto">
+          <p className="text-gray-600 dark:text-gray-300 max-w-2xl mx-auto">
             MindRoom inherits the security, scale, and reliability of Matrix — the same protocol trusted by governments and militaries worldwide
           </p>
         </div>
@@ -49,15 +49,15 @@ export function Stats() {
               className={`text-center ${isVisible ? 'fade-in-up' : 'opacity-0'}`}
               style={{ animationDelay: `${index * 0.1}s` }}
             >
-              <div className="text-4xl md:text-5xl font-bold text-white mb-2">
+              <div className="text-4xl md:text-5xl font-bold text-gray-900 dark:text-white mb-2">
                 {isVisible && (
                   <span className="inline-block">
                     {stat.value}
-                    {stat.suffix && <span className="text-orange-200">{stat.suffix}</span>}
+                    {stat.suffix && <span className="text-orange-600 dark:text-orange-400">{stat.suffix}</span>}
                   </span>
                 )}
               </div>
-              <div className="text-orange-100 font-medium">{stat.label}</div>
+              <div className="text-gray-600 dark:text-gray-300 font-medium">{stat.label}</div>
             </div>
           ))}
         </div>
