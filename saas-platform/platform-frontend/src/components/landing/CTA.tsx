@@ -101,7 +101,7 @@ export function CTA() {
 
           {/* Trust text */}
           <p className="mt-8 text-white/80 text-sm">
-            🔒 End-to-End Encrypted • Privacy-First Design • Open Source • Self-Hostable
+            🔒 End-to-End Encrypted • GDPR-Ready Architecture • Open Source • Self-Hostable
           </p>
         </div>
       </div>
