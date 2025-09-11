@@ -81,22 +81,22 @@ export default function LandingPage() {
       {/* How It Works - Immediately explain what MindRoom is */}
       <HowItWorks />
 
-      {/* Stats Section */}
-      <Stats />
-
-      {/* Features */}
-      <Features />
-
-      {/* Why It Matters */}
-      <WhyItMatters />
-
-      {/* Collaboration In Action */}
+      {/* Collaboration - Show the KEY differentiator: federation across organizations */}
       <Collaboration />
 
-      {/* Testimonials */}
+      {/* Stats Section - Build credibility with Matrix adoption */}
+      <Stats />
+
+      {/* Features - Comprehensive capability list */}
+      <Features />
+
+      {/* Why It Matters - Strategic importance of federated AI */}
+      <WhyItMatters />
+
+      {/* Testimonials - Social proof */}
       <Testimonials />
 
-      {/* Pricing */}
+      {/* Pricing - Commercial details */}
       <Pricing />
 
       {/* CTA Section */}

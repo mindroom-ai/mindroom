@@ -1,10 +1,10 @@
 // Navigation links
 export const navLinks = [
   { href: '#how-it-works', label: 'How It Works' },
-  { href: '#features', label: 'Features' },
   { href: '#collaboration', label: 'Collaboration' },
+  { href: '#features', label: 'Features' },
+  { href: '#why-it-matters', label: 'Why It Matters' },
   { href: '#pricing', label: 'Pricing' },
-  { href: '#testimonials', label: 'Testimonials' },
 ]
 
 // Footer links
