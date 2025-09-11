@@ -43,13 +43,13 @@ function ChatBubble({
   isAgent?: boolean
   orgDomain?: string
 }) {
-  // Extract domain for visual differentiation (only for federation scenarios)
+  // Extract domain for visual differentiation
   const domainColor = orgDomain?.includes('org-a') ? 'blue' : orgDomain?.includes('org-b') ? 'green' : ''
   const borderAccent =
     isAgent ? 'border-l-4 border-orange-400/60' :
     domainColor === 'blue' ? 'border-l-4 border-blue-400/60' :
     domainColor === 'green' ? 'border-l-4 border-green-400/60' :
-    ''
+    'border-l-4 border-gray-300/60 dark:border-gray-600/60' // Default border for regular users
 
   // Consistent bubble styling for all user messages
   const bubbleStyle = isAgent
