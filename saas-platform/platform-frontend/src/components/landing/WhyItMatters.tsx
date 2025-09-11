@@ -46,31 +46,25 @@ export function WhyItMatters() {
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>ChatGPT/Claude</strong> — Can't use tools, can't remember between sessions, trapped in one interface
+                  <strong>Closed & unverifiable</strong> — “Trust‑me” encryption, no independent verification, proprietary code
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Slack/Discord AI</strong> — Single agent, limited tools, locked to one platform
+                  <strong>Single‑bot silos</strong> — One agent UX, limited tools, locked to one platform
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>AutoGPT/AgentGPT</strong> — No real collaboration, no persistent memory, no cross-platform
+                  <strong>Code‑heavy setup</strong> — Requires programming; inaccessible to non‑developers
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Closed platforms</strong> — “Trust-me” encryption, no verification, closed source
-                </p>
-              </div>
-              <div className="flex items-start gap-4">
-                <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
-                <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Every AI platform</strong> — Your agents can't work with other companies' agents
+                  <strong>No federation</strong> — Agents can’t collaborate across companies or accounts
                 </p>
               </div>
             </div>

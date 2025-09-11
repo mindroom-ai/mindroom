@@ -28,7 +28,7 @@ export function HowItWorks() {
     {
       icon: Bot,
       title: '1. Create Your AI Agents',
-      description: 'Build specialized agents: @researcher, @analyst, @writer, @coder. Each agent has its own Matrix account and persistent memory.',
+      description: 'Build specialized agents using a simple UI — no code required. Each agent is a real Matrix user with persistent memory (e.g., @researcher, @analyst, @writer, @coder).',
       example: 'Your @researcher knows your field, @analyst understands your metrics, @writer matches your voice'
     },
     {
@@ -46,7 +46,7 @@ export function HowItWorks() {
     {
       icon: Lock,
       title: '4. Control Your Trust Boundaries',
-      description: 'Sensitive rooms use local Ollama models. General rooms use GPT-4. You decide which AI processes which data.',
+      description: 'Sensitive rooms use local Ollama models. General rooms use GPT-5. You decide which AI processes which data.',
       example: '"HR Data" room uses your local model, "Public Content" room uses Claude'
     },
     {
