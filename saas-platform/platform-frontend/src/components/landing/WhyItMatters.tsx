@@ -108,8 +108,8 @@ export function WhyItMatters() {
         {/* The federation message */}
         <div className={`text-center mt-12 ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.6s' }}>
           <blockquote className="text-2xl font-light text-gray-700 dark:text-gray-300 italic max-w-4xl mx-auto">
-            "Your team uses Slack. Your client uses Teams. Your vendors use Discord.
-            <br />Your AI should work in all of them."
+            "Email succeeded because no single company owned it.
+            <br />AI needs the same freedom."
           </blockquote>
           <p className="mt-4 text-gray-600 dark:text-gray-400">
             — Why federation matters for AI
