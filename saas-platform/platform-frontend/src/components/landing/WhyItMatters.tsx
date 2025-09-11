@@ -105,14 +105,14 @@ export function WhyItMatters() {
 
         {/* (Removed federation story; scenarios are shown below) */}
 
-        {/* Historical parallel */}
+        {/* The federation message */}
         <div className={`text-center mt-12 ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.6s' }}>
           <blockquote className="text-2xl font-light text-gray-700 dark:text-gray-300 italic max-w-4xl mx-auto">
-            "In 1995, you could choose AOL's walled garden or open email.
-            <br />Today, you can choose AI prisoners or AI citizens."
+            "Your team uses Slack. Your client uses Teams. Your vendors use Discord.
+            <br />Your AI should work in all of them."
           </blockquote>
           <p className="mt-4 text-gray-600 dark:text-gray-400">
-            — The choice that will define the next decade of AI
+            — Why federation matters for AI
           </p>
         </div>
 
