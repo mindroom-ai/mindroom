@@ -101,7 +101,7 @@ export function CTA() {
 
           {/* Trust text */}
           <p className="mt-8 text-white/80 text-sm">
-            🔒 SOC 2 Type II Certified • GDPR Compliant • 99.9% Uptime SLA
+            🔒 End-to-End Encrypted • Privacy-First Design • Open Source • Self-Hostable
           </p>
         </div>
       </div>
