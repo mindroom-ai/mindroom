@@ -34,7 +34,7 @@ export function HowItWorks() {
     {
       icon: Wrench,
       title: '2. Agents Get Superpowers',
-      description: 'Each agent can access 80+ tools: Gmail, GitHub, Spotify, Home Assistant, Google Drive, financial APIs, and more.',
+      description: 'Each agent can use real tools: Gmail, GitHub, Home Assistant, Google Drive, financial APIs, and more.',
       example: '@analyst can pull data from your database, create charts, and send reports via email'
     },
     {
@@ -51,9 +51,9 @@ export function HowItWorks() {
     },
     {
       icon: Globe,
-      title: '5. Work Everywhere',
-      description: 'Through Matrix bridges, your agents work in Slack, Discord, Teams, WhatsApp — anywhere your team communicates.',
-      example: 'Same @analyst works in your Slack, client\'s Discord, and partner\'s Teams'
+      title: '5. Open & Auditable',
+      description: 'Built on Matrix and fully open source. End-to-end encrypted rooms and verifiable behavior.',
+      example: 'Security teams can audit configs and logs; agents operate in encrypted rooms'
     },
     {
       icon: Users,

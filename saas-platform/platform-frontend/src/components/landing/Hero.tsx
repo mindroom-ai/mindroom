@@ -48,7 +48,7 @@ export function Hero() {
 
           {/* Subheading */}
           <p className={`text-xl md:text-2xl text-gray-600 dark:text-gray-300 mb-10 max-w-3xl mx-auto leading-relaxed ${mounted ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.2s' }}>
-            Create specialized AI agents with 80+ tools. Built on Matrix with verifiable end-to-end encryption and a fully open-source stack. Agents collaborate across Slack, Discord, Teams, and more.
+            Your agents are real users in your chat rooms (Matrix accounts). Verifiable end-to-end encryption. Fully open source. Connect tools and work across Slack, Discord, Teams via bridges.
           </p>
 
           {/* CTA Buttons */}
@@ -76,11 +76,11 @@ export function Hero() {
           <div className={`flex flex-wrap gap-4 justify-center ${mounted ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.4s' }}>
             <div className="group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
               <Bot className="w-5 h-5 text-orange-500 group-hover:rotate-12 transition-transform" />
-              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Multiple AI Agents</span>
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Agents Are Real Users</span>
             </div>
             <div className="group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
               <MessageSquare className="w-5 h-5 text-orange-500 group-hover:rotate-12 transition-transform" />
-              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">80+ Tools & Integrations</span>
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Works Where You Work</span>
             </div>
             <div className="group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
               <Shield className="w-5 h-5 text-orange-500 group-hover:rotate-12 transition-transform" />

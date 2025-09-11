@@ -6,14 +6,14 @@ import { useEffect, useState } from 'react'
 const features = [
   {
     icon: Bot,
-    title: 'Multiple Specialized Agents',
-    description: 'Create researcher, analyst, writer, coder agents. Each with unique skills, persistent memory, and real Matrix accounts.',
+    title: 'Agents Are Real Users',
+    description: 'Agents have their own Matrix accounts and join rooms like teammates. Persistent memory and skills per agent.',
     gradient: 'from-blue-500 to-cyan-500',
   },
   {
     icon: Zap,
-    title: '80+ Tools & Integrations',
-    description: 'Gmail, GitHub, Spotify, Home Assistant, Google Drive, databases, APIs. Your agents can actually DO things, not just talk.',
+    title: '100+ Tools & Integrations',
+    description: 'Gmail, GitHub, Home Assistant, Google Drive, databases, APIs and more. Your agents can actually DO things, not just talk.',
     gradient: 'from-yellow-500 to-orange-500',
   },
   {
