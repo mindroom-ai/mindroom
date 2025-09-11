@@ -90,7 +90,7 @@ export function WhyItMatters() {
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Verifiable E2E + open source</strong> — Built on Matrix; encryption you can verify; fully open & auditable
+                  <strong>Verifiable E2E + 100% open source</strong> — Built on Matrix; every layer transparent and auditable
                 </p>
               </div>
               <div className="flex items-start gap-4">
