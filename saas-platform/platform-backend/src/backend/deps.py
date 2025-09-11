@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from backend.config import auth_client, logger, supabase
@@ -10,6 +10,9 @@ from fastapi import Header, HTTPException
 
 if TYPE_CHECKING:
     from supabase import Client
+
+# Simple in-memory cache for auth verification (token -> (user_data, expiry))
+_auth_cache: dict[str, tuple[dict, datetime]] = {}
 
 
 def ensure_supabase() -> Client:
@@ -26,7 +29,7 @@ def _ensure_auth_client() -> Client:
     return auth_client
 
 
-async def verify_user(authorization: str = Header(None)) -> dict:
+async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901
     """Verify regular user via Supabase JWT.
 
     With the current schema, `account.id == auth.user.id`.
@@ -36,6 +39,20 @@ async def verify_user(authorization: str = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail="Invalid authorization header")
 
     token = authorization.replace("Bearer ", "")
+
+    # Check cache first (5 minute TTL)
+    now = datetime.now(UTC)
+    if token in _auth_cache:
+        cached_data, expiry = _auth_cache[token]
+        if expiry > now:
+            # Cache hit - return cached data
+            return cached_data
+        # Cache expired - remove it
+        del _auth_cache[token]
+
+    # Clean up expired entries periodically (simple cleanup)
+    if len(_auth_cache) > 100:  # Prevent unbounded growth
+        _auth_cache.clear()
 
     sb = ensure_supabase()
     ac = _ensure_auth_client()
@@ -80,13 +97,20 @@ async def verify_user(authorization: str = Header(None)) -> dict:
                 if not result.data:
                     msg = "Account creation failed. Please contact support."
                     raise HTTPException(status_code=404, detail=msg) from None
-        else:
-            return {
-                "user_id": user.user.id,
-                "email": user.user.email,
-                "account_id": account_id,
-                "account": result.data,
-            }
+
+        # Prepare response data
+        user_data = {
+            "user_id": user.user.id,
+            "email": user.user.email,
+            "account_id": account_id,
+            "account": result.data,
+        }
+
+        # Cache the result with 5 minute TTL
+        expiry = now + timedelta(minutes=5)
+        _auth_cache[token] = (user_data, expiry)
+
+        return user_data  # noqa: TRY300
     except HTTPException:
         raise
     except Exception:
