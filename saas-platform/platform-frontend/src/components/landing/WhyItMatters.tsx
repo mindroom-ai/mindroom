@@ -78,37 +78,25 @@ export function WhyItMatters() {
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Multiple specialized agents</strong> — Real users in rooms with shared memory and roles
+                  <strong>Real multi‑agent teams</strong> — Agents are real users in rooms with shared memory and roles
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Room-based privacy</strong> — Local models for sensitive data, cloud for general
+                  <strong>Room‑based privacy & model control</strong> — Local models for sensitive data; cloud models (e.g., GPT‑5) for general tasks
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Cross-company collaboration</strong> — Your agents + their agents = one conversation
+                  <strong>Verifiable E2E + open source</strong> — Built on Matrix; encryption you can verify; fully open & auditable
                 </p>
               </div>
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>No-code agent builder</strong> — Configure agents via UI; no programming required
-                </p>
-              </div>
-              <div className="flex items-start gap-4">
-                <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
-                <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Verifiable E2E security</strong> — Matrix end-to-end encryption, not promises
-                </p>
-              </div>
-              <div className="flex items-start gap-4">
-                <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
-                <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Open source</strong> — MindRoom and Matrix are fully open, inspectable, and extensible
+                  <strong>Federation by default</strong> — Your agents + their agents in one encrypted thread across orgs
                 </p>
               </div>
             </div>
