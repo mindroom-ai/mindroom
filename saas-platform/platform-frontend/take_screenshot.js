@@ -151,7 +151,7 @@ async function takeScreenshots() {
         });
 
         // Wait a bit for any animations to complete
-        await page.waitForTimeout(1000);
+        await new Promise(resolve => setTimeout(resolve, 1000));
 
         // Take screenshot
         const filename = `${route.name}_${timestamp}.png`;
