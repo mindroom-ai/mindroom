@@ -85,7 +85,7 @@ export function Features() {
   }, [])
 
   return (
-    <section id="features" className="py-24 px-6 relative overflow-hidden">
+    <section id="features" className="py-20 md:py-24 px-6 relative overflow-hidden">
       {/* Background gradient */}
       <div className="absolute inset-0 bg-gradient-to-b from-gray-50 to-white dark:from-gray-900 dark:to-gray-800"></div>
 
