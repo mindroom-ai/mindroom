@@ -1,6 +1,19 @@
 "use client";
 
-import { Lock, Users } from "lucide-react";
+import {
+  Lock,
+  Users,
+  Calendar,
+  Database,
+  BarChart3,
+  MessageSquare,
+  Mail,
+  Search,
+  Globe,
+  FileText,
+  PieChart,
+  Table,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 
 // Types
@@ -81,15 +94,18 @@ function getBorderColor(isAgent: boolean, orgDomain?: string): string {
 // Components
 function Chip({
   label,
+  icon,
   className = "",
 }: {
   label: string;
+  icon?: React.ReactNode;
   className?: string;
 }) {
   return (
     <span
-      className={`px-2 py-0.5 text-xs rounded-full bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-600 ${className}`}
+      className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-600 ${className}`}
     >
+      {icon}
       {label}
     </span>
   );
@@ -146,7 +162,7 @@ function ChatBubble({
   name: string;
   org: string;
   text: React.ReactNode;
-  chips?: string[];
+  chips?: Array<{ label: string; icon?: React.ReactNode }>;
   color: string;
   isAgent?: boolean;
   orgDomain?: string;
@@ -178,8 +194,13 @@ function ChatBubble({
               AI Agent
             </span>
           )}
-          {chips.map((c, i) => (
-            <Chip key={i} label={c} className="hidden md:inline-flex" />
+          {chips.map((chip, i) => (
+            <Chip
+              key={i}
+              label={chip.label}
+              icon={chip.icon}
+              className="hidden md:inline-flex"
+            />
           ))}
         </div>
         <div
@@ -211,8 +232,21 @@ function AgentTeamChat() {
         <div className="text-gray-600 dark:text-gray-400 text-sm mt-1">
           I'll gather data on your top 5 competitors...
         </div>
-        <div className="text-xs text-gray-500 mt-2 bg-gray-100 dark:bg-gray-700/50 rounded px-2 py-1 inline-block">
-          [Accessing: Web search, Industry databases, News APIs]
+        <div className="text-xs text-gray-500 mt-2 bg-gray-100 dark:bg-gray-700/50 rounded px-2 py-1 inline-flex items-center gap-2">
+          <span className="flex items-center gap-1">
+            <Search className="w-3 h-3" />
+            Web search
+          </span>
+          <span className="text-gray-400">·</span>
+          <span className="flex items-center gap-1">
+            <Database className="w-3 h-3" />
+            Industry DB
+          </span>
+          <span className="text-gray-400">·</span>
+          <span className="flex items-center gap-1">
+            <Globe className="w-3 h-3" />
+            News APIs
+          </span>
         </div>
       </div>
 
@@ -223,8 +257,21 @@ function AgentTeamChat() {
         <div className="text-gray-600 dark:text-gray-400 text-sm mt-1">
           I'll analyze market positioning and create visualizations...
         </div>
-        <div className="text-xs text-gray-500 mt-2 bg-gray-100 dark:bg-gray-700/50 rounded px-2 py-1 inline-block">
-          [Accessing: Data analysis tools, Chart generators, Google Sheets]
+        <div className="text-xs text-gray-500 mt-2 bg-gray-100 dark:bg-gray-700/50 rounded px-2 py-1 inline-flex items-center gap-2">
+          <span className="flex items-center gap-1">
+            <BarChart3 className="w-3 h-3" />
+            Analysis tools
+          </span>
+          <span className="text-gray-400">·</span>
+          <span className="flex items-center gap-1">
+            <PieChart className="w-3 h-3" />
+            Charts
+          </span>
+          <span className="text-gray-400">·</span>
+          <span className="flex items-center gap-1">
+            <Table className="w-3 h-3" />
+            Google Sheets
+          </span>
         </div>
       </div>
 
@@ -235,8 +282,18 @@ function AgentTeamChat() {
         <div className="text-gray-600 dark:text-gray-400 text-sm mt-1">
           Report complete! Sent to your email and saved to Google Drive.
         </div>
-        <div className="text-xs text-gray-500 mt-2 bg-gray-100 dark:bg-gray-700/50 rounded px-2 py-1 inline-block">
-          [Tools used: 12 | Data processed: 847 sources | Time: 3 minutes]
+        <div className="text-xs text-gray-500 mt-2 bg-gray-100 dark:bg-gray-700/50 rounded px-2 py-1 inline-flex items-center gap-2">
+          <span className="flex items-center gap-1">
+            <FileText className="w-3 h-3" />
+            12 tools used
+          </span>
+          <span className="text-gray-400">·</span>
+          <span className="flex items-center gap-1">
+            <Database className="w-3 h-3" />
+            847 sources
+          </span>
+          <span className="text-gray-400">·</span>
+          <span>3 minutes</span>
         </div>
       </div>
     </div>
@@ -264,7 +321,10 @@ function BusinessChat() {
         org="Matrix · agent"
         isAgent={true}
         color="bg-orange-500"
-        chips={["DB", "Analytics"]}
+        chips={[
+          { label: "DB", icon: <Database className="w-3 h-3" /> },
+          { label: "Analytics", icon: <BarChart3 className="w-3 h-3" /> },
+        ]}
         text={
           <>
             Fetching from DB + analytics… Chart attached. We're 13% below target
@@ -309,7 +369,12 @@ function BusinessChat() {
         org="Matrix · agent"
         isAgent={true}
         color="bg-orange-500"
-        chips={["Slack bridge"]}
+        chips={[
+          {
+            label: "Slack bridge",
+            icon: <MessageSquare className="w-3 h-3" />,
+          },
+        ]}
         text={<>Posted in Slack and invited @client_architect (read‑only).</>}
       />
     </>
@@ -332,7 +397,7 @@ function PersonalChat() {
         org="Matrix · agent"
         isAgent={true}
         color="bg-orange-500"
-        chips={["Calendar"]}
+        chips={[{ label: "Calendar", icon: <Calendar className="w-3 h-3" /> }]}
         text={<>Checking weekends for Alice…</>}
       />
       <ChatBubble
@@ -341,7 +406,7 @@ function PersonalChat() {
         org="Matrix · agent"
         isAgent={true}
         color="bg-sky-600"
-        chips={["Calendar"]}
+        chips={[{ label: "Calendar", icon: <Calendar className="w-3 h-3" /> }]}
         text={<>Bob is free Sat 14:00–18:00; busy Sunday morning.</>}
       />
       <ChatBubble
@@ -350,7 +415,7 @@ function PersonalChat() {
         org="Matrix · agent"
         isAgent={true}
         color="bg-emerald-600"
-        chips={["Calendar"]}
+        chips={[{ label: "Calendar", icon: <Calendar className="w-3 h-3" /> }]}
         text={<>Carol is free Sunday 10:00–13:00; Sat is open after 17:00.</>}
       />
       <ChatBubble
@@ -366,7 +431,13 @@ function PersonalChat() {
         org="Matrix · agent"
         isAgent={true}
         color="bg-orange-500"
-        chips={["Invites", "Discord bridge"]}
+        chips={[
+          { label: "Invites", icon: <Mail className="w-3 h-3" /> },
+          {
+            label: "Discord bridge",
+            icon: <MessageSquare className="w-3 h-3" />,
+          },
+        ]}
         text={
           <>Invites sent and summary posted to Discord #friends (via bridge).</>
         }
