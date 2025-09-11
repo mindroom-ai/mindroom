@@ -26,7 +26,7 @@ export function WhyItMatters() {
   }, [])
 
   return (
-    <section id="why-it-matters" className="py-24 px-6 bg-gradient-to-b from-gray-50 to-white dark:from-gray-900 dark:to-gray-800">
+    <section id="why-it-matters" className="py-20 md:py-24 px-6 bg-gradient-to-b from-gray-50 to-white dark:from-gray-900 dark:to-gray-800">
       <div className="container mx-auto max-w-6xl">
         <div className="text-center mb-16">
           <h2 className="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
@@ -104,9 +104,9 @@ export function WhyItMatters() {
         </div>
 
         {/* Visual representation of federation */}
-        <div className={`rounded-2xl p-8 bg-gradient-to-r from-gray-50 to-white dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-gray-700 ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.4s' }}>
+        <div className={`rounded-2xl p-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur border border-gray-200 dark:border-gray-700 shadow-xl ring-1 ring-gray-200/60 dark:ring-gray-700/60 max-w-5xl mx-auto ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.4s' }}>
           {/* Top accent bar */}
-          <div className="h-1 w-20 mx-auto mb-6 rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600"></div>
+          <div className="h-1 w-16 md:w-20 mx-auto mb-6 rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600"></div>
           <div className="text-center mb-8">
             <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">
               Federation in Practice
@@ -179,16 +179,7 @@ export function WhyItMatters() {
           </p>
         </div>
 
-        {/* CTA */}
-        <div className="text-center mt-12">
-          <Link
-            href="/auth/signup"
-            className="inline-flex items-center px-8 py-4 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-semibold rounded-full hover:shadow-2xl hover:shadow-orange-500/25 transform hover:scale-105 transition-all duration-300"
-          >
-            Join the Open AI Revolution
-            <ArrowRight className="ml-2 w-5 h-5" />
-          </Link>
-        </div>
+        {/* CTA removed here to reduce repetition; main CTA remains at page bottom */}
       </div>
     </section>
   )
