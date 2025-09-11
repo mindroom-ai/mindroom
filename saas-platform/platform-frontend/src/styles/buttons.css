@@ -1,16 +1,24 @@
-/* Common button styles */
+/* Common button styles with mobile touch feedback */
 .btn-primary {
   @apply px-6 py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-medium rounded-full hover:shadow-lg hover:shadow-orange-500/25 transform hover:scale-105 transition-all duration-300;
+  @apply active:scale-95 active:shadow-md; /* Touch feedback */
+  -webkit-tap-highlight-color: transparent; /* Remove iOS tap highlight */
 }
 
 .btn-secondary {
   @apply px-6 py-2.5 bg-white/80 dark:bg-gray-800/80 backdrop-blur border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 font-semibold rounded-full hover:bg-white dark:hover:bg-gray-800 hover:border-orange-300 dark:hover:border-orange-700 hover:shadow-lg transition-all duration-300;
+  @apply active:scale-95 active:shadow-md; /* Touch feedback */
+  -webkit-tap-highlight-color: transparent;
 }
 
 .nav-link {
   @apply text-gray-600 dark:text-gray-300 hover:text-orange-500 dark:hover:text-orange-400 transition-colors;
+  @apply active:text-orange-600 dark:active:text-orange-300; /* Touch feedback */
+  -webkit-tap-highlight-color: transparent;
 }
 
 .footer-link {
   @apply text-gray-400 hover:text-white transition-colors;
+  @apply active:text-orange-400; /* Touch feedback */
+  -webkit-tap-highlight-color: transparent;
 }

@@ -55,14 +55,14 @@ export function Hero() {
           <div className={`flex flex-col sm:flex-row gap-4 justify-center mb-16 ${mounted ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.3s' }}>
             <Link
               href="/auth/signup"
-              className="group inline-flex items-center px-8 py-4 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-semibold rounded-full hover:shadow-2xl hover:shadow-orange-500/25 transform hover:scale-105 transition-all duration-300 shimmer"
+              className="group inline-flex items-center px-8 py-4 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-semibold rounded-full hover:shadow-2xl hover:shadow-orange-500/25 transform hover:scale-105 active:scale-95 transition-all duration-300 shimmer"
             >
               Start Free Trial
               <ArrowRight className="ml-2 w-5 h-5 group-hover:translate-x-1 transition-transform" />
             </Link>
             <Link
               href="#features"
-              className="inline-flex items-center px-8 py-4 bg-white/80 dark:bg-gray-800/80 backdrop-blur border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 font-semibold rounded-full hover:bg-white dark:hover:bg-gray-800 hover:border-orange-300 dark:hover:border-orange-700 hover:shadow-lg transition-all duration-300"
+              className="inline-flex items-center px-8 py-4 bg-white/80 dark:bg-gray-800/80 backdrop-blur border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 font-semibold rounded-full hover:bg-white dark:hover:bg-gray-800 hover:border-orange-300 dark:hover:border-orange-700 hover:shadow-lg active:scale-95 transition-all duration-300"
             >
               Watch Demo
               <svg className="ml-2 w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
@@ -74,19 +74,19 @@ export function Hero() {
 
           {/* Feature Pills with hover effects */}
           <div className={`flex flex-wrap gap-4 justify-center ${mounted ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.4s' }}>
-            <div className="group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
+            <div className="touch-card group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
               <Bot className="w-5 h-5 text-orange-500 group-hover:rotate-12 transition-transform" />
-              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Agents Are Real Users</span>
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Truly Decentralized</span>
             </div>
-            <div className="group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
+            <div className="touch-card group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
               <MessageSquare className="w-5 h-5 text-orange-500 group-hover:rotate-12 transition-transform" />
               <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Works Where You Work</span>
             </div>
-            <div className="group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
+            <div className="touch-card group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
               <Shield className="w-5 h-5 text-orange-500 group-hover:rotate-12 transition-transform" />
               <span className="text-sm font-medium text-gray-700 dark:text-gray-300">End-to-End Encrypted</span>
             </div>
-            <div className="group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
+            <div className="touch-card group flex items-center gap-2 px-5 py-3 bg-white/80 dark:bg-gray-800/80 backdrop-blur rounded-full shadow-md hover:shadow-xl hover:scale-105 transition-all duration-300 cursor-default">
               <Sparkles className="w-5 h-5 text-orange-500 group-hover:rotate-12 transition-transform" />
               <span className="text-sm font-medium text-gray-700 dark:text-gray-300">100% Open Source</span>
             </div>

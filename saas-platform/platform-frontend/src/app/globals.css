@@ -182,3 +182,113 @@ body {
     transform: translateX(-50%) translateY(-5px);
   }
 }
+
+/* Mobile touch optimizations */
+@media (hover: none) and (pointer: coarse) {
+  /* Disable hover effects on touch devices */
+  .hover-lift:hover {
+    transform: none;
+    box-shadow: none;
+  }
+
+  /* Add active states for touch feedback */
+  .hover-lift:active {
+    transform: scale(0.98);
+    transition: transform 0.1s ease;
+  }
+
+  /* Reduce animations on mobile for performance */
+  .blob-1, .blob-2 {
+    animation: none;
+    opacity: 0.2;
+  }
+
+  /* Simplify floating animations on mobile */
+  .float-animation {
+    animation: none;
+  }
+
+  /* Disable icon rotation on hover for touch devices */
+  .group:hover .group-hover\:rotate-12 {
+    transform: none;
+  }
+
+  /* Add tap feedback for icons */
+  .group:active .group-hover\:rotate-12 {
+    transform: scale(1.2);
+    transition: transform 0.1s ease;
+  }
+}
+
+/* Touch-friendly card interactions */
+.touch-card {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation; /* Prevent double-tap zoom */
+  user-select: none; /* Prevent text selection on long press */
+  position: relative;
+  overflow: hidden;
+}
+
+.touch-card:active {
+  transform: scale(0.98);
+  transition: transform 0.1s ease;
+}
+
+/* Ripple effect for touch feedback */
+@keyframes ripple {
+  to {
+    transform: scale(4);
+    opacity: 0;
+  }
+}
+
+.touch-ripple {
+  position: absolute;
+  border-radius: 50%;
+  background: rgba(255, 107, 53, 0.3);
+  width: 100px;
+  height: 100px;
+  pointer-events: none;
+  animation: ripple 0.6s ease-out;
+}
+
+/* Improved mobile animations */
+@media (max-width: 768px) {
+  /* Reduce animation complexity */
+  .fade-in-up {
+    animation: fadeInUpMobile 0.4s ease-out forwards;
+  }
+
+  @keyframes fadeInUpMobile {
+    from {
+      opacity: 0;
+      transform: translateY(20px); /* Reduced distance */
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Disable shimmer on mobile to improve performance */
+  .shimmer::after {
+    display: none;
+  }
+
+  /* Prevent text selection during swipe */
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Allow text selection for specific elements */
+  p, h1, h2, h3, h4, h5, h6, span, .selectable {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* Optimize touch scrolling */
+  * {
+    -webkit-overflow-scrolling: touch;
+  }
+}
