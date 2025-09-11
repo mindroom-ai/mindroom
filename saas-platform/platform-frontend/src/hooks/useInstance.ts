@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
 import { listInstances, restartInstance as apiRestartInstance } from '@/lib/api'
+import { cache } from '@/lib/cache'
 
 export interface Instance {
   id: string // UUID
@@ -40,8 +41,12 @@ const DEV_INSTANCE: Instance | null =
     : null
 
 export function useInstance() {
-  const [instance, setInstance] = useState<Instance | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Start with cached data if available (optimistic UI)
+  const cacheKey = 'user-instance'
+  const cachedInstance = cache.get<Instance>(cacheKey)
+
+  const [instance, setInstance] = useState<Instance | null>(cachedInstance)
+  const [loading, setLoading] = useState(!cachedInstance) // Only show loading if no cache
   const { user, loading: authLoading } = useAuth()
   const supabase = createClient()
 
@@ -55,6 +60,7 @@ export function useInstance() {
     // Use dev instance if in development mode
     if (DEV_INSTANCE) {
       setInstance(DEV_INSTANCE)
+      cache.set(cacheKey, DEV_INSTANCE)
       setLoading(false)
       return
     }
@@ -64,7 +70,9 @@ export function useInstance() {
       try {
         const data = await listInstances()
         if (data.instances && data.instances.length > 0) {
-          setInstance(data.instances[0])
+          const newInstance = data.instances[0]
+          setInstance(newInstance)
+          cache.set(cacheKey, newInstance)
         }
       } catch (error) {
         console.error('Error fetching instance:', error)
