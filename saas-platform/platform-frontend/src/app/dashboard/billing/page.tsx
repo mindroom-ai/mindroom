@@ -50,8 +50,8 @@ export default function BillingPage() {
       'Basic integrations',
     ],
     starter: [
-      '3 AI Agents',
-      '1,000 messages per day',
+      '100 AI Agents',
+      'Unlimited messages',
       '5GB storage',
       'Priority support',
       'All integrations',

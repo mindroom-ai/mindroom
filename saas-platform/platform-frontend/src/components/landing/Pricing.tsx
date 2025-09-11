@@ -33,8 +33,8 @@ const plans = [
     period: '/month',
     description: 'Perfect for individuals',
     features: [
-      { text: '3 AI Agents', included: true },
-      { text: '1,000 messages/day', included: true },
+      { text: '100 AI Agents', included: true },
+      { text: 'Unlimited messages', included: true },
       { text: '5GB storage', included: true },
       { text: 'Email support', included: true },
       { text: 'All integrations', included: true },
@@ -143,7 +143,9 @@ export function Pricing() {
           {plans.map((plan, index) => {
             const Icon = plan.icon
             const price = billingCycle === 'yearly' && plan.price !== '$0'
-              ? `$${Math.floor(parseInt(plan.price.slice(1)) * 0.8)}`
+              ? plan.name === 'Professional'
+                ? `$${Math.floor(8 * 0.8 * 12)}` // $8 * 0.8 * 12 months = $76.80/year per user
+                : `$${Math.floor(parseInt(plan.price.slice(1)) * 0.8 * 12)}` // monthly * 0.8 * 12
               : plan.price
 
             return (
@@ -178,7 +180,11 @@ export function Pricing() {
                     <div className="flex items-baseline gap-2">
                       <span className="text-5xl font-bold text-gray-900 dark:text-white">{price}</span>
                       <span className="text-gray-600 dark:text-gray-400">
-                        {plan.period === 'forever' ? plan.period : billingCycle === 'yearly' ? '/year' : plan.period}
+                        {plan.period === 'forever'
+                          ? plan.period
+                          : billingCycle === 'yearly'
+                            ? plan.name === 'Professional' ? '/user/year' : '/year'
+                            : plan.period}
                       </span>
                     </div>
                     <p className="text-gray-600 dark:text-gray-400 mt-2">{plan.description}</p>

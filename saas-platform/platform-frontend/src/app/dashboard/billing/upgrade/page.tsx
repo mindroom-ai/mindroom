@@ -24,8 +24,8 @@ const plans: Plan[] = [
     priceId: process.env.STRIPE_PRICE_STARTER || '',
     description: 'Perfect for individuals',
     features: [
-      '3 AI Agents',
-      '1,000 messages/day',
+      '100 AI Agents',
+      'Unlimited messages',
       '5GB storage',
       'Priority support',
       'All integrations',
