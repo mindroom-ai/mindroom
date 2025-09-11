@@ -6,7 +6,7 @@
     "dev": "next dev --turbopack -H 0.0.0.0",
     "build": "next build",
     "start": "next start",
-    "screenshot": "node take_screenshot.js"
+    "screenshot": "nix-shell --run 'node take_screenshot.js' 2>/dev/null || node take_screenshot.js"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
