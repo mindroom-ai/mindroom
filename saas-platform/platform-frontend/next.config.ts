@@ -15,6 +15,12 @@ const nextConfig: NextConfig = {
     ignoreDuringBuilds: true,
   },
   output: 'standalone',
+  // Silence Turbopack workspace root warning
+  // (Next.js will use this directory as the workspace root)
+  // @ts-expect-error - 'turbopack' is not yet in typed NextConfig
+  turbopack: {
+    root: __dirname,
+  },
 };
 
 export default nextConfig;
