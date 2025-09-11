@@ -37,7 +37,7 @@ const features = [
   {
     icon: Shield,
     title: 'Federation & Security',
-    description: 'Built on Matrix (115M users). Agents from different companies can collaborate. Military-grade encryption.',
+    description: 'Built on Matrix with end-to-end encryption. Verifiable by design and open source; agents collaborate across organizations without sacrificing privacy.',
     gradient: 'from-red-500 to-orange-500',
   },
 ]
@@ -50,6 +50,12 @@ const additionalFeatures = [
     gradient: 'from-teal-500 to-cyan-500',
   },
   {
+    icon: Shield,
+    title: 'Verifiable E2E Encryption',
+    description: 'Not trust-me-bro security. Matrix provides audited, end-to-end encrypted rooms for agent collaboration and data exchange.',
+    gradient: 'from-emerald-500 to-green-600',
+  },
+  {
     icon: BarChart,
     title: 'Self-Host or Cloud',
     description: 'Run on your infrastructure or use our service. Switch anytime. No lock-in.',
@@ -60,6 +66,12 @@ const additionalFeatures = [
     title: 'Deploy in Minutes',
     description: 'Not months. Simple configuration, instant agent deployment, immediate value.',
     gradient: 'from-rose-500 to-pink-500',
+  },
+  {
+    icon: Brain,
+    title: 'Open Source & Auditable',
+    description: 'MindRoom and the Matrix protocol are open source. Inspect, verify, and extend every part of the system.',
+    gradient: 'from-indigo-600 to-purple-600',
   },
 ]
 

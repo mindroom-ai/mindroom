@@ -64,6 +64,12 @@ export function WhyItMatters() {
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
+                  <strong>Closed platforms</strong> — “Trust-me” encryption, no verification, closed source
+                </p>
+              </div>
+              <div className="flex items-start gap-4">
+                <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
+                <p className="text-gray-600 dark:text-gray-300">
                   <strong>Every AI platform</strong> — Your agents can't work with other companies' agents
                 </p>
               </div>
@@ -97,6 +103,18 @@ export function WhyItMatters() {
                 <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
                   <strong>Cross-company collaboration</strong> — Your agents + their agents = one conversation
+                </p>
+              </div>
+              <div className="flex items-start gap-4">
+                <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
+                <p className="text-gray-600 dark:text-gray-300">
+                  <strong>Verifiable E2E security</strong> — Matrix end-to-end encryption, not promises
+                </p>
+              </div>
+              <div className="flex items-start gap-4">
+                <div className="w-2 h-2 rounded-full bg-green-500 mt-2 flex-shrink-0"></div>
+                <p className="text-gray-600 dark:text-gray-300">
+                  <strong>Open source</strong> — MindRoom and Matrix are fully open, inspectable, and extensible
                 </p>
               </div>
             </div>
