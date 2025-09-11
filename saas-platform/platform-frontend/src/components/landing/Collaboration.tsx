@@ -184,24 +184,6 @@ export function Collaboration() {
             <div className="p-3 md:p-4 space-y-2 md:space-y-3">
               {tab === 'business' ? (
                 <>
-                  {/* Federation indicator */}
-                  <div className="flex items-center justify-center gap-6 mb-3 py-2 text-xs text-gray-500 dark:text-gray-400">
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-0.5 bg-blue-400/60"></div>
-                      <span>org-a.com</span>
-                    </div>
-                    <span className="text-gray-400">×</span>
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-0.5 bg-green-400/60"></div>
-                      <span>org-b.net</span>
-                    </div>
-                    <span className="text-gray-400">×</span>
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-0.5 bg-orange-400/60"></div>
-                      <span>AI Agents</span>
-                    </div>
-                  </div>
-
                   <ChatBubble
                     side="left"
                     name="alice"
