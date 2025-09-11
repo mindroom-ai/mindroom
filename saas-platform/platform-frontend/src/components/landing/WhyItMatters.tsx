@@ -46,7 +46,7 @@ export function WhyItMatters() {
               <div className="flex items-start gap-4">
                 <div className="w-2 h-2 rounded-full bg-red-500 mt-2 flex-shrink-0"></div>
                 <p className="text-gray-600 dark:text-gray-300">
-                  <strong>Closed & unverifiable</strong> — “Trust‑me” encryption, no independent verification, proprietary code
+                  <strong>Closed & unverifiable</strong> — “Trust‑me bro” encryption, no independent verification, proprietary code
                 </p>
               </div>
               <div className="flex items-start gap-4">
