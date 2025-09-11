@@ -17,11 +17,10 @@ if (!fs.existsSync(SCREENSHOTS_DIR)) {
 const ROUTES = [
   { path: '/', name: 'landing', viewport: { width: 1920, height: 1080 } },
   { path: '/', name: 'landing-mobile', viewport: { width: 375, height: 812 } },
-  { path: '/pricing', name: 'pricing', viewport: { width: 1920, height: 1080 } },
   { path: '/auth/login', name: 'login', viewport: { width: 1920, height: 1080 } },
   { path: '/auth/signup', name: 'signup', viewport: { width: 1920, height: 1080 } },
   // Dashboard pages require auth - skip them for now
-  // Could add demo/mockup pages later if needed
+  // Pricing is already on the landing page - no need for separate page
 ];
 
 // Function to check if server is running
