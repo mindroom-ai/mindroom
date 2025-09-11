@@ -64,7 +64,7 @@ export function HowItWorks() {
   ]
 
   return (
-    <section id="how-it-works" className="py-24 px-6 bg-gradient-to-b from-white to-gray-50 dark:from-gray-800 dark:to-gray-900">
+    <section id="how-it-works" className="py-20 md:py-24 px-6 bg-gradient-to-b from-white to-gray-50 dark:from-gray-800 dark:to-gray-900">
       <div className="container mx-auto max-w-7xl">
         <div className="text-center mb-16">
           <h2 className="text-4xl md:text-5xl font-bold mb-6 bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
@@ -116,10 +116,10 @@ export function HowItWorks() {
         </div>
 
         {/* Visual example */}
-        <div className="mt-12 rounded-2xl p-8 bg-gradient-to-r from-gray-50 to-white dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-gray-700">
+        <div className="mt-10 rounded-2xl p-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur border border-gray-200 dark:border-gray-700 shadow-xl ring-1 ring-gray-200/60 dark:ring-gray-700/60 max-w-4xl mx-auto">
           {/* Top accent bar */}
-          <div className="h-1 w-20 mx-auto mb-6 rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600"></div>
-          <h3 className="text-2xl font-bold text-center mb-6 text-gray-900 dark:text-white">
+          <div className="h-1 w-16 md:w-20 mx-auto mb-6 rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600"></div>
+          <h3 className="text-2xl font-bold text-center mb-4 text-gray-900 dark:text-white">
             Agents Collaborating
           </h3>
 
