@@ -533,10 +533,10 @@ export function Collaboration() {
         {/* Simple federation/bridge callout */}
         <div className="text-center mt-2 text-[13px] md:text-sm text-gray-600 dark:text-gray-300 max-w-3xl mx-auto">
           <p>
-            <strong>True Federation:</strong> Different organizations
-            (org-a.com, org-b.net) collaborate in one encrypted room. Each
+            <strong>Decentralized Federation:</strong> Like email or the web — no single point of control.
+            Different organizations (org-a.com, org-b.net) collaborate in one encrypted room. Each
             participant is a real, verifiable Matrix account on their own
-            server.
+            server. The network survives even if servers disappear.
           </p>
           <p className="mt-1">
             <strong>Bridges:</strong> Connect existing tools (Slack, Discord,
