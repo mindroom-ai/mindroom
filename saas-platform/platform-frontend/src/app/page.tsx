@@ -14,6 +14,11 @@ import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
 import { useState, useEffect } from 'react'
 import { navLinks, footerLinks } from '@/lib/constants'
+import {
+  FileText, DollarSign, Layers,
+  Info, BookOpen, Briefcase,
+  Mail, HelpCircle, Activity
+} from 'lucide-react'
 
 export default function LandingPage() {
   const [scrolled, setScrolled] = useState(false)
@@ -25,6 +30,19 @@ export default function LandingPage() {
     window.addEventListener('scroll', handleScroll)
     return () => window.removeEventListener('scroll', handleScroll)
   }, [])
+
+  // Icon mapping for footer links
+  const footerIcons: Record<string, any> = {
+    'Features': Layers,
+    'Pricing': DollarSign,
+    'Documentation': FileText,
+    'About': Info,
+    'Blog': BookOpen,
+    'Careers': Briefcase,
+    'Contact': Mail,
+    'Help Center': HelpCircle,
+    'Status': Activity,
+  }
 
   return (
     <main className="min-h-screen overflow-x-hidden">
@@ -121,13 +139,17 @@ export default function LandingPage() {
               <div key={category}>
                 <h4 className="font-semibold mb-4 capitalize">{category}</h4>
                 <ul className="space-y-2">
-                  {links.map((link) => (
-                    <li key={link.href}>
-                      <Link href={link.href} className="footer-link">
-                        {link.label}
-                      </Link>
-                    </li>
-                  ))}
+                  {links.map((link) => {
+                    const Icon = footerIcons[link.label]
+                    return (
+                      <li key={link.href}>
+                        <Link href={link.href} className="footer-link flex items-center gap-2 group">
+                          {Icon && <Icon className="w-4 h-4 text-gray-500 group-hover:text-orange-400 transition-colors" />}
+                          <span>{link.label}</span>
+                        </Link>
+                      </li>
+                    )
+                  })}
                 </ul>
               </div>
             ))}
