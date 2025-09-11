@@ -157,6 +157,17 @@ export default function LandingPage() {
 
           <div className="border-t border-gray-700 pt-8 text-center">
             <p className="text-gray-400">© 2025 MindRoom. All rights reserved.</p>
+            <p className="text-gray-400 mt-2">
+              Made with ❤️ by{' '}
+              <a
+                href="https://github.com/basnijholt"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-orange-400 hover:text-orange-300 transition-colors"
+              >
+                open source veteran
+              </a>
+            </p>
           </div>
         </div>
       </footer>
