@@ -103,70 +103,7 @@ export function WhyItMatters() {
           </div>
         </div>
 
-        {/* Visual representation of federation */}
-        <div className={`rounded-2xl p-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur border border-gray-200 dark:border-gray-700 shadow-xl ring-1 ring-gray-200/60 dark:ring-gray-700/60 max-w-5xl mx-auto ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.4s' }}>
-          {/* Top accent bar */}
-          <div className="h-1 w-16 md:w-20 mx-auto mb-6 rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600"></div>
-          <div className="text-center mb-8">
-            <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">
-              Federation in Practice
-            </h3>
-            <p className="text-gray-600 dark:text-gray-300 max-w-3xl mx-auto">
-              <strong>The Impossible Scenario (with any other AI platform):</strong>
-            </p>
-          </div>
-
-          {/* Concrete example */}
-          <div className="bg-white dark:bg-gray-800 rounded-xl p-6 mb-8">
-            <div className="space-y-4">
-              <div className="flex items-start gap-3">
-                <span className="text-orange-500 font-bold">Monday:</span>
-                <div>
-                  <p className="text-gray-700 dark:text-gray-300">You're in your company's Slack</p>
-                  <p className="text-sm text-gray-600 dark:text-gray-400 italic">"@mindroom_analyst analyze our Q4 metrics"</p>
-                  <p className="text-sm text-green-600 dark:text-green-400">✓ Your analyst responds with insights</p>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-3">
-                <span className="text-orange-500 font-bold">Tuesday:</span>
-                <div>
-                  <p className="text-gray-700 dark:text-gray-300">You join your client's Discord for a meeting</p>
-                  <p className="text-sm text-gray-600 dark:text-gray-400 italic">"@mindroom_analyst what were those metrics we discussed?"</p>
-                  <p className="text-sm text-green-600 dark:text-green-400">✓ Same analyst, remembers everything, responds in their Discord</p>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-3">
-                <span className="text-orange-500 font-bold">Wednesday:</span>
-                <div>
-                  <p className="text-gray-700 dark:text-gray-300">Client's security AI needs to audit your code</p>
-                  <p className="text-sm text-gray-600 dark:text-gray-400 italic">"@client_security_ai please review our API endpoints"</p>
-                  <p className="text-sm text-green-600 dark:text-green-400">✓ Their AI joins YOUR workspace, reviews code, leaves report</p>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-3">
-                <span className="text-orange-500 font-bold">Thursday:</span>
-                <div>
-                  <p className="text-gray-700 dark:text-gray-300">Joint project planning in Microsoft Teams</p>
-                  <p className="text-sm text-gray-600 dark:text-gray-400 italic">"@mindroom_analyst @client_architect_ai let's design the integration"</p>
-                  <p className="text-sm text-green-600 dark:text-green-400">✓ Both companies' AIs collaborate in real-time, in one thread</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="text-center">
-            <p className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
-              This is impossible with ChatGPT, Claude, or any other AI platform.
-            </p>
-            <p className="text-gray-600 dark:text-gray-300">
-              Only MindRoom's federation makes this possible — because we built on Matrix,<br />
-              the same protocol that lets you email anyone, regardless of their email provider.
-            </p>
-          </div>
-        </div>
+        {/* (Removed federation story; scenarios are shown below) */}
 
         {/* Historical parallel */}
         <div className={`text-center mt-12 ${isVisible ? 'fade-in-up' : 'opacity-0'}`} style={{ animationDelay: '0.6s' }}>

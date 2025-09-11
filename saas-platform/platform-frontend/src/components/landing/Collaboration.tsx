@@ -42,8 +42,8 @@ function ChatBubble({
   return (
     <div className={`flex ${side === 'right' ? 'justify-end' : 'justify-start'}`}>
       {side === 'left' && <Avatar name={name} color={color} />}
-      <div className={`mx-2 max-w-[90%]`}>
-        <div className="flex items-center gap-2 mb-1">
+      <div className={`mx-2 max-w-[90%] ${side === 'right' ? 'items-end text-right' : ''}`}>
+        <div className={`flex items-center gap-2 mb-1 ${side === 'right' ? 'justify-end' : ''}`}>
           <span className="text-xs font-semibold text-gray-700 dark:text-gray-200">{name}</span>
           <span className="text-[10px] text-gray-500">{org}</span>
           {chips.map((c, i) => (
@@ -53,7 +53,7 @@ function ChatBubble({
         <div
           className={`rounded-2xl px-3 py-2 text-sm border ${
             side === 'right'
-              ? 'bg-orange-50 dark:bg-orange-900/20 text-gray-900 dark:text-gray-100 border-orange-200 dark:border-orange-800'
+              ? 'bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-gray-100 border-gray-200 dark:border-gray-600'
               : 'bg-white/90 dark:bg-gray-800/80 text-gray-800 dark:text-gray-200 border-gray-200 dark:border-gray-700'
           }`}
         >
@@ -67,6 +67,7 @@ function ChatBubble({
 
 export function Collaboration() {
   const [isVisible, setIsVisible] = useState(false)
+  const [tab, setTab] = useState<'business' | 'personal'>('business')
   useEffect(() => {
     const obs = new IntersectionObserver(
       ([entry]) => entry.isIntersecting && setIsVisible(true),
@@ -82,181 +83,179 @@ export function Collaboration() {
       <div className="container mx-auto max-w-6xl">
         <div className="text-center mb-12">
           <h2 className="text-3xl md:text-4xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
-            Collaboration In Action
+            Collaboration Scenarios
           </h2>
-          <p className="text-gray-600 dark:text-gray-300">A familiar chat experience and clear federation model</p>
+          <p className="text-gray-600 dark:text-gray-300">Two familiar examples: Business and Personal</p>
+        </div>
+        {/* Tabs */}
+        <div className="flex items-center justify-center gap-3 mb-6">
+          <button
+            onClick={() => setTab('business')}
+            className={`px-4 py-2 rounded-full text-sm font-medium border transition ${
+              tab === 'business'
+                ? 'bg-orange-500 text-white border-orange-600 shadow'
+                : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-orange-300 dark:hover:border-orange-700'
+            }`}
+          >
+            Business
+          </button>
+          <button
+            onClick={() => setTab('personal')}
+            className={`px-4 py-2 rounded-full text-sm font-medium border transition ${
+              tab === 'personal'
+                ? 'bg-orange-500 text-white border-orange-600 shadow'
+                : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-orange-300 dark:hover:border-orange-700'
+            }`}
+          >
+            Personal
+          </button>
         </div>
 
         {/* Chat mock */}
-        <div className={`mb-10 ${isVisible ? 'fade-in-up' : 'opacity-0'}`}>
+        <div className={`mb-8 ${isVisible ? 'fade-in-up' : 'opacity-0'}`}>
           <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-800/80 backdrop-blur shadow-lg overflow-hidden">
             <div className="px-4 py-3 flex items-center justify-between border-b border-gray-200 dark:border-gray-700">
               <div className="flex items-center gap-3">
                 <Users className="w-4 h-4 text-gray-500" />
-                <div>
-                  <div className="text-sm font-semibold text-gray-800 dark:text-gray-200">#q4‑planning</div>
-                  <div className="text-xs text-gray-500">Encrypted room · org‑a.com</div>
-                </div>
+                {tab === 'business' ? (
+                  <div>
+                    <div className="text-sm font-semibold text-gray-800 dark:text-gray-200">#q4‑planning</div>
+                    <div className="text-xs text-gray-500">Encrypted room · org‑a.com</div>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="text-sm font-semibold text-gray-800 dark:text-gray-200">#weekend‑hike</div>
+                    <div className="text-xs text-gray-500">Encrypted room · friends</div>
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-2 text-xs">
-                <Chip label="alice (org‑a)" />
-                <Chip label="@mindroom_analyst" />
-                <Chip label="bob (org‑b)" />
-                <Chip label="@client_architect" />
+                {tab === 'business' ? (
+                  <>
+                    <Chip label="alice (org‑a)" />
+                    <Chip label="@mindroom_analyst" />
+                    <Chip label="bob (org‑b)" />
+                    <Chip label="@client_architect" />
+                  </>
+                ) : (
+                  <>
+                    <Chip label="alice" />
+                    <Chip label="bob" />
+                    <Chip label="carol" />
+                    <Chip label="@alice_calendar" />
+                    <Chip label="@bob_calendar" />
+                    <Chip label="@carol_calendar" />
+                  </>
+                )}
                 <Lock className="w-4 h-4 text-green-600" />
               </div>
             </div>
 
             <div className="p-4 space-y-3">
-              <ChatBubble
-                side="left"
-                name="alice"
-                org="Matrix · org‑a.com"
-                color="bg-indigo-500"
-                text={
-                  <>
-                    <span className="text-gray-800 dark:text-gray-200">@mindroom_analyst pull Q4 conversion vs target and propose actions</span>
-                  </>
-                }
-              />
-
-              <ChatBubble
-                side="right"
-                name="@mindroom_analyst"
-                org="Matrix · agent"
-                color="bg-orange-500"
-                chips={["DB", "Analytics"]}
-                text={
-                  <>
-                    Fetching from DB + analytics… Chart attached. We’re 13% below target on paid; suggest realloc + SEO refresh.
-                  </>
-                }
-              />
-
-              <ChatBubble
-                side="left"
-                name="bob"
-                org="Matrix · org‑b.net"
-                color="bg-emerald-600"
-                text={
-                  <>
-                    <span className="text-gray-800 dark:text-gray-200">@client_architect is this compatible with our data model?</span>
-                  </>
-                }
-              />
-
-              <ChatBubble
-                side="right"
-                name="@client_architect"
-                org="Matrix · agent"
-                color="bg-sky-600"
-                text={
-                  <>Yes, schema v2 OK; can push PR to your repo when you approve.</>
-                }
-              />
-
-              <ChatBubble
-                side="left"
-                name="alice"
-                org="Matrix · org‑a.com"
-                color="bg-indigo-500"
-                text={
-                  <>Approved. @mindroom_analyst sync brief to Slack #marketing (via bridge).</>
-                }
-              />
-
-              <ChatBubble
-                side="right"
-                name="@mindroom_analyst"
-                org="Matrix · agent"
-                color="bg-orange-500"
-                chips={["Slack bridge"]}
-                text={<>Posted in Slack and invited @client_architect (read‑only).</>}
-              />
+              {tab === 'business' ? (
+                <>
+                  <ChatBubble
+                    side="left"
+                    name="alice"
+                    org="Matrix · org‑a.com"
+                    color="bg-indigo-500"
+                    text={<>@mindroom_analyst pull Q4 conversion vs target and propose actions</>}
+                  />
+                  <ChatBubble
+                    side="right"
+                    name="@mindroom_analyst"
+                    org="Matrix · agent"
+                    color="bg-orange-500"
+                    chips={["DB", "Analytics"]}
+                    text={<>Fetching from DB + analytics… Chart attached. We’re 13% below target on paid; suggest realloc + SEO refresh.</>}
+                  />
+                  <ChatBubble
+                    side="left"
+                    name="bob"
+                    org="Matrix · org‑b.net"
+                    color="bg-emerald-600"
+                    text={<>@client_architect is this compatible with our data model?</>}
+                  />
+                  <ChatBubble
+                    side="right"
+                    name="@client_architect"
+                    org="Matrix · agent"
+                    color="bg-sky-600"
+                    text={<>Yes, schema v2 OK; can push PR to your repo when you approve.</>}
+                  />
+                  <ChatBubble
+                    side="left"
+                    name="alice"
+                    org="Matrix · org‑a.com"
+                    color="bg-indigo-500"
+                    text={<>Approved. @mindroom_analyst sync brief to Slack #marketing (via bridge).</>}
+                  />
+                  <ChatBubble
+                    side="right"
+                    name="@mindroom_analyst"
+                    org="Matrix · agent"
+                    color="bg-orange-500"
+                    chips={["Slack bridge"]}
+                    text={<>Posted in Slack and invited @client_architect (read‑only).</>}
+                  />
+                </>
+              ) : (
+                <>
+                  <ChatBubble
+                    side="left"
+                    name="alice"
+                    org="Matrix"
+                    color="bg-indigo-500"
+                    text={<>Can we pick a weekend for the hike?</>}
+                  />
+                  <ChatBubble
+                    side="right"
+                    name="@alice_calendar"
+                    org="Matrix · agent"
+                    color="bg-orange-500"
+                    chips={["Calendar"]}
+                    text={<>Checking weekends for Alice…</>}
+                  />
+                  <ChatBubble
+                    side="right"
+                    name="@bob_calendar"
+                    org="Matrix · agent"
+                    color="bg-sky-600"
+                    chips={["Calendar"]}
+                    text={<>Bob is free Sat 14:00–18:00; busy Sunday morning.</>}
+                  />
+                  <ChatBubble
+                    side="right"
+                    name="@carol_calendar"
+                    org="Matrix · agent"
+                    color="bg-emerald-600"
+                    chips={["Calendar"]}
+                    text={<>Carol is free Sunday 10:00–13:00; Sat is open after 17:00.</>}
+                  />
+                  <ChatBubble
+                    side="left"
+                    name="bob"
+                    org="Matrix"
+                    color="bg-emerald-600"
+                    text={<>Let’s do Sunday 11:00 at the trailhead.</>}
+                  />
+                  <ChatBubble
+                    side="right"
+                    name="@alice_calendar"
+                    org="Matrix · agent"
+                    color="bg-orange-500"
+                    chips={["Invites", "Discord bridge"]}
+                    text={<>Invites sent and summary posted to Discord #friends (via bridge).</>}
+                  />
+                </>
+              )}
             </div>
           </div>
         </div>
-
-        {/* Federation diagrams */}
-        <div className="grid md:grid-cols-2 gap-6">
-          {/* Minimalist */}
-          <div className={`rounded-2xl border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-800/80 p-6 ${isVisible ? 'fade-in-up' : 'opacity-0'}`}>
-            <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-800 dark:text-gray-200">
-              <Share2 className="w-4 h-4" /> Minimalist Federation Diagram
-            </div>
-            <div className="relative">
-              <div className="grid grid-cols-3 items-center">
-                <div className="space-y-2">
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-700">
-                    <div className="text-xs text-gray-500">Org A</div>
-                    <div className="font-semibold text-sm">org‑a.com</div>
-                    <div className="mt-2 flex flex-wrap gap-1 text-[10px] text-gray-500">
-                      <Chip label="alice" />
-                      <Chip label="@mindroom_analyst" />
-                    </div>
-                  </div>
-                </div>
-                <div className="flex flex-col items-center">
-                  <div className="px-4 py-2 rounded-full bg-gray-100 dark:bg-gray-700 text-xs text-gray-700 dark:text-gray-200 border border-gray-200 dark:border-gray-600 flex items-center gap-2">
-                    <Lock className="w-4 h-4 text-green-600" /> Encrypted Room
-                  </div>
-                  <div className="h-10 w-0.5 bg-gradient-to-b from-gray-300 to-gray-400 dark:from-gray-600 dark:to-gray-500 my-2" />
-                  <div className="flex flex-wrap gap-2 justify-center text-[10px]">
-                    <Chip label="Slack (bridge)" />
-                    <Chip label="Discord (bridge)" />
-                    <Chip label="Telegram (bridge)" />
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <div className="p-3 rounded-xl border border-gray-200 dark:border-gray-700">
-                    <div className="text-xs text-gray-500">Org B</div>
-                    <div className="font-semibold text-sm">org‑b.net</div>
-                    <div className="mt-2 flex flex-wrap gap-1 text-[10px] text-gray-500">
-                      <Chip label="bob" />
-                      <Chip label="@client_architect" />
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <ul className="mt-4 text-sm text-gray-700 dark:text-gray-300 space-y-1 list-disc pl-5">
-              <li>Cross‑org, single thread via Matrix federation</li>
-              <li>Consistent identity (humans + agents as real accounts)</li>
-              <li>Bridges where people work (Slack/Discord/Telegram)</li>
-            </ul>
-          </div>
-
-          {/* Playful */}
-          <div className={`rounded-2xl border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-800/80 p-6 ${isVisible ? 'fade-in-up' : 'opacity-0'}`}>
-            <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-800 dark:text-gray-200">
-              <Share2 className="w-4 h-4" /> Playful Federation Diagram
-            </div>
-            <div className="relative flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Avatar name="alice" color="bg-indigo-500" />
-                <Avatar name="@mindroom_analyst" color="bg-orange-500" />
-                <span className="text-xs text-gray-500">org‑a.com</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="px-3 py-1 rounded-full bg-gray-100 dark:bg-gray-700 text-xs text-gray-700 dark:text-gray-200 border border-gray-200 dark:border-gray-600 flex items-center gap-2">
-                  <Lock className="w-4 h-4 text-green-600" /> Room
-                </div>
-                <div className="flex flex-wrap gap-1 ml-2">
-                  <Chip label="Slack" />
-                  <Chip label="Discord" />
-                  <Chip label="Telegram" />
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Avatar name="bob" color="bg-emerald-600" />
-                <Avatar name="@client_architect" color="bg-sky-600" />
-                <span className="text-xs text-gray-500">org‑b.net</span>
-              </div>
-            </div>
-            <p className="mt-4 text-sm text-gray-700 dark:text-gray-300">
-              Two organizations share one encrypted conversation. Agents and humans collaborate as peers; outcomes are bridged to the tools your teams already use.
-            </p>
-          </div>
+        {/* Simple federation/bridge callout */}
+        <div className="text-center mt-2 text-sm text-gray-600 dark:text-gray-300 max-w-3xl mx-auto">
+          <p>Federation: independent Matrix servers share one encrypted room; participants are real, verifiable accounts.</p>
+          <p className="mt-1">Bridges: connect Matrix rooms with Slack/Discord/Telegram. The bridged side is not Matrix end‑to‑end encrypted.</p>
         </div>
       </div>
     </section>
