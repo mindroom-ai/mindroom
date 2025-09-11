@@ -24,7 +24,7 @@ export function DarkModeToggle() {
     <div className="relative" ref={dropdownRef}>
       <button
         type="button"
-        className="-m-2.5 p-2.5 text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
+        className="p-2 text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400 transition-colors"
         onClick={() => setShowDropdown(!showDropdown)}
         aria-label="Toggle dark mode"
       >

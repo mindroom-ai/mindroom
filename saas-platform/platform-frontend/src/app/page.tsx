@@ -59,7 +59,7 @@ export default function LandingPage() {
               <DarkModeToggle />
               <Link
                 href="/auth/login"
-                className="hidden sm:inline-block px-5 py-2.5 text-gray-600 dark:text-gray-300 hover:text-orange-500 dark:hover:text-orange-400 font-medium transition-colors whitespace-nowrap"
+                className="hidden sm:flex items-center px-5 py-2 text-gray-600 dark:text-gray-300 hover:text-orange-500 dark:hover:text-orange-400 font-medium transition-colors whitespace-nowrap"
               >
                 Sign In
               </Link>
