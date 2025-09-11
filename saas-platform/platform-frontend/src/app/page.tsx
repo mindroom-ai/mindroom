@@ -9,6 +9,7 @@ import { Testimonials } from '@/components/landing/Testimonials'
 import { Stats } from '@/components/landing/Stats'
 import { CTA } from '@/components/landing/CTA'
 import { WhyItMatters } from '@/components/landing/WhyItMatters'
+import { Collaboration } from '@/components/landing/Collaboration'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
 import { useState, useEffect } from 'react'
@@ -88,6 +89,9 @@ export default function LandingPage() {
 
       {/* Why It Matters */}
       <WhyItMatters />
+
+      {/* Collaboration In Action */}
+      <Collaboration />
 
       {/* Testimonials */}
       <Testimonials />

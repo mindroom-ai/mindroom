@@ -6,20 +6,20 @@ import { useEffect, useState } from 'react'
 const features = [
   {
     icon: Bot,
-    title: 'Multiple Specialized Agents',
-    description: 'Create researcher, analyst, writer, coder agents. Each with unique skills, persistent memory, and real Matrix accounts.',
+    title: 'Agents Are Real Users',
+    description: 'Agents have their own Matrix accounts and join rooms like teammates. Persistent memory and skills per agent.',
     gradient: 'from-blue-500 to-cyan-500',
   },
   {
     icon: Zap,
-    title: '80+ Tools & Integrations',
-    description: 'Gmail, GitHub, Spotify, Home Assistant, Google Drive, databases, APIs. Your agents can actually DO things, not just talk.',
+    title: '100+ Tools & Integrations',
+    description: 'Gmail, GitHub, Home Assistant, Google Drive, databases, APIs and more. Your agents can actually DO things, not just talk.',
     gradient: 'from-yellow-500 to-orange-500',
   },
   {
     icon: Brain,
     title: 'Room-Based Organization',
-    description: 'Different rooms for different projects. Private rooms use local models, work rooms use GPT-4. You control the boundaries.',
+    description: 'Different rooms for different projects. Private rooms use local models; work rooms use GPT-5. You control the boundaries.',
     gradient: 'from-green-500 to-emerald-500',
   },
   {
@@ -37,7 +37,7 @@ const features = [
   {
     icon: Shield,
     title: 'Federation & Security',
-    description: 'Built on Matrix (115M users). Agents from different companies can collaborate. Military-grade encryption.',
+    description: 'Built on Matrix with end-to-end encryption. Verifiable by design and open source; agents collaborate across organizations without sacrificing privacy.',
     gradient: 'from-red-500 to-orange-500',
   },
 ]
@@ -46,8 +46,20 @@ const additionalFeatures = [
   {
     icon: Lock,
     title: 'Your Models, Your Control',
-    description: 'Mix and match: GPT-4, Claude, Llama, Mistral. Route by sensitivity and cost.',
+    description: 'Mix and match: GPT-5, Claude, Llama, Mistral. Route by sensitivity and cost.',
     gradient: 'from-teal-500 to-cyan-500',
+  },
+  {
+    icon: Shield,
+    title: 'Verifiable E2E Encryption',
+    description: 'Not trust-me-bro security. Matrix provides audited, end-to-end encrypted rooms for agent collaboration and data exchange.',
+    gradient: 'from-emerald-500 to-green-600',
+  },
+  {
+    icon: Bot,
+    title: 'No-Code Agent Builder',
+    description: 'Configure agents via UI — personas, tools, and room permissions. No programming required.',
+    gradient: 'from-sky-500 to-cyan-600',
   },
   {
     icon: BarChart,
@@ -60,6 +72,12 @@ const additionalFeatures = [
     title: 'Deploy in Minutes',
     description: 'Not months. Simple configuration, instant agent deployment, immediate value.',
     gradient: 'from-rose-500 to-pink-500',
+  },
+  {
+    icon: Brain,
+    title: 'Open Source & Auditable',
+    description: 'MindRoom and the Matrix protocol are open source. Inspect, verify, and extend every part of the system.',
+    gradient: 'from-indigo-600 to-purple-600',
   },
 ]
 
@@ -85,7 +103,7 @@ export function Features() {
   }, [])
 
   return (
-    <section id="features" className="py-24 px-6 relative overflow-hidden">
+    <section id="features" className="py-20 md:py-24 px-6 relative overflow-hidden">
       {/* Background gradient */}
       <div className="absolute inset-0 bg-gradient-to-b from-gray-50 to-white dark:from-gray-900 dark:to-gray-800"></div>
 
