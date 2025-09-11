@@ -32,8 +32,8 @@ export default function BillingPage() {
   const getTierDisplay = (tier: string) => {
     const tiers: { [key: string]: { name: string; price: string; color: string } } = {
       free: { name: 'Free', price: '$0/month', color: 'gray' },
-      starter: { name: 'Starter', price: '$49/month', color: 'blue' },
-      professional: { name: 'Professional', price: '$199/month', color: 'purple' },
+      starter: { name: 'Starter', price: '$10/month', color: 'blue' },
+      professional: { name: 'Professional', price: '$8/user/month', color: 'purple' },
       enterprise: { name: 'Enterprise', price: 'Custom', color: 'yellow' },
     }
     return tiers[tier] || tiers.free
@@ -50,9 +50,9 @@ export default function BillingPage() {
       'Basic integrations',
     ],
     starter: [
-      '5 AI Agents',
-      '5,000 messages per day',
-      '10GB storage',
+      '3 AI Agents',
+      '1,000 messages per day',
+      '5GB storage',
       'Priority support',
       'All integrations',
       'Custom workflows',
@@ -60,9 +60,9 @@ export default function BillingPage() {
     ],
     professional: [
       'Unlimited AI Agents',
-      '50,000 messages per day',
-      '100GB storage',
-      '24/7 phone support',
+      'Unlimited messages',
+      '10GB storage per user',
+      'Priority support',
       'Advanced analytics',
       'Custom integrations',
       'SLA guarantee',

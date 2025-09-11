@@ -20,13 +20,13 @@ const plans: Plan[] = [
   {
     id: 'starter',
     name: 'Starter',
-    price: '$49',
+    price: '$10',
     priceId: process.env.STRIPE_PRICE_STARTER || '',
-    description: 'Perfect for small teams',
+    description: 'Perfect for individuals',
     features: [
-      '5 AI Agents',
-      '5,000 messages/day',
-      '10GB storage',
+      '3 AI Agents',
+      '1,000 messages/day',
+      '5GB storage',
       'Priority support',
       'All integrations',
       'Custom workflows',
@@ -36,14 +36,14 @@ const plans: Plan[] = [
   {
     id: 'professional',
     name: 'Professional',
-    price: '$199',
+    price: '$8',
     priceId: process.env.STRIPE_PRICE_PROFESSIONAL || '',
-    description: 'For growing businesses',
+    description: 'For teams and businesses',
     features: [
       'Unlimited AI Agents',
-      '50,000 messages/day',
-      '100GB storage',
-      '24/7 phone support',
+      'Unlimited messages',
+      '10GB storage per user',
+      'Priority support',
       'Advanced analytics',
       'Custom integrations',
       'SLA guarantee',
@@ -175,7 +175,7 @@ export default function UpgradePage() {
 
               <div className="mb-6">
                 <span className="text-3xl font-bold dark:text-white">{plan.price}</span>
-                {plan.price !== 'Custom' && <span className="text-gray-600 dark:text-gray-400">/month</span>}
+                {plan.price !== 'Custom' && <span className="text-gray-600 dark:text-gray-400">{plan.id === 'professional' ? '/user/month' : '/month'}</span>}
               </div>
 
               <ul className="space-y-3">
