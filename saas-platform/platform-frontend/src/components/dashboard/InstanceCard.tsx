@@ -3,6 +3,7 @@ import Link from 'next/link'
 import { useState } from 'react'
 import type { Instance } from '@/hooks/useInstance'
 import { provisionInstance } from '@/lib/api'
+import { Card, CardHeader } from '@/components/ui/Card'
 
 export function InstanceCard({ instance }: { instance: Instance | null }) {
   const [isProvisioning, setIsProvisioning] = useState(false)
@@ -56,8 +57,8 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
   // No instance yet - show provision card
   if (!instance) {
     return (
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
-        <h2 className="text-xl font-bold mb-4 dark:text-white">MindRoom Instance</h2>
+      <Card>
+        <CardHeader>MindRoom Instance</CardHeader>
         <div className="text-center py-8">
           <Rocket className="w-16 h-16 text-gray-400 dark:text-gray-500 mx-auto mb-4" />
           <p className="text-gray-600 dark:text-gray-400 mb-6">
@@ -66,7 +67,7 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
           <button
             onClick={handleProvision}
             disabled={isProvisioning}
-            className="px-6 py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+            className="px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all disabled:bg-gray-400 disabled:cursor-not-allowed"
           >
             {isProvisioning ? (
               <>
@@ -78,7 +79,7 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
             )}
           </button>
         </div>
-      </div>
+      </Card>
     )
   }
 
@@ -135,9 +136,9 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
   const matrixHost = getHostname(instance.matrix_server_url)
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+    <Card>
       <div className="flex justify-between items-start mb-4">
-        <h2 className="text-xl font-bold dark:text-white">MindRoom Instance</h2>
+        <CardHeader>MindRoom Instance</CardHeader>
         <div className={`flex items-center gap-2 px-3 py-1 rounded-full ${getStatusColor()}`}>
           {getStatusIcon()}
           <span className="text-sm font-medium">{getStatusText()}</span>
@@ -262,13 +263,13 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
             href={instance.frontend_url}
             target="_blank"
             rel="noopener noreferrer"
-            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors"
+            className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
           >
             <ExternalLink className="w-4 h-4" />
             Open MindRoom
           </Link>
         </div>
       )}
-    </div>
+    </Card>
   )
 }

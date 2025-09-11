@@ -6,6 +6,7 @@ import { useSubscription } from '@/hooks/useSubscription'
 import { InstanceCard } from '@/components/dashboard/InstanceCard'
 import { UsageChart } from '@/components/dashboard/UsageChart'
 import { QuickActions } from '@/components/dashboard/QuickActions'
+import { Card, CardHeader } from '@/components/ui/Card'
 import { Loader2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
@@ -83,26 +84,26 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-w-7xl mx-auto">
       {/* Welcome Header */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-        <h1 className="text-2xl font-bold dark:text-white">Welcome back!</h1>
-        <p className="text-gray-600 dark:text-gray-400 mt-1">
-          Your MindRoom is {instance?.status === 'running' ? 'up and running' : instance?.status === 'provisioning' ? 'starting up' : 'currently offline'}
+      <Card>
+        <h1 className="text-3xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">Welcome back!</h1>
+        <p className="text-gray-600 dark:text-gray-400 mt-2 text-lg">
+          Your MindRoom is {instance?.status === 'running' ? '✅ up and running' : instance?.status === 'provisioning' ? '🔄 starting up' : '⏸️ currently offline'}
         </p>
-      </div>
+      </Card>
 
       {/* Instance Status and Quick Actions */}
-      <div className="grid md:grid-cols-2 gap-6">
+      <div className="grid lg:grid-cols-2 gap-6">
         <InstanceCard instance={instance} />
         <QuickActions instance={instance} subscription={subscription} />
       </div>
 
       {/* Usage Overview */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-        <h2 className="text-xl font-bold mb-4 dark:text-white">Usage This Month</h2>
+      <Card>
+        <CardHeader className="mb-6">Usage This Month</CardHeader>
         <UsageChart subscription={subscription} />
-      </div>
+      </Card>
     </div>
   )
 }

@@ -2,7 +2,7 @@
 
 import { useUsage } from '@/hooks/useUsage'
 import { useSubscription } from '@/hooks/useSubscription'
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card'
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { Loader2, TrendingUp, MessageSquare, Bot, HardDrive } from 'lucide-react'
 
