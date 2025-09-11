@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, Trash2, ExternalLink, Server, Database, Globe } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
+import { Card, CardHeader, CardSection } from '@/components/ui/Card'
 
 type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'deprovisioning' | 'maintenance' | 'error'
 
@@ -145,41 +146,41 @@ export default function InstancePage() {
 
   if (!instance) {
     return (
-      <div className="max-w-4xl mx-auto p-6">
-        <div className="bg-white dark:bg-gray-800 rounded-lg p-8 text-center">
-          <Server className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-          <h2 className="text-2xl font-bold mb-2">No Instance Found</h2>
-          <p className="text-gray-600 mb-6">
+      <div className="max-w-4xl mx-auto">
+        <Card padding="xl" className="text-center">
+          <Server className="w-20 h-20 text-gray-400 dark:text-gray-500 mx-auto mb-6" />
+          <CardHeader className="mb-3">No Instance Found</CardHeader>
+          <p className="text-gray-600 dark:text-gray-400 mb-8 text-lg">
             You don't have a MindRoom instance yet. Upgrade to a paid plan to get your own instance.
           </p>
           <button
             onClick={() => router.push('/dashboard/billing/upgrade')}
-            className="px-6 py-3 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors"
+            className="px-8 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
           >
             Upgrade Plan
           </button>
-        </div>
+        </Card>
       </div>
     )
   }
 
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-6">
+    <div className="max-w-6xl mx-auto space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Your MindRoom Instance</h1>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <h1 className="text-3xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">Your MindRoom Instance</h1>
         <button
           onClick={handleRefresh}
           disabled={refreshing}
-          className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
+          className="flex items-center justify-center gap-2 px-5 py-2.5 border border-gray-300 dark:border-gray-600 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 transition-all font-medium"
         >
           <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-          Refresh
+          <span>Refresh</span>
         </button>
       </div>
 
       {/* Status Card */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
+      <Card>
         <div className="flex items-start justify-between mb-6">
           <div>
             <h2 className="text-xl font-bold mb-2">Instance Status</h2>
@@ -268,7 +269,7 @@ export default function InstancePage() {
         </div>
 
         {/* Instance Details */}
-        <div className="border-t pt-6">
+        <CardSection>
           <h3 className="font-semibold mb-4">Instance Details</h3>
           <div className="grid md:grid-cols-2 gap-4">
             <div>
@@ -284,27 +285,27 @@ export default function InstancePage() {
               <p className="text-sm">{new Date(instance.updated_at).toLocaleString()}</p>
             </div>
           </div>
-        </div>
-      </div>
+        </CardSection>
+      </Card>
 
       {/* Access URLs (only show when running) */}
       {instance.status === 'running' && instance.frontend_url && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-          <h2 className="text-xl font-bold mb-4 dark:text-white">Access Your MindRoom</h2>
+        <Card>
+          <CardHeader className="mb-6">Access Your MindRoom</CardHeader>
           <div className="space-y-4">
-            <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-5 bg-gradient-to-r from-orange-50 to-yellow-50 dark:from-orange-900/10 dark:to-yellow-900/10 rounded-2xl border border-orange-200/50 dark:border-orange-800/30">
               <div className="flex items-center gap-3">
-                <Globe className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+                <Globe className="w-5 h-5 text-orange-600 dark:text-orange-400" />
                 <div>
                   <p className="font-medium dark:text-white">MindRoom App</p>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">{instance.frontend_url}</p>
+                  <p className="text-sm text-gray-600 dark:text-gray-400 break-all">{instance.frontend_url}</p>
                 </div>
               </div>
               <a
                 href={instance.frontend_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-2 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors"
+                className="flex items-center justify-center gap-2 px-6 py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all whitespace-nowrap"
               >
                 Open MindRoom
                 <ExternalLink className="w-4 h-4" />
@@ -312,7 +313,7 @@ export default function InstancePage() {
             </div>
 
             {instance.backend_url && (
-              <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-5 bg-gray-50 dark:bg-gray-700 rounded-2xl">
                 <div className="flex items-center gap-3">
                   <Server className="w-5 h-5 text-gray-600 dark:text-gray-400" />
                   <div>
@@ -333,7 +334,7 @@ export default function InstancePage() {
             )}
 
             {instance.matrix_server_url && (
-              <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-5 bg-gray-50 dark:bg-gray-700 rounded-2xl">
                 <div className="flex items-center gap-3">
                   <Database className="w-5 h-5 text-gray-600 dark:text-gray-400" />
                   <div>
@@ -344,20 +345,22 @@ export default function InstancePage() {
               </div>
             )}
           </div>
-        </div>
+        </Card>
       )}
 
       {/* Configuration (collapsible) */}
-      <details className="bg-white dark:bg-gray-800 rounded-lg shadow-sm">
-        <summary className="p-6 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
-          <span className="font-bold text-xl dark:text-white">Instance Configuration</span>
+      <Card className="overflow-hidden p-0">
+        <details>
+        <summary className="p-8 cursor-pointer hover:bg-gray-50/50 dark:hover:bg-gray-700/50 transition-colors">
+          <CardHeader>Instance Configuration</CardHeader>
         </summary>
-        <div className="px-6 pb-6">
-          <pre className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg overflow-x-auto text-sm dark:text-gray-300">
+        <div className="px-8 pb-8">
+          <pre className="bg-gray-50 dark:bg-gray-900/50 p-6 rounded-2xl overflow-x-auto text-sm dark:text-gray-300 font-mono border border-gray-200 dark:border-gray-700">
             {JSON.stringify(instance.config, null, 2)}
           </pre>
         </div>
       </details>
+      </Card>
     </div>
   )
 }

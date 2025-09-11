@@ -135,9 +135,9 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
   const matrixHost = getHostname(instance.matrix_server_url)
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+    <Card>
       <div className="flex justify-between items-start mb-4">
-        <h2 className="text-xl font-bold dark:text-white">MindRoom Instance</h2>
+        <CardHeader>MindRoom Instance</CardHeader>
         <div className={`flex items-center gap-2 px-3 py-1 rounded-full ${getStatusColor()}`}>
           {getStatusIcon()}
           <span className="text-sm font-medium">{getStatusText()}</span>
@@ -262,13 +262,13 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
             href={instance.frontend_url}
             target="_blank"
             rel="noopener noreferrer"
-            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors"
+            className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
           >
             <ExternalLink className="w-4 h-4" />
             Open MindRoom
           </Link>
         </div>
       )}
-    </div>
+    </Card>
   )
 }

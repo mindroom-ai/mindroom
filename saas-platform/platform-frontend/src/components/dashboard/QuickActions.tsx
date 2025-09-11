@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import type { Instance } from '@/hooks/useInstance'
 import type { Subscription } from '@/hooks/useSubscription'
+import { Card, CardHeader } from '@/components/ui/Card'
 
 interface QuickActionsProps {
   instance: Instance | null
@@ -48,8 +49,8 @@ export function QuickActions({ instance, subscription }: QuickActionsProps) {
   ]
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
-      <h2 className="text-xl font-bold mb-4 dark:text-white">Quick Actions</h2>
+    <Card>
+      <CardHeader className="mb-4">Quick Actions</CardHeader>
 
       <div className="space-y-3">
         {actions.map((action) => {
@@ -129,6 +130,6 @@ export function QuickActions({ instance, subscription }: QuickActionsProps) {
           </div>
         </div>
       )}
-    </div>
+    </Card>
   )
 }

@@ -13,10 +13,10 @@ export function Header({ sidebarOpen, setSidebarOpen }: HeaderProps) {
   const { user } = useAuth()
 
   return (
-    <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 shadow-sm sm:gap-x-6 sm:px-6 lg:px-8">
+    <header className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-gray-200/50 dark:border-gray-700/50 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md px-4 shadow-sm sm:gap-x-6 sm:px-6 lg:px-8">
       <button
         type="button"
-        className="-m-2.5 p-2.5 text-gray-700 lg:hidden"
+        className="p-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors lg:hidden"
         onClick={() => setSidebarOpen(!sidebarOpen)}
       >
         <span className="sr-only">Open sidebar</span>
