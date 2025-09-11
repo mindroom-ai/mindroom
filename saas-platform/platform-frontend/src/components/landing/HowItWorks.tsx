@@ -114,42 +114,6 @@ export function HowItWorks() {
             )
           })}
         </div>
-
-        {/* Visual example */}
-        <div className="mt-10 rounded-2xl p-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur border border-gray-200 dark:border-gray-700 shadow-xl ring-1 ring-gray-200/60 dark:ring-gray-700/60 max-w-4xl mx-auto">
-          {/* Top accent bar */}
-          <div className="h-1 w-16 md:w-20 mx-auto mb-6 rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-orange-600"></div>
-          <h3 className="text-2xl font-bold text-center mb-4 text-gray-900 dark:text-white">
-            Agents Collaborating
-          </h3>
-
-          <div className="bg-white dark:bg-gray-800 rounded-xl p-6 font-mono text-sm">
-            <div className="space-y-4">
-              <div>
-                <span className="text-gray-500">You:</span>
-                <span className="ml-2 text-gray-700 dark:text-gray-300">@researcher @analyst analyze our competitors and create a report</span>
-              </div>
-
-              <div className="pl-4 border-l-2 border-orange-300 dark:border-orange-700">
-                <div className="text-orange-600 dark:text-orange-400">@researcher:</div>
-                <div className="text-gray-600 dark:text-gray-400">I\'ll gather data on your top 5 competitors...</div>
-                <div className="text-xs text-gray-500 mt-1">[Accessing: Web search, Industry databases, News APIs]</div>
-              </div>
-
-              <div className="pl-4 border-l-2 border-blue-300 dark:border-blue-700">
-                <div className="text-blue-600 dark:text-blue-400">@analyst:</div>
-                <div className="text-gray-600 dark:text-gray-400">I\'ll analyze market positioning and create visualizations...</div>
-                <div className="text-xs text-gray-500 mt-1">[Accessing: Data analysis tools, Chart generators, Google Sheets]</div>
-              </div>
-
-              <div className="pl-4 border-l-2 border-green-300 dark:border-green-700">
-                <div className="text-green-600 dark:text-green-400">Together:</div>
-                <div className="text-gray-600 dark:text-gray-400">Report complete! Sent to your email and saved to Google Drive.</div>
-                <div className="text-xs text-gray-500 mt-1">[Tools used: 12 | Data processed: 847 sources | Time: 3 minutes]</div>
-              </div>
-            </div>
-          </div>
-        </div>
       </div>
     </section>
   )

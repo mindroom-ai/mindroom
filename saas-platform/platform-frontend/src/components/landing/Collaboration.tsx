@@ -88,7 +88,7 @@ function ChatBubble({
 
 export function Collaboration() {
   const [isVisible, setIsVisible] = useState(false)
-  const [tab, setTab] = useState<'business' | 'personal'>('business')
+  const [tab, setTab] = useState<'agent' | 'business' | 'personal'>('agent')
   useEffect(() => {
     const obs = new IntersectionObserver(
       ([entry]) => entry.isIntersecting && setIsVisible(true),
@@ -106,10 +106,20 @@ export function Collaboration() {
           <h2 className="text-3xl md:text-4xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 dark:from-white dark:to-gray-300 bg-clip-text text-transparent">
             Collaboration Scenarios
           </h2>
-          <p className="text-gray-600 dark:text-gray-300">Two familiar examples: Business and Personal</p>
+          <p className="text-gray-600 dark:text-gray-300">See how agents work together and collaborate across organizations</p>
         </div>
         {/* Tabs */}
         <div className="flex items-center justify-center gap-2 md:gap-3 mb-4 md:mb-6">
+          <button
+            onClick={() => setTab('agent')}
+            className={`px-3 py-1.5 md:px-4 md:py-2 rounded-full text-sm font-medium border transition ${
+              tab === 'agent'
+                ? 'bg-orange-500 text-white border-orange-600 shadow'
+                : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-orange-300 dark:hover:border-orange-700'
+            }`}
+          >
+            Agent Team
+          </button>
           <button
             onClick={() => setTab('business')}
             className={`px-3 py-1.5 md:px-4 md:py-2 rounded-full text-sm font-medium border transition ${
@@ -138,7 +148,12 @@ export function Collaboration() {
             <div className="px-3 md:px-4 py-2.5 md:py-3 flex items-center justify-between border-b border-gray-200 dark:border-gray-700">
               <div className="flex items-center gap-2 md:gap-3">
                 <Users className="w-4 h-4 text-gray-500" />
-                {tab === 'business' ? (
+                {tab === 'agent' ? (
+                  <div>
+                    <div className="text-sm font-semibold text-gray-800 dark:text-gray-200">#competitor‑analysis</div>
+                    <div className="text-[11px] md:text-xs text-gray-500">Agent workspace · tools enabled</div>
+                  </div>
+                ) : tab === 'business' ? (
                   <div>
                     <div className="text-sm font-semibold text-gray-800 dark:text-gray-200">#q4‑planning</div>
                     <div className="text-[11px] md:text-xs text-gray-500">
@@ -155,11 +170,17 @@ export function Collaboration() {
               <div className="flex items-center gap-2">
                 {/* Mobile: show compact participant summary */}
                 <span className="text-xs text-gray-600 dark:text-gray-300 md:hidden">
-                  {tab === 'business' ? '4 participants' : '6 participants'}
+                  {tab === 'agent' ? '3 participants' : tab === 'business' ? '4 participants' : '6 participants'}
                 </span>
                 {/* Desktop: show participant chips */}
                 <div className="hidden md:flex items-center gap-2 text-xs">
-                  {tab === 'business' ? (
+                  {tab === 'agent' ? (
+                    <>
+                      <Chip label="you" />
+                      <Chip label="@researcher" />
+                      <Chip label="@analyst" />
+                    </>
+                  ) : tab === 'business' ? (
                     <>
                       <Chip label="alice (org‑a)" />
                       <Chip label="@mindroom_analyst" />
@@ -182,7 +203,48 @@ export function Collaboration() {
             </div>
 
             <div className="p-3 md:p-4 space-y-2 md:space-y-3">
-              {tab === 'business' ? (
+              {tab === 'agent' ? (
+                <>
+                  <div className="space-y-4">
+                    <div>
+                      <span className="text-gray-500 text-sm">You:</span>
+                      <div className="ml-2 mt-1 text-gray-700 dark:text-gray-300 text-sm">
+                        @researcher @analyst analyze our competitors and create a report
+                      </div>
+                    </div>
+
+                    <div className="pl-4 border-l-4 border-orange-400/60">
+                      <div className="text-orange-600 dark:text-orange-400 font-semibold text-sm">@researcher:</div>
+                      <div className="text-gray-600 dark:text-gray-400 text-sm mt-1">
+                        I'll gather data on your top 5 competitors...
+                      </div>
+                      <div className="text-xs text-gray-500 mt-2 bg-gray-100 dark:bg-gray-700/50 rounded px-2 py-1 inline-block">
+                        [Accessing: Web search, Industry databases, News APIs]
+                      </div>
+                    </div>
+
+                    <div className="pl-4 border-l-4 border-blue-400/60">
+                      <div className="text-blue-600 dark:text-blue-400 font-semibold text-sm">@analyst:</div>
+                      <div className="text-gray-600 dark:text-gray-400 text-sm mt-1">
+                        I'll analyze market positioning and create visualizations...
+                      </div>
+                      <div className="text-xs text-gray-500 mt-2 bg-gray-100 dark:bg-gray-700/50 rounded px-2 py-1 inline-block">
+                        [Accessing: Data analysis tools, Chart generators, Google Sheets]
+                      </div>
+                    </div>
+
+                    <div className="pl-4 border-l-4 border-green-400/60">
+                      <div className="text-green-600 dark:text-green-400 font-semibold text-sm">Together:</div>
+                      <div className="text-gray-600 dark:text-gray-400 text-sm mt-1">
+                        Report complete! Sent to your email and saved to Google Drive.
+                      </div>
+                      <div className="text-xs text-gray-500 mt-2 bg-gray-100 dark:bg-gray-700/50 rounded px-2 py-1 inline-block">
+                        [Tools used: 12 | Data processed: 847 sources | Time: 3 minutes]
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : tab === 'business' ? (
                 <>
                   <ChatBubble
                     side="left"
