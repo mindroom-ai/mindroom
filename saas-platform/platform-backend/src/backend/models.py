@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -152,3 +152,178 @@ class UpdateAccountStatusResponse(BaseModel):
     status: str
     account_id: str
     new_status: str
+
+
+# Account Models
+class AccountOut(BaseModel):
+    """Account information output model."""
+
+    id: str
+    email: str
+    full_name: str | None = None
+    company_name: str | None = None
+    is_admin: bool = False
+    status: str = "active"
+    stripe_customer_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class AccountSetupResponse(BaseModel):
+    """Account setup response model."""
+
+    message: str
+    account_id: str
+
+
+# Subscription Models
+class SubscriptionCancelResponse(BaseModel):
+    """Subscription cancellation response model."""
+
+    success: bool
+    message: str
+    cancelled_at: str | None = None
+
+
+class SubscriptionReactivateResponse(BaseModel):
+    """Subscription reactivation response model."""
+
+    success: bool
+    message: str
+    subscription_id: str | None = None
+
+
+# Pricing Models
+class PricingPlanOut(BaseModel):
+    """Individual pricing plan model."""
+
+    model_config = {"populate_by_name": True}
+
+    name: str
+    price: int
+    period: str
+    features: list[str]
+    is_popular: bool = Field(default=False, alias="isPopular")
+    stripe_price_id_monthly: str | None = None
+    stripe_price_id_yearly: str | None = None
+
+
+class PricingConfigResponse(BaseModel):
+    """Pricing configuration response model."""
+
+    plans: dict[str, PricingPlanOut]
+
+
+class StripePriceResponse(BaseModel):
+    """Stripe price ID response model."""
+
+    price_id: str
+    plan: str
+    billing_cycle: str
+
+
+# Admin Models
+class AdminStatsDetailedOut(BaseModel):
+    """Detailed admin statistics output model."""
+
+    accounts_count: int
+    subscriptions_count: int
+    instances_count: int
+    recent_activity: list[dict[str, Any]]
+
+
+class AdminAccountDetailOut(BaseModel):
+    """Detailed account information for admin view."""
+
+    id: str
+    email: str
+    full_name: str | None = None
+    company_name: str | None = None
+    is_admin: bool = False
+    status: str = "active"
+    stripe_customer_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    subscription: SubscriptionOut | None = None
+    instances: list[InstanceOut] = []
+
+
+class AdminProvisionResponse(BaseModel):
+    """Admin provision response model."""
+
+    success: bool
+    message: str
+    instance_id: int
+
+
+class AdminSyncResponse(BaseModel):
+    """Admin sync response model."""
+
+    success: bool
+    message: str
+    synced: int
+    errors: int
+
+
+class AdminLogoutResponse(BaseModel):
+    """Admin logout response model."""
+
+    success: bool
+
+
+# React Admin Models
+class ReactAdminListResponse(BaseModel):
+    """React Admin list response model."""
+
+    data: list[dict[str, Any]]
+    total: int
+
+
+class ReactAdminItemResponse(BaseModel):
+    """React Admin single item response model."""
+
+    data: dict[str, Any] | None
+
+
+class ReactAdminDeleteResponse(BaseModel):
+    """React Admin delete response model."""
+
+    data: dict[str, Any]
+
+
+# Dashboard Metrics Models
+class DashboardMetricsOut(BaseModel):
+    """Dashboard metrics model."""
+
+    model_config = {"populate_by_name": True}
+
+    total_accounts: int = Field(alias="totalAccounts")
+    active_subscriptions: int = Field(alias="activeSubscriptions")
+    running_instances: int = Field(alias="runningInstances")
+    mrr: int
+    daily_messages: list[dict[str, Any]] = Field(alias="dailyMessages")
+    instance_statuses: list[dict[str, Any]] = Field(alias="instanceStatuses")
+    recent_activity: list[dict[str, Any]] = Field(alias="recentActivity")
+
+
+# Webhook Models
+class WebhookResponse(BaseModel):
+    """Webhook processing response model."""
+
+    received: bool
+
+
+# Checkout Models
+class CheckoutSessionRequest(BaseModel):
+    """Checkout session request model."""
+
+    price_id: str
+    billing_cycle: Literal["monthly", "yearly"]
+    user_count: int = 1
+
+
+class CheckoutSessionResponse(BaseModel):
+    """Checkout session response model."""
+
+    url: str
+    session_id: str

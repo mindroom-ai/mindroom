@@ -83,13 +83,13 @@ class TestPricingConfig:
 
         # Starter plan IDs
         starter = model.plans["starter"]
-        assert starter.stripe_price_id_monthly == "price_1S6EmY3GVsrZHuzXTpwM8Gqx"
-        assert starter.stripe_price_id_yearly == "price_1S6EmY3GVsrZHuzXCHBA7s8b"
+        assert starter.stripe_price_id_monthly == "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
+        assert starter.stripe_price_id_yearly == "price_1S6FvF3GVsrZHuzXDjv76gwE"
 
         # Professional plan IDs
         professional = model.plans["professional"]
-        assert professional.stripe_price_id_monthly == "price_1S6EmZ3GVsrZHuzXpdUKcgCU"
-        assert professional.stripe_price_id_yearly == "price_1S6EmZ3GVsrZHuzXr1m0Bwuh"
+        assert professional.stripe_price_id_monthly == "price_1S6FvG3GVsrZHuzXBwljASJB"
+        assert professional.stripe_price_id_yearly == "price_1S6FvG3GVsrZHuzXQV9y2VEo"
 
         # Free and Enterprise should not have Stripe IDs
         assert model.plans["free"].stripe_price_id_monthly is None
@@ -157,16 +157,16 @@ class TestPricingHelperFunctions:
     def test_get_stripe_price_id(self) -> None:
         """Test getting Stripe price IDs."""
         # Starter monthly
-        assert get_stripe_price_id("starter", "monthly") == "price_1S6EmY3GVsrZHuzXTpwM8Gqx"
+        assert get_stripe_price_id("starter", "monthly") == "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
 
         # Starter yearly
-        assert get_stripe_price_id("starter", "yearly") == "price_1S6EmY3GVsrZHuzXCHBA7s8b"
+        assert get_stripe_price_id("starter", "yearly") == "price_1S6FvF3GVsrZHuzXDjv76gwE"
 
         # Professional monthly
-        assert get_stripe_price_id("professional", "monthly") == "price_1S6EmZ3GVsrZHuzXpdUKcgCU"
+        assert get_stripe_price_id("professional", "monthly") == "price_1S6FvG3GVsrZHuzXBwljASJB"
 
         # Professional yearly
-        assert get_stripe_price_id("professional", "yearly") == "price_1S6EmZ3GVsrZHuzXr1m0Bwuh"
+        assert get_stripe_price_id("professional", "yearly") == "price_1S6FvG3GVsrZHuzXQV9y2VEo"
 
         # Free plan (no Stripe IDs)
         assert get_stripe_price_id("free", "monthly") is None
@@ -307,7 +307,7 @@ class TestPricingIntegration:
         assert yaml_data["plans"]["professional"]["price_monthly"] == 800
 
         # Check Stripe IDs consistency
-        starter_monthly_id = "price_1S6EmY3GVsrZHuzXTpwM8Gqx"
+        starter_monthly_id = "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
         assert get_stripe_price_id("starter", "monthly") == starter_monthly_id
         assert config_model.plans["starter"].stripe_price_id_monthly == starter_monthly_id
         assert yaml_data["plans"]["starter"]["stripe_price_id_monthly"] == starter_monthly_id
