@@ -42,7 +42,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
         "auth": "authentication",
     }
 
-    async def dispatch(
+    async def dispatch(  # noqa: C901
         self,
         request: Request,
         call_next: Callable,
@@ -90,6 +90,9 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                 if body:
                     try:
                         data = json.loads(body)
+                    except json.JSONDecodeError:
+                        details = {"body": "non-json"}
+                    else:
                         # Remove sensitive fields
                         sensitive_fields = {"password", "api_key", "secret", "token", "credit_card"}
                         details = {
@@ -98,8 +101,6 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                             if k.lower() not in sensitive_fields
                             and not any(sensitive in k.lower() for sensitive in sensitive_fields)
                         }
-                    except json.JSONDecodeError:
-                        details = {"body": "non-json"}
             except Exception as e:
                 logger.warning(f"Failed to parse request body for audit: {e}")
 
