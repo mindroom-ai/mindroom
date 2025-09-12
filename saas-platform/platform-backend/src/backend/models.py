@@ -226,29 +226,6 @@ class StripePriceResponse(BaseModel):
 
 
 # Admin Models
-class AdminStatsDetailedOut(BaseModel):
-    """Detailed admin statistics output model."""
-
-    accounts_count: int
-    subscriptions_count: int
-    instances_count: int
-    recent_activity: list[dict[str, Any]]
-
-
-class AdminAccountDetailOut(BaseModel):
-    """Detailed account information for admin view."""
-
-    id: str
-    email: str
-    full_name: str | None = None
-    company_name: str | None = None
-    is_admin: bool = False
-    status: str = "active"
-    stripe_customer_id: str | None = None
-    created_at: str | None = None
-    updated_at: str | None = None
-    subscription: SubscriptionOut | None = None
-    instances: list[InstanceOut] = []
 
 
 class AdminProvisionResponse(BaseModel):
@@ -292,21 +269,6 @@ class ReactAdminDeleteResponse(BaseModel):
     """React Admin delete response model."""
 
     data: dict[str, Any]
-
-
-# Dashboard Metrics Models
-class DashboardMetricsOut(BaseModel):
-    """Dashboard metrics model."""
-
-    model_config = {"populate_by_name": True}
-
-    total_accounts: int = Field(alias="totalAccounts")
-    active_subscriptions: int = Field(alias="activeSubscriptions")
-    running_instances: int = Field(alias="runningInstances")
-    mrr: int
-    daily_messages: list[dict[str, Any]] = Field(alias="dailyMessages")
-    instance_statuses: list[dict[str, Any]] = Field(alias="instanceStatuses")
-    recent_activity: list[dict[str, Any]] = Field(alias="recentActivity")
 
 
 # Webhook Models
