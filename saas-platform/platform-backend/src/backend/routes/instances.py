@@ -163,8 +163,8 @@ async def provision_user_instance(
     if inst_result.data:
         existing = inst_result.data[0]
 
-        # If instance is deprovisioned or in error state, reprovision it
-        if existing.get("status") in ["deprovisioned", "error"]:
+        # If instance is deprovisioned, reprovision it
+        if existing.get("status") == "deprovisioned":
             logger.info(
                 "Reprovisioning %s instance %s for user %s",
                 existing.get("status"),
