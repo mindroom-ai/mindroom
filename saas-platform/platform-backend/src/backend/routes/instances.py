@@ -68,11 +68,12 @@ async def _background_sync_instance_status(instance_id: str) -> None:
             actual_status = "error"
 
         # Update database
+        now = datetime.now(UTC).isoformat()
         sb.table("instances").update(
             {
                 "status": actual_status,
-                "kubernetes_synced_at": datetime.now(UTC).isoformat(),
-                "updated_at": datetime.now(UTC).isoformat(),
+                "kubernetes_synced_at": now,
+                "updated_at": now,
             },
         ).eq("instance_id", instance_id).execute()
 
@@ -157,8 +158,22 @@ async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -
         .execute()
     )
     if inst_result.data:
-        # Idempotent: return existing instance metadata
         existing = inst_result.data[0]
+
+        # If instance is deprovisioned, reprovision it
+        if existing.get("status") == "deprovisioned":
+            logger.info("Reprovisioning deprovisioned instance %s for user %s", existing["instance_id"], account_id)
+            return await provision_instance(
+                data={
+                    "subscription_id": subscription["id"],
+                    "account_id": account_id,
+                    "tier": subscription["tier"],
+                    "instance_id": existing["instance_id"],  # Reuse the same instance ID
+                },
+                authorization=f"Bearer {PROVISIONER_API_KEY}",
+            )
+
+        # Otherwise return existing instance metadata
         return {
             "success": True,
             "message": "Instance already exists",

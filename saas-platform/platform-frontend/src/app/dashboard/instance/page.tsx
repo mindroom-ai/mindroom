@@ -78,7 +78,7 @@ export default function InstancePage() {
     setRefreshing(false)
   }
 
-  const handleAction = async (action: 'start' | 'stop' | 'restart' | 'delete') => {
+  const handleAction = async (action: 'start' | 'stop' | 'restart' | 'delete' | 'reprovision') => {
     if (!instance) return
 
     setActionLoading(action)
@@ -93,6 +93,11 @@ export default function InstancePage() {
           break
         case 'restart':
           await apiRestartInstance(instance.instance_id)
+          break
+        case 'reprovision':
+          // Use the provision endpoint which now handles reprovisioning
+          const { provisionInstance } = await import('@/lib/api')
+          await provisionInstance()
           break
         case 'delete':
           // Delete not implemented yet
@@ -142,7 +147,7 @@ export default function InstancePage() {
       case 'error':
         return 'Instance not found in cluster. It may have been removed during maintenance. Please contact support to reprovision your instance.'
       case 'deprovisioned':
-        return 'Instance has been removed. Contact support if this was unexpected.'
+        return 'Instance has been removed. Click "Reprovision Instance" to restore it.'
       default:
         return 'Unknown status'
     }
@@ -270,11 +275,16 @@ export default function InstancePage() {
 
           {instance.status === 'deprovisioned' && (
             <button
-              onClick={() => window.location.href = 'mailto:support@mindroom.chat?subject=Instance Deprovisioned&body=My instance ID: ' + String(instance.instance_id) + ' has been deprovisioned. Please help me restore it.'}
-              className="flex items-center gap-2 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
+              onClick={() => handleAction('reprovision')}
+              disabled={actionLoading !== null}
+              className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 transition-colors"
             >
-              <AlertCircle className="w-4 h-4" />
-              Contact Support
+              {actionLoading === 'reprovision' ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+              Reprovision Instance
             </button>
           )}
 
