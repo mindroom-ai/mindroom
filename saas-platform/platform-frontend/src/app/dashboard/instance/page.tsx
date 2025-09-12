@@ -2,8 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, Trash2, ExternalLink, Server, Database, Globe } from 'lucide-react'
-import { createClient } from '@/lib/supabase/client'
+import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, Database, Globe } from 'lucide-react'
 import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
 import { getCached, setCached } from '@/lib/cache'
@@ -33,15 +32,24 @@ export default function InstancePage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null)
 
   useEffect(() => {
-    fetchInstance()
-    // Poll for updates while provisioning
-    const interval = setInterval(() => {
-      if (instance?.status === 'provisioning') {
-        fetchInstance(true)
-      }
-    }, 5000) // Poll every 5 seconds
+    // Only fetch if no cached data, otherwise fetch silently in background
+    if (!cachedInstance) {
+      fetchInstance()
+    } else {
+      // Fetch silently in background to get fresh data
+      fetchInstance(true)
+    }
+  }, []) // Run only on mount
 
-    return () => clearInterval(interval)
+  useEffect(() => {
+    // Poll for updates while provisioning
+    if (instance?.status === 'provisioning') {
+      const interval = setInterval(() => {
+        fetchInstance(true)
+      }, 5000) // Poll every 5 seconds
+
+      return () => clearInterval(interval)
+    }
   }, [instance?.status])
 
   const fetchInstance = async (silent = false) => {
