@@ -149,7 +149,7 @@ async def provision_user_instance(
     sb = ensure_supabase()
 
     account_id = user["account_id"]
-    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
+    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).execute()
     if not sub_result.data:
         raise HTTPException(status_code=404, detail="No subscription found")
     subscription = sub_result.data[0]
