@@ -63,7 +63,7 @@ async def create_checkout_session(
         "line_items": [{"price": price_id, "quantity": quantity}],
         "mode": "subscription",
         "success_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard?success=true&session_id={{CHECKOUT_SESSION_ID}}",
-        "cancel_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/pricing?cancelled=true",
+        "cancel_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard/billing/upgrade?cancelled=true",
         "allow_promotion_codes": True,
         "billing_address_collection": "required",
         "subscription_data": {
