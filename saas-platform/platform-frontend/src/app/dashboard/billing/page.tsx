@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useSubscription } from '@/hooks/useSubscription'
 import { createPortalSession } from '@/lib/api'
-import { PRICING_PLANS, getTierDisplay, formatLimit, type PlanId } from '@/lib/pricing-config'
+import { PRICING_PLANS, formatLimit, type PlanId } from '@/lib/pricing-config'
 import { Loader2, CreditCard, TrendingUp, Check } from 'lucide-react'
 
 export default function BillingPage() {
@@ -31,9 +31,12 @@ export default function BillingPage() {
   }
 
   const currentTier = (subscription?.tier || 'free') as PlanId
-  const tierInfo = getTierDisplay(currentTier)
   const currentPlan = PRICING_PLANS[currentTier]
   const features = currentPlan.features
+  const tierInfo = {
+    name: currentPlan.name,
+    price: currentPlan.price + currentPlan.period,
+  }
 
   return (
     <div className="space-y-6">

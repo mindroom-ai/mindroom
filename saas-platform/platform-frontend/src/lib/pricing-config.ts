@@ -170,15 +170,3 @@ export function formatLimit(value: number | 'unlimited' | string): string {
   }
   return value
 }
-
-// For backward compatibility with existing tier display
-export function getTierDisplay(tier: PlanId) {
-  const plan = PRICING_PLANS[tier]
-  return {
-    name: plan.name,
-    price: plan.price + (plan.period ? plan.period : ''),
-    color: plan.gradient?.includes('orange') ? 'orange' :
-           plan.gradient?.includes('purple') ? 'purple' :
-           plan.gradient?.includes('yellow') ? 'yellow' : 'gray',
-  }
-}
