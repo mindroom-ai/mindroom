@@ -79,22 +79,26 @@ class PricingConfig(BaseModel):
     discounts: Discounts
 
 
-# Load pricing configuration from YAML
-# Try multiple possible locations for the config file
-possible_paths = [
-    Path("/app/pricing-config.yaml"),  # Docker container path
-    Path(__file__).parent.parent.parent.parent / "pricing-config.yaml",  # Development path
-    Path("pricing-config.yaml"),  # Current directory
-]
+def find_pricing_config_path() -> Path:
+    """Find the pricing configuration file in expected locations.
 
-config_path = None
-for path in possible_paths:
-    if path.exists():
-        config_path = path
-        break
+    Returns:
+        Path to the pricing configuration file.
 
-# Raise exception if config file not found
-if config_path is None:
+    Raises:
+        FileNotFoundError: If the config file is not found in any expected location.
+
+    """
+    possible_paths = [
+        Path("/app/pricing-config.yaml"),  # Docker container path
+        Path(__file__).parent.parent.parent.parent / "pricing-config.yaml",  # Development path
+        Path("pricing-config.yaml"),  # Current directory
+    ]
+
+    for path in possible_paths:
+        if path.exists():
+            return path
+
     msg = (
         "pricing-config.yaml not found in any expected location. "
         "Looked in: /app/, development path, and current directory"
@@ -102,14 +106,12 @@ if config_path is None:
     raise FileNotFoundError(msg)
 
 
+# Load the config path at module initialization
+config_path = find_pricing_config_path()
+
+
 def load_pricing_config() -> dict[str, Any]:
     """Load pricing configuration from YAML file."""
-    if not config_path.exists():
-        msg = (
-            f"Pricing configuration file not found at {config_path}. This file is required for the application to run."
-        )
-        raise FileNotFoundError(msg)
-
     with config_path.open() as f:
         return yaml.safe_load(f)
 
