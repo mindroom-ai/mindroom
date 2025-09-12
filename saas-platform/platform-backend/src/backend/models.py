@@ -216,26 +216,6 @@ class SubscriptionReactivateResponse(BaseModel):
 
 
 # Pricing Models
-class PricingPlanOut(BaseModel):
-    """Individual pricing plan model."""
-
-    model_config = {"populate_by_name": True}
-
-    name: str
-    price: int
-    period: str
-    features: list[str]
-    is_popular: bool = Field(default=False, alias="isPopular")
-    stripe_price_id_monthly: str | None = None
-    stripe_price_id_yearly: str | None = None
-
-
-class PricingConfigResponse(BaseModel):
-    """Pricing configuration response model."""
-
-    plans: dict[str, PricingPlanOut]
-
-
 class StripePriceResponse(BaseModel):
     """Stripe price ID response model."""
 
