@@ -92,9 +92,9 @@ async def cancel_subscription(
             "subscription_id": cancelled_sub.id,
         }
 
-    except stripe.error.StripeError as e:
+    except stripe.error.StripeError:
         logger.exception("Stripe error cancelling subscription")
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=400, detail="Payment provider error") from None
 
 
 @router.post("/my/subscription/reactivate", response_model=SubscriptionReactivateResponse)
@@ -136,6 +136,6 @@ async def reactivate_subscription(user: Annotated[dict, Depends(verify_user)]) -
             "subscription_id": reactivated_sub.id,
         }
 
-    except stripe.error.StripeError as e:
+    except stripe.error.StripeError:
         logger.exception("Stripe error reactivating subscription")
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=400, detail="Payment provider error") from None

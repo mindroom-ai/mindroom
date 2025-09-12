@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -17,7 +18,7 @@ from backend.config import (
     logger,
 )
 from backend.db_utils import update_instance_status
-from backend.deps import ensure_supabase
+from backend.deps import _extract_bearer_token, ensure_supabase, limiter
 from backend.k8s import check_deployment_exists, ensure_docker_registry_secret, run_kubectl, wait_for_deployment_ready
 from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
 from backend.process import run_helm
@@ -42,15 +43,25 @@ async def _background_mark_running_when_ready(instance_id: str, namespace: str =
         logger.exception("Background readiness wait failed for instance %s", instance_id)
 
 
+def _require_provisioner_auth(authorization: str | None) -> None:
+    """Validate provisioner API key using constant-time comparison."""
+    try:
+        token = _extract_bearer_token(authorization)
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Unauthorized") from None
+    if not PROVISIONER_API_KEY or not hmac.compare_digest(token, PROVISIONER_API_KEY):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 @router.post("/system/provision", response_model=ProvisionResponse)
+@limiter.limit("5/minute")
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
     background_tasks: BackgroundTasks = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Provision a new instance (compatible with customer portal)."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     sb = ensure_supabase()
 
@@ -240,13 +251,13 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 
 
 @router.post("/system/instances/{instance_id}/start", response_model=ActionResult)
+@limiter.limit("10/minute")
 async def start_instance_provisioner(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Start an instance (provisioner API compatible)."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     logger.info("Starting instance %s", instance_id)
 
@@ -279,13 +290,13 @@ async def start_instance_provisioner(
 
 
 @router.post("/system/instances/{instance_id}/stop", response_model=ActionResult)
+@limiter.limit("10/minute")
 async def stop_instance_provisioner(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Stop an instance (provisioner API compatible)."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     logger.info("Stopping instance %s", instance_id)
 
@@ -318,13 +329,13 @@ async def stop_instance_provisioner(
 
 
 @router.post("/system/instances/{instance_id}/restart", response_model=ActionResult)
+@limiter.limit("10/minute")
 async def restart_instance_provisioner(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Restart an instance (provisioner API compatible)."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     logger.info("Restarting instance %s", instance_id)
 
@@ -354,13 +365,13 @@ async def restart_instance_provisioner(
 
 
 @router.delete("/system/instances/{instance_id}/uninstall", response_model=ActionResult)
+@limiter.limit("2/minute")
 async def uninstall_instance(
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Completely uninstall/deprovision an instance."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     logger.info("Uninstalling instance %s", instance_id)
 
@@ -392,12 +403,12 @@ async def uninstall_instance(
 
 
 @router.post("/system/sync-instances", response_model=SyncResult)
+@limiter.limit("5/minute")
 async def sync_instances(
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Sync instance states between database and Kubernetes cluster."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     sb = ensure_supabase()
 

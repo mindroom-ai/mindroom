@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from backend.config import PROVISIONER_API_KEY, logger
-from backend.deps import ensure_supabase, verify_admin
+from backend.deps import ensure_supabase, limiter, verify_admin
 from backend.models import (
     ActionResult,
     AdminAccountDetailsResponse,
@@ -66,6 +66,7 @@ def audit_log_entry(
 
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
+@limiter.limit("30/minute")
 async def get_admin_stats(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Get platform statistics for admin dashboard."""
     audit_log_entry(
@@ -117,6 +118,7 @@ async def _proxy_to_provisioner(
 
 
 @router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
+@limiter.limit("10/minute")
 async def admin_start_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Start an instance (admin proxy)."""
     result = await _proxy_to_provisioner(start_instance_provisioner, instance_id, admin)
@@ -143,6 +145,7 @@ async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(v
 
 
 @router.post("/admin/instances/{instance_id}/restart", response_model=ActionResult)
+@limiter.limit("10/minute")
 async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Restart an instance (admin proxy)."""
     result = await _proxy_to_provisioner(restart_instance_provisioner, instance_id, admin)
@@ -156,6 +159,7 @@ async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depend
 
 
 @router.delete("/admin/instances/{instance_id}/uninstall", response_model=ActionResult)
+@limiter.limit("2/minute")
 async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Uninstall an instance (admin proxy)."""
     result = await _proxy_to_provisioner(uninstall_instance, instance_id, admin)
@@ -169,6 +173,7 @@ async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depe
 
 
 @router.post("/admin/instances/{instance_id}/provision", response_model=ProvisionResponse)
+@limiter.limit("5/minute")
 async def admin_provision_instance(
     instance_id: int,
     background_tasks: BackgroundTasks,
@@ -206,6 +211,7 @@ async def admin_provision_instance(
 
 
 @router.post("/admin/sync-instances", response_model=SyncResult)
+@limiter.limit("5/minute")
 async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Sync instance states between database and Kubernetes (admin proxy)."""
     result = await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
@@ -313,6 +319,7 @@ async def admin_logout() -> dict[str, bool]:
 
 # === React Admin Data Provider ===
 @router.get("/admin/{resource}", response_model=AdminListResponse)
+@limiter.limit("60/minute")
 async def admin_get_list(
     resource: str,
     admin: Annotated[dict, Depends(verify_admin)],
@@ -370,6 +377,7 @@ async def admin_get_list(
 
 
 @router.get("/admin/{resource}/{resource_id}", response_model=AdminGetOneResponse)
+@limiter.limit("60/minute")
 async def admin_get_one(
     resource: str,
     resource_id: str,
@@ -387,13 +395,15 @@ async def admin_get_one(
 
     try:
         result = sb.table(resource).select("*").eq("id", resource_id).single().execute()
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception:
+        logger.exception("Error fetching single resource")
+        raise HTTPException(status_code=404, detail="Not found") from None
     else:
         return {"data": result.data}
 
 
 @router.post("/admin/{resource}", response_model=AdminCreateResponse)
+@limiter.limit("15/minute")
 async def admin_create(
     resource: str,
     data: dict,
@@ -417,11 +427,13 @@ async def admin_create(
             )
 
         return {"data": result.data[0] if result.data else None}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        logger.exception("Error creating resource")
+        raise HTTPException(status_code=400, detail="Invalid request") from None
 
 
 @router.put("/admin/{resource}/{resource_id}", response_model=AdminUpdateResponse)
+@limiter.limit("15/minute")
 async def admin_update(
     resource: str,
     resource_id: str,
@@ -445,11 +457,13 @@ async def admin_update(
         )
 
         return {"data": result.data[0] if result.data else None}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        logger.exception("Error updating resource")
+        raise HTTPException(status_code=400, detail="Invalid request") from None
 
 
 @router.delete("/admin/{resource}/{resource_id}", response_model=AdminDeleteResponse)
+@limiter.limit("10/minute")
 async def admin_delete(
     resource: str,
     resource_id: str,
@@ -468,13 +482,15 @@ async def admin_delete(
             resource_type=resource,
             resource_id=resource_id,
         )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        logger.exception("Error deleting resource")
+        raise HTTPException(status_code=400, detail="Invalid request") from None
     else:
         return {"data": {"id": resource_id}}
 
 
 @router.get("/admin/metrics/dashboard", response_model=AdminDashboardMetricsResponse)
+@limiter.limit("30/minute")
 async def get_dashboard_metrics(
     admin: Annotated[dict, Depends(verify_admin)],
 ) -> dict[str, Any]:
