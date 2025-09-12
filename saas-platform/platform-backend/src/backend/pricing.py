@@ -122,24 +122,7 @@ def load_pricing_config_model() -> PricingConfig:
 
     """
     config_dict = load_pricing_config()
-
-    # Validate required fields are present
-    if not config_dict.get("product"):
-        msg = "Missing 'product' section in pricing configuration"
-        raise ValueError(msg)
-    if "description" not in config_dict["product"]:
-        msg = "Missing 'product.description' in pricing configuration"
-        raise ValueError(msg)
-    if not config_dict.get("discounts"):
-        msg = "Missing 'discounts' section in pricing configuration"
-        raise ValueError(msg)
-    if not config_dict.get("trial"):
-        msg = "Missing 'trial' section in pricing configuration"
-        raise ValueError(msg)
-    if "applicable_plans" not in config_dict["trial"]:
-        msg = "Missing 'trial.applicable_plans' in pricing configuration"
-        raise ValueError(msg)
-
+    # Pydantic will validate all required fields automatically
     return PricingConfig(**config_dict)
 
 
