@@ -13,6 +13,11 @@ openai_key: ""
 anthropic_key: ""
 openrouter_key: ""
 
+# Optional: mount API keys as files (more secure)
+secrets:
+  enabled: false
+  name: ""
+
 # Supabase (shared auth)
 supabaseUrl: ""
 supabaseAnonKey: ""

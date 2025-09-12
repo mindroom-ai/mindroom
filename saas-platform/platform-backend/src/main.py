@@ -6,7 +6,9 @@ This replaces the previous monolithic implementation.
 
 from __future__ import annotations
 
-from backend.config import ALLOWED_ORIGINS
+from typing import TYPE_CHECKING
+
+from backend.config import ALLOWED_ORIGINS, ENVIRONMENT, PLATFORM_DOMAIN
 from backend.deps import limiter
 from backend.middleware.audit_logging import AuditLoggingMiddleware
 from backend.routes import (
@@ -22,11 +24,17 @@ from backend.routes import (
     usage,
     webhooks,
 )
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from starlette.responses import Response as StarletteResponse
 
 # FastAPI app
 app = FastAPI(title="MindRoom Backend")
@@ -39,15 +47,41 @@ app = FastAPI(title="MindRoom Backend")
 # Audit logging middleware (added first, runs second)
 app.add_middleware(AuditLoggingMiddleware)
 
+# Compute CORS origins: exclude localhost in production
+cors_origins = [o for o in ALLOWED_ORIGINS if not (ENVIRONMENT == "production" and o.startswith("http://localhost"))]
+
 # CORS middleware (added last, runs first - ensures CORS headers on ALL responses)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    expose_headers=["X-Total-Count"],
+    max_age=86400,
 )
+
+# Restrict allowed hosts
+allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN]
+if ENVIRONMENT != "production":
+    allowed_hosts += ["localhost", "127.0.0.1"]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+
+
+# Basic security headers
+@app.middleware("http")
+async def add_security_headers(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[StarletteResponse]],
+) -> StarletteResponse:
+    """Inject basic security headers into every response."""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
 
 # Rate limiting (applies to routes decorated with @limiter.limit)
 app.state.limiter = limiter

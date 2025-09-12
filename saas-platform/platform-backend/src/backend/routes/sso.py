@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import Annotated
 
 from backend.config import PLATFORM_DOMAIN
-from backend.deps import verify_user
+from backend.deps import _extract_bearer_token, limiter, verify_user
 from backend.models import StatusResponse
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 
@@ -14,6 +14,7 @@ router = APIRouter()
 
 
 @router.post("/my/sso-cookie", response_model=StatusResponse)
+@limiter.limit("5/minute")
 async def set_sso_cookie(
     response: Response,
     user: Annotated[dict, Depends(verify_user)],  # noqa: ARG001
@@ -23,10 +24,10 @@ async def set_sso_cookie(
 
     The cookie is used by instance nginx to forward Authorization headers.
     """
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-
-    token = authorization.replace("Bearer ", "", 1)
+    try:
+        token = _extract_bearer_token(authorization)
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Missing bearer token") from None
 
     # Normalize cookie domain: ensure it applies to all subdomains
     domain = PLATFORM_DOMAIN
@@ -48,6 +49,7 @@ async def set_sso_cookie(
 
 
 @router.delete("/my/sso-cookie", response_model=StatusResponse)
+@limiter.limit("10/minute")
 async def clear_sso_cookie(response: Response) -> dict[str, str]:
     """Clear the SSO cookie on logout."""
     # Normalize cookie domain: ensure it applies to all subdomains

@@ -37,6 +37,7 @@ from backend.routes.provisioner import (
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
 router = APIRouter()
+ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs", "usage_metrics"}
 
 
 def audit_log_entry(
@@ -320,7 +321,7 @@ async def admin_logout() -> dict[str, bool]:
 # === React Admin Data Provider ===
 @router.get("/admin/{resource}", response_model=AdminListResponse)
 @limiter.limit("60/minute")
-async def admin_get_list(
+async def admin_get_list(  # noqa: C901
     resource: str,
     admin: Annotated[dict, Depends(verify_admin)],
     _sort: Annotated[str | None, Query()] = None,
@@ -330,6 +331,8 @@ async def admin_get_list(
     q: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
     """Generic list endpoint for React Admin."""
+    if resource not in ALLOWED_RESOURCES:
+        raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
     audit_log_entry(
@@ -384,6 +387,8 @@ async def admin_get_one(
     admin: Annotated[dict, Depends(verify_admin)],
 ) -> dict[str, Any]:
     """Get single record for React Admin."""
+    if resource not in ALLOWED_RESOURCES:
+        raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
     audit_log_entry(
@@ -410,6 +415,8 @@ async def admin_create(
     admin: Annotated[dict, Depends(verify_admin)],
 ) -> dict[str, Any]:
     """Create record for React Admin."""
+    if resource not in ALLOWED_RESOURCES:
+        raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
     try:
@@ -441,6 +448,8 @@ async def admin_update(
     admin: Annotated[dict, Depends(verify_admin)],
 ) -> dict[str, Any]:
     """Update record for React Admin."""
+    if resource not in ALLOWED_RESOURCES:
+        raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
     try:
@@ -470,6 +479,8 @@ async def admin_delete(
     admin: Annotated[dict, Depends(verify_admin)],
 ) -> dict[str, Any]:
     """Delete record for React Admin."""
+    if resource not in ALLOWED_RESOURCES:
+        raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
     try:
