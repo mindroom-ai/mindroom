@@ -37,8 +37,11 @@ export function useSubscription() {
       subscriptionCache.delete('user-subscription')
     }
 
+    // Check for cached data right before deciding to show loading
+    const currentCache = subscriptionCache.get('user-subscription') as Subscription | null
+
     // Only show loading on initial fetch when there's no cached data
-    if (isInitial && !cachedSubscription) {
+    if (isInitial && !currentCache && !subscription) {
       setLoading(true)
     }
 

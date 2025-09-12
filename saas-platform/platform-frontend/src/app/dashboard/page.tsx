@@ -63,7 +63,8 @@ export default function DashboardPage() {
     setupFreeTier()
   }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, instance, instanceLoading, setupAttempted, router])
 
-  if (authLoading || instanceLoading || subscriptionLoading) {
+  // Only show loading if we're still loading auth OR if we have no data at all
+  if (authLoading || (instanceLoading && !instance && subscriptionLoading && !subscription)) {
     return <DashboardLoader />
   }
 
