@@ -48,6 +48,7 @@ COPY --from=builder /app /app
 # Copy additional files needed by platform-backend
 COPY k8s/instance /app/k8s/instance/
 COPY default-config.yaml /app/default-config.yaml
+COPY pricing-config.yaml /app/pricing-config.yaml
 
 EXPOSE 8000
 

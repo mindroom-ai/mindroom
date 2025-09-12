@@ -80,8 +80,22 @@ class PricingConfig(BaseModel):
 
 
 # Load pricing configuration from YAML
-# The config file is at the saas-platform root
-config_path = Path(__file__).parent.parent.parent.parent / "pricing-config.yaml"
+# Try multiple possible locations for the config file
+possible_paths = [
+    Path("/app/pricing-config.yaml"),  # Docker container path
+    Path(__file__).parent.parent.parent.parent / "pricing-config.yaml",  # Development path
+    Path("pricing-config.yaml"),  # Current directory
+]
+
+config_path = None
+for path in possible_paths:
+    if path.exists():
+        config_path = path
+        break
+
+# Fallback to development path if none exist
+if config_path is None:
+    config_path = Path(__file__).parent.parent.parent.parent / "pricing-config.yaml"
 
 
 def load_pricing_config() -> dict[str, Any]:
