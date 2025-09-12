@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from './useAuth'
 import { apiCall } from '@/lib/api'
-import { cache } from '@/lib/cache'
+import { getCached, setCached } from '@/lib/cache'
 
 export interface Subscription {
   id: string
@@ -21,12 +21,9 @@ export interface Subscription {
 }
 
 export function useSubscription() {
-  // Start with cached data if available (optimistic UI)
-  const cacheKey = 'user-subscription'
-  const cachedSubscription = cache.get<Subscription>(cacheKey)
-
+  const cachedSubscription = getCached<Subscription>('user-subscription')
   const [subscription, setSubscription] = useState<Subscription | null>(cachedSubscription)
-  const [loading, setLoading] = useState(!cachedSubscription) // Only show loading if no cache
+  const [loading, setLoading] = useState(!cachedSubscription)
   const { user, loading: authLoading } = useAuth()
 
   useEffect(() => {
@@ -36,7 +33,6 @@ export function useSubscription() {
       return
     }
 
-    // Get user's subscription through API
     const fetchSubscription = async () => {
       try {
         const response = await apiCall('/my/subscription')
@@ -44,9 +40,8 @@ export function useSubscription() {
         if (response.ok) {
           const data = await response.json()
           setSubscription(data)
-          cache.set(cacheKey, data)
+          setCached('user-subscription', data)
         } else if (response.status === 404) {
-          // User doesn't have a subscription yet
           setSubscription(null)
         } else {
           console.error('Error fetching subscription:', response.statusText)

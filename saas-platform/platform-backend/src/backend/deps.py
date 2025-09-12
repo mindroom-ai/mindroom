@@ -45,13 +45,11 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901
     if token in _auth_cache:
         cached_data, expiry = _auth_cache[token]
         if expiry > now:
-            # Cache hit - return cached data
             return cached_data
-        # Cache expired - remove it
         del _auth_cache[token]
 
-    # Clean up expired entries periodically (simple cleanup)
-    if len(_auth_cache) > 100:  # Prevent unbounded growth
+    # Simple cache size limit
+    if len(_auth_cache) > 100:
         _auth_cache.clear()
 
     sb = ensure_supabase()
@@ -110,13 +108,14 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901
         expiry = now + timedelta(minutes=5)
         _auth_cache[token] = (user_data, expiry)
 
-        return user_data  # noqa: TRY300
     except HTTPException:
         raise
     except Exception:
         logger.exception("User verification error")
         msg = "Authentication failed"
         raise HTTPException(status_code=401, detail=msg) from None
+
+    return user_data
 
 
 async def verify_user_optional(authorization: str = Header(None)) -> dict | None:

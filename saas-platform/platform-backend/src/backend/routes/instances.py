@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, verify_user
+from backend.k8s import check_deployment_exists, run_kubectl
 from backend.models import ActionResult, InstancesResponse, ProvisionResponse
 from backend.routes.provisioner import (
     provision_instance,
@@ -21,25 +22,21 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 router = APIRouter()
 
-# Simple in-memory set to track instances being synced to prevent race conditions
+# Track instances being synced to prevent duplicates
 _syncing_instances: set[str] = set()
 
 
 async def _background_sync_instance_status(instance_id: str) -> None:
     """Background task to sync a single instance's Kubernetes status."""
+    if instance_id in _syncing_instances:
+        return  # Already syncing
+
+    _syncing_instances.add(instance_id)
+
     try:
-        # Add instance to syncing set
-        _syncing_instances.add(instance_id)
-
-        try:
-            from backend.k8s import check_deployment_exists, run_kubectl  # noqa: PLC0415
-        except ImportError:
-            logger.error("Kubernetes functions not available, skipping sync for instance %s", instance_id)
-            return
-
         sb = ensure_supabase()
 
-        # Get current status from DB to make better decisions
+        # Get current status from DB
         result = sb.table("instances").select("status").eq("instance_id", instance_id).single().execute()
         current_status = result.data.get("status") if result.data else None
 
@@ -51,33 +48,27 @@ async def _background_sync_instance_status(instance_id: str) -> None:
             return
 
         if exists:
-            # Get actual replicas count to determine if running or stopped
-            try:
-                code, out, _ = await run_kubectl(
-                    [
-                        "get",
-                        f"deployment/mindroom-backend-{instance_id}",
-                        "-o=jsonpath={.spec.replicas}",
-                    ],
-                    namespace="mindroom-instances",
-                )
-                if code == 0:
-                    replicas = int(out.strip() or "0")
-                    actual_status = "running" if replicas > 0 else "stopped"
-                else:
-                    actual_status = "error"
-            except Exception:
-                logger.exception("Failed to get replica count for instance %s", instance_id)
+            # Get actual replicas count
+            code, out, _ = await run_kubectl(
+                [
+                    "get",
+                    f"deployment/mindroom-backend-{instance_id}",
+                    "-o=jsonpath={.spec.replicas}",
+                ],
+                namespace="mindroom-instances",
+            )
+            if code == 0:
+                replicas = int(out.strip() or "0")
+                actual_status = "running" if replicas > 0 else "stopped"
+            else:
                 actual_status = "error"
-        # Deployment doesn't exist - determine if it's deprovisioned or error
         elif current_status in ["deprovisioned", "provisioning"]:
-            # Keep the current status if it makes sense
+            # Keep current status if it makes sense
             actual_status = current_status
         else:
-            # Otherwise mark as error
             actual_status = "error"
 
-        # Update database with current status and sync timestamp
+        # Update database
         sb.table("instances").update(
             {
                 "status": actual_status,
@@ -87,17 +78,14 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         ).eq("instance_id", instance_id).execute()
 
         logger.info("Background sync completed for instance %s: status=%s", instance_id, actual_status)
-    except Exception:
-        logger.exception("Background sync failed for instance %s", instance_id)
     finally:
-        # Remove from syncing set
         _syncing_instances.discard(instance_id)
 
 
 @router.get("/my/instances", response_model=InstancesResponse)
 async def list_user_instances(
     user: Annotated[dict, Depends(verify_user)],
-    background_tasks: BackgroundTasks = None,  # type: ignore[assignment]
+    background_tasks: BackgroundTasks | None = None,
 ) -> dict[str, Any]:
     """List instances for current user with background status refresh."""
     sb = ensure_supabase()
@@ -114,7 +102,7 @@ async def list_user_instances(
             if not instance_id:
                 continue
 
-            # Skip if already being synced (prevent race condition)
+            # Skip if already being synced
             if str(instance_id) in _syncing_instances:
                 continue
 
@@ -123,9 +111,10 @@ async def list_user_instances(
             if not synced_at:
                 needs_sync = True
             else:
-                # Parse ISO timestamp - fromisoformat handles both Z and +00:00 in Python 3.11+
-                # For compatibility, we still need to replace Z with +00:00
-                synced_time = datetime.fromisoformat(synced_at.replace("Z", "+00:00"))  # noqa: FURB162
+                # Parse ISO timestamp (handle both Z and +00:00 formats)
+                if synced_at.endswith("Z"):
+                    synced_at = synced_at[:-1] + "+00:00"
+                synced_time = datetime.fromisoformat(synced_at)
                 needs_sync = synced_time < stale_threshold
 
             if needs_sync:
