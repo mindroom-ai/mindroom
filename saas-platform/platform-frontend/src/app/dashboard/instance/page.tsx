@@ -31,6 +31,9 @@ export default function InstancePage() {
   const [refreshing, setRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
 
+  // Version marker to force cache bust
+  console.log('Instance page v2 - handles cancelled requests')
+
   useEffect(() => {
     // Only fetch if no cached data, otherwise fetch silently in background
     if (!cachedInstance) {
