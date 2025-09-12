@@ -141,7 +141,10 @@ async def list_user_instances(
 
 
 @router.post("/my/instances/provision", response_model=ProvisionResponse)
-async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def provision_user_instance(
+    user: Annotated[dict, Depends(verify_user)],
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
     """Provision an instance for the current user."""
     sb = ensure_supabase()
 
@@ -171,6 +174,7 @@ async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -
                     "instance_id": existing["instance_id"],  # Reuse the same instance ID
                 },
                 authorization=f"Bearer {PROVISIONER_API_KEY}",
+                background_tasks=background_tasks,
             )
 
         # Otherwise return existing instance metadata
@@ -190,6 +194,7 @@ async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -
             "tier": subscription["tier"],
         },
         authorization=f"Bearer {PROVISIONER_API_KEY}",
+        background_tasks=background_tasks,
     )
 
 
