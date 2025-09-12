@@ -63,7 +63,12 @@ export function useInstance() {
     }
 
     // Get user's instance through the API endpoint
-    const fetchInstance = async () => {
+    const fetchInstance = async (isInitial = false) => {
+      // Only show loading on initial fetch when there's no cached data
+      if (isInitial && !cachedInstance) {
+        setLoading(true)
+      }
+
       try {
         const data = await listInstances()
         if (data.instances && data.instances.length > 0) {
@@ -73,6 +78,7 @@ export function useInstance() {
         } else {
           // No instances found
           setInstance(null)
+          cache.remove('user-instance')
         }
       } catch (error) {
         console.error('Error fetching instance:', error)
@@ -81,11 +87,13 @@ export function useInstance() {
           console.error('Error details:', error.message)
         }
       } finally {
-        setLoading(false)
+        if (isInitial) {
+          setLoading(false)
+        }
       }
     }
 
-    fetchInstance()
+    fetchInstance(true)  // Initial fetch
 
     // Skip polling in dev mode
     if (DEV_INSTANCE) {
@@ -96,24 +104,7 @@ export function useInstance() {
     // (avoids RLS issues with direct Supabase access)
     let errorCount = 0
     const interval = setInterval(async () => {
-      try {
-        const data = await listInstances()
-        if (data.instances && data.instances.length > 0) {
-          const newInstance = data.instances[0]
-          // Only update if status actually changed to avoid re-renders
-          if (newInstance.status !== instance?.status) {
-            setInstance(newInstance)
-            cache.set('user-instance', newInstance)
-          }
-        }
-        errorCount = 0 // Reset error count on success
-      } catch (err) {
-        errorCount++
-        // Only log first error and every 10th error to avoid spamming
-        if (errorCount === 1 || errorCount % 10 === 0) {
-          console.error(`Error polling instance status (attempt ${errorCount}):`, err)
-        }
-      }
+      await fetchInstance(false)  // Background update, no loading state
     }, 30000)
 
     return () => {

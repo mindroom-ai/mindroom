@@ -29,10 +29,14 @@ export function useSubscription() {
   const [loading, setLoading] = useState(!cachedSubscription)
   const { user, loading: authLoading } = useAuth()
 
-  const fetchSubscription = async () => {
+  const fetchSubscription = async (isInitial = false) => {
     if (!user) return
 
-    setLoading(true)
+    // Only show loading on initial fetch when there's no cached data
+    if (isInitial && !cachedSubscription) {
+      setLoading(true)
+    }
+
     try {
       const response = await apiCall('/my/subscription')
 
@@ -49,7 +53,9 @@ export function useSubscription() {
     } catch (error) {
       console.error('Error fetching subscription:', error)
     } finally {
-      setLoading(false)
+      if (isInitial) {
+        setLoading(false)
+      }
     }
   }
 
@@ -60,15 +66,15 @@ export function useSubscription() {
       return
     }
 
-    fetchSubscription()
+    fetchSubscription(true)  // Initial fetch
 
     // Poll for updates every 30 seconds instead of using real-time
-    const interval = setInterval(fetchSubscription, 30000)
+    const interval = setInterval(() => fetchSubscription(false), 30000)  // Background updates
 
     return () => {
       clearInterval(interval)
     }
   }, [user, authLoading])
 
-  return { subscription, loading, refresh: fetchSubscription }
+  return { subscription, loading, refresh: () => fetchSubscription(false) }
 }
