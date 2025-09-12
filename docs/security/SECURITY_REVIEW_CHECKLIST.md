@@ -4,8 +4,8 @@
 This document provides a systematic security review checklist for the MindRoom beta release. Each item should be verified and documented before making the codebase open-source.
 
 ## Critical Issues Found (Immediate Action Required)
-- [ ] **CRITICAL**: Default Matrix admin password is set to "changeme" in `saas-platform/k8s/instance/values.yaml`
-- [ ] **CRITICAL**: Docker Compose uses default passwords for Postgres and Redis in `docker-compose.platform.yml`
+- [x] **CRITICAL**: Default Matrix admin password is set to "changeme" in `saas-platform/k8s/instance/values.yaml`
+- [x] **CRITICAL**: Docker Compose uses default passwords for Postgres and Redis in `docker-compose.platform.yml`
 
 ---
 
@@ -91,7 +91,7 @@ This document provides a systematic security review checklist for the MindRoom b
 
 ### Kubernetes Security
 - [ ] Verify pods run with minimal privileges (non-root users)
-- [ ] Check that network policies properly isolate instances
+- [x] Check that network policies properly isolate instances
 - [ ] Ensure resource limits prevent denial of service
 - [ ] Validate RBAC permissions follow least privilege principle
 - [ ] Check that container images are from trusted sources

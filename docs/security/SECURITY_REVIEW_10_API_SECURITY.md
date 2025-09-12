@@ -12,33 +12,27 @@ This review examines the API security posture of the MindRoom platform backend, 
 
 ---
 
-## 1. Rate Limiting Implementation (FAIL)
+## 1. Rate Limiting Implementation (PARTIAL)
 
-### Current Status: **FAIL** ❌
+### Current Status: **PARTIAL** ⚠️
 
 **Findings:**
-- **No rate limiting middleware detected** in FastAPI application
-- No use of `slowapi`, `fastapi-limiter`, or similar rate limiting libraries
-- No rate limiting configuration in `main.py` or route files
-- No Redis or memory-based rate limiting implementation
-- Only authentication-based access control exists
+- FastAPI rate limiting integrated via `slowapi`; 429 handler registered
+- Per-route limits applied to admin and provisioner endpoints
+- Remaining: evaluate user/SSO endpoints and public routes for appropriate limits
 
-**Vulnerable Endpoints:**
+**High-Risk Endpoints Remaining:**
 ```python
-# ALL 45+ endpoints lack rate limiting, including:
-/health                          # Public endpoint - DoS risk
-/my/account/setup               # Account creation - abuse risk
-/stripe/checkout                # Payment processing - financial risk
-/webhooks/stripe                # External webhook - DoS risk
-/admin/stats                    # Admin endpoint - resource exhaustion
-/system/provision               # Instance provisioning - resource DoS
+# /my/account/setup               # Account creation - abuse risk
+# /stripe/checkout                # Payment processing - financial risk
+# /webhooks/stripe                # External webhook - DoS risk
 ```
 
 **Security Impact:**
-- **DoS Attacks**: Unlimited requests can overwhelm the server
-- **Brute Force**: Authentication endpoints vulnerable to credential attacks
-- **Resource Exhaustion**: Expensive operations (provisioning, stats) unprotected
-- **Cost Amplification**: Stripe API calls and Kubernetes operations unlimited
+- DoS Attacks – mitigated on admin/provisioner; review remaining surfaces
+- Brute Force – apply limits to auth/SSO flows
+- Resource Exhaustion – admin/provisioner now protected
+- Cost Amplification – reduce by limiting payment/webhook endpoints
 
 ### Recommended Implementation
 

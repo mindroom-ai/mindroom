@@ -5,6 +5,22 @@ Initial security review of the MindRoom codebase has identified several critical
 
 ---
 
+## Status Update (2025-09-12)
+
+Completed:
+- Removed default passwords in tracked configs:
+  - `saas-platform/k8s/instance/values.yaml`: no default Matrix password; strong random defaults in templates
+  - `docker-compose.platform.yml`: removed `:-changeme` fallbacks for Postgres/Redis
+- Added FastAPI rate limiting on admin and provisioner endpoints
+- Hardened provisioner auth using constant-time comparison
+- Added per-instance Kubernetes NetworkPolicy and hardened pod security contexts
+
+Remaining (highest priority):
+- API key rotation and revocation workflow
+- Apply rate limits to user/SSO endpoints where appropriate
+- Migrate runtime secrets to Kubernetes Secrets/secret manager; define rotation policy
+- Add monitoring/alerts for failed auth and admin actions
+
 ## Critical Findings (Immediate Action Required)
 
 ### 1. Default Passwords in Production Code

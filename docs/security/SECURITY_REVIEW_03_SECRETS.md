@@ -79,33 +79,27 @@ This security review reveals critical vulnerabilities in secrets management acro
 - Deploy scripts load env vars using python-dotenv with shell format
 - No echo or logging of sensitive values in scripts
 
-### 7. ❌ Replace all "changeme" default passwords before deployment
-**Status: FAIL - Multiple "changeme" passwords found**
+### 7. ✅ Replace all "changeme" default passwords before deployment
+**Status: PASS - Insecure defaults removed (tracked configs)**
 
-**Default Passwords Found:**
-- `docker-compose.platform.yml` line 86: `POSTGRES_PASSWORD=${PLATFORM_DB_PASSWORD:-changeme}`
-- `docker-compose.platform.yml` line 105: `redis-server --requirepass ${PLATFORM_REDIS_PASSWORD:-changeme}`
-- `saas-platform/k8s/instance/values.yaml` line 22: `matrix_admin_password: "changeme"`
+**Remediation:**
+- `docker-compose.platform.yml`: removed `:-changeme` fallbacks for Postgres/Redis (explicit env required)
+- `saas-platform/k8s/instance/values.yaml`: no default Matrix admin password; template generates strong secrets if not provided
 
-### 8. ❌ Implement secure password generation for Matrix user accounts
-**Status: FAIL - Static default password**
+### 8. ✅ Implement secure password generation for Matrix user accounts
+**Status: PASS - Strong defaults when not provided**
 
-**Issues:**
-- Matrix admin password hardcoded as "changeme" in K8s values
-- No password generation mechanism implemented
-- Matrix registration shared secret uses the same "changeme" password
-- Matrix macaroon and form secrets also use same weak password
+**Update:**
+- Helm template now defaults `registration_shared_secret`, `macaroon_secret_key`, and `form_secret` to strong random values when not explicitly set
 
-### 9. ❌ Verify Matrix registration tokens are properly secured
-**Status: FAIL - Weak token generation**
+### 9. ⚠️ Verify Matrix registration tokens are properly secured
+**Status: PARTIAL - Strong defaults added; rotation pending**
 
-**Issues:**
-- Registration shared secret is the hardcoded "changeme" password
-- No proper token generation or rotation mechanism
-- Tokens stored in plaintext in ConfigMaps
+**Update:**
+- Strong random defaults added; rotation and secret store integration remain
 
-### 10. ❌ Ensure Matrix admin credentials are stored securely
-**Status: FAIL - Multiple security issues**
+### 10. ⚠️ Ensure Matrix admin credentials are stored securely
+**Status: PARTIAL - Defaults removed; secret store pending**
 
 **Issues:**
 - Matrix admin password is "changeme" in default configuration

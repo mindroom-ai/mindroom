@@ -18,17 +18,16 @@ This report analyzes the infrastructure security of the MindRoom SaaS platform, 
 
 ### 1. Pod Privilege Configuration
 
-**Status: ❌ FAIL**
+**Status: ⚠️ PARTIAL**
 **Severity: CRITICAL**
 
 #### Current State
-- **Backend deployment:** Has basic security context (runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000)
-- **Frontend deployment:** Missing security context entirely
-- **Synapse deployment:** Missing security context, runs privileged operations
+- **Backend deployment:** Security context hardened (runAsNonRoot, drop caps, no priv-esc)
+- **Frontend deployment:** App container hardened; nginx kept capable of binding :80
+- **Synapse deployment:** Startup performs file ownership adjustments (unchanged)
 
-#### Critical Issues
-1. **Frontend pod lacks security context** - runs as root by default
-2. **Synapse container performs privileged operations** in startup script:
+#### Notes
+1. **Synapse container performs privileged operations** in startup script:
    ```yaml
    command: ["/bin/sh"]
    args:
@@ -37,11 +36,8 @@ This report analyzes the infrastructure security of the MindRoom SaaS platform, 
        # Fix permissions
        chown -R 991:991 /data
    ```
-3. **Missing security hardening directives:**
-   - No `allowPrivilegeEscalation: false`
-   - No `readOnlyRootFilesystem: true`
-   - No `runAsNonRoot: true`
-   - No `capabilities` dropping
+2. **Backend hardened** with `allowPrivilegeEscalation: false`, `runAsNonRoot: true`, and capability drop
+3. **Frontend app container** hardened; nginx left with defaults to serve on port 80
 
 #### Impact
 - Container escape potential through privilege escalation
@@ -75,14 +71,11 @@ containers:
 
 ### 2. Network Policies and Traffic Isolation
 
-**Status: ❌ FAIL**
+**Status: ✅ PASS (initial policy in place)**
 **Severity: CRITICAL**
 
 #### Current State
-- **No NetworkPolicies found** in any Kubernetes manifests
-- Default cluster behavior allows all pod-to-pod communication
-- No traffic segmentation between customer instances
-- No ingress/egress filtering
+- Per-instance NetworkPolicy added limiting ingress to required ports and egress to DNS/HTTP(S)
 
 #### Critical Issues
 1. **Complete lack of network isolation** between:
@@ -93,10 +86,7 @@ containers:
 3. **No egress controls** - pods can reach any external endpoint
 
 #### Impact
-- Multi-tenant security breaches
-- Lateral movement in compromise scenarios
-- Data exfiltration possibilities
-- Compliance violations
+- Reduced lateral movement; improved tenant isolation
 
 #### Remediation
 ```yaml

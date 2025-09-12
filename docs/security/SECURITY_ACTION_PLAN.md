@@ -308,3 +308,19 @@ Do NOT deploy to production until:
 *Document Created: September 11, 2025*
 *Next Review: After P0-P2 completion*
 *Security Owner: [Assign responsible person]*
+
+---
+
+## Status Update (2025-09-12)
+
+Completed:
+- P0: Replaced default passwords in tracked configs (Matrix values, Compose)
+- P1: Implemented FastAPI rate limiting on admin and provisioner routes
+- P1: Provisioner auth hardened with constant-time key comparison
+- P2: Added per-instance NetworkPolicy; hardened pod/container security contexts
+
+Remaining:
+- P0: Revoke & rotate exposed API keys; remove `.env` from git history (procedural)
+- P1: Extend rate limiting to user/SSO endpoints as needed
+- P2: Move secrets from env vars to mounted secrets; validate etcd encryption
+- P3–P5: Monitoring/alerting for failed auth and admin actions; GDPR mechanisms
