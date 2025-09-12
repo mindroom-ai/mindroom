@@ -4,7 +4,11 @@
 # requires-python = ">=3.12"
 # dependencies = ["stripe", "python-dotenv", "pyyaml"]
 # ///
-"""Test script for Stripe connection and product listing."""
+"""Debug script for Stripe connection and product listing.
+
+This is a utility script for debugging Stripe integration issues.
+For actual tests, see platform-backend/tests/test_stripe_*.py
+"""
 
 import os
 import sys
