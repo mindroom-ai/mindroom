@@ -102,11 +102,15 @@ def handle_subscription_created(subscription: dict) -> None:
             tz=UTC,
         ).isoformat()
 
-    # Upsert subscription (in case it already exists)
-    sb.table("subscriptions").upsert(
-        subscription_data,
-        on_conflict="account_id",
-    ).execute()
+    # Check if subscription already exists for this account
+    existing = sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
+
+    if existing.data:
+        # Update existing subscription
+        sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
+    else:
+        # Create new subscription
+        sb.table("subscriptions").insert(subscription_data).execute()
 
     logger.info("Subscription created for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
 
