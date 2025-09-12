@@ -78,8 +78,8 @@ export default function InstancesPage() {
     <div>
       <div className="mb-8 flex justify-between items-center">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Instances</h1>
-          <p className="text-gray-600 mt-2">Manage customer MindRoom instances</p>
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Instances</h1>
+          <p className="text-gray-600 dark:text-gray-400 mt-2">Manage customer MindRoom instances</p>
         </div>
         <div className="space-x-2">
           <Button
@@ -93,50 +93,50 @@ export default function InstancesPage() {
         </div>
       </div>
 
-      <Card>
+      <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
         <CardHeader>
-          <CardTitle>All Instances</CardTitle>
+          <CardTitle className="text-gray-900 dark:text-gray-100">All Instances</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
-                <tr className="border-b">
-                  <th className="text-left py-3 px-4">Instance ID</th>
-                  <th className="text-left py-3 px-4">Customer</th>
-                  <th className="text-left py-3 px-4">Status</th>
-                  <th className="text-left py-3 px-4">URL</th>
-                  <th className="text-left py-3 px-4">Agents</th>
-                  <th className="text-left py-3 px-4">Created</th>
-                  <th className="text-left py-3 px-4">Actions</th>
+                <tr className="border-b border-gray-200 dark:border-gray-700">
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Instance ID</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Customer</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Status</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">URL</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Agents</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Created</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {instances?.map((instance) => (
-                  <tr key={instance.id} className="border-b hover:bg-gray-50">
+                  <tr key={instance.id} className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800">
                     <td className="py-3 px-4">
-                      <div className="font-mono text-sm">
+                      <div className="font-mono text-sm text-gray-900 dark:text-gray-100">
                         {instance.instance_id}
                       </div>
                     </td>
                     <td className="py-3 px-4">
                       <div>
-                        <div className="font-medium">
-                          {instance.accounts?.email}
+                        <div className="font-medium text-gray-900 dark:text-gray-100">
+                          {instance.accounts?.email || 'No email'}
                         </div>
-                        <div className="text-sm text-gray-500">
-                          {instance.accounts?.full_name}
+                        <div className="text-sm text-gray-500 dark:text-gray-400">
+                          {instance.accounts?.full_name || '-'}
                         </div>
                       </div>
                     </td>
                     <td className="py-3 px-4">
                       <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                        instance.status === 'running' ? 'bg-green-100 text-green-800' :
-                        instance.status === 'stopped' ? 'bg-gray-100 text-gray-800' :
-                        instance.status === 'error' ? 'bg-red-100 text-red-800' :
-                        instance.status === 'provisioning' ? 'bg-blue-100 text-blue-800' :
-                        instance.status === 'deprovisioned' ? 'bg-gray-100 text-gray-800' :
-                        'bg-yellow-100 text-yellow-800'
+                        instance.status === 'running' ? 'bg-green-100 dark:bg-green-900/20 text-green-800 dark:text-green-400' :
+                        instance.status === 'stopped' ? 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-400' :
+                        instance.status === 'error' ? 'bg-red-100 dark:bg-red-900/20 text-red-800 dark:text-red-400' :
+                        instance.status === 'provisioning' ? 'bg-blue-100 dark:bg-blue-900/20 text-blue-800 dark:text-blue-400' :
+                        instance.status === 'deprovisioned' ? 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-400' :
+                        'bg-yellow-100 dark:bg-yellow-900/20 text-yellow-800 dark:text-yellow-400'
                       }`}>
                         {instance.status}
                       </span>
@@ -147,20 +147,20 @@ export default function InstancesPage() {
                           href={instance.instance_url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-blue-600 hover:text-blue-900 text-sm"
+                          className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 text-sm"
                         >
                           {instance.instance_url.replace('https://', '')}
                         </a>
                       ) : (
-                        <span className="text-gray-400">-</span>
+                        <span className="text-gray-400 dark:text-gray-500">-</span>
                       )}
                     </td>
                     <td className="py-3 px-4">
-                      <span className="text-sm">
+                      <span className="text-sm text-gray-900 dark:text-gray-100">
                         {instance.agent_count || 0}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-sm text-gray-500">
+                    <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">
                       {new Date(instance.created_at).toLocaleDateString()}
                     </td>
                     <td className="py-3 px-4">

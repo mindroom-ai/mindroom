@@ -2,6 +2,8 @@
 
 import { useState } from 'react'
 import { apiCall } from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Play, Square, RotateCw, Trash2, Rocket } from 'lucide-react'
 
 interface InstanceActionsProps {
   instanceId: string
@@ -38,50 +40,64 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
   }
 
   return (
-    <div className="flex gap-1">
+    <div className="flex gap-2">
       {(currentStatus === 'deprovisioned' || currentStatus === 'error') && (
-        <button
-          className="text-green-600 hover:underline text-sm"
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-green-600 dark:text-green-400 hover:text-green-700 dark:hover:text-green-300"
           onClick={() => performAction('provision')}
           disabled={loading !== null}
         >
-          {loading === 'provision' ? '...' : 'Provision'}
-        </button>
+          <Rocket className="w-3 h-3 mr-1" />
+          {loading === 'provision' ? 'Provisioning...' : 'Provision'}
+        </Button>
       )}
 
       {currentStatus === 'stopped' && (
-        <button
-          className="text-green-600 hover:underline text-sm"
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-green-600 dark:text-green-400 hover:text-green-700 dark:hover:text-green-300"
           onClick={() => performAction('start')}
           disabled={loading !== null}
         >
-          {loading === 'start' ? '...' : 'Start'}
-        </button>
+          <Play className="w-3 h-3 mr-1" />
+          {loading === 'start' ? 'Starting...' : 'Start'}
+        </Button>
       )}
 
       {currentStatus === 'running' && (
-        <button
-          className="text-yellow-600 hover:underline text-sm"
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-yellow-600 dark:text-yellow-400 hover:text-yellow-700 dark:hover:text-yellow-300"
           onClick={() => performAction('stop')}
           disabled={loading !== null}
         >
-          {loading === 'stop' ? '...' : 'Stop'}
-        </button>
+          <Square className="w-3 h-3 mr-1" />
+          {loading === 'stop' ? 'Stopping...' : 'Stop'}
+        </Button>
       )}
 
       {currentStatus === 'running' && (
-        <button
-          className="text-blue-600 hover:underline text-sm"
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
           onClick={() => performAction('restart')}
           disabled={loading !== null}
         >
-          {loading === 'restart' ? '...' : 'Restart'}
-        </button>
+          <RotateCw className="w-3 h-3 mr-1" />
+          {loading === 'restart' ? 'Restarting...' : 'Restart'}
+        </Button>
       )}
 
       {currentStatus !== 'deprovisioned' && (
-        <button
-          className="text-red-600 hover:underline text-sm"
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300"
           onClick={() => {
             if (confirm(`Uninstall instance ${instanceId}?`)) {
               performAction('uninstall')
@@ -89,8 +105,9 @@ export function InstanceActions({ instanceId, currentStatus }: InstanceActionsPr
           }}
           disabled={loading !== null}
         >
-          {loading === 'uninstall' ? '...' : 'Uninstall'}
-        </button>
+          <Trash2 className="w-3 h-3 mr-1" />
+          {loading === 'uninstall' ? 'Uninstalling...' : 'Uninstall'}
+        </Button>
       )}
     </div>
   )

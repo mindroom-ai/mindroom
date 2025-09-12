@@ -55,42 +55,42 @@ export default function AccountsPage() {
     <div>
       <div className="mb-8 flex justify-between items-center">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Accounts</h1>
-          <p className="text-gray-600 mt-2">Manage user accounts and permissions</p>
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Accounts</h1>
+          <p className="text-gray-600 dark:text-gray-400 mt-2">Manage user accounts and permissions</p>
         </div>
         <Button>Export</Button>
       </div>
 
-      <Card>
+      <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
         <CardHeader>
-          <CardTitle>All Accounts</CardTitle>
+          <CardTitle className="text-gray-900 dark:text-gray-100">All Accounts</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
-                <tr className="border-b">
-                  <th className="text-left py-3 px-4">Email</th>
-                  <th className="text-left py-3 px-4">Full Name</th>
-                  <th className="text-left py-3 px-4">Company</th>
-                  <th className="text-left py-3 px-4">Status</th>
-                  <th className="text-left py-3 px-4">Admin</th>
-                  <th className="text-left py-3 px-4">Created</th>
-                  <th className="text-left py-3 px-4">Actions</th>
+                <tr className="border-b border-gray-200 dark:border-gray-700">
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Email</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Full Name</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Company</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Status</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Admin</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Created</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {accounts?.map((account) => (
-                  <tr key={account.id} className="border-b hover:bg-gray-50">
+                  <tr key={account.id} className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800">
                     <td className="py-3 px-4">
-                      <div className="font-medium">{account.email}</div>
+                      <div className="font-medium text-gray-900 dark:text-gray-100">{account.email}</div>
                     </td>
-                    <td className="py-3 px-4">{account.full_name || '-'}</td>
-                    <td className="py-3 px-4">{account.company_name || '-'}</td>
+                    <td className="py-3 px-4 text-gray-700 dark:text-gray-300">{account.full_name || '-'}</td>
+                    <td className="py-3 px-4 text-gray-700 dark:text-gray-300">{account.company_name || '-'}</td>
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2">
                         <select
-                          className="text-sm border border-gray-300 rounded px-2 py-1 bg-white"
+                          className="text-sm border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
                           value={editStatuses[account.id] ?? account.status}
                           onChange={(e) => setEditStatuses((s) => ({ ...s, [account.id]: e.target.value }))}
                         >
@@ -100,7 +100,7 @@ export default function AccountsPage() {
                           <option value="pending_verification">pending_verification</option>
                         </select>
                         <button
-                          className="text-blue-600 hover:text-blue-900 text-sm disabled:text-gray-400"
+                          className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 text-sm disabled:text-gray-400"
                           disabled={updatingId === account.id}
                           onClick={async () => {
                             const next = editStatuses[account.id] ?? account.status
@@ -122,18 +122,23 @@ export default function AccountsPage() {
                     </td>
                     <td className="py-3 px-4">
                       {account.is_admin ? (
-                        <span className="text-green-600">✓</span>
+                        <span className="text-green-600 dark:text-green-400">✓</span>
                       ) : (
-                        <span className="text-gray-400">-</span>
+                        <span className="text-gray-400 dark:text-gray-500">-</span>
                       )}
                     </td>
-                    <td className="py-3 px-4 text-sm text-gray-500">
+                    <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">
                       {new Date(account.created_at).toLocaleDateString()}
                     </td>
                     <td className="py-3 px-4">
-                      <Link href={`/admin/accounts/${account.id}`} className="text-blue-600 hover:text-blue-900 text-sm">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+                        onClick={() => window.location.href = `/admin/accounts/${account.id}`}
+                      >
                         View
-                      </Link>
+                      </Button>
                     </td>
                   </tr>
                 ))}
