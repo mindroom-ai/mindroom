@@ -13,6 +13,16 @@ from fastapi import APIRouter, Header, HTTPException, Request
 router = APIRouter()
 
 
+def _timestamp_to_iso(timestamp: float) -> str:
+    """Convert Unix timestamp to ISO format string."""
+    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
+
+
+def _maybe_timestamp_to_iso(timestamp: float | None) -> str | None:
+    """Convert Unix timestamp to ISO format string, or None if timestamp is None."""
+    return _timestamp_to_iso(timestamp) if timestamp is not None else None
+
+
 def _get_tier_from_price(price: dict) -> str:
     """Extract tier from price metadata.
 
@@ -82,23 +92,15 @@ def handle_subscription_created(subscription: dict) -> None:
         "status": subscription["status"],
         "max_agents": limits.get("max_agents", 1),
         "max_messages_per_day": limits.get("max_messages_per_day", 100),
-        "trial_ends_at": datetime.fromtimestamp(subscription["trial_end"], tz=UTC).isoformat()
-        if subscription.get("trial_end")
-        else None,
+        "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
         "updated_at": datetime.now(UTC).isoformat(),
     }
 
     # Add period dates if available
-    if subscription.get("current_period_start"):
-        subscription_data["current_period_start"] = datetime.fromtimestamp(
-            subscription["current_period_start"],
-            tz=UTC,
-        ).isoformat()
-    if subscription.get("current_period_end"):
-        subscription_data["current_period_end"] = datetime.fromtimestamp(
-            subscription["current_period_end"],
-            tz=UTC,
-        ).isoformat()
+    if start := subscription.get("current_period_start"):
+        subscription_data["current_period_start"] = _timestamp_to_iso(start)
+    if end := subscription.get("current_period_end"):
+        subscription_data["current_period_end"] = _timestamp_to_iso(end)
 
     # Check if subscription already exists for this account
     existing = sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
@@ -153,26 +155,16 @@ def handle_subscription_updated(subscription: dict) -> None:
         "status": subscription["status"],
         "max_agents": limits.get("max_agents", 1),
         "max_messages_per_day": limits.get("max_messages_per_day", 100),
-        "trial_ends_at": datetime.fromtimestamp(subscription["trial_end"], tz=UTC).isoformat()
-        if subscription.get("trial_end")
-        else None,
-        "cancelled_at": datetime.fromtimestamp(subscription["canceled_at"], tz=UTC).isoformat()
-        if subscription.get("canceled_at")
-        else None,
+        "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
+        "cancelled_at": _maybe_timestamp_to_iso(subscription.get("canceled_at")),
         "updated_at": datetime.now(UTC).isoformat(),
     }
 
     # Add period dates if available
-    if subscription.get("current_period_start"):
-        subscription_data["current_period_start"] = datetime.fromtimestamp(
-            subscription["current_period_start"],
-            tz=UTC,
-        ).isoformat()
-    if subscription.get("current_period_end"):
-        subscription_data["current_period_end"] = datetime.fromtimestamp(
-            subscription["current_period_end"],
-            tz=UTC,
-        ).isoformat()
+    if start := subscription.get("current_period_start"):
+        subscription_data["current_period_start"] = _timestamp_to_iso(start)
+    if end := subscription.get("current_period_end"):
+        subscription_data["current_period_end"] = _timestamp_to_iso(end)
 
     # Update subscription
     sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
@@ -225,7 +217,7 @@ def handle_payment_succeeded(invoice: dict) -> None:
                 "currency": invoice["currency"],
                 "billing_reason": invoice.get("billing_reason", "subscription_cycle"),
             },
-            "timestamp": datetime.fromtimestamp(invoice["created"], tz=UTC).isoformat(),
+            "timestamp": _timestamp_to_iso(invoice["created"]),
         },
     ).execute()
 
