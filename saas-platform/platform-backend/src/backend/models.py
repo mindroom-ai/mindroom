@@ -39,7 +39,10 @@ class SubscriptionOut(BaseModel):
     status: Literal["active", "cancelled", "past_due", "trialing", "incomplete"]
     stripe_subscription_id: str | None = None
     stripe_customer_id: str | None = None
+    current_period_start: str | None = None
     current_period_end: str | None = None
+    trial_ends_at: str | None = None
+    cancelled_at: str | None = None
     max_agents: int
     max_messages_per_day: int
     max_storage_gb: int | None = None

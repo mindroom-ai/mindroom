@@ -63,8 +63,14 @@ export default function DashboardPage() {
     setupFreeTier()
   }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, instance, instanceLoading, setupAttempted, router])
 
-  // Only show loading if we're still loading auth OR if we have no data at all
-  if (authLoading || (instanceLoading && !instance && subscriptionLoading && !subscription)) {
+  // Only show loading if we're still loading auth AND have no cached data
+  // This prevents the flash of loading screen when navigating between pages
+  if (authLoading && !instance && !subscription) {
+    return <DashboardLoader />
+  }
+
+  // Also show loading if auth is done but we have no user and are still loading data
+  if (!authLoading && !user && (instanceLoading || subscriptionLoading)) {
     return <DashboardLoader />
   }
 
