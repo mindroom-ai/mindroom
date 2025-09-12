@@ -66,22 +66,61 @@ export default function BillingPage() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold dark:text-white">Billing & Subscription</h1>
 
+      {/* Cancellation Warning Banner */}
+      {subscription?.cancelled_at && subscription?.status !== 'cancelled' && (
+        <div className="bg-yellow-50 dark:bg-yellow-900/20 border-2 border-yellow-400 dark:border-yellow-600 rounded-lg p-4 mb-6">
+          <div className="flex items-start">
+            <div className="flex-shrink-0">
+              <svg className="h-6 w-6 text-yellow-600" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+            </div>
+            <div className="ml-3 flex-1">
+              <h3 className="text-sm font-bold text-yellow-800 dark:text-yellow-200">
+                SUBSCRIPTION ENDING SOON
+              </h3>
+              <div className="mt-2 text-sm text-yellow-700 dark:text-yellow-300">
+                <p>Your {tierInfo.name} subscription will end on <strong>{subscription?.trial_ends_at
+                  ? new Date(subscription.trial_ends_at).toLocaleDateString()
+                  : subscription?.current_period_end
+                  ? new Date(subscription.current_period_end).toLocaleDateString()
+                  : 'the end of your billing period'}</strong></p>
+                <p className="mt-1">After this date, your account will revert to the Free plan.</p>
+              </div>
+              <div className="mt-3">
+                <button
+                  onClick={openStripePortal}
+                  className="text-sm font-medium text-yellow-800 dark:text-yellow-200 hover:text-yellow-600 dark:hover:text-yellow-100"
+                >
+                  Reactivate subscription →
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Current Plan */}
       <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
         <div className="flex items-start justify-between">
           <div>
             <h2 className="text-xl font-bold mb-2 dark:text-white">Current Plan</h2>
             <div className="flex items-center gap-3 mb-4">
-              <span className={`px-3 py-1 rounded-full text-sm font-medium bg-orange-100 text-orange-700`}>
+              <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                subscription?.cancelled_at && subscription?.status !== 'cancelled'
+                  ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300'
+                  : 'bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-300'
+              }`}>
                 {tierInfo.name}
+                {subscription?.cancelled_at && subscription?.status !== 'cancelled' && ' (Ending)'}
               </span>
               <span className="text-2xl font-bold">{tierInfo.price}</span>
-              {subscription?.status === 'active' && (
+              {subscription?.status === 'active' && !subscription?.cancelled_at && (
                 <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700">
                   Active
                 </span>
               )}
-              {subscription?.status === 'trialing' && (
+              {subscription?.status === 'trialing' && !subscription?.cancelled_at && (
                 <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
                   Trial
                 </span>
@@ -94,11 +133,6 @@ export default function BillingPage() {
               {subscription?.status === 'cancelled' && (
                 <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700">
                   Cancelled
-                </span>
-              )}
-              {subscription?.cancelled_at && subscription?.status !== 'cancelled' && (
-                <span className="px-2 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-700">
-                  Cancelling
                 </span>
               )}
             </div>
@@ -164,25 +198,9 @@ export default function BillingPage() {
         </div>
 
         {/* Billing Period */}
-        {(subscription?.current_period_end || subscription?.trial_ends_at || subscription?.cancelled_at) && (
+        {(subscription?.current_period_end || subscription?.trial_ends_at) && !subscription?.cancelled_at && (
           <div className="mt-6 pt-6 border-t">
-            {subscription?.cancelled_at && subscription?.status !== 'cancelled' ? (
-              <div className="space-y-2">
-                <p className="text-sm text-yellow-600 dark:text-yellow-400 font-medium">
-                  ⚠️ Subscription will end on:{' '}
-                  <span className="font-bold">
-                    {subscription?.trial_ends_at
-                      ? new Date(subscription.trial_ends_at).toLocaleDateString()
-                      : subscription?.current_period_end
-                      ? new Date(subscription.current_period_end).toLocaleDateString()
-                      : 'end of billing period'}
-                  </span>
-                </p>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  You can reactivate anytime before this date through the Manage Subscription portal.
-                </p>
-              </div>
-            ) : subscription?.status === 'trialing' && subscription?.trial_ends_at ? (
+            {subscription?.status === 'trialing' && subscription?.trial_ends_at ? (
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 Trial ends: <span className="font-medium">{new Date(subscription.trial_ends_at).toLocaleDateString()}</span>
                 {' '}({Math.ceil((new Date(subscription.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24))} days remaining)
