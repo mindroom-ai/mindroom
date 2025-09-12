@@ -183,9 +183,16 @@ async def provision_user_instance(
             )
 
         # Otherwise return existing instance metadata
+        status = existing.get("status", "unknown")
+        message = "Instance is already provisioning" if status == "provisioning" else "Instance already exists"
+        logger.info(
+            "Instance already exists for user %s with status %s, returning existing metadata",
+            account_id,
+            status,
+        )
         return {
             "success": True,
-            "message": "Instance already exists",
+            "message": message,
             "customer_id": existing.get("instance_id") or existing.get("subdomain") or "",
             "frontend_url": existing.get("frontend_url") or existing.get("instance_url"),
             "api_url": existing.get("backend_url") or existing.get("api_url"),
