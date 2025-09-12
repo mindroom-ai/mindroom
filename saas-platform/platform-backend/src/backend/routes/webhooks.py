@@ -250,7 +250,7 @@ def handle_payment_failed(invoice: dict) -> None:
 @router.post("/webhooks/stripe")
 async def stripe_webhook(  # noqa: C901
     request: Request,
-    stripe_signature: Annotated[str | None, Header()] = None,
+    stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,
 ) -> dict[str, Any]:
     """Handle incoming Stripe webhook events."""
     if not stripe_signature:
