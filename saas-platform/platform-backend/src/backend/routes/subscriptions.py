@@ -36,6 +36,7 @@ async def get_user_subscription(user: Annotated[dict, Depends(verify_user)]) -> 
             "status": "active",
             "max_agents": 1,
             "max_messages_per_day": 100,
+            "max_storage_gb": 1,  # Free tier has 1GB storage
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }
