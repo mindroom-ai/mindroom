@@ -98,10 +98,12 @@ async def list_user_instances(
     start = time.perf_counter()
     sb = ensure_supabase()
     account_id = user["account_id"]
+
+    db_start = time.perf_counter()
     result = sb.table("instances").select("*").eq("account_id", account_id).execute()
+    db_time = (time.perf_counter() - db_start) * 1000
 
     instances = result.data or []
-    db_time = (time.perf_counter() - start) * 1000
 
     # Check if any instance needs a background sync (older than 30 seconds)
     stale_threshold = datetime.now(UTC) - timedelta(seconds=30)

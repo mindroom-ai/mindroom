@@ -43,11 +43,12 @@ async def verify_user(authorization: str = Header(None)) -> dict:
     token = authorization.replace("Bearer ", "")
 
     # Check cache first
-    start = time.perf_counter()
     if token in _auth_cache:
-        logger.info("Auth cache hit: %.2fms", (time.perf_counter() - start) * 1000)
+        logger.info("Auth cache hit (instant)")
         return _auth_cache[token]
 
+    # Start timing for database lookup
+    start = time.perf_counter()
     sb = ensure_supabase()
     ac = _ensure_auth_client()
 
