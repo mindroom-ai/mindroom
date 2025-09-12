@@ -52,8 +52,13 @@ def _get_billing_cycle_from_price(price: dict) -> str:
     raise ValueError(msg)
 
 
-def handle_subscription_created(subscription: dict) -> None:
-    """Handle Stripe subscription creation events."""
+def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
+    """Handle Stripe subscription creation events.
+
+    Returns:
+        Tuple of (success, account_id) where account_id is used for webhook event tracking
+
+    """
     logger.info("Subscription created: %s", subscription["id"])
     sb = ensure_supabase()
 
@@ -63,7 +68,7 @@ def handle_subscription_created(subscription: dict) -> None:
 
     if not account_result.data:
         logger.error("No account found for customer %s", customer_id)
-        return
+        return False, None
 
     account_id = account_result.data["id"]
 
@@ -114,10 +119,16 @@ def handle_subscription_created(subscription: dict) -> None:
         sb.table("subscriptions").insert(subscription_data).execute()
 
     logger.info("Subscription created for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
+    return True, account_id
 
 
-def handle_subscription_updated(subscription: dict) -> None:
-    """Handle Stripe subscription update events."""
+def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
+    """Handle Stripe subscription update events.
+
+    Returns:
+        Tuple of (success, account_id) where account_id is used for webhook event tracking
+
+    """
     logger.info("Subscription updated: %s", subscription["id"])
     sb = ensure_supabase()
 
@@ -127,7 +138,7 @@ def handle_subscription_updated(subscription: dict) -> None:
 
     if not account_result.data:
         logger.error("No account found for customer %s", customer_id)
-        return
+        return False, None
 
     account_id = account_result.data["id"]
 
@@ -167,34 +178,65 @@ def handle_subscription_updated(subscription: dict) -> None:
     if end := subscription.get("current_period_end"):
         subscription_data["current_period_end"] = _timestamp_to_iso(end)
 
-    # Update subscription
+    # Update subscription with tenant validation
     sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
 
     logger.info("Subscription updated for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
+    return True, account_id
 
 
-def handle_subscription_deleted(subscription: dict) -> None:
-    """Handle Stripe subscription deletion events."""
+def handle_subscription_deleted(subscription: dict) -> tuple[bool, str | None]:
+    """Handle Stripe subscription deletion events.
+
+    Returns:
+        Tuple of (success, account_id) where account_id is used for webhook event tracking
+
+    """
     logger.info("Subscription deleted: %s", subscription["id"])
     sb = ensure_supabase()
 
-    # Update subscription status to cancelled
+    # First verify the subscription exists and get account_id for audit trail
+    sub_result = (
+        sb.table("subscriptions")
+        .select("account_id")
+        .eq("stripe_subscription_id", subscription["id"])
+        .single()
+        .execute()
+    )
+
+    if not sub_result.data:
+        logger.warning(f"Webhook received for unknown subscription: {subscription['id']}")
+        return False, None
+
+    account_id = sub_result.data["account_id"]
+
+    # Update subscription status to cancelled with tenant validation
     sb.table("subscriptions").update(
         {
             "status": "cancelled",
             "cancelled_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         },
-    ).eq("stripe_subscription_id", subscription["id"]).execute()
+    ).eq("stripe_subscription_id", subscription["id"]).eq(
+        "account_id",
+        account_id,  # Double-check account ownership
+    ).execute()
+
+    return True, account_id
 
 
-def handle_payment_succeeded(invoice: dict) -> None:
-    """Handle successful Stripe payment events."""
+def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
+    """Handle successful Stripe payment events.
+
+    Returns:
+        Tuple of (success, account_id) where account_id is used for webhook event tracking
+
+    """
     logger.info("Payment succeeded: %s", invoice["id"])
 
     # Skip if no subscription (one-time payments)
     if not invoice.get("subscription"):
-        return
+        return False, None
 
     sb = ensure_supabase()
 
@@ -203,13 +245,43 @@ def handle_payment_succeeded(invoice: dict) -> None:
     account_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
 
     if not account_result.data:
-        logger.error("No account found for customer %s", customer_id)
-        return
+        logger.warning(f"No account found for customer_id: {customer_id} in payment")
+        # Try to get account_id from subscription if available
+        if invoice.get("subscription"):
+            sub_result = (
+                sb.table("subscriptions")
+                .select("account_id")
+                .eq("stripe_subscription_id", invoice["subscription"])
+                .single()
+                .execute()
+            )
+            if sub_result.data:
+                account_id = sub_result.data["account_id"]
+            else:
+                return False, None
+        else:
+            return False, None
+    else:
+        account_id = account_result.data["id"]
 
-    # Record the payment
+    # Record the payment in both tables for compatibility
+    # First, record in payments table with tenant isolation
+    sb.table("payments").insert(
+        {
+            "invoice_id": invoice["id"],
+            "subscription_id": invoice["subscription"],
+            "customer_id": customer_id,
+            "account_id": account_id,  # Add account_id for tenant isolation
+            "amount": invoice["amount_paid"] / 100,
+            "currency": invoice["currency"],
+            "status": "succeeded",
+        },
+    ).execute()
+
+    # Also record in usage table for metrics
     sb.table("usage").insert(
         {
-            "account_id": account_result.data["id"],
+            "account_id": account_id,
             "metric_type": "payment",
             "metric_value": invoice["amount_paid"] / 100,  # Convert from cents
             "metadata": {
@@ -222,16 +294,38 @@ def handle_payment_succeeded(invoice: dict) -> None:
         },
     ).execute()
 
+    return True, account_id
 
-def handle_payment_failed(invoice: dict) -> None:
-    """Handle failed Stripe payment events."""
+
+def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
+    """Handle failed Stripe payment events.
+
+    Returns:
+        Tuple of (success, account_id) where account_id is used for webhook event tracking
+
+    """
     logger.info("Payment failed: %s", invoice["id"])
 
     # Skip if no subscription
     if not invoice.get("subscription"):
-        return
+        return False, None
 
     sb = ensure_supabase()
+
+    # Get account_id for tenant association
+    sub_result = (
+        sb.table("subscriptions")
+        .select("account_id")
+        .eq("stripe_subscription_id", invoice["subscription"])
+        .single()
+        .execute()
+    )
+
+    if not sub_result.data:
+        logger.warning(f"No subscription found for payment failure: {invoice['subscription']}")
+        return False, None
+
+    account_id = sub_result.data["account_id"]
 
     # Update subscription status to past_due
     sb.table("subscriptions").update(
@@ -239,11 +333,16 @@ def handle_payment_failed(invoice: dict) -> None:
             "status": "past_due",
             "updated_at": datetime.now(UTC).isoformat(),
         },
-    ).eq("stripe_subscription_id", invoice["subscription"]).execute()
+    ).eq("stripe_subscription_id", invoice["subscription"]).eq(
+        "account_id",
+        account_id,  # Tenant validation
+    ).execute()
+
+    return True, account_id
 
 
 @router.post("/webhooks/stripe", response_model=WebhookResponse)
-async def stripe_webhook(  # noqa: C901
+async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
     request: Request,
     stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,
 ) -> dict[str, Any]:
@@ -259,30 +358,80 @@ async def stripe_webhook(  # noqa: C901
         logger.exception("Webhook error")
         raise HTTPException(status_code=400, detail="Invalid signature") from e
 
+    # Store the webhook event with tenant association
+    sb = ensure_supabase()
+    account_id = None
+    error_msg = None
+
     try:
         # Subscription lifecycle events
         if event.type == "customer.subscription.created":
-            handle_subscription_created(event.data.object)
+            success, account_id = handle_subscription_created(event.data.object)
+            if not success:
+                error_msg = "Failed to process subscription creation"
         elif event.type == "customer.subscription.updated":
-            handle_subscription_updated(event.data.object)
+            success, account_id = handle_subscription_updated(event.data.object)
+            if not success:
+                error_msg = "Failed to process subscription update"
         elif event.type == "customer.subscription.deleted":
-            handle_subscription_deleted(event.data.object)
+            success, account_id = handle_subscription_deleted(event.data.object)
+            if not success:
+                error_msg = "Failed to process subscription deletion"
 
         # Payment events
         elif event.type == "invoice.payment_succeeded":
-            handle_payment_succeeded(event.data.object)
+            success, account_id = handle_payment_succeeded(event.data.object)
+            if not success:
+                error_msg = "Failed to process payment"
         elif event.type == "invoice.payment_failed":
-            handle_payment_failed(event.data.object)
+            success, account_id = handle_payment_failed(event.data.object)
+            if not success:
+                error_msg = "Failed to process payment failure"
 
         # Trial events
         elif event.type == "customer.subscription.trial_will_end":
             # Log for now, could send email notifications later
             logger.info("Trial ending soon for subscription: %s", event.data.object["id"])
+            # Try to get account_id for audit
+            if hasattr(event.data.object, "customer"):
+                customer_id = event.data.object.customer
+                acc_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+                if acc_result.data:
+                    account_id = acc_result.data["id"]
 
         else:
             logger.info("Unhandled event type: %s", event.type)
+            # For unhandled events, try to extract account_id from common fields
+            if hasattr(event.data.object, "customer"):
+                customer_id = event.data.object.customer
+                acc_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+                if acc_result.data:
+                    account_id = acc_result.data["id"]
     except Exception as e:
         logger.exception("Error processing webhook")
-        return {"received": True, "error": str(e)}
-    else:
-        return {"received": True}
+        error_msg = str(e)
+
+    # Record the webhook event with tenant association
+    try:
+        webhook_record = {
+            "stripe_event_id": event.id,
+            "event_type": event.type,
+            "payload": event.data.object,
+            "processed_at": datetime.now(UTC).isoformat(),
+        }
+
+        # Add account_id if we could determine it
+        if account_id:
+            webhook_record["account_id"] = account_id
+
+        # Add error if there was one
+        if error_msg:
+            webhook_record["error"] = error_msg
+
+        sb.table("webhook_events").insert(webhook_record).execute()
+    except Exception:
+        logger.exception("Failed to record webhook event")
+
+    if error_msg:
+        return {"received": True, "error": error_msg}
+    return {"received": True}
