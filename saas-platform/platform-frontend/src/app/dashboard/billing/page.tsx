@@ -2,14 +2,57 @@
 
 import { useState, useEffect } from 'react'
 import { useSubscription } from '@/hooks/useSubscription'
-import { createPortalSession } from '@/lib/api'
-import { PRICING_PLANS, formatLimit, type PlanId } from '@/lib/pricing-config'
+import { createPortalSession, getPricingConfig } from '@/lib/api'
+import { PLAN_GRADIENTS, type PlanId } from '@/lib/pricing-config'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, TrendingUp, Check, RefreshCw } from 'lucide-react'
+
+interface PricingPlan {
+  name: string
+  price_monthly: string
+  price_yearly: string
+  price_model?: string
+  description: string
+  features: string[]
+  recommended?: boolean
+  limits?: {
+    max_agents: number | string
+    max_messages_per_day: number | string
+    storage_gb: number | string
+  }
+}
+
+interface PricingConfig {
+  plans: Record<string, PricingPlan>
+  discounts?: {
+    annual_percentage: number
+  }
+}
+
+function formatLimit(value: number | string | undefined): string {
+  if (!value) return 'N/A'
+  if (value === 'unlimited' || value === -1) return 'Unlimited'
+  if (typeof value === 'number') {
+    if (value >= 1000000) return `${value / 1000000}M`
+    if (value >= 1000) return `${value / 1000}K`
+    return value.toString()
+  }
+  return value
+}
 
 export default function BillingPage() {
   const { subscription, loading, refresh } = useSubscription()
   const [redirecting, setRedirecting] = useState(false)
+  const [pricingConfig, setPricingConfig] = useState<PricingConfig | null>(null)
+  const [pricingLoading, setPricingLoading] = useState(true)
+
+  // Fetch pricing configuration
+  useEffect(() => {
+    getPricingConfig()
+      .then(setPricingConfig)
+      .catch(console.error)
+      .finally(() => setPricingLoading(false))
+  }, [])
 
   // Auto-refresh when returning from Stripe portal or checkout
   useEffect(() => {
@@ -37,16 +80,26 @@ export default function BillingPage() {
     }
   }
 
-  if (loading) {
+  if (loading || pricingLoading) {
     return <DashboardLoader message="Loading billing information..." />
   }
 
+  if (!pricingConfig) {
+    return (
+      <div className="flex items-center justify-center h-96">
+        <div className="text-red-500">Failed to load pricing configuration</div>
+      </div>
+    )
+  }
+
   const currentTier = (subscription?.tier || 'free') as PlanId
-  const currentPlan = PRICING_PLANS[currentTier]
-  const features = currentPlan.features
+  const currentPlan = pricingConfig.plans[currentTier]
+  const features = currentPlan?.features || []
   const tierInfo = {
-    name: currentPlan.name,
-    price: currentPlan.price + currentPlan.period,
+    name: currentPlan?.name || 'Free',
+    price: currentPlan ?
+      `${currentPlan.price_monthly}${currentPlan.price_model === 'per_user' ? '/user/month' : '/month'}` :
+      '$0/month',
   }
 
   return (
@@ -229,14 +282,14 @@ export default function BillingPage() {
               <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
               <div>
                 <p className="text-sm text-gray-600 dark:text-gray-400">AI Agents</p>
-                <p className="font-semibold">{formatLimit(currentPlan.limits.maxAgents)}</p>
+                <p className="font-semibold">{formatLimit(currentPlan?.limits?.max_agents)}</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
               <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
               <div>
                 <p className="text-sm text-gray-600 dark:text-gray-400">Messages/Day</p>
-                <p className="font-semibold">{formatLimit(currentPlan.limits.maxMessagesPerDay)}</p>
+                <p className="font-semibold">{formatLimit(currentPlan?.limits?.max_messages_per_day)}</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -244,7 +297,7 @@ export default function BillingPage() {
               <div>
                 <p className="text-sm text-gray-600 dark:text-gray-400">Storage</p>
                 <p className="font-semibold">
-                  {currentPlan.limits.storageGb === 'unlimited' ? 'Unlimited' : `${currentPlan.limits.storageGb}GB`}
+                  {formatLimit(currentPlan?.limits?.storage_gb) === 'Unlimited' ? 'Unlimited' : `${formatLimit(currentPlan?.limits?.storage_gb)}GB`}
                 </p>
               </div>
             </div>
@@ -287,15 +340,15 @@ export default function BillingPage() {
       <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-sm">
         <h2 className="text-xl font-bold mb-4 dark:text-white">Available Plans</h2>
         <div className="grid md:grid-cols-3 gap-4">
-          {Object.values(PRICING_PLANS)
-            .filter(plan => plan.id !== 'free' && plan.id !== 'enterprise')
-            .map(plan => {
-              const isCurrentPlan = plan.id === currentTier
-              const isDowngrade = ['starter', 'professional'].indexOf(plan.id) < ['starter', 'professional'].indexOf(currentTier)
+          {Object.entries(pricingConfig.plans)
+            .filter(([key]) => key !== 'free' && key !== 'enterprise')
+            .map(([key, plan]) => {
+              const isCurrentPlan = key === currentTier
+              const isDowngrade = ['starter', 'professional'].indexOf(key) < ['starter', 'professional'].indexOf(currentTier)
 
               return (
                 <div
-                  key={plan.id}
+                  key={key}
                   className={`border rounded-lg p-4 ${
                     isCurrentPlan
                       ? 'border-orange-500 bg-orange-50 dark:bg-orange-900/20'
@@ -311,8 +364,10 @@ export default function BillingPage() {
                     )}
                   </div>
                   <p className="text-2xl font-bold mb-2">
-                    {plan.price}
-                    <span className="text-sm text-gray-500 dark:text-gray-400">{plan.period}</span>
+                    {plan.price_monthly}
+                    <span className="text-sm text-gray-500 dark:text-gray-400">
+                      {plan.price_model === 'per_user' ? '/user/month' : '/month'}
+                    </span>
                   </p>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">{plan.description}</p>
                   {!isCurrentPlan && !isDowngrade && (
