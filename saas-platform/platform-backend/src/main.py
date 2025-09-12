@@ -27,6 +27,15 @@ from fastapi.middleware.cors import CORSMiddleware
 # FastAPI app
 app = FastAPI(title="MindRoom Backend")
 
+# IMPORTANT: Middleware order is reversed in FastAPI!
+# The last middleware added runs first.
+# We want: Request -> AuditLogging -> CORS -> Routes
+# So we add them in reverse order:
+
+# Audit logging middleware (added first, runs second)
+app.add_middleware(AuditLoggingMiddleware)
+
+# CORS middleware (added last, runs first - ensures CORS headers on ALL responses)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -35,9 +44,6 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
-
-# Audit logging middleware
-app.add_middleware(AuditLoggingMiddleware)
 
 # Include routers
 app.include_router(health.router)
