@@ -21,4 +21,10 @@ async def health_check() -> dict[str, Any]:
     except Exception:
         supabase_ok = False
 
-    return {"status": "healthy", "supabase": supabase_ok, "stripe": bool(stripe.api_key)}
+    overall_status = "ok" if (supabase_ok and bool(stripe.api_key)) else "degraded"
+
+    return {
+        "status": overall_status,
+        "supabase": supabase_ok,
+        "stripe": bool(stripe.api_key),
+    }

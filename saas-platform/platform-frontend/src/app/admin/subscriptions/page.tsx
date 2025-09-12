@@ -65,77 +65,84 @@ export default function SubscriptionsPage() {
     <div>
       <div className="mb-8 flex justify-between items-center">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Subscriptions</h1>
-          <p className="text-gray-600 mt-2">Manage customer subscriptions and billing</p>
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Subscriptions</h1>
+          <p className="text-gray-600 dark:text-gray-400 mt-2">Manage customer subscriptions and billing</p>
         </div>
-        <Button>Export</Button>
+        <Button onClick={() => alert('Export functionality coming soon')}>Export</Button>
       </div>
 
-      <Card>
+      <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
         <CardHeader>
-          <CardTitle>All Subscriptions</CardTitle>
+          <CardTitle className="text-gray-900 dark:text-gray-100">All Subscriptions</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
-                <tr className="border-b">
-                  <th className="text-left py-3 px-4">Customer</th>
-                  <th className="text-left py-3 px-4">Plan</th>
-                  <th className="text-left py-3 px-4">Status</th>
-                  <th className="text-left py-3 px-4">Price</th>
-                  <th className="text-left py-3 px-4">Started</th>
-                  <th className="text-left py-3 px-4">Next Bill</th>
-                  <th className="text-left py-3 px-4">Actions</th>
+                <tr className="border-b border-gray-200 dark:border-gray-700">
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Customer</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Plan</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Status</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Price</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Started</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Next Bill</th>
+                  <th className="text-left py-3 px-4 text-gray-700 dark:text-gray-300">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {subscriptions?.map((subscription) => (
-                  <tr key={subscription.id} className="border-b hover:bg-gray-50">
+                  <tr key={subscription.id} className="border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800">
                     <td className="py-3 px-4">
                       <div>
-                        <div className="font-medium">
-                          {subscription.accounts?.email}
+                        <div className="font-medium text-gray-900 dark:text-gray-100">
+                          {subscription.accounts?.email || 'No email'}
                         </div>
-                        <div className="text-sm text-gray-500">
-                          {subscription.accounts?.full_name}
+                        <div className="text-sm text-gray-500 dark:text-gray-400">
+                          {subscription.accounts?.full_name || '-'}
                         </div>
                       </div>
                     </td>
                     <td className="py-3 px-4">
-                      <div className="font-medium capitalize">
-                        {subscription.price_tier}
+                      <div className="font-medium capitalize text-gray-900 dark:text-gray-100">
+                        {subscription.price_tier || subscription.tier || 'Unknown'}
                       </div>
                     </td>
                     <td className="py-3 px-4">
                       <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                        subscription.status === 'active' ? 'bg-green-100 text-green-800' :
-                        subscription.status === 'canceled' ? 'bg-red-100 text-red-800' :
-                        subscription.status === 'past_due' ? 'bg-yellow-100 text-yellow-800' :
-                        'bg-gray-100 text-gray-800'
+                        subscription.status === 'active' ? 'bg-green-100 dark:bg-green-900/20 text-green-800 dark:text-green-400' :
+                        subscription.status === 'canceled' ? 'bg-red-100 dark:bg-red-900/20 text-red-800 dark:text-red-400' :
+                        subscription.status === 'past_due' ? 'bg-yellow-100 dark:bg-yellow-900/20 text-yellow-800 dark:text-yellow-400' :
+                        'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-400'
                       }`}>
                         {subscription.status}
                       </span>
                     </td>
                     <td className="py-3 px-4">
-                      {formatPrice(subscription.price || 0)}
-                      <span className="text-gray-500 text-sm">
-                        /{subscription.billing_period}
+                      <span className="text-gray-900 dark:text-gray-100">
+                        {formatPrice(subscription.price || 0)}
+                      </span>
+                      <span className="text-gray-500 dark:text-gray-400 text-sm">
+                        /{subscription.billing_period || 'month'}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-sm text-gray-500">
+                    <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">
                       {new Date(subscription.created_at).toLocaleDateString()}
                     </td>
-                    <td className="py-3 px-4 text-sm text-gray-500">
+                    <td className="py-3 px-4 text-sm text-gray-500 dark:text-gray-400">
                       {subscription.current_period_end
                         ? new Date(subscription.current_period_end).toLocaleDateString()
                         : '-'
                       }
                     </td>
                     <td className="py-3 px-4">
-                      <button className="text-blue-600 hover:text-blue-900 text-sm">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
+                        onClick={() => alert(`Managing subscription ${subscription.id}`)}
+                      >
                         Manage
-                      </button>
+                      </Button>
                     </td>
                   </tr>
                 ))}

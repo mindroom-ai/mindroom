@@ -7,6 +7,7 @@ This replaces the previous monolithic implementation.
 from __future__ import annotations
 
 from backend.config import ALLOWED_ORIGINS
+from backend.middleware.audit_logging import AuditLoggingMiddleware
 from backend.routes import (
     accounts,
     admin,
@@ -25,7 +26,6 @@ from fastapi.middleware.cors import CORSMiddleware
 # FastAPI app
 app = FastAPI(title="MindRoom Backend")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -34,6 +34,9 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# Audit logging middleware
+app.add_middleware(AuditLoggingMiddleware)
 
 # Include routers
 app.include_router(health.router)

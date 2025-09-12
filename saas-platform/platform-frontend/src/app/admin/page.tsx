@@ -108,7 +108,7 @@ export default function AdminDashboard() {
       title: 'System Health',
       value: health?.status === 'ok' ? 'Operational' : 'Degraded',
       icon: Activity,
-      change: health ? `Supabase ${health.supabase ? 'ok' : 'err'} · Stripe ${health.stripe ? 'ok' : 'err'}` : 'Unknown',
+      change: health ? `Supabase: ${health.supabase ? '✓ Healthy' : '✗ Error'} | Stripe: ${health.stripe ? '✓ Healthy' : '✗ Error'}` : 'Checking...',
       changeType: (health && health.status === 'ok') ? 'positive' as const : 'negative' as const
     },
   ]
@@ -116,63 +116,63 @@ export default function AdminDashboard() {
   return (
     <div>
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900">Admin Dashboard</h1>
-        <p className="text-gray-600 mt-2">System overview and key metrics</p>
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Admin Dashboard</h1>
+        <p className="text-gray-600 dark:text-gray-400 mt-2">System overview and key metrics</p>
       </div>
 
       {/* API-backed Metrics */}
       {metrics && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-          <Card>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+          <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium">MRR (est.)</CardTitle>
+              <CardTitle className="text-sm font-medium text-gray-700 dark:text-gray-300">MRR (est.)</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">${metrics.mrr.toLocaleString()}</div>
+              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">${metrics.mrr.toLocaleString()}</div>
             </CardContent>
           </Card>
-          <Card>
+          <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium">Accounts</CardTitle>
+              <CardTitle className="text-sm font-medium text-gray-700 dark:text-gray-300">Accounts</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{metrics.totalAccounts}</div>
+              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{metrics.totalAccounts}</div>
             </CardContent>
           </Card>
-          <Card>
+          <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium">Active Subs</CardTitle>
+              <CardTitle className="text-sm font-medium text-gray-700 dark:text-gray-300">Active Subs</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{metrics.activeSubscriptions}</div>
+              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{metrics.activeSubscriptions}</div>
             </CardContent>
           </Card>
-          <Card>
+          <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium">Running Inst.</CardTitle>
+              <CardTitle className="text-sm font-medium text-gray-700 dark:text-gray-300">Running Inst.</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{metrics.runningInstances}</div>
+              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{metrics.runningInstances}</div>
             </CardContent>
           </Card>
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         {statCards.map((stat) => (
-          <Card key={stat.title}>
+          <Card key={stat.title} className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">
+              <CardTitle className="text-sm font-medium text-gray-700 dark:text-gray-300">
                 {stat.title}
               </CardTitle>
-              <stat.icon className="h-4 w-4 text-muted-foreground" />
+              <stat.icon className="h-4 w-4 text-gray-500 dark:text-gray-400" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stat.value}</div>
-              <p className={`text-xs ${
-                stat.changeType === 'positive' ? 'text-green-600' :
-                stat.changeType === 'negative' ? 'text-red-600' :
-                'text-gray-600'
+              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stat.value}</div>
+              <p className={`text-xs mt-1 ${
+                stat.changeType === 'positive' ? 'text-green-600 dark:text-green-400' :
+                stat.changeType === 'negative' ? 'text-red-600 dark:text-red-400' :
+                'text-gray-600 dark:text-gray-400'
               }`}>
                 {stat.change}
               </p>
@@ -182,9 +182,9 @@ export default function AdminDashboard() {
       </div>
 
       {/* Recent Activity */}
-      <Card>
+      <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">
         <CardHeader>
-          <CardTitle>Recent Activity</CardTitle>
+          <CardTitle className="text-gray-900 dark:text-gray-100">Recent Activity</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="space-y-4">

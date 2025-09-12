@@ -64,12 +64,29 @@ async def get_admin_stats(admin: Annotated[dict, Depends(verify_admin)]) -> dict
     try:
         accounts = sb.table("accounts").select("*", count="exact").execute()
         subscriptions = sb.table("subscriptions").select("*", count="exact").eq("status", "active").execute()
-        instances = sb.table("instances").select("*", count="exact").eq("status", "active").execute()
+        instances = sb.table("instances").select("*", count="exact").eq("status", "running").execute()
+
+        # Get recent activity for dashboard
+        recent_logs = (
+            sb.table("audit_logs").select("*, accounts(email)").order("created_at", desc=True).limit(5).execute()
+        )
+
+        recent_activity = []
+        if recent_logs.data:
+            recent_activity.extend(
+                {
+                    "type": log.get("action", "unknown"),
+                    "description": f"{log.get('resource_type', '')} {log.get('action', '')} by {log.get('accounts', {}).get('email', 'System')}",
+                    "timestamp": log.get("created_at", ""),
+                }
+                for log in recent_logs.data
+            )
 
         return {
-            "accounts": len(accounts.data) if accounts.data else 0,
-            "active_subscriptions": len(subscriptions.data) if subscriptions.data else 0,
-            "running_instances": len(instances.data) if instances.data else 0,
+            "accounts_count": len(accounts.data) if accounts.data else 0,
+            "subscriptions_count": len(subscriptions.data) if subscriptions.data else 0,
+            "instances_count": len(instances.data) if instances.data else 0,
+            "recent_activity": recent_activity,
         }
     except Exception as e:
         logger.exception("Error fetching admin stats")
@@ -188,6 +205,50 @@ async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) ->
     return result
 
 
+@router.get("/admin/accounts/{account_id}")
+async def get_account_details(
+    account_id: str,
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001
+) -> dict[str, Any]:
+    """Get detailed account information including subscription and instances."""
+    sb = ensure_supabase()
+
+    try:
+        # Get account details
+        account_result = sb.table("accounts").select("*").eq("id", account_id).single().execute()
+        if not account_result.data:
+            raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
+
+        account = account_result.data
+
+        # Get subscription if exists
+        subscription_result = (
+            sb.table("subscriptions")
+            .select("*")
+            .eq("account_id", account_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        # Get instances if exist
+        instances_result = (
+            sb.table("instances").select("*").eq("account_id", account_id).order("created_at", desc=True).execute()
+        )
+
+        # Build response
+        return {
+            **account,
+            "subscription": subscription_result.data[0] if subscription_result.data else None,
+            "instances": instances_result.data if instances_result.data else [],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching account details")
+        raise HTTPException(status_code=500, detail="Failed to fetch account details") from e
+
+
 @router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
 async def update_account_status(
     account_id: str,
@@ -259,9 +320,15 @@ async def admin_get_list(
     )
 
     try:
-        # Special-case: instances should include account info
+        # Add joins for better data display in admin panel
         if resource == "instances":
             query = sb.table("instances").select("*, accounts(email, full_name)", count="exact")
+        elif resource == "subscriptions":
+            query = sb.table("subscriptions").select("*, accounts(email, full_name)", count="exact")
+        elif resource == "audit_logs":
+            query = sb.table("audit_logs").select("*, accounts(email)", count="exact")
+        elif resource == "usage_metrics":
+            query = sb.table("usage_metrics").select("*, accounts(email, full_name)", count="exact")
         else:
             query = sb.table(resource).select("*", count="exact")
 
@@ -404,18 +471,7 @@ async def get_dashboard_metrics(
         action="view",
         resource_type="dashboard_metrics",
     )
-    try:
-        sb = ensure_supabase()
-    except HTTPException:
-        return {
-            "totalAccounts": 0,
-            "activeSubscriptions": 0,
-            "runningInstances": 0,
-            "mrr": 0,
-            "dailyMessages": [],
-            "instanceStatuses": [],
-            "recentActivity": [],
-        }
+    sb = ensure_supabase()
 
     try:
         accounts = sb.table("accounts").select("*", count="exact", head=True).execute()
