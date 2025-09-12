@@ -154,7 +154,7 @@ export default function UpgradePage() {
                 ${isDowngrade ? 'opacity-50 cursor-not-allowed' : ''}
               `}
             >
-              {plan.recommended && (
+              {plan.recommended && !isCurrentPlan && (
                 <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
                   <span className="bg-orange-500 text-white px-3 py-1 rounded-full text-xs font-semibold flex items-center">
                     <Sparkles className="w-3 h-3 mr-1" />
@@ -164,7 +164,7 @@ export default function UpgradePage() {
               )}
 
               {isCurrentPlan && (
-                <div className="absolute -top-3 right-4">
+                <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
                   <span className="bg-gray-500 text-white px-3 py-1 rounded-full text-xs font-semibold">
                     Current Plan
                   </span>

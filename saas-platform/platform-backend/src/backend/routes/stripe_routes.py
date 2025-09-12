@@ -66,7 +66,7 @@ async def create_checkout_session(
         "cancel_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/pricing?cancelled=true",
         "allow_promotion_codes": True,
         "billing_address_collection": "required",
-        "payment_method_collection": "if_required",
+        "payment_method_collection": "always",
         "subscription_data": {
             "metadata": {
                 "tier": request.tier,
@@ -108,7 +108,7 @@ async def create_portal_session(user: Annotated[dict, Depends(verify_user)]) -> 
 
     session = stripe.billing_portal.Session.create(
         customer=result.data["stripe_customer_id"],
-        return_url=f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard/billing",
+        return_url=f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard/billing?return=true",
     )
 
     return {"url": session.url}

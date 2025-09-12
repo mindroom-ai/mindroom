@@ -87,10 +87,20 @@ def handle_subscription_created(subscription: dict) -> None:
         "trial_ends_at": datetime.fromtimestamp(subscription["trial_end"], tz=UTC).isoformat()
         if subscription.get("trial_end")
         else None,
-        "current_period_start": datetime.fromtimestamp(subscription["current_period_start"], tz=UTC).isoformat(),
-        "current_period_end": datetime.fromtimestamp(subscription["current_period_end"], tz=UTC).isoformat(),
         "updated_at": datetime.now(UTC).isoformat(),
     }
+
+    # Add period dates if available
+    if subscription.get("current_period_start"):
+        subscription_data["current_period_start"] = datetime.fromtimestamp(
+            subscription["current_period_start"],
+            tz=UTC,
+        ).isoformat()
+    if subscription.get("current_period_end"):
+        subscription_data["current_period_end"] = datetime.fromtimestamp(
+            subscription["current_period_end"],
+            tz=UTC,
+        ).isoformat()
 
     # Upsert subscription (in case it already exists)
     sb.table("subscriptions").upsert(
@@ -144,13 +154,23 @@ def handle_subscription_updated(subscription: dict) -> None:
         "trial_ends_at": datetime.fromtimestamp(subscription["trial_end"], tz=UTC).isoformat()
         if subscription.get("trial_end")
         else None,
-        "current_period_start": datetime.fromtimestamp(subscription["current_period_start"], tz=UTC).isoformat(),
-        "current_period_end": datetime.fromtimestamp(subscription["current_period_end"], tz=UTC).isoformat(),
         "cancelled_at": datetime.fromtimestamp(subscription["canceled_at"], tz=UTC).isoformat()
         if subscription.get("canceled_at")
         else None,
         "updated_at": datetime.now(UTC).isoformat(),
     }
+
+    # Add period dates if available
+    if subscription.get("current_period_start"):
+        subscription_data["current_period_start"] = datetime.fromtimestamp(
+            subscription["current_period_start"],
+            tz=UTC,
+        ).isoformat()
+    if subscription.get("current_period_end"):
+        subscription_data["current_period_end"] = datetime.fromtimestamp(
+            subscription["current_period_end"],
+            tz=UTC,
+        ).isoformat()
 
     # Update subscription
     sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()

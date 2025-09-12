@@ -9,10 +9,13 @@ export interface Subscription {
   id: string
   account_id: string
   tier: 'free' | 'starter' | 'professional' | 'enterprise'
-  status: 'active' | 'cancelled' | 'past_due'
+  status: 'active' | 'cancelled' | 'past_due' | 'trialing'
   stripe_subscription_id: string | null
   stripe_customer_id: string | null
+  current_period_start: string | null
   current_period_end: string | null
+  trial_ends_at: string | null
+  cancelled_at: string | null
   max_agents: number
   max_messages_per_day: number
   max_storage_gb: number
@@ -26,31 +29,35 @@ export function useSubscription() {
   const [loading, setLoading] = useState(!cachedSubscription)
   const { user, loading: authLoading } = useAuth()
 
+  const fetchSubscription = async () => {
+    if (!user) return
+
+    setLoading(true)
+    try {
+      const response = await apiCall('/my/subscription')
+
+      if (response.ok) {
+        const data = await response.json()
+        setSubscription(data)
+        cache.set('user-subscription', data)
+      } else if (response.status === 404) {
+        setSubscription(null)
+        cache.remove('user-subscription')
+      } else {
+        console.error('Error fetching subscription:', response.statusText)
+      }
+    } catch (error) {
+      console.error('Error fetching subscription:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (authLoading) return
     if (!user) {
       setLoading(false)
       return
-    }
-
-    const fetchSubscription = async () => {
-      try {
-        const response = await apiCall('/my/subscription')
-
-        if (response.ok) {
-          const data = await response.json()
-          setSubscription(data)
-          cache.set('user-subscription', data)
-        } else if (response.status === 404) {
-          setSubscription(null)
-        } else {
-          console.error('Error fetching subscription:', response.statusText)
-        }
-      } catch (error) {
-        console.error('Error fetching subscription:', error)
-      } finally {
-        setLoading(false)
-      }
     }
 
     fetchSubscription()
@@ -63,5 +70,5 @@ export function useSubscription() {
     }
   }, [user, authLoading])
 
-  return { subscription, loading }
+  return { subscription, loading, refresh: fetchSubscription }
 }

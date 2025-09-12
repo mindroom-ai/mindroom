@@ -14,14 +14,6 @@ from pydantic import BaseModel
 router = APIRouter()
 
 
-class SubscriptionUpdateRequest(BaseModel):
-    """Request model for updating subscription."""
-
-    tier: str | None = None
-    billing_cycle: str | None = None
-    quantity: int | None = None
-
-
 class CancelSubscriptionRequest(BaseModel):
     """Request model for canceling subscription."""
 
@@ -48,80 +40,6 @@ async def get_user_subscription(user: Annotated[dict, Depends(verify_user)]) -> 
             "updated_at": datetime.now(UTC).isoformat(),
         }
     return result.data[0]
-
-
-@router.post("/my/subscription/upgrade")
-async def upgrade_subscription(
-    request: SubscriptionUpdateRequest,
-    user: Annotated[dict, Depends(verify_user)],
-) -> dict[str, Any]:
-    """Upgrade or change subscription plan."""
-    if not stripe.api_key:
-        raise HTTPException(status_code=500, detail="Stripe not configured")
-
-    sb = ensure_supabase()
-    account_id = user["account_id"]
-
-    # Get current subscription
-    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).single().execute()
-
-    if not sub_result.data or not sub_result.data.get("stripe_subscription_id"):
-        raise HTTPException(
-            status_code=400,
-            detail="No active subscription found. Please use checkout to create a new subscription.",
-        )
-
-    stripe_sub_id = sub_result.data["stripe_subscription_id"]
-
-    try:
-        # Get the Stripe subscription
-        stripe_sub = stripe.Subscription.retrieve(stripe_sub_id)
-
-        # Update the subscription based on request
-        update_params = {}
-
-        if request.tier or request.billing_cycle:
-            # Change plan - need to update the subscription items
-            from backend.pricing import get_stripe_price_id  # noqa: PLC0415
-
-            new_tier = request.tier or sub_result.data.get("tier", "starter")
-            new_cycle = request.billing_cycle or "monthly"  # Default or detect from current
-
-            price_id = get_stripe_price_id(new_tier, new_cycle)
-            if not price_id:
-                raise HTTPException(status_code=400, detail=f"Invalid plan: {new_tier} ({new_cycle})")
-
-            # Update subscription items
-            update_params["items"] = [
-                {
-                    "id": stripe_sub["items"]["data"][0]["id"],
-                    "price": price_id,
-                    "quantity": request.quantity or stripe_sub["items"]["data"][0]["quantity"],
-                },
-            ]
-        elif request.quantity:
-            # Just update quantity for per-user pricing
-            update_params["items"] = [
-                {
-                    "id": stripe_sub["items"]["data"][0]["id"],
-                    "quantity": request.quantity,
-                },
-            ]
-
-        if update_params:
-            updated_sub = stripe.Subscription.modify(stripe_sub_id, **update_params)
-
-            # Update local database will happen via webhook
-            return {
-                "success": True,
-                "message": "Subscription updated successfully",
-                "subscription_id": updated_sub.id,
-            }
-        return {"success": False, "message": "No changes requested"}  # noqa: TRY300
-
-    except stripe.error.StripeError as e:
-        logger.exception("Stripe error updating subscription")
-        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/my/subscription/cancel")
