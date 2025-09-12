@@ -92,11 +92,21 @@ export async function restartInstance(instanceId: string | number) {
   return response.json()
 }
 
-// Stripe Integration (to be added)
-export async function createCheckoutSession(priceId: string, tier: string) {
+// Pricing
+export async function getPricingConfig() {
+  const response = await apiCall('/pricing/config')
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to fetch pricing configuration')
+  }
+  return response.json()
+}
+
+// Stripe Integration
+export async function createCheckoutSession(tier: string, billingCycle: 'monthly' | 'yearly' = 'monthly') {
   const response = await apiCall('/stripe/checkout', {
     method: 'POST',
-    body: JSON.stringify({ price_id: priceId, tier })
+    body: JSON.stringify({ tier, billing_cycle: billingCycle })
   })
   if (!response.ok) {
     const error = await response.text()

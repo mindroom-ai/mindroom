@@ -13,6 +13,7 @@ from backend.routes import (
     admin,
     health,
     instances,
+    pricing,
     provisioner,
     sso,
     stripe_routes,
@@ -46,6 +47,7 @@ app.include_router(usage.router)
 app.include_router(instances.router)
 app.include_router(provisioner.router)
 app.include_router(admin.router)
+app.include_router(pricing.router)
 app.include_router(stripe_routes.router)
 app.include_router(sso.router)
 app.include_router(webhooks.router)

@@ -14,7 +14,6 @@ const plans = Object.values(PRICING_PLANS)
     id: plan.id,
     name: plan.name,
     price: plan.price,
-    priceId: process.env[`STRIPE_PRICE_${plan.id.toUpperCase()}`] || '',
     description: plan.description,
     features: plan.features,
     recommended: plan.recommended,
@@ -47,7 +46,9 @@ export default function UpgradePage() {
     setIsProcessing(true)
 
     try {
-      const { url } = await createCheckoutSession(plan.priceId, plan.id)
+      // For now, default to monthly billing
+      // TODO: Add billing cycle selector in UI
+      const { url } = await createCheckoutSession(plan.id, 'monthly')
       window.location.href = url
     } catch (error) {
       console.error('Error creating checkout session:', error)

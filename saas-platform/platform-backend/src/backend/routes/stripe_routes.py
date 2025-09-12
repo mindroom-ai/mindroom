@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from backend.config import stripe
 from backend.deps import ensure_supabase, verify_user, verify_user_optional
 from backend.models import UrlResponse
+from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -17,8 +18,8 @@ router = APIRouter()
 class CheckoutRequest(BaseModel):
     """Request model for creating Stripe checkout sessions."""
 
-    price_id: str
     tier: str
+    billing_cycle: str = "monthly"  # monthly or yearly
 
 
 @router.post("/stripe/checkout", response_model=UrlResponse)
@@ -29,6 +30,12 @@ async def create_checkout_session(
     """Create Stripe checkout session for subscription."""
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")
+
+    # Get price ID from config
+    price_id = get_stripe_price_id(request.tier, request.billing_cycle)
+    if not price_id:
+        raise HTTPException(status_code=400, detail=f"No price found for {request.tier} ({request.billing_cycle})")
+
     sb = ensure_supabase()
 
     customer_id: str | None = None
@@ -49,7 +56,7 @@ async def create_checkout_session(
             ).execute()
 
     checkout_params = {
-        "line_items": [{"price": request.price_id, "quantity": 1}],
+        "line_items": [{"price": price_id, "quantity": 1}],
         "mode": "subscription",
         "success_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard?success=true&session_id={{CHECKOUT_SESSION_ID}}",
         "cancel_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/pricing?cancelled=true",
@@ -57,11 +64,22 @@ async def create_checkout_session(
         "billing_address_collection": "required",
         "payment_method_collection": "if_required",
         "subscription_data": {
-            "trial_period_days": 14,
-            "metadata": {"tier": request.tier, "supabase_user_id": user["account_id"] if user else ""},
+            "metadata": {
+                "tier": request.tier,
+                "billing_cycle": request.billing_cycle,
+                "supabase_user_id": user["account_id"] if user else "",
+            },
         },
-        "metadata": {"tier": request.tier, "supabase_user_id": user["account_id"] if user else ""},
+        "metadata": {
+            "tier": request.tier,
+            "billing_cycle": request.billing_cycle,
+            "supabase_user_id": user["account_id"] if user else "",
+        },
     }
+
+    # Add trial period if enabled for this plan
+    if is_trial_enabled_for_plan(request.tier):
+        checkout_params["subscription_data"]["trial_period_days"] = get_trial_days()
 
     if customer_id:
         checkout_params["customer"] = customer_id

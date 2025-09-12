@@ -234,6 +234,7 @@ dependencies = [
     { name = "cachetools" },
     { name = "fastapi" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "stripe" },
     { name = "supabase" },
     { name = "uvicorn", extra = ["standard"] },
@@ -241,9 +242,10 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cachetools", specifier = ">=6.2.0" },
+    { name = "cachetools", specifier = ">=6.2" },
     { name = "fastapi", specifier = ">=0.104.1" },
     { name = "python-dotenv", specifier = ">=1" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "stripe", specifier = ">=7" },
     { name = "supabase", specifier = ">=2.18.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.24" },
