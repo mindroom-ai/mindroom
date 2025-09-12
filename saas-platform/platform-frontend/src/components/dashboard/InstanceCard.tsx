@@ -47,12 +47,20 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
       // Refresh the page to show the new instance
       window.location.reload()
     } catch (error: any) {
-      console.error('Provision error:', error)
       // Don't show error for cancelled requests (user navigated away/refreshed)
-      if (error?.name === 'AbortError' || error?.message?.includes('aborted') || error?.message?.includes('cancelled')) {
-        console.log('Request cancelled due to navigation')
+      const isAborted =
+        error?.name === 'AbortError' ||
+        error?.message?.includes('aborted') ||
+        error?.message?.includes('cancelled') ||
+        error?.message?.includes('Failed to fetch') ||
+        !error?.message ||
+        error?.message === ''
+
+      if (isAborted) {
         return
       }
+
+      console.error('Provision error:', error)
       const errorMessage = error.message || 'Unknown error'
       // Check for specific error conditions
       if (errorMessage.includes('No subscription found')) {

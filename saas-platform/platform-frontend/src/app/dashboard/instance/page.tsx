@@ -31,8 +31,6 @@ export default function InstancePage() {
   const [refreshing, setRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
 
-  // Version marker to force cache bust
-  console.log('Instance page v3 - improved abort detection with logging')
 
   useEffect(() => {
     // Only fetch if no cached data, otherwise fetch silently in background
@@ -110,15 +108,6 @@ export default function InstancePage() {
       // Refresh instance status
       await fetchInstance()
     } catch (error: any) {
-      console.error(`Error performing ${action}:`, error)
-      console.log('Error details:', {
-        name: error?.name,
-        message: error?.message,
-        code: error?.code,
-        type: typeof error,
-        stringified: String(error)
-      })
-
       // Don't show error for cancelled requests (user navigated away/refreshed)
       // Check for various abort/cancel conditions
       const isAborted =
@@ -131,9 +120,8 @@ export default function InstancePage() {
         !error?.message || // Empty errors often indicate cancellation
         error?.message === ''
 
-      if (isAborted) {
-        console.log('Request cancelled/aborted - not showing error')
-      } else {
+      if (!isAborted) {
+        console.error(`Error performing ${action}:`, error)
         alert(`Failed to ${action} instance. Please try again.`)
       }
     } finally {
