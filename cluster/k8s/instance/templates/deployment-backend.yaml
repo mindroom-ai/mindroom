@@ -42,8 +42,8 @@ spec:
         - name: ANTHROPIC_API_KEY
           value: {{ .Values.anthropic_key | quote }}
         {{- if .Values.secrets.enabled }}
-        - name: OPENROUTER_API_KEY_FILE
-          value: "/etc/secrets/openrouter_key"
+        - name: ANTHROPIC_API_KEY_FILE
+          value: "/etc/secrets/anthropic_key"
         {{- end }}
         - name: ACCOUNT_ID
           value: {{ .Values.accountId | quote }}
@@ -75,6 +75,10 @@ spec:
         {{- end }}
         - name: OPENROUTER_API_KEY
           value: {{ .Values.openrouter_key | quote }}
+        {{- if .Values.secrets.enabled }}
+        - name: OPENROUTER_API_KEY_FILE
+          value: "/etc/secrets/openrouter_key"
+        {{- end }}
         - name: HOME
           value: {{ .Values.storagePath }}
         volumeMounts:

@@ -6,6 +6,7 @@ This replaces the previous monolithic implementation.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from backend.config import ALLOWED_ORIGINS, ENVIRONMENT, PLATFORM_DOMAIN
@@ -85,7 +86,17 @@ async def add_security_headers(
 
 # Rate limiting (applies to routes decorated with @limiter.limit)
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+rate_logger = logging.getLogger("mindroom.ratelimit")
+
+
+async def _logged_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) -> StarletteResponse:  # type: ignore[override]
+    client = request.client.host if request.client else "unknown"
+    rate_logger.warning("429 Too Many Requests: path=%s client=%s", request.url.path, client)
+    return await _rate_limit_exceeded_handler(request, exc)
+
+
+app.add_exception_handler(RateLimitExceeded, _logged_rate_limit_exceeded)
 app.add_middleware(SlowAPIMiddleware)
 
 # Include routers

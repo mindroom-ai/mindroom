@@ -16,7 +16,10 @@ openrouter_key: ""
 # Optional: mount API keys as files (more secure)
 secrets:
   enabled: false
-  name: ""
+  create: false
+  name: ""  # if set, mount this Secret name; otherwise expect it exists or set create=true with stringData/data
+  data: {}
+  stringData: {}
 
 # Supabase (shared auth)
 supabaseUrl: ""
