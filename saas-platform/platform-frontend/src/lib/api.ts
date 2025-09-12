@@ -9,14 +9,22 @@ export async function apiCall(
   const supabase = createClient()
   const { data: { session } } = await supabase.auth.getSession()
 
-  return fetch(`${API_URL}${endpoint}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': session?.access_token ? `Bearer ${session.access_token}` : '',
-      ...options.headers,
-    },
-  })
+  const url = `${API_URL}${endpoint}`
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': session?.access_token ? `Bearer ${session.access_token}` : '',
+    ...options.headers,
+  }
+
+  try {
+    return await fetch(url, {
+      ...options,
+      headers,
+    })
+  } catch (error) {
+    console.error(`API call failed: ${url}`, error)
+    throw error
+  }
 }
 
 // Account Management

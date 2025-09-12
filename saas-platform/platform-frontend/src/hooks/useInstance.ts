@@ -70,9 +70,16 @@ export function useInstance() {
           const newInstance = data.instances[0]
           setInstance(newInstance)
           setCached('user-instance', newInstance)
+        } else {
+          // No instances found
+          setInstance(null)
         }
       } catch (error) {
         console.error('Error fetching instance:', error)
+        // Show more details about the error
+        if (error instanceof Error) {
+          console.error('Error details:', error.message)
+        }
       } finally {
         setLoading(false)
       }
@@ -87,14 +94,22 @@ export function useInstance() {
 
     // Poll for changes every 10 seconds instead of realtime subscription
     // (avoids RLS issues with direct Supabase access)
+    let errorCount = 0
     const interval = setInterval(async () => {
       try {
         const data = await listInstances()
         if (data.instances && data.instances.length > 0) {
-          setInstance(data.instances[0])
+          const newInstance = data.instances[0]
+          setInstance(newInstance)
+          setCached('user-instance', newInstance)
         }
+        errorCount = 0 // Reset error count on success
       } catch (err) {
-        console.error('Error polling instance status:', err)
+        errorCount++
+        // Only log first error and every 10th error to avoid spamming
+        if (errorCount === 1 || errorCount % 10 === 0) {
+          console.error(`Error polling instance status (attempt ${errorCount}):`, err)
+        }
       }
     }, 10000)
 
