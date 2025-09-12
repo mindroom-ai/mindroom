@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.pricing import PRICING_CONFIG, get_stripe_price_id
+from backend.pricing import PRICING_CONFIG_MODEL, get_stripe_price_id
 from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
@@ -17,37 +17,46 @@ async def get_pricing_config() -> dict[str, Any]:
     This returns the pricing plans, features, and limits.
     Stripe price IDs are only included if they are configured.
     """
-    if not PRICING_CONFIG:
-        raise HTTPException(status_code=500, detail="Pricing configuration not available")
+    config_model = PRICING_CONFIG_MODEL
 
-    # Filter out sensitive data if needed
+    # Build response using the Pydantic model
     config = {
-        "product": PRICING_CONFIG.get("product", {}),
+        "product": {
+            "name": config_model.product.name,
+            "description": config_model.product.description,
+            "metadata": {"platform": config_model.product.metadata.platform},
+        },
         "plans": {},
-        "trial": PRICING_CONFIG.get("trial", {}),
-        "discounts": PRICING_CONFIG.get("discounts", {}),
+        "trial": {
+            "enabled": config_model.trial.enabled,
+            "days": config_model.trial.days,
+            "applicable_plans": config_model.trial.applicable_plans,
+        },
+        "discounts": {
+            "annual_percentage": config_model.discounts.annual_percentage,
+        },
     }
 
     # Process each plan
-    for plan_key, plan_data in PRICING_CONFIG.get("plans", {}).items():
+    for plan_key, plan_data in config_model.plans.items():
         # Convert cents to dollar strings for frontend
-        price_monthly = plan_data.get("price_monthly", 0)
-        price_yearly = plan_data.get("price_yearly", 0)
+        price_monthly = plan_data.price_monthly
+        price_yearly = plan_data.price_yearly
 
         config["plans"][plan_key] = {
-            "name": plan_data.get("name"),
+            "name": plan_data.name,
             "price_monthly": f"${price_monthly / 100:.0f}"
             if isinstance(price_monthly, (int, float))
             else price_monthly,
             "price_yearly": f"${price_yearly / 100:.0f}" if isinstance(price_yearly, (int, float)) else price_yearly,
-            "price_model": plan_data.get("price_model", "flat"),
-            "description": plan_data.get("description"),
-            "features": plan_data.get("features", []),
-            "limits": plan_data.get("limits", {}),
-            "recommended": plan_data.get("recommended", False),
+            "price_model": plan_data.price_model or "flat",
+            "description": plan_data.description,
+            "features": plan_data.features,
+            "limits": plan_data.limits.model_dump(),
+            "recommended": plan_data.recommended,
             # Include Stripe price IDs if available
-            "stripe_price_id_monthly": plan_data.get("stripe_price_id_monthly"),
-            "stripe_price_id_yearly": plan_data.get("stripe_price_id_yearly"),
+            "stripe_price_id_monthly": plan_data.stripe_price_id_monthly,
+            "stripe_price_id_yearly": plan_data.stripe_price_id_yearly,
         }
 
     return config
