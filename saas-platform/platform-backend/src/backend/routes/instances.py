@@ -135,7 +135,7 @@ async def list_user_instances(
 
     # Log cache effectiveness
     total_time = (time.perf_counter() - start) * 1000
-    logger.debug("Instances endpoint: DB query %.2fms, total %.2fms (cached K8s status)", db_time, total_time)
+    logger.info("Instances endpoint: DB query %.2fms, total %.2fms (cached K8s status)", db_time, total_time)
 
     # Return cached data immediately
     return {"instances": instances}
