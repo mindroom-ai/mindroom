@@ -43,12 +43,8 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         current_status = result.data.get("status") if result.data else None
 
         # Check if deployment exists
-        try:
-            k8s_start = time.perf_counter()
-            exists = await check_deployment_exists(instance_id)
-        except FileNotFoundError:
-            logger.warning("kubectl not found, cannot sync instance %s", instance_id)
-            return
+        k8s_start = time.perf_counter()
+        exists = await check_deployment_exists(instance_id)
 
         if exists:
             # Get actual replicas count
