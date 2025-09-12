@@ -163,15 +163,15 @@ class AccountWithRelationsOut(BaseModel):
 
     id: str
     email: str
-    full_name: str | None = None
-    company_name: str | None = None
-    is_admin: bool = False
-    status: str = "active"
-    stripe_customer_id: str | None = None
-    created_at: str | None = None
-    updated_at: str | None = None
-    subscriptions: list[dict[str, Any]] | None = None
-    instances: list[dict[str, Any]] | None = None
+    full_name: str | None = None  # Genuinely optional
+    company_name: str | None = None  # Genuinely optional
+    is_admin: bool  # Required, no default
+    status: str  # Required, no default
+    stripe_customer_id: str | None = None  # Optional for free users
+    created_at: str  # Required, should always exist
+    updated_at: str  # Required, should always exist
+    subscriptions: list[dict[str, Any]] | None = None  # Can be None from DB
+    instances: list[dict[str, Any]] | None = None  # Can be None from DB
 
 
 class AccountOut(BaseModel):
@@ -179,13 +179,13 @@ class AccountOut(BaseModel):
 
     id: str
     email: str
-    full_name: str | None = None
-    company_name: str | None = None
-    is_admin: bool = False
-    status: str = "active"
-    stripe_customer_id: str | None = None
-    created_at: str | None = None
-    updated_at: str | None = None
+    full_name: str | None = None  # Genuinely optional
+    company_name: str | None = None  # Genuinely optional
+    is_admin: bool  # Required, no default
+    status: str  # Required, no default
+    stripe_customer_id: str | None = None  # Optional for free users
+    created_at: str  # Required, should always exist
+    updated_at: str  # Required, should always exist
 
 
 class AccountSetupResponse(BaseModel):
