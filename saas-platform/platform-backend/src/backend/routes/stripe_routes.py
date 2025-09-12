@@ -66,7 +66,6 @@ async def create_checkout_session(
         "cancel_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/pricing?cancelled=true",
         "allow_promotion_codes": True,
         "billing_address_collection": "required",
-        "payment_method_collection": "always",
         "subscription_data": {
             "metadata": {
                 "tier": request.tier,

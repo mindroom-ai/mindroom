@@ -97,6 +97,14 @@ export default function UpgradePage() {
           Back to Billing
         </button>
         <h1 className="text-3xl font-bold dark:text-white">Upgrade Your Plan</h1>
+        {process.env.NODE_ENV === 'development' || process.env.NEXT_PUBLIC_STRIPE_MODE === 'test' ? (
+          <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-400 dark:border-yellow-600 rounded-lg p-3 mt-4">
+            <p className="text-sm text-yellow-800 dark:text-yellow-200 font-semibold">Test Mode Active</p>
+            <p className="text-sm text-yellow-700 dark:text-yellow-300 mt-1">
+              Use test card: <code className="bg-yellow-100 dark:bg-yellow-800 px-1 rounded">4242 4242 4242 4242</code> with any future date and CVC.
+            </p>
+          </div>
+        ) : null}
         <p className="text-gray-600 dark:text-gray-400 mt-2">
           Choose a plan that fits your needs. You can change or cancel anytime.
         </p>

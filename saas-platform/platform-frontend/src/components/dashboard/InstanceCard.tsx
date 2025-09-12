@@ -42,11 +42,19 @@ export function InstanceCard({ instance }: { instance: Instance | null }) {
   const handleProvision = async () => {
     setIsProvisioning(true)
     try {
-      await provisionInstance()
+      const result = await provisionInstance()
+      console.log('Provision result:', result)
       // Refresh the page to show the new instance
       window.location.reload()
     } catch (error: any) {
-      alert(`Failed to provision instance: ${error.message || 'Unknown error'}`)
+      console.error('Provision error:', error)
+      const errorMessage = error.message || 'Unknown error'
+      // Check for specific error conditions
+      if (errorMessage.includes('No subscription found')) {
+        alert('Please wait for your account setup to complete, then try again.')
+      } else {
+        alert(`Failed to provision instance: ${errorMessage}`)
+      }
     } finally {
       setIsProvisioning(false)
     }

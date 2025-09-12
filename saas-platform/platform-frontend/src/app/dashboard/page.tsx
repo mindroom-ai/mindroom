@@ -32,27 +32,32 @@ export default function DashboardPage() {
   useEffect(() => {
     // Auto-setup free tier if user has no subscription
     const setupFreeTier = async () => {
-      // Skip if: not logged in, still loading, already has subscription, already setting up,
-      // an instance already exists, or we've already attempted setup once in this session.
+      // Skip if: not logged in, already has subscription, already setting up,
+      // or we've already attempted setup once in this session.
       if (
-        authLoading ||
         !user ||
-        subscriptionLoading ||
-        instanceLoading ||
         subscription ||
         isSettingUp ||
-        instance ||
         setupAttempted
       ) {
         return
       }
 
+      // Wait a bit for data to load before setting up
+      if (authLoading || subscriptionLoading) {
+        return
+      }
+
+      console.log('Setting up free tier account...')
       setSetupAttempted(true)
       setIsSettingUp(true)
       try {
-        await setupAccount()
+        const result = await setupAccount()
+        console.log('Free tier setup result:', result)
         // Trigger a refresh; hooks poll and will pick up the new subscription
         router.refresh()
+        // Force reload after a short delay to ensure data is updated
+        setTimeout(() => window.location.reload(), 2000)
       } catch (error) {
         console.error('Error setting up free tier:', error)
       } finally {
@@ -61,7 +66,7 @@ export default function DashboardPage() {
     }
 
     setupFreeTier()
-  }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, instance, instanceLoading, setupAttempted, router])
+  }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, setupAttempted, router])
 
   // Only show loading if we're still loading auth AND have no cached data
   // This prevents the flash of loading screen when navigating between pages
