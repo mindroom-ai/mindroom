@@ -174,20 +174,6 @@ class AccountWithRelationsOut(BaseModel):
     instances: list[dict[str, Any]] | None = None  # Can be None from DB
 
 
-class AccountOut(BaseModel):
-    """Account information output model."""
-
-    id: str
-    email: str
-    full_name: str | None = None  # Genuinely optional
-    company_name: str | None = None  # Genuinely optional
-    is_admin: bool  # Required, no default
-    status: str  # Required, no default
-    stripe_customer_id: str | None = None  # Optional for free users
-    created_at: str  # Required, should always exist
-    updated_at: str  # Required, should always exist
-
-
 class AccountSetupResponse(BaseModel):
     """Account setup response model."""
 
@@ -277,23 +263,6 @@ class AdminDashboardMetricsResponse(BaseModel):
     recent_instances: list[dict[str, Any]]
 
 
-class AdminProvisionResponse(BaseModel):
-    """Admin provision response model."""
-
-    success: bool
-    message: str
-    instance_id: int
-
-
-class AdminSyncResponse(BaseModel):
-    """Admin sync response model."""
-
-    success: bool
-    message: str
-    synced: int
-    errors: int
-
-
 class AdminLogoutResponse(BaseModel):
     """Admin logout response model."""
 
@@ -306,19 +275,3 @@ class WebhookResponse(BaseModel):
 
     received: bool
     error: str | None = None
-
-
-# Checkout Models
-class CheckoutSessionRequest(BaseModel):
-    """Checkout session request model."""
-
-    price_id: str
-    billing_cycle: Literal["monthly", "yearly"]
-    user_count: int = 1
-
-
-class CheckoutSessionResponse(BaseModel):
-    """Checkout session response model."""
-
-    url: str
-    session_id: str
