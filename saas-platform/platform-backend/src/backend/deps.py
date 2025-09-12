@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from backend.config import auth_client, logger, supabase
+from cachetools import TTLCache
 from fastapi import Header, HTTPException
 
 if TYPE_CHECKING:
     from supabase import Client
 
-# Simple in-memory cache for auth verification (token -> (user_data, expiry))
-_auth_cache: dict[str, tuple[dict, datetime]] = {}
+# TTL cache for auth verification (5 minutes, max 100 entries)
+_auth_cache = TTLCache(maxsize=100, ttl=300)
 
 
 def ensure_supabase() -> Client:
@@ -30,7 +31,7 @@ def _ensure_auth_client() -> Client:
     return auth_client
 
 
-async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901
+async def verify_user(authorization: str = Header(None)) -> dict:
     """Verify regular user via Supabase JWT.
 
     With the current schema, `account.id == auth.user.id`.
@@ -41,19 +42,11 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901
 
     token = authorization.replace("Bearer ", "")
 
-    # Check cache first (5 minute TTL)
+    # Check cache first
     start = time.perf_counter()
-    now = datetime.now(UTC)
     if token in _auth_cache:
-        cached_data, expiry = _auth_cache[token]
-        if expiry > now:
-            logger.info("Auth cache hit: %.2fms", (time.perf_counter() - start) * 1000)
-            return cached_data
-        del _auth_cache[token]
-
-    # Simple cache size limit
-    if len(_auth_cache) > 100:
-        _auth_cache.clear()
+        logger.info("Auth cache hit: %.2fms", (time.perf_counter() - start) * 1000)
+        return _auth_cache[token]
 
     sb = ensure_supabase()
     ac = _ensure_auth_client()
@@ -107,9 +100,8 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901
             "account": result.data,
         }
 
-        # Cache the result with 5 minute TTL
-        expiry = now + timedelta(minutes=5)
-        _auth_cache[token] = (user_data, expiry)
+        # Cache the result (TTL handled by TTLCache)
+        _auth_cache[token] = user_data
 
         # Log the time taken for database auth
         logger.info("Auth database lookup: %.2fms", (time.perf_counter() - start) * 1000)
