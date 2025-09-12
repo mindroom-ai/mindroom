@@ -61,7 +61,7 @@ export default function LandingPage() {
               </span>
             </div>
 
-            <div className="hidden lg:flex items-center gap-8">
+            <div className="hidden xl:flex items-center gap-8">
               {navLinks.map((link) => (
                 <Link
                   key={link.href}
