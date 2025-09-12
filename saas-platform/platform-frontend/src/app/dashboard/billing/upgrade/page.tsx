@@ -5,67 +5,20 @@ import { useRouter } from 'next/navigation'
 import { Check, ArrowLeft } from 'lucide-react'
 import { useSubscription } from '@/hooks/useSubscription'
 import { createCheckoutSession } from '@/lib/api'
+import { PRICING_PLANS, type PlanId } from '@/lib/pricing-config'
 
-type Plan = {
-  id: string
-  name: string
-  price: string
-  priceId: string
-  description: string
-  features: string[]
-  recommended?: boolean
-}
-
-const plans: Plan[] = [
-  {
-    id: 'starter',
-    name: 'Starter',
-    price: '$10',
-    priceId: process.env.STRIPE_PRICE_STARTER || '',
-    description: 'Perfect for individuals',
-    features: [
-      '100 AI Agents',
-      'Unlimited messages',
-      '5GB storage',
-      'Priority support',
-      'All integrations',
-      'Custom workflows',
-    ],
-    recommended: true,
-  },
-  {
-    id: 'professional',
-    name: 'Professional',
-    price: '$8',
-    priceId: process.env.STRIPE_PRICE_PROFESSIONAL || '',
-    description: 'For teams and businesses',
-    features: [
-      'Unlimited AI Agents',
-      'Unlimited messages',
-      '10GB storage per user',
-      'Priority support',
-      'Advanced analytics',
-      'Custom integrations',
-      'SLA guarantee',
-      'Team training',
-    ],
-  },
-  {
-    id: 'enterprise',
-    name: 'Enterprise',
-    price: 'Custom',
-    priceId: '',
-    description: 'Tailored for large organizations',
-    features: [
-      'Unlimited everything',
-      'Custom limits',
-      'Dedicated infrastructure',
-      'White-glove support',
-      'Custom development',
-      'On-premise option',
-    ],
-  },
-]
+// Filter out free plan and map to upgrade options
+const plans = Object.values(PRICING_PLANS)
+  .filter(plan => plan.id !== 'free')
+  .map(plan => ({
+    id: plan.id,
+    name: plan.name,
+    price: plan.price,
+    priceId: process.env[`STRIPE_PRICE_${plan.id.toUpperCase()}`] || '',
+    description: plan.description,
+    features: plan.features,
+    recommended: plan.recommended,
+  }))
 
 export default function UpgradePage() {
   const router = useRouter()

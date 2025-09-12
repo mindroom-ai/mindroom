@@ -3,7 +3,9 @@
 import Link from 'next/link'
 import { Check, X, Sparkles, Zap, Crown } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { PRICING_PLANS } from '@/lib/pricing-config'
 
+// Transform pricing plans to landing page format
 const plans = [
   {
     name: 'Self-Hosted',
@@ -27,46 +29,29 @@ const plans = [
     gradient: 'from-gray-500 to-gray-600',
   },
   {
-    name: 'Starter',
+    name: PRICING_PLANS.starter.name,
     icon: Zap,
-    price: '$10',
-    period: '/month',
-    description: 'Perfect for individuals',
-    features: [
-      { text: '100 AI Agents', included: true },
-      { text: 'Unlimited messages', included: true },
-      { text: '5GB storage', included: true },
-      { text: 'Email support', included: true },
-      { text: 'All integrations', included: true },
-      { text: 'Custom workflows', included: true },
-      { text: 'Analytics dashboard', included: true },
-      { text: 'Priority support', included: false },
-    ],
+    price: PRICING_PLANS.starter.price,
+    period: PRICING_PLANS.starter.period,
+    description: PRICING_PLANS.starter.description,
+    features: PRICING_PLANS.starter.features.map(text => ({ text, included: true }))
+      .concat([{ text: 'SSO & SAML', included: false }]),
     cta: 'Start 14-Day Trial',
     href: '/auth/signup?plan=starter',
-    featured: true,
-    gradient: 'from-orange-500 to-orange-600',
+    featured: PRICING_PLANS.starter.recommended || false,
+    gradient: PRICING_PLANS.starter.gradient || 'from-orange-500 to-orange-600',
   },
   {
-    name: 'Professional',
+    name: PRICING_PLANS.professional.name,
     icon: Crown,
-    price: '$8',
-    period: '/user/month',
-    description: 'For teams and businesses',
-    features: [
-      { text: 'Unlimited AI Agents', included: true },
-      { text: 'Unlimited messages', included: true },
-      { text: '10GB storage per user', included: true },
-      { text: 'Priority support', included: true },
-      { text: 'Advanced analytics', included: true },
-      { text: 'SSO & SAML', included: true },
-      { text: 'SLA guarantee', included: true },
-      { text: 'Team training', included: true },
-    ],
+    price: PRICING_PLANS.professional.price,
+    period: PRICING_PLANS.professional.period,
+    description: PRICING_PLANS.professional.description,
+    features: PRICING_PLANS.professional.features.map(text => ({ text, included: true })),
     cta: 'Start 14-Day Trial',
     href: '/auth/signup?plan=professional',
     featured: false,
-    gradient: 'from-purple-500 to-purple-600',
+    gradient: PRICING_PLANS.professional.gradient || 'from-purple-500 to-purple-600',
   },
 ]
 
