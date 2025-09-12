@@ -32,14 +32,15 @@ data:
     # Registration and authentication
     enable_registration: true
     enable_registration_without_verification: true
-    registration_shared_secret: "{{ .Values.matrix_admin_password }}"
+    # If not provided, fallback to a strong random value
+    registration_shared_secret: "{{ .Values.matrix_admin_password | default (randAlphaNum 32) }}"
 
     # Disable reporting stats
     report_stats: false
 
-    # Keys and secrets
-    macaroon_secret_key: "{{ .Values.matrix_admin_password }}"
-    form_secret: "{{ .Values.matrix_admin_password }}"
+    # Keys and secrets (independent defaults when not provided)
+    macaroon_secret_key: "{{ .Values.matrix_admin_password | default (randAlphaNum 32) }}"
+    form_secret: "{{ .Values.matrix_admin_password | default (randAlphaNum 32) }}"
     signing_key_path: /data/{{ .Values.customer }}.signing.key
 
     # Trusted key servers

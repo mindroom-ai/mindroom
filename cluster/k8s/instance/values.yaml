@@ -18,5 +18,5 @@ supabaseUrl: ""
 supabaseAnonKey: ""
 supabaseServiceKey: ""
 
-# Matrix admin user
-matrix_admin_password: "changeme"
+# Matrix admin user (leave empty and set via --set or Secret)
+matrix_admin_password: ""
