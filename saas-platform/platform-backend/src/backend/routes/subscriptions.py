@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from backend.config import logger, stripe
 from backend.deps import ensure_supabase, verify_user
 from backend.models import SubscriptionCancelResponse, SubscriptionOut, SubscriptionReactivateResponse
+from backend.pricing import get_plan_limits_from_metadata
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -29,18 +30,27 @@ async def get_user_subscription(user: Annotated[dict, Depends(verify_user)]) -> 
     result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
     if not result.data:
         # Return a default free subscription if none exists
+        limits = get_plan_limits_from_metadata("free")
         return {
             "id": "00000000-0000-0000-0000-000000000000",
             "account_id": account_id,
             "tier": "free",
             "status": "active",
-            "max_agents": 1,
-            "max_messages_per_day": 100,
-            "max_storage_gb": 1,  # Free tier has 1GB storage
+            "max_agents": limits["max_agents"],
+            "max_messages_per_day": limits["max_messages_per_day"],
+            "max_storage_gb": limits["max_storage_gb"],
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }
-    return result.data[0]
+
+    # Add max_storage_gb from pricing config if not in database
+    subscription = result.data[0]
+    if "max_storage_gb" not in subscription or subscription["max_storage_gb"] is None:
+        tier = subscription.get("tier", "free")
+        limits = get_plan_limits_from_metadata(tier)
+        subscription["max_storage_gb"] = limits["max_storage_gb"]
+
+    return subscription
 
 
 @router.post("/my/subscription/cancel", response_model=SubscriptionCancelResponse)
