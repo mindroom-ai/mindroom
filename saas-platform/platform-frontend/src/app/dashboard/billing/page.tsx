@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useSubscription } from '@/hooks/useSubscription'
 import { createPortalSession } from '@/lib/api'
+import { PRICING_PLANS, getTierDisplay, formatLimit, type PlanId } from '@/lib/pricing-config'
 import { Loader2, CreditCard, TrendingUp, Check } from 'lucide-react'
 
 export default function BillingPage() {
@@ -29,58 +30,10 @@ export default function BillingPage() {
     )
   }
 
-  const getTierDisplay = (tier: string) => {
-    const tiers: { [key: string]: { name: string; price: string; color: string } } = {
-      free: { name: 'Free', price: '$0/month', color: 'gray' },
-      starter: { name: 'Starter', price: '$10/month', color: 'blue' },
-      professional: { name: 'Professional', price: '$8/user/month', color: 'purple' },
-      enterprise: { name: 'Enterprise', price: 'Custom', color: 'yellow' },
-    }
-    return tiers[tier] || tiers.free
-  }
-
-  const tierInfo = getTierDisplay(subscription?.tier || 'free')
-
-  const planFeatures = {
-    free: [
-      '1 AI Agent',
-      '100 messages per day',
-      '1GB storage',
-      'Community support',
-      'Basic integrations',
-    ],
-    starter: [
-      '100 AI Agents',
-      'Unlimited messages',
-      '5GB storage',
-      'Priority support',
-      'All integrations',
-      'Custom workflows',
-      'Analytics dashboard',
-    ],
-    professional: [
-      'Unlimited AI Agents',
-      'Unlimited messages',
-      '10GB storage per user',
-      'Priority support',
-      'Advanced analytics',
-      'Custom integrations',
-      'SLA guarantee',
-      'Team training',
-    ],
-    enterprise: [
-      'Unlimited everything',
-      'Custom limits',
-      'Dedicated infrastructure',
-      'White-glove support',
-      'Custom development',
-      'On-premise option',
-      'Compliance certifications',
-      'Dedicated account manager',
-    ],
-  }
-
-  const features = planFeatures[subscription?.tier || 'free'] || planFeatures.free
+  const currentTier = (subscription?.tier || 'free') as PlanId
+  const tierInfo = getTierDisplay(currentTier)
+  const currentPlan = PRICING_PLANS[currentTier]
+  const features = currentPlan.features
 
   return (
     <div className="space-y-6">
@@ -141,21 +94,23 @@ export default function BillingPage() {
               <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
               <div>
                 <p className="text-sm text-gray-600 dark:text-gray-400">AI Agents</p>
-                <p className="font-semibold">{subscription?.max_agents || 1}</p>
+                <p className="font-semibold">{formatLimit(currentPlan.limits.maxAgents)}</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
               <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
               <div>
                 <p className="text-sm text-gray-600 dark:text-gray-400">Messages/Day</p>
-                <p className="font-semibold">{subscription?.max_messages_per_day.toLocaleString() || 100}</p>
+                <p className="font-semibold">{formatLimit(currentPlan.limits.maxMessagesPerDay)}</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
               <TrendingUp className="w-4 h-4 text-gray-400 dark:text-gray-500 dark:text-gray-400" />
               <div>
                 <p className="text-sm text-gray-600 dark:text-gray-400">Storage</p>
-                <p className="font-semibold">{subscription?.max_storage_gb || 1}GB</p>
+                <p className="font-semibold">
+                  {currentPlan.limits.storageGb === 'unlimited' ? 'Unlimited' : `${currentPlan.limits.storageGb}GB`}
+                </p>
               </div>
             </div>
           </div>
