@@ -21,8 +21,13 @@ export async function apiCall(
       ...options,
       headers,
     })
-  } catch (error) {
-    console.error(`API call failed: ${url}`, error)
+  } catch (error: any) {
+    // Log the error but check if it's a cancellation
+    if (error?.name === 'AbortError' || !error?.message) {
+      console.log(`Request cancelled: ${url}`)
+    } else {
+      console.error(`API call failed: ${url}`, error)
+    }
     throw error
   }
 }
@@ -59,8 +64,14 @@ export async function listInstances() {
 export async function provisionInstance() {
   const response = await apiCall('/my/instances/provision', { method: 'POST' })
   if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to provision instance')
+    let errorText = ''
+    try {
+      errorText = await response.text()
+    } catch {
+      // If we can't read the response (e.g., connection aborted), use generic message
+      errorText = ''
+    }
+    throw new Error(errorText || 'Failed to provision instance')
   }
   return response.json()
 }
