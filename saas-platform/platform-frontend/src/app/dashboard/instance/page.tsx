@@ -6,6 +6,7 @@ import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, Trash
 import { createClient } from '@/lib/supabase/client'
 import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
+import { getCached, setCached } from '@/lib/cache'
 
 type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'deprovisioning' | 'maintenance' | 'error'
 
@@ -25,8 +26,9 @@ type Instance = {
 
 export default function InstancePage() {
   const router = useRouter()
-  const [instance, setInstance] = useState<Instance | null>(null)
-  const [loading, setLoading] = useState(true)
+  const cachedInstance = getCached<Instance>('user-instance')
+  const [instance, setInstance] = useState<Instance | null>(cachedInstance)
+  const [loading, setLoading] = useState(!cachedInstance)
   const [refreshing, setRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
 
@@ -49,7 +51,9 @@ export default function InstancePage() {
       const data = await listInstances()
 
       if (data.instances && data.instances.length > 0) {
-        setInstance(data.instances[0])
+        const newInstance = data.instances[0]
+        setInstance(newInstance)
+        setCached('user-instance', newInstance)
       } else {
         setInstance(null)
       }
