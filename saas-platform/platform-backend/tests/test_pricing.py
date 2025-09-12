@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 from backend.pricing import (
     PricingConfig,
@@ -131,24 +132,16 @@ class TestPricingConfig:
         mock_path.exists.return_value = False
 
         with patch("backend.pricing.config_path", mock_path):
-            config = load_pricing_config()
+            # Should raise FileNotFoundError when config file is missing
+            with pytest.raises(FileNotFoundError) as exc_info:
+                load_pricing_config()
 
-            # Should return minimal config
-            assert config["plans"] == {}
-            assert config["product"]["name"] == "MindRoom Subscription"
-            assert config["trial"]["enabled"] is True
-            assert config["trial"]["days"] == 14
+            assert "Pricing configuration file not found" in str(exc_info.value)
+            assert "This file is required for the application to run" in str(exc_info.value)
 
-            # Model should handle missing config gracefully and provide defaults
-            model = load_pricing_config_model()
-            assert model.product.name == "MindRoom Subscription"
-            assert model.product.description == "AI-powered team collaboration platform"
-            assert model.product.metadata.platform == "mindroom"
-            assert model.trial.days == 14
-            assert model.trial.enabled is True
-            assert model.trial.applicable_plans == []
-            assert model.discounts.annual_percentage == 20
-            assert model.plans == {}  # No plans when config is missing
+            # Model should also fail without valid config
+            with pytest.raises(FileNotFoundError):
+                load_pricing_config_model()
 
 
 class TestPricingHelperFunctions:

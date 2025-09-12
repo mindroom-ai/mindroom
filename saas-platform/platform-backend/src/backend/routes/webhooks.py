@@ -19,14 +19,19 @@ def _get_tier_from_price(price: dict) -> str:
     if (metadata := price.get("metadata", {})) and (tier := metadata.get("tier")):
         return tier
 
-    # Fall back to lookup_key
+    # Try to extract from lookup_key
     if lookup_key := price.get("lookup_key"):
         # Parse lookup_key format: mindroom_[tier]_[cycle]
         parts = lookup_key.split("_")
         if len(parts) >= 2:
             return parts[1]
 
-    return "free"
+    msg = (
+        f"Unable to determine tier from price. "
+        f"Price metadata: {price.get('metadata')}, "
+        f"lookup_key: {price.get('lookup_key')}"
+    )
+    raise ValueError(msg)
 
 
 def _get_billing_cycle_from_price(price: dict) -> str:
@@ -35,12 +40,22 @@ def _get_billing_cycle_from_price(price: dict) -> str:
     if (metadata := price.get("metadata", {})) and (cycle := metadata.get("billing_cycle")):
         return cycle
 
-    # Fall back to recurring interval
+    # Try to extract from recurring interval
     if recurring := price.get("recurring"):
-        interval = recurring.get("interval", "month")
-        return "yearly" if interval == "year" else "monthly"
+        interval = recurring.get("interval")
+        if interval == "year":
+            return "yearly"
+        if interval == "month":
+            return "monthly"
+        msg = f"Unexpected billing interval: {interval}"
+        raise ValueError(msg)
 
-    return "monthly"
+    msg = (
+        f"Unable to determine billing cycle from price. "
+        f"Price metadata: {price.get('metadata')}, "
+        f"recurring: {price.get('recurring')}"
+    )
+    raise ValueError(msg)
 
 
 def handle_subscription_created(subscription: dict) -> None:

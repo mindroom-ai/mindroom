@@ -93,20 +93,22 @@ for path in possible_paths:
         config_path = path
         break
 
-# Fallback to development path if none exist
+# Raise exception if config file not found
 if config_path is None:
-    config_path = Path(__file__).parent.parent.parent.parent / "pricing-config.yaml"
+    msg = (
+        "pricing-config.yaml not found in any expected location. "
+        "Looked in: /app/, development path, and current directory"
+    )
+    raise FileNotFoundError(msg)
 
 
 def load_pricing_config() -> dict[str, Any]:
     """Load pricing configuration from YAML file."""
     if not config_path.exists():
-        # Return a minimal config if file doesn't exist
-        return {
-            "plans": {},
-            "product": {"name": "MindRoom Subscription"},
-            "trial": {"enabled": True, "days": 14},
-        }
+        msg = (
+            f"Pricing configuration file not found at {config_path}. This file is required for the application to run."
+        )
+        raise FileNotFoundError(msg)
 
     with config_path.open() as f:
         return yaml.safe_load(f)
@@ -121,27 +123,22 @@ def load_pricing_config_model() -> PricingConfig:
     """
     config_dict = load_pricing_config()
 
-    # Provide defaults for missing fields if config is minimal
-    if not config_dict.get("product") or "description" not in config_dict.get("product", {}):
-        # Ensure complete product information
-        product = config_dict.get("product", {})
-        config_dict["product"] = {
-            "name": product.get("name", "MindRoom Subscription"),
-            "description": product.get("description", "AI-powered team collaboration platform"),
-            "metadata": product.get("metadata", {"platform": "mindroom"}),
-        }
-
+    # Validate required fields are present
+    if not config_dict.get("product"):
+        msg = "Missing 'product' section in pricing configuration"
+        raise ValueError(msg)
+    if "description" not in config_dict["product"]:
+        msg = "Missing 'product.description' in pricing configuration"
+        raise ValueError(msg)
     if not config_dict.get("discounts"):
-        config_dict["discounts"] = {"annual_percentage": 20}
-
-    if not config_dict.get("trial") or "applicable_plans" not in config_dict.get("trial", {}):
-        # Ensure complete trial information
-        trial = config_dict.get("trial", {})
-        config_dict["trial"] = {
-            "enabled": trial.get("enabled", True),
-            "days": trial.get("days", 14),
-            "applicable_plans": trial.get("applicable_plans", []),
-        }
+        msg = "Missing 'discounts' section in pricing configuration"
+        raise ValueError(msg)
+    if not config_dict.get("trial"):
+        msg = "Missing 'trial' section in pricing configuration"
+        raise ValueError(msg)
+    if "applicable_plans" not in config_dict["trial"]:
+        msg = "Missing 'trial.applicable_plans' in pricing configuration"
+        raise ValueError(msg)
 
     return PricingConfig(**config_dict)
 
@@ -213,11 +210,9 @@ def get_plan_limits_from_metadata(tier: str) -> dict[str, Any]:
     plan = get_plan_details(tier)
 
     if not plan:
-        # Return free tier defaults if plan not found
-        return {
-            "max_agents": 1,
-            "max_messages_per_day": 100,
-        }
+        available_plans = ", ".join(load_pricing_config_model().plans.keys())
+        msg = f"Plan '{tier}' not found in pricing configuration. Available plans: {available_plans}"
+        raise ValueError(msg)
 
     # Convert Pydantic model to dict, handling "unlimited" values
     limits = {}

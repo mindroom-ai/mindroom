@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -249,26 +249,6 @@ class AdminLogoutResponse(BaseModel):
     """Admin logout response model."""
 
     success: bool
-
-
-# React Admin Models
-class ReactAdminListResponse(BaseModel):
-    """React Admin list response model."""
-
-    data: list[dict[str, Any]]
-    total: int
-
-
-class ReactAdminItemResponse(BaseModel):
-    """React Admin single item response model."""
-
-    data: dict[str, Any] | None
-
-
-class ReactAdminDeleteResponse(BaseModel):
-    """React Admin delete response model."""
-
-    data: dict[str, Any]
 
 
 # Webhook Models
