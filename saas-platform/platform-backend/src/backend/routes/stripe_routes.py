@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from typing import Annotated, Any
 
-from backend.config import logger, stripe
+from backend.config import PLATFORM_DOMAIN, logger, stripe
 from backend.deps import ensure_supabase, verify_user, verify_user_optional
 from backend.models import UrlResponse
 from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
@@ -71,7 +70,7 @@ async def create_checkout_session(
                 # Create a portal session instead
                 portal_session = stripe.billing_portal.Session.create(
                     customer=customer_id,
-                    return_url=f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard/billing",
+                    return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing",
                 )
                 return {"url": portal_session.url}
 
@@ -81,8 +80,8 @@ async def create_checkout_session(
     checkout_params = {
         "line_items": [{"price": price_id, "quantity": quantity}],
         "mode": "subscription",
-        "success_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard?success=true&session_id={{CHECKOUT_SESSION_ID}}",
-        "cancel_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard/billing/upgrade?cancelled=true",
+        "success_url": f"https://app.{PLATFORM_DOMAIN}/dashboard?success=true&session_id={{CHECKOUT_SESSION_ID}}",
+        "cancel_url": f"https://app.{PLATFORM_DOMAIN}/dashboard/billing/upgrade?cancelled=true",
         "allow_promotion_codes": True,
         "billing_address_collection": "required",
         "subscription_data": {
@@ -120,7 +119,7 @@ async def create_portal_session(user: Annotated[dict, Depends(verify_user)]) -> 
 
     session = stripe.billing_portal.Session.create(
         customer=result.data["stripe_customer_id"],
-        return_url=f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard/billing?return=true",
+        return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing?return=true",
     )
 
     return {"url": session.url}

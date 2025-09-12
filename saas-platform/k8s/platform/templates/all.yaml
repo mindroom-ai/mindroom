@@ -13,7 +13,11 @@ metadata:
   namespace: mindroom-{{ .Values.environment }}
 type: Opaque
 stringData:
+  {{- if eq .Values.environment "production" }}
   PLATFORM_DOMAIN: {{ .Values.domain }}
+  {{- else }}
+  PLATFORM_DOMAIN: {{ .Values.environment }}.{{ .Values.domain }}
+  {{- end }}
   ENVIRONMENT: {{ .Values.environment }}
   SUPABASE_URL: {{ .Values.supabase.url }}
   SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey }}
@@ -76,8 +80,6 @@ spec:
         env:
         - name: NODE_ENV
           value: production
-        - name: APP_URL
-          value: https://app.{{ .Values.domain }}
         # Next.js public env vars for client-side
         - name: NEXT_PUBLIC_SUPABASE_URL
           valueFrom:
