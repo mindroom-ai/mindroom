@@ -128,7 +128,7 @@ export function Features() {
             return (
               <div
                 key={index}
-                className={`group relative p-8 bg-white dark:bg-gray-800 rounded-2xl shadow-lg hover:shadow-2xl transition-all duration-500 hover:-translate-y-2 cursor-default ${
+                className={`touch-card group relative p-8 bg-white dark:bg-gray-800 rounded-2xl shadow-lg hover:shadow-2xl transition-all duration-500 hover:-translate-y-2 cursor-default ${
                   isVisible ? 'fade-in-up' : 'opacity-0'
                 }`}
                 style={{ animationDelay: `${index * 0.1}s` }}
@@ -164,7 +164,7 @@ export function Features() {
             return (
               <div
                 key={index}
-                className={`group relative p-6 bg-gradient-to-br from-gray-50 to-white dark:from-gray-800 dark:to-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 hover:border-orange-300 dark:hover:border-orange-700 transition-all duration-300 ${
+                className={`touch-card group relative p-6 bg-gradient-to-br from-gray-50 to-white dark:from-gray-800 dark:to-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 hover:border-orange-300 dark:hover:border-orange-700 transition-all duration-300 ${
                   isVisible ? 'fade-in-up' : 'opacity-0'
                 }`}
                 style={{ animationDelay: `${(features.length + index) * 0.1}s` }}
