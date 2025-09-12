@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Annotated, Any
 
-from backend.config import stripe
+from backend.config import logger, stripe
 from backend.deps import ensure_supabase, verify_user, verify_user_optional
 from backend.models import UrlResponse
 from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
@@ -55,6 +55,25 @@ async def create_checkout_session(
                 "id",
                 user["account_id"],
             ).execute()
+
+    # Check if customer already has an active subscription
+    if customer_id:
+        # Check for existing active subscriptions
+        subscriptions = stripe.Subscription.list(customer=customer_id, status="all", limit=10)
+        for sub in subscriptions.data:
+            if sub.status in ["active", "trialing"]:
+                # Customer already has a subscription - they should use the portal to manage it
+                logger.warning(
+                    "Customer %s already has an active subscription %s, redirecting to portal",
+                    customer_id,
+                    sub.id,
+                )
+                # Create a portal session instead
+                portal_session = stripe.billing_portal.Session.create(
+                    customer=customer_id,
+                    return_url=f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard/billing",
+                )
+                return {"url": portal_session.url}
 
     # Use quantity for professional plan (per-user pricing)
     quantity = request.quantity if request.tier == "professional" else 1
