@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
 import { listInstances, restartInstance as apiRestartInstance } from '@/lib/api'
-import { getCached, setCached } from '@/lib/cache'
+import { cache } from '@/lib/cache'
 
 export interface Instance {
   id: string // UUID
@@ -41,7 +41,7 @@ const DEV_INSTANCE: Instance | null =
     : null
 
 export function useInstance() {
-  const cachedInstance = getCached<Instance>('user-instance')
+  const cachedInstance = cache.get('user-instance') as Instance | null
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
   const [loading, setLoading] = useState(!cachedInstance)
   const { user, loading: authLoading } = useAuth()
@@ -57,7 +57,7 @@ export function useInstance() {
     // Use dev instance if in development mode
     if (DEV_INSTANCE) {
       setInstance(DEV_INSTANCE)
-      setCached('user-instance', DEV_INSTANCE)
+      cache.set('user-instance', DEV_INSTANCE)
       setLoading(false)
       return
     }
@@ -69,7 +69,7 @@ export function useInstance() {
         if (data.instances && data.instances.length > 0) {
           const newInstance = data.instances[0]
           setInstance(newInstance)
-          setCached('user-instance', newInstance)
+          cache.set('user-instance', newInstance)
         } else {
           // No instances found
           setInstance(null)
@@ -101,7 +101,7 @@ export function useInstance() {
         if (data.instances && data.instances.length > 0) {
           const newInstance = data.instances[0]
           setInstance(newInstance)
-          setCached('user-instance', newInstance)
+          cache.set('user-instance', newInstance)
         }
         errorCount = 0 // Reset error count on success
       } catch (err) {

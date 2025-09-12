@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, Database, Globe } from 'lucide-react'
 import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
-import { getCached, setCached } from '@/lib/cache'
+import { cache } from '@/lib/cache'
 
 type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'error' | 'deprovisioned' | 'restarting'
 
@@ -25,7 +25,7 @@ type Instance = {
 
 export default function InstancePage() {
   const router = useRouter()
-  const cachedInstance = getCached<Instance>('user-instance')
+  const cachedInstance = cache.get('user-instance') as Instance | null
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
   const [loading, setLoading] = useState(!cachedInstance)
   const [refreshing, setRefreshing] = useState(false)
@@ -61,7 +61,7 @@ export default function InstancePage() {
       if (data.instances && data.instances.length > 0) {
         const newInstance = data.instances[0]
         setInstance(newInstance)
-        setCached('user-instance', newInstance)
+        cache.set('user-instance', newInstance)
       } else {
         setInstance(null)
       }

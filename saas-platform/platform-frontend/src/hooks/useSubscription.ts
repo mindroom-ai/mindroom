@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from './useAuth'
 import { apiCall } from '@/lib/api'
-import { getCached, setCached } from '@/lib/cache'
+import { cache } from '@/lib/cache'
 
 export interface Subscription {
   id: string
@@ -21,7 +21,7 @@ export interface Subscription {
 }
 
 export function useSubscription() {
-  const cachedSubscription = getCached<Subscription>('user-subscription')
+  const cachedSubscription = cache.get('user-subscription') as Subscription | null
   const [subscription, setSubscription] = useState<Subscription | null>(cachedSubscription)
   const [loading, setLoading] = useState(!cachedSubscription)
   const { user, loading: authLoading } = useAuth()
@@ -40,7 +40,7 @@ export function useSubscription() {
         if (response.ok) {
           const data = await response.json()
           setSubscription(data)
-          setCached('user-subscription', data)
+          cache.set('user-subscription', data)
         } else if (response.status === 404) {
           setSubscription(null)
         } else {
