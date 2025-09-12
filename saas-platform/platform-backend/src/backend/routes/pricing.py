@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.models import StripePriceResponse
 from backend.pricing import PRICING_CONFIG_MODEL, get_stripe_price_id
 from fastapi import APIRouter, HTTPException
 
@@ -62,7 +63,7 @@ async def get_pricing_config() -> dict[str, Any]:
     return config
 
 
-@router.get("/pricing/stripe-price/{plan}/{billing_cycle}")
+@router.get("/pricing/stripe-price/{plan}/{billing_cycle}", response_model=StripePriceResponse)
 async def get_stripe_price(plan: str, billing_cycle: str) -> dict[str, Any]:
     """Get the Stripe price ID for a specific plan and billing cycle.
 

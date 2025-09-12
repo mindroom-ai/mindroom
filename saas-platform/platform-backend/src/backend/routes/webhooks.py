@@ -7,6 +7,7 @@ from typing import Annotated, Any
 
 from backend.config import STRIPE_WEBHOOK_SECRET, logger, stripe
 from backend.deps import ensure_supabase
+from backend.models import WebhookResponse
 from backend.pricing import get_plan_limits_from_metadata
 from fastapi import APIRouter, Header, HTTPException, Request
 
@@ -241,7 +242,7 @@ def handle_payment_failed(invoice: dict) -> None:
     ).eq("stripe_subscription_id", invoice["subscription"]).execute()
 
 
-@router.post("/webhooks/stripe")
+@router.post("/webhooks/stripe", response_model=WebhookResponse)
 async def stripe_webhook(  # noqa: C901
     request: Request,
     stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,

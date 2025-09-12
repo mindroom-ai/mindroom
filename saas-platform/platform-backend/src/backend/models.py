@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -158,6 +158,22 @@ class UpdateAccountStatusResponse(BaseModel):
 
 
 # Account Models
+class AccountWithRelationsOut(BaseModel):
+    """Account with subscriptions and instances."""
+
+    id: str
+    email: str
+    full_name: str | None = None
+    company_name: str | None = None
+    is_admin: bool = False
+    status: str = "active"
+    stripe_customer_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    subscriptions: list[dict[str, Any]] | None = None
+    instances: list[dict[str, Any]] | None = None
+
+
 class AccountOut(BaseModel):
     """Account information output model."""
 
@@ -177,6 +193,7 @@ class AccountSetupResponse(BaseModel):
 
     message: str
     account_id: str
+    subscription: SubscriptionOut | None = None
 
 
 # Subscription Models
@@ -185,6 +202,8 @@ class SubscriptionCancelResponse(BaseModel):
 
     success: bool
     message: str
+    cancel_at_period_end: bool | None = None
+    subscription_id: str | None = None
     cancelled_at: str | None = None
 
 
@@ -226,6 +245,56 @@ class StripePriceResponse(BaseModel):
 
 
 # Admin Models
+class AdminListResponse(BaseModel):
+    """Admin list response for generic resources."""
+
+    data: list[dict[str, Any]]
+    total: int
+
+
+class AdminGetOneResponse(BaseModel):
+    """Admin single item response."""
+
+    data: dict[str, Any]
+
+
+class AdminCreateResponse(BaseModel):
+    """Admin create response."""
+
+    data: dict[str, Any] | None
+
+
+class AdminUpdateResponse(BaseModel):
+    """Admin update response."""
+
+    data: dict[str, Any] | None
+
+
+class AdminDeleteResponse(BaseModel):
+    """Admin delete response."""
+
+    data: dict[str, Any]
+
+
+class AdminAccountDetailsResponse(BaseModel):
+    """Admin account details response."""
+
+    account: dict[str, Any]
+    subscription: dict[str, Any] | None
+    instances: list[dict[str, Any]]
+
+
+class AdminDashboardMetricsResponse(BaseModel):
+    """Admin dashboard metrics response."""
+
+    total_accounts: int
+    active_subscriptions: int
+    total_instances: int
+    instances_by_status: dict[str, int]
+    subscription_revenue: float
+    subscriptions_by_tier: dict[str, int]
+    recent_signups: list[dict[str, Any]]
+    recent_instances: list[dict[str, Any]]
 
 
 class AdminProvisionResponse(BaseModel):
@@ -256,6 +325,7 @@ class WebhookResponse(BaseModel):
     """Webhook processing response model."""
 
     received: bool
+    error: str | None = None
 
 
 # Checkout Models

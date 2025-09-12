@@ -11,7 +11,21 @@ if TYPE_CHECKING:
 
 from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, verify_admin
-from backend.models import ActionResult, AdminStatsOut, UpdateAccountStatusResponse
+from backend.models import (
+    ActionResult,
+    AdminAccountDetailsResponse,
+    AdminCreateResponse,
+    AdminDashboardMetricsResponse,
+    AdminDeleteResponse,
+    AdminGetOneResponse,
+    AdminListResponse,
+    AdminLogoutResponse,
+    AdminStatsOut,
+    AdminUpdateResponse,
+    ProvisionResponse,
+    SyncResult,
+    UpdateAccountStatusResponse,
+)
 from backend.routes.provisioner import (
     provision_instance,
     restart_instance_provisioner,
@@ -83,10 +97,9 @@ async def get_admin_stats(admin: Annotated[dict, Depends(verify_admin)]) -> dict
             )
 
         return {
-            "accounts_count": len(accounts.data) if accounts.data else 0,
-            "subscriptions_count": len(subscriptions.data) if subscriptions.data else 0,
-            "instances_count": len(instances.data) if instances.data else 0,
-            "recent_activity": recent_activity,
+            "accounts": len(accounts.data) if accounts.data else 0,
+            "active_subscriptions": len(subscriptions.data) if subscriptions.data else 0,
+            "running_instances": len(instances.data) if instances.data else 0,
         }
     except Exception as e:
         logger.exception("Error fetching admin stats")
@@ -155,7 +168,7 @@ async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depe
     return result
 
 
-@router.post("/admin/instances/{instance_id}/provision")
+@router.post("/admin/instances/{instance_id}/provision", response_model=ProvisionResponse)
 async def admin_provision_instance(
     instance_id: int,
     background_tasks: BackgroundTasks,
@@ -192,7 +205,7 @@ async def admin_provision_instance(
     return result
 
 
-@router.post("/admin/sync-instances")
+@router.post("/admin/sync-instances", response_model=SyncResult)
 async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Sync instance states between database and Kubernetes (admin proxy)."""
     result = await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
@@ -205,7 +218,7 @@ async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) ->
     return result
 
 
-@router.get("/admin/accounts/{account_id}")
+@router.get("/admin/accounts/{account_id}", response_model=AdminAccountDetailsResponse)
 async def get_account_details(
     account_id: str,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001
@@ -292,14 +305,14 @@ async def update_account_status(
         raise HTTPException(status_code=500, detail="Failed to update account status") from e
 
 
-@router.post("/admin/auth/logout")
+@router.post("/admin/auth/logout", response_model=AdminLogoutResponse)
 async def admin_logout() -> dict[str, bool]:
     """Admin logout placeholder."""
     return {"success": True}
 
 
 # === React Admin Data Provider ===
-@router.get("/admin/{resource}")
+@router.get("/admin/{resource}", response_model=AdminListResponse)
 async def admin_get_list(
     resource: str,
     admin: Annotated[dict, Depends(verify_admin)],
@@ -356,7 +369,7 @@ async def admin_get_list(
         return {"data": result.data, "total": result.count}
 
 
-@router.get("/admin/{resource}/{resource_id}")
+@router.get("/admin/{resource}/{resource_id}", response_model=AdminGetOneResponse)
 async def admin_get_one(
     resource: str,
     resource_id: str,
@@ -380,7 +393,7 @@ async def admin_get_one(
         return {"data": result.data}
 
 
-@router.post("/admin/{resource}")
+@router.post("/admin/{resource}", response_model=AdminCreateResponse)
 async def admin_create(
     resource: str,
     data: dict,
@@ -408,7 +421,7 @@ async def admin_create(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.put("/admin/{resource}/{resource_id}")
+@router.put("/admin/{resource}/{resource_id}", response_model=AdminUpdateResponse)
 async def admin_update(
     resource: str,
     resource_id: str,
@@ -436,7 +449,7 @@ async def admin_update(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.delete("/admin/{resource}/{resource_id}")
+@router.delete("/admin/{resource}/{resource_id}", response_model=AdminDeleteResponse)
 async def admin_delete(
     resource: str,
     resource_id: str,
@@ -461,7 +474,7 @@ async def admin_delete(
         return {"data": {"id": resource_id}}
 
 
-@router.get("/admin/metrics/dashboard")
+@router.get("/admin/metrics/dashboard", response_model=AdminDashboardMetricsResponse)
 async def get_dashboard_metrics(
     admin: Annotated[dict, Depends(verify_admin)],
 ) -> dict[str, Any]:

@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 from backend.config import logger, stripe
 from backend.deps import ensure_supabase, verify_user
-from backend.models import SubscriptionOut
+from backend.models import SubscriptionCancelResponse, SubscriptionOut, SubscriptionReactivateResponse
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -42,7 +42,7 @@ async def get_user_subscription(user: Annotated[dict, Depends(verify_user)]) -> 
     return result.data[0]
 
 
-@router.post("/my/subscription/cancel")
+@router.post("/my/subscription/cancel", response_model=SubscriptionCancelResponse)
 async def cancel_subscription(
     request: CancelSubscriptionRequest,
     user: Annotated[dict, Depends(verify_user)],
@@ -86,7 +86,7 @@ async def cancel_subscription(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
-@router.post("/my/subscription/reactivate")
+@router.post("/my/subscription/reactivate", response_model=SubscriptionReactivateResponse)
 async def reactivate_subscription(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Reactivate a cancelled subscription (if still in billing period)."""
     if not stripe.api_key:
