@@ -92,14 +92,13 @@ export default function BillingPage() {
         <div className="flex items-start justify-between">
           <div>
             <h2 className="text-xl font-bold mb-2 dark:text-white">Current Plan</h2>
-            <div className="flex items-center gap-3 mb-4">
+            <div className="flex items-center gap-3 mb-2">
               <span className={`px-3 py-1 rounded-full text-sm font-medium ${
                 subscription?.cancelled_at && subscription?.status !== 'cancelled'
                   ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300'
                   : 'bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-300'
               }`}>
                 {tierInfo.name}
-                {subscription?.cancelled_at && subscription?.status !== 'cancelled' && ' (Ending)'}
               </span>
               <span className="text-2xl font-bold">{tierInfo.price}</span>
               {subscription?.status === 'active' && !subscription?.cancelled_at && (
@@ -107,7 +106,7 @@ export default function BillingPage() {
                   Active
                 </span>
               )}
-              {subscription?.status === 'trialing' && !subscription?.cancelled_at && (
+              {subscription?.status === 'trialing' && (
                 <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
                   Trial
                 </span>
@@ -123,6 +122,64 @@ export default function BillingPage() {
                 </span>
               )}
             </div>
+
+            {/* Trial/Billing Period Information */}
+            {subscription && (
+              <div className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                {subscription.status === 'trialing' && subscription.trial_ends_at && (
+                  <div>
+                    <p className="text-base">
+                      {subscription.cancelled_at ? (
+                        <>
+                          <span className="text-yellow-600 dark:text-yellow-400 font-semibold">Cancels {new Date(subscription.trial_ends_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                          <br />
+                          <span className="text-sm">After your free trial ends on {new Date(subscription.trial_ends_at).toLocaleDateString('en-US', {
+                            month: 'long',
+                            day: 'numeric',
+                            year: 'numeric'
+                          })}, this subscription will no longer be available.</span>
+                        </>
+                      ) : (
+                        <>
+                          Free trial until: <strong className="text-gray-900 dark:text-gray-100">
+                            {new Date(subscription.trial_ends_at).toLocaleDateString('en-US', {
+                              month: 'long',
+                              day: 'numeric',
+                              year: 'numeric'
+                            })}
+                          </strong>
+                          <span className="text-gray-500 dark:text-gray-400 ml-2">
+                            ({Math.ceil((new Date(subscription.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24))} days remaining)
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  </div>
+                )}
+                {subscription.status === 'active' && subscription.current_period_end && !subscription.cancelled_at && (
+                  <p>
+                    Next billing date: <strong className="text-gray-900 dark:text-gray-100">
+                      {new Date(subscription.current_period_end).toLocaleDateString('en-US', {
+                        month: 'long',
+                        day: 'numeric',
+                        year: 'numeric'
+                      })}
+                    </strong>
+                  </p>
+                )}
+                {subscription.cancelled_at && subscription.status === 'active' && subscription.current_period_end && (
+                  <p>
+                    <span className="text-yellow-600 dark:text-yellow-400 font-semibold">Cancels {new Date(subscription.current_period_end).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                    <br />
+                    <span className="text-sm">Subscription ends on {new Date(subscription.current_period_end).toLocaleDateString('en-US', {
+                      month: 'long',
+                      day: 'numeric',
+                      year: 'numeric'
+                    })}</span>
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           {subscription?.stripe_subscription_id && (
@@ -184,21 +241,6 @@ export default function BillingPage() {
           </div>
         </div>
 
-        {/* Billing Period */}
-        {(subscription?.current_period_end || subscription?.trial_ends_at) && !subscription?.cancelled_at && (
-          <div className="mt-6 pt-6 border-t">
-            {subscription?.status === 'trialing' && subscription?.trial_ends_at ? (
-              <p className="text-sm text-gray-600 dark:text-gray-400">
-                Trial ends: <span className="font-medium">{new Date(subscription.trial_ends_at).toLocaleDateString()}</span>
-                {' '}({Math.ceil((new Date(subscription.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24))} days remaining)
-              </p>
-            ) : subscription?.current_period_end ? (
-              <p className="text-sm text-gray-600 dark:text-gray-400">
-                Next billing date: <span className="font-medium">{new Date(subscription.current_period_end).toLocaleDateString()}</span>
-              </p>
-            ) : null}
-          </div>
-        )}
       </div>
 
       {/* Payment Method */}
