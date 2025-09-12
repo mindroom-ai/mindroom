@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -32,6 +33,7 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         return  # Already syncing
 
     _syncing_instances.add(instance_id)
+    start = time.perf_counter()
 
     try:
         sb = ensure_supabase()
@@ -42,6 +44,7 @@ async def _background_sync_instance_status(instance_id: str) -> None:
 
         # Check if deployment exists
         try:
+            k8s_start = time.perf_counter()
             exists = await check_deployment_exists(instance_id)
         except FileNotFoundError:
             logger.warning("kubectl not found, cannot sync instance %s", instance_id)
@@ -77,7 +80,15 @@ async def _background_sync_instance_status(instance_id: str) -> None:
             },
         ).eq("instance_id", instance_id).execute()
 
-        logger.info("Background sync completed for instance %s: status=%s", instance_id, actual_status)
+        total_time = (time.perf_counter() - start) * 1000
+        k8s_time = (time.perf_counter() - k8s_start) * 1000
+        logger.info(
+            "Background K8s sync for instance %s: status=%s, K8s calls %.2fms, total %.2fms",
+            instance_id,
+            actual_status,
+            k8s_time,
+            total_time,
+        )
     finally:
         _syncing_instances.discard(instance_id)
 
@@ -88,11 +99,13 @@ async def list_user_instances(
     background_tasks: BackgroundTasks | None = None,
 ) -> dict[str, Any]:
     """List instances for current user with background status refresh."""
+    start = time.perf_counter()
     sb = ensure_supabase()
     account_id = user["account_id"]
     result = sb.table("instances").select("*").eq("account_id", account_id).execute()
 
     instances = result.data or []
+    db_time = (time.perf_counter() - start) * 1000
 
     # Check if any instance needs a background sync (older than 30 seconds)
     if background_tasks:
@@ -120,6 +133,10 @@ async def list_user_instances(
             if needs_sync:
                 logger.info("Instance %s has stale K8s status, scheduling background sync", instance_id)
                 background_tasks.add_task(_background_sync_instance_status, str(instance_id))
+
+    # Log cache effectiveness
+    total_time = (time.perf_counter() - start) * 1000
+    logger.debug("Instances endpoint: DB query %.2fms, total %.2fms (cached K8s status)", db_time, total_time)
 
     # Return cached data immediately
     return {"instances": instances}

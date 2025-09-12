@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -41,10 +42,12 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901
     token = authorization.replace("Bearer ", "")
 
     # Check cache first (5 minute TTL)
+    start = time.perf_counter()
     now = datetime.now(UTC)
     if token in _auth_cache:
         cached_data, expiry = _auth_cache[token]
         if expiry > now:
+            logger.debug("Auth cache hit: %.2fms", (time.perf_counter() - start) * 1000)
             return cached_data
         del _auth_cache[token]
 
@@ -107,6 +110,9 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901
         # Cache the result with 5 minute TTL
         expiry = now + timedelta(minutes=5)
         _auth_cache[token] = (user_data, expiry)
+
+        # Log the time taken for database auth
+        logger.debug("Auth database lookup: %.2fms", (time.perf_counter() - start) * 1000)
 
     except HTTPException:
         raise
