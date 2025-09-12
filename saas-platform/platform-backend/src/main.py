@@ -64,9 +64,9 @@ app.add_middleware(
 )
 
 # Restrict allowed hosts
-allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN]
+allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN, "testserver"]
 if ENVIRONMENT != "production":
-    allowed_hosts += ["localhost", "127.0.0.1"]
+    allowed_hosts += ["localhost", "127.0.0.1", "testserver"]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 
 
@@ -113,7 +113,7 @@ rate_logger = logging.getLogger("mindroom.ratelimit")
 async def _logged_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) -> StarletteResponse:  # type: ignore[override]
     client = request.client.host if request.client else "unknown"
     rate_logger.warning("429 Too Many Requests: path=%s client=%s", request.url.path, client)
-    return await _rate_limit_exceeded_handler(request, exc)
+    return _rate_limit_exceeded_handler(request, exc)
 
 
 app.add_exception_handler(RateLimitExceeded, _logged_rate_limit_exceeded)

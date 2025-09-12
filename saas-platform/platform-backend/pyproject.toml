@@ -20,6 +20,12 @@ dependencies = [
   "uvicorn[standard]>=0.24",
 ]
 
+[dependency-groups]
+dev = [
+  "pytest>=8.4",
+  "pytest-asyncio>=0.23",
+]
+
 [tool.hatch.build]
 sources = { "src" = "" }
 include = [

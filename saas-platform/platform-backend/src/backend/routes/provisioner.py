@@ -22,7 +22,7 @@ from backend.deps import _extract_bearer_token, ensure_supabase, limiter
 from backend.k8s import check_deployment_exists, ensure_docker_registry_secret, run_kubectl, wait_for_deployment_ready
 from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
 from backend.process import run_helm
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 router = APIRouter()
 
@@ -56,6 +56,7 @@ def _require_provisioner_auth(authorization: str | None) -> None:
 @router.post("/system/provision", response_model=ProvisionResponse)
 @limiter.limit("5/minute")
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
+    request: Request,  # noqa: ARG001
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
     background_tasks: BackgroundTasks = None,  # type: ignore[assignment]
@@ -253,6 +254,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 @router.post("/system/instances/{instance_id}/start", response_model=ActionResult)
 @limiter.limit("10/minute")
 async def start_instance_provisioner(
+    request: Request,  # noqa: ARG001
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
@@ -292,6 +294,7 @@ async def start_instance_provisioner(
 @router.post("/system/instances/{instance_id}/stop", response_model=ActionResult)
 @limiter.limit("10/minute")
 async def stop_instance_provisioner(
+    request: Request,  # noqa: ARG001
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
@@ -331,6 +334,7 @@ async def stop_instance_provisioner(
 @router.post("/system/instances/{instance_id}/restart", response_model=ActionResult)
 @limiter.limit("10/minute")
 async def restart_instance_provisioner(
+    request: Request,  # noqa: ARG001
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
@@ -367,6 +371,7 @@ async def restart_instance_provisioner(
 @router.delete("/system/instances/{instance_id}/uninstall", response_model=ActionResult)
 @limiter.limit("2/minute")
 async def uninstall_instance(
+    request: Request,  # noqa: ARG001
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
@@ -405,6 +410,7 @@ async def uninstall_instance(
 @router.post("/system/sync-instances", response_model=SyncResult)
 @limiter.limit("5/minute")
 async def sync_instances(
+    request: Request,  # noqa: ARG001
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Sync instance states between database and Kubernetes cluster."""

@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from backend.deps import verify_admin
-from fastapi.testclient import TestClient
-from main import app
+import sys
+import types
+
+# Stub external deps not needed for this test
+sys.modules.setdefault("stripe", types.SimpleNamespace(api_key=""))
+
+from backend.deps import verify_admin  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from main import app  # noqa: E402
 
 
 def _override_verify_admin() -> dict[str, str]:

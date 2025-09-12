@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from backend.deps import verify_user
-from fastapi.testclient import TestClient
-from main import app
+import sys
+import types
+
+# Stub external deps not needed for this test
+sys.modules.setdefault("stripe", types.SimpleNamespace(api_key=""))
+
+from backend.deps import verify_user  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from main import app  # noqa: E402
 
 
 def _override_verify_user() -> dict[str, str]:
@@ -15,7 +21,7 @@ def test_sso_cookie_rate_limit() -> None:
     """6th request within a minute should return 429."""
     app.dependency_overrides[verify_user] = _override_verify_user
     client = TestClient(app)
-    headers = {"Authorization": "Bearer test-token"}
+    headers = {"authorization": "Bearer test-token"}
 
     # Limit is 5/min; 6th request should be 429
     statuses = []

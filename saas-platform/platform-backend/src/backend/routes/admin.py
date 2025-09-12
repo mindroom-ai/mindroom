@@ -34,7 +34,7 @@ from backend.routes.provisioner import (
     sync_instances,
     uninstall_instance,
 )
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 router = APIRouter()
 ALLOWED_RESOURCES = {"accounts", "subscriptions", "instances", "audit_logs", "usage_metrics"}
@@ -68,7 +68,7 @@ def audit_log_entry(
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
 @limiter.limit("30/minute")
-async def get_admin_stats(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+async def get_admin_stats(_request: Request, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008
     """Get platform statistics for admin dashboard."""
     audit_log_entry(
         account_id=admin["user_id"],
@@ -120,7 +120,11 @@ async def _proxy_to_provisioner(
 
 @router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
 @limiter.limit("10/minute")
-async def admin_start_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+async def admin_start_instance(
+    request: Request,  # noqa: ARG001
+    instance_id: int,
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+) -> dict[str, Any]:
     """Start an instance (admin proxy)."""
     result = await _proxy_to_provisioner(start_instance_provisioner, instance_id, admin)
     audit_log_entry(
@@ -133,7 +137,7 @@ async def admin_start_instance(instance_id: int, admin: Annotated[dict, Depends(
 
 
 @router.post("/admin/instances/{instance_id}/stop", response_model=ActionResult)
-async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+async def admin_stop_instance(instance_id: int, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008
     """Stop an instance (admin proxy)."""
     result = await _proxy_to_provisioner(stop_instance_provisioner, instance_id, admin)
     audit_log_entry(
@@ -147,7 +151,11 @@ async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(v
 
 @router.post("/admin/instances/{instance_id}/restart", response_model=ActionResult)
 @limiter.limit("10/minute")
-async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+async def admin_restart_instance(
+    request: Request,  # noqa: ARG001
+    instance_id: int,
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+) -> dict[str, Any]:
     """Restart an instance (admin proxy)."""
     result = await _proxy_to_provisioner(restart_instance_provisioner, instance_id, admin)
     audit_log_entry(
@@ -161,7 +169,11 @@ async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depend
 
 @router.delete("/admin/instances/{instance_id}/uninstall", response_model=ActionResult)
 @limiter.limit("2/minute")
-async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+async def admin_uninstall_instance(
+    request: Request,  # noqa: ARG001
+    instance_id: int,
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+) -> dict[str, Any]:
     """Uninstall an instance (admin proxy)."""
     result = await _proxy_to_provisioner(uninstall_instance, instance_id, admin)
     audit_log_entry(
@@ -176,9 +188,10 @@ async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depe
 @router.post("/admin/instances/{instance_id}/provision", response_model=ProvisionResponse)
 @limiter.limit("5/minute")
 async def admin_provision_instance(
+    request: Request,  # noqa: ARG001
     instance_id: int,
     background_tasks: BackgroundTasks,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Provision a deprovisioned instance."""
     sb = ensure_supabase()
@@ -213,7 +226,7 @@ async def admin_provision_instance(
 
 @router.post("/admin/sync-instances", response_model=SyncResult)
 @limiter.limit("5/minute")
-async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+async def admin_sync_instances(request: Request, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
     """Sync instance states between database and Kubernetes (admin proxy)."""
     result = await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
     audit_log_entry(
@@ -228,7 +241,7 @@ async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) ->
 @router.get("/admin/accounts/{account_id}", response_model=AdminAccountDetailsResponse)
 async def get_account_details(
     account_id: str,
-    admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001
+    admin: dict = Depends(verify_admin),  # noqa: ARG001, FAST002, B008
 ) -> dict[str, Any]:
     """Get detailed account information including subscription and instances."""
     sb = ensure_supabase()
@@ -273,7 +286,7 @@ async def get_account_details(
 async def update_account_status(
     account_id: str,
     status: str,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Update account status (active, suspended, etc)."""
     sb = ensure_supabase()
@@ -322,12 +335,13 @@ async def admin_logout() -> dict[str, bool]:
 @router.get("/admin/{resource}", response_model=AdminListResponse)
 @limiter.limit("60/minute")
 async def admin_get_list(  # noqa: C901
+    _request: Request,
     resource: str,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
     _sort: Annotated[str | None, Query()] = None,
     _order: Annotated[str | None, Query()] = None,
-    _start: Annotated[int, Query()] = 0,
-    _end: Annotated[int, Query()] = 10,
+    _start: int = Query(0),  # noqa: FAST002
+    _end: int = Query(10),  # noqa: FAST002
     q: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
     """Generic list endpoint for React Admin."""
@@ -382,9 +396,10 @@ async def admin_get_list(  # noqa: C901
 @router.get("/admin/{resource}/{resource_id}", response_model=AdminGetOneResponse)
 @limiter.limit("60/minute")
 async def admin_get_one(
+    _request: Request,
     resource: str,
     resource_id: str,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Get single record for React Admin."""
     if resource not in ALLOWED_RESOURCES:
@@ -410,9 +425,10 @@ async def admin_get_one(
 @router.post("/admin/{resource}", response_model=AdminCreateResponse)
 @limiter.limit("15/minute")
 async def admin_create(
+    _request: Request,
     resource: str,
     data: dict,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Create record for React Admin."""
     if resource not in ALLOWED_RESOURCES:
@@ -442,10 +458,11 @@ async def admin_create(
 @router.put("/admin/{resource}/{resource_id}", response_model=AdminUpdateResponse)
 @limiter.limit("15/minute")
 async def admin_update(
+    _request: Request,
     resource: str,
     resource_id: str,
     data: dict,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Update record for React Admin."""
     if resource not in ALLOWED_RESOURCES:
@@ -474,9 +491,10 @@ async def admin_update(
 @router.delete("/admin/{resource}/{resource_id}", response_model=AdminDeleteResponse)
 @limiter.limit("10/minute")
 async def admin_delete(
+    _request: Request,
     resource: str,
     resource_id: str,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Delete record for React Admin."""
     if resource not in ALLOWED_RESOURCES:
@@ -503,7 +521,8 @@ async def admin_delete(
 @router.get("/admin/metrics/dashboard", response_model=AdminDashboardMetricsResponse)
 @limiter.limit("30/minute")
 async def get_dashboard_metrics(
-    admin: Annotated[dict, Depends(verify_admin)],
+    _request: Request,
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Get dashboard metrics for admin panel."""
     audit_log_entry(
