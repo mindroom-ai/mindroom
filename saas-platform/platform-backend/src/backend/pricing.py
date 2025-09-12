@@ -186,6 +186,42 @@ def is_trial_enabled_for_plan(plan: str) -> bool:
     return plan in config.trial.applicable_plans
 
 
+def get_plan_limits_from_metadata(tier: str) -> dict[str, Any]:
+    """Get plan limits for a specific tier.
+
+    Args:
+        tier: Plan tier (e.g., 'free', 'starter', 'professional', 'enterprise')
+
+    Returns:
+        Dictionary of plan limits with keys like 'max_agents', 'max_messages_per_day'
+
+    """
+    plan = get_plan_details(tier)
+
+    if not plan:
+        # Return free tier defaults if plan not found
+        return {
+            "max_agents": 1,
+            "max_messages_per_day": 100,
+        }
+
+    # Convert Pydantic model to dict, handling "unlimited" values
+    limits = {}
+
+    # Handle unlimited as a very large number for database storage
+    if plan.limits.max_agents == "unlimited":
+        limits["max_agents"] = 999999
+    else:
+        limits["max_agents"] = plan.limits.max_agents
+
+    if plan.limits.max_messages_per_day == "unlimited":
+        limits["max_messages_per_day"] = 999999
+    else:
+        limits["max_messages_per_day"] = plan.limits.max_messages_per_day
+
+    return limits
+
+
 # Export pricing data for easy access
 PRICING_CONFIG = load_pricing_config()
 PRICING_CONFIG_MODEL = load_pricing_config_model()
