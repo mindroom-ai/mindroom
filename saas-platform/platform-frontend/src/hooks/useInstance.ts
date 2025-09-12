@@ -123,8 +123,8 @@ export function useInstance() {
 
     try {
       await apiRestartInstance(String(instance.instance_id))
-      // Update local state to show provisioning
-      setInstance(prev => prev ? { ...prev, status: 'provisioning' } : null)
+      // Update local state to show restarting
+      setInstance(prev => prev ? { ...prev, status: 'restarting' } : null)
     } catch (error) {
       console.error('Error restarting instance:', error)
     }

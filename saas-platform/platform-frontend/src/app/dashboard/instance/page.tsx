@@ -7,7 +7,7 @@ import { listInstances, startInstance, stopInstance, restartInstance as apiResta
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
 import { getCached, setCached } from '@/lib/cache'
 
-type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'deprovisioning' | 'maintenance' | 'error'
+type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'error' | 'deprovisioned' | 'restarting'
 
 type Instance = {
   id: string
@@ -42,8 +42,8 @@ export default function InstancePage() {
   }, []) // Run only on mount
 
   useEffect(() => {
-    // Poll for updates while provisioning
-    if (instance?.status === 'provisioning') {
+    // Poll for updates while provisioning or restarting
+    if (instance?.status === 'provisioning' || instance?.status === 'restarting') {
       const interval = setInterval(() => {
         fetchInstance(true)
       }, 5000) // Poll every 5 seconds
@@ -114,10 +114,10 @@ export default function InstancePage() {
       case 'running':
         return <CheckCircle className="w-5 h-5 text-green-500" />
       case 'provisioning':
-      case 'deprovisioning':
+      case 'restarting':
         return <Loader2 className="w-5 h-5 text-orange-500 animate-spin" />
       case 'stopped':
-      case 'maintenance':
+      case 'deprovisioned':
         return <Clock className="w-5 h-5 text-yellow-500" />
       case 'failed':
       case 'error':
@@ -133,16 +133,16 @@ export default function InstancePage() {
         return 'Instance is running and accessible'
       case 'provisioning':
         return 'Setting up your MindRoom instance... This may take a few minutes.'
+      case 'restarting':
+        return 'Restarting your instance... This will take a moment.'
       case 'stopped':
         return 'Instance is stopped. Start it to access your MindRoom.'
       case 'failed':
         return 'Instance provisioning failed. Please contact support.'
       case 'error':
         return 'Instance not found in cluster. It may have been removed during maintenance. Please contact support to reprovision your instance.'
-      case 'deprovisioning':
-        return 'Removing instance...'
-      case 'maintenance':
-        return 'Instance is under maintenance. It will be back soon.'
+      case 'deprovisioned':
+        return 'Instance has been removed. Contact support if this was unexpected.'
       default:
         return 'Unknown status'
     }
@@ -202,7 +202,9 @@ export default function InstancePage() {
                 font-medium capitalize
                 ${instance.status === 'running' ? 'text-green-600' : ''}
                 ${instance.status === 'provisioning' ? 'text-orange-600' : ''}
+                ${instance.status === 'restarting' ? 'text-orange-600' : ''}
                 ${instance.status === 'stopped' ? 'text-yellow-600' : ''}
+                ${instance.status === 'deprovisioned' ? 'text-gray-600' : ''}
                 ${instance.status === 'failed' ? 'text-red-600' : ''}
                 ${instance.status === 'error' ? 'text-red-600' : ''}
               `}>
@@ -215,6 +217,13 @@ export default function InstancePage() {
           </div>
 
           {/* Action Buttons */}
+          {instance.status === 'restarting' && (
+            <div className="flex items-center gap-2 text-orange-600">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-sm font-medium">Restarting...</span>
+            </div>
+          )}
+
           {instance.status === 'running' && (
             <div className="flex gap-2">
               <button
@@ -256,6 +265,16 @@ export default function InstancePage() {
                 <Play className="w-4 h-4" />
               )}
               Start Instance
+            </button>
+          )}
+
+          {instance.status === 'deprovisioned' && (
+            <button
+              onClick={() => window.location.href = 'mailto:support@mindroom.chat?subject=Instance Deprovisioned&body=My instance ID: ' + String(instance.instance_id) + ' has been deprovisioned. Please help me restore it.'}
+              className="flex items-center gap-2 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
+            >
+              <AlertCircle className="w-4 h-4" />
+              Contact Support
             </button>
           )}
 
