@@ -93,12 +93,6 @@ async def create_checkout_session(
                 "supabase_user_id": user["account_id"] if user else "",
             },
         },
-        "metadata": {
-            "tier": request.tier,
-            "billing_cycle": request.billing_cycle,
-            "quantity": str(quantity),
-            "supabase_user_id": user["account_id"] if user else "",
-        },
     }
 
     # Add trial period if enabled for this plan
