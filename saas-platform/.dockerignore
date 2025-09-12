@@ -1,0 +1,68 @@
+# Platform Frontend
+platform-frontend/node_modules
+platform-frontend/.next
+platform-frontend/.env
+platform-frontend/.env.local
+platform-frontend/.env.*.local
+platform-frontend/coverage
+platform-frontend/.nyc_output
+platform-frontend/.cache
+platform-frontend/dist
+platform-frontend/build
+platform-frontend/out
+platform-frontend/.vercel
+platform-frontend/*.log
+platform-frontend/npm-debug.log*
+platform-frontend/yarn-debug.log*
+platform-frontend/yarn-error.log*
+
+# Platform Backend
+platform-backend/__pycache__
+platform-backend/*.pyc
+platform-backend/*.pyo
+platform-backend/*.pyd
+platform-backend/.Python
+platform-backend/env
+platform-backend/venv
+platform-backend/.venv
+platform-backend/.env
+platform-backend/.env.local
+platform-backend/*.egg-info
+platform-backend/.pytest_cache
+platform-backend/.coverage
+platform-backend/htmlcov
+platform-backend/.mypy_cache
+platform-backend/.ruff_cache
+
+# General
+.git
+.gitignore
+.DS_Store
+*.swp
+*.swo
+*~
+.idea
+.vscode
+*.iml
+*.log
+
+# Terraform
+terraform-k8s/*.tfstate*
+terraform-k8s/.terraform
+terraform-k8s/*.backup
+terraform-k8s/*_kubeconfig.yaml
+
+# Documentation
+docs
+*.md
+!README.md
+
+# Tests
+**/tests
+**/test_*.py
+**/__tests__
+
+# Scripts (not needed in Docker)
+scripts
+deploy.sh
+redeploy-*.sh
