@@ -211,6 +211,11 @@ def get_plan_limits_from_metadata(tier: str) -> dict[str, Any]:
     else:
         limits["max_messages_per_day"] = plan.limits.max_messages_per_day
 
+    if plan.limits.storage_gb == "unlimited":
+        limits["max_storage_gb"] = 999999
+    else:
+        limits["max_storage_gb"] = plan.limits.storage_gb
+
     return limits
 
 

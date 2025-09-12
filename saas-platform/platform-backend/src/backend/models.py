@@ -45,7 +45,7 @@ class SubscriptionOut(BaseModel):
     cancelled_at: str | None = None
     max_agents: int
     max_messages_per_day: int
-    max_storage_gb: int | None = None
+    max_storage_gb: int
     created_at: str | None = None
     updated_at: str | None = None
 
