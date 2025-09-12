@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from backend.config import auth_client, logger, supabase
+from cachetools import TTLCache
 from fastapi import Header, HTTPException
 
 if TYPE_CHECKING:
     from supabase import Client
+
+# TTL cache for auth verification (5 minutes, max 100 entries)
+_auth_cache = TTLCache(maxsize=100, ttl=300)
 
 
 def ensure_supabase() -> Client:
@@ -37,6 +42,13 @@ async def verify_user(authorization: str = Header(None)) -> dict:
 
     token = authorization.replace("Bearer ", "")
 
+    # Check cache first
+    if token in _auth_cache:
+        logger.info("Auth cache hit (instant)")
+        return _auth_cache[token]
+
+    # Start timing for database lookup
+    start = time.perf_counter()
     sb = ensure_supabase()
     ac = _ensure_auth_client()
 
@@ -57,6 +69,7 @@ async def verify_user(authorization: str = Header(None)) -> dict:
         except Exception:
             logger.info(f"Account not found for user {account_id}, creating...")
             try:
+                now = datetime.now(UTC).isoformat()
                 create_result = (
                     sb.table("accounts")
                     .insert(
@@ -66,8 +79,8 @@ async def verify_user(authorization: str = Header(None)) -> dict:
                             "full_name": user.user.user_metadata.get("full_name", "")
                             if user.user.user_metadata
                             else "",
-                            "created_at": datetime.now(UTC).isoformat(),
-                            "updated_at": datetime.now(UTC).isoformat(),
+                            "created_at": now,
+                            "updated_at": now,
                         },
                     )
                     .execute()
@@ -80,19 +93,29 @@ async def verify_user(authorization: str = Header(None)) -> dict:
                 if not result.data:
                     msg = "Account creation failed. Please contact support."
                     raise HTTPException(status_code=404, detail=msg) from None
-        else:
-            return {
-                "user_id": user.user.id,
-                "email": user.user.email,
-                "account_id": account_id,
-                "account": result.data,
-            }
+
+        # Prepare response data
+        user_data = {
+            "user_id": user.user.id,
+            "email": user.user.email,
+            "account_id": account_id,
+            "account": result.data,
+        }
+
+        # Cache the result (TTL handled by TTLCache)
+        _auth_cache[token] = user_data
+
+        # Log the time taken for database auth
+        logger.info("Auth database lookup: %.2fms", (time.perf_counter() - start) * 1000)
+
     except HTTPException:
         raise
     except Exception:
         logger.exception("User verification error")
         msg = "Authentication failed"
         raise HTTPException(status_code=401, detail=msg) from None
+
+    return user_data
 
 
 async def verify_user_optional(authorization: str = Header(None)) -> dict | None:

@@ -2,12 +2,12 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, Trash2, ExternalLink, Server, Database, Globe } from 'lucide-react'
-import { createClient } from '@/lib/supabase/client'
+import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, Database, Globe } from 'lucide-react'
 import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance } from '@/lib/api'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
+import { cache } from '@/lib/cache'
 
-type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'deprovisioning' | 'maintenance' | 'error'
+type InstanceStatus = 'provisioning' | 'running' | 'stopped' | 'failed' | 'error' | 'deprovisioned' | 'restarting'
 
 type Instance = {
   id: string
@@ -25,21 +25,31 @@ type Instance = {
 
 export default function InstancePage() {
   const router = useRouter()
-  const [instance, setInstance] = useState<Instance | null>(null)
-  const [loading, setLoading] = useState(true)
+  const cachedInstance = cache.get('user-instance') as Instance | null
+  const [instance, setInstance] = useState<Instance | null>(cachedInstance)
+  const [loading, setLoading] = useState(!cachedInstance)
   const [refreshing, setRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
 
   useEffect(() => {
-    fetchInstance()
-    // Poll for updates while provisioning
-    const interval = setInterval(() => {
-      if (instance?.status === 'provisioning') {
-        fetchInstance(true)
-      }
-    }, 5000) // Poll every 5 seconds
+    // Only fetch if no cached data, otherwise fetch silently in background
+    if (!cachedInstance) {
+      fetchInstance()
+    } else {
+      // Fetch silently in background to get fresh data
+      fetchInstance(true)
+    }
+  }, []) // Run only on mount
 
-    return () => clearInterval(interval)
+  useEffect(() => {
+    // Poll for updates while provisioning or restarting
+    if (instance?.status === 'provisioning' || instance?.status === 'restarting') {
+      const interval = setInterval(() => {
+        fetchInstance(true)
+      }, 5000) // Poll every 5 seconds
+
+      return () => clearInterval(interval)
+    }
   }, [instance?.status])
 
   const fetchInstance = async (silent = false) => {
@@ -49,7 +59,9 @@ export default function InstancePage() {
       const data = await listInstances()
 
       if (data.instances && data.instances.length > 0) {
-        setInstance(data.instances[0])
+        const newInstance = data.instances[0]
+        setInstance(newInstance)
+        cache.set('user-instance', newInstance)
       } else {
         setInstance(null)
       }
@@ -66,7 +78,7 @@ export default function InstancePage() {
     setRefreshing(false)
   }
 
-  const handleAction = async (action: 'start' | 'stop' | 'restart' | 'delete') => {
+  const handleAction = async (action: 'start' | 'stop' | 'restart' | 'delete' | 'reprovision') => {
     if (!instance) return
 
     setActionLoading(action)
@@ -81,6 +93,11 @@ export default function InstancePage() {
           break
         case 'restart':
           await apiRestartInstance(instance.instance_id)
+          break
+        case 'reprovision':
+          // Use the provision endpoint which now handles reprovisioning
+          const { provisionInstance } = await import('@/lib/api')
+          await provisionInstance()
           break
         case 'delete':
           // Delete not implemented yet
@@ -102,10 +119,10 @@ export default function InstancePage() {
       case 'running':
         return <CheckCircle className="w-5 h-5 text-green-500" />
       case 'provisioning':
-      case 'deprovisioning':
+      case 'restarting':
         return <Loader2 className="w-5 h-5 text-orange-500 animate-spin" />
       case 'stopped':
-      case 'maintenance':
+      case 'deprovisioned':
         return <Clock className="w-5 h-5 text-yellow-500" />
       case 'failed':
       case 'error':
@@ -121,16 +138,16 @@ export default function InstancePage() {
         return 'Instance is running and accessible'
       case 'provisioning':
         return 'Setting up your MindRoom instance... This may take a few minutes.'
+      case 'restarting':
+        return 'Restarting your instance... This will take a moment.'
       case 'stopped':
         return 'Instance is stopped. Start it to access your MindRoom.'
       case 'failed':
         return 'Instance provisioning failed. Please contact support.'
       case 'error':
         return 'Instance not found in cluster. It may have been removed during maintenance. Please contact support to reprovision your instance.'
-      case 'deprovisioning':
-        return 'Removing instance...'
-      case 'maintenance':
-        return 'Instance is under maintenance. It will be back soon.'
+      case 'deprovisioned':
+        return 'Instance has been removed. Click "Reprovision Instance" to restore it.'
       default:
         return 'Unknown status'
     }
@@ -190,7 +207,9 @@ export default function InstancePage() {
                 font-medium capitalize
                 ${instance.status === 'running' ? 'text-green-600' : ''}
                 ${instance.status === 'provisioning' ? 'text-orange-600' : ''}
+                ${instance.status === 'restarting' ? 'text-orange-600' : ''}
                 ${instance.status === 'stopped' ? 'text-yellow-600' : ''}
+                ${instance.status === 'deprovisioned' ? 'text-gray-600' : ''}
                 ${instance.status === 'failed' ? 'text-red-600' : ''}
                 ${instance.status === 'error' ? 'text-red-600' : ''}
               `}>
@@ -203,6 +222,13 @@ export default function InstancePage() {
           </div>
 
           {/* Action Buttons */}
+          {instance.status === 'restarting' && (
+            <div className="flex items-center gap-2 text-orange-600">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-sm font-medium">Restarting...</span>
+            </div>
+          )}
+
           {instance.status === 'running' && (
             <div className="flex gap-2">
               <button
@@ -244,6 +270,21 @@ export default function InstancePage() {
                 <Play className="w-4 h-4" />
               )}
               Start Instance
+            </button>
+          )}
+
+          {instance.status === 'deprovisioned' && (
+            <button
+              onClick={() => handleAction('reprovision')}
+              disabled={actionLoading !== null}
+              className="flex items-center gap-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 transition-colors"
+            >
+              {actionLoading === 'reprovision' ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+              Reprovision Instance
             </button>
           )}
 

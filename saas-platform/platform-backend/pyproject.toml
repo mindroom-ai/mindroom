@@ -10,6 +10,7 @@ description = "MindRoom SaaS Platform Backend"
 requires-python = ">=3.13"
 classifiers = [ "Programming Language :: Python :: 3 :: Only", "Programming Language :: Python :: 3.13" ]
 dependencies = [
+  "cachetools>=6.2",
   "fastapi>=0.104.1",
   "python-dotenv>=1",
   "stripe>=7",

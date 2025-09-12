@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import time
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from backend.config import PROVISIONER_API_KEY
+from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, verify_user
+from backend.k8s import check_deployment_exists, run_kubectl
 from backend.models import ActionResult, InstancesResponse, ProvisionResponse
 from backend.routes.provisioner import (
     provision_instance,
@@ -16,18 +19,125 @@ from backend.routes.provisioner import (
     start_instance_provisioner,
     stop_instance_provisioner,
 )
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 router = APIRouter()
 
+# Track instances being synced to prevent duplicates
+_syncing_instances: set[str] = set()
+
+
+async def _background_sync_instance_status(instance_id: str) -> None:
+    """Background task to sync a single instance's Kubernetes status."""
+    if instance_id in _syncing_instances:
+        return  # Already syncing
+
+    _syncing_instances.add(instance_id)
+    start = time.perf_counter()
+
+    try:
+        sb = ensure_supabase()
+
+        # Get current status from DB
+        result = sb.table("instances").select("status").eq("instance_id", instance_id).single().execute()
+        current_status = result.data.get("status") if result.data else None
+
+        # Check if deployment exists
+        k8s_start = time.perf_counter()
+        exists = await check_deployment_exists(instance_id)
+
+        if exists:
+            # Get actual replicas count
+            code, out, _ = await run_kubectl(
+                [
+                    "get",
+                    f"deployment/mindroom-backend-{instance_id}",
+                    "-o=jsonpath={.spec.replicas}",
+                ],
+                namespace="mindroom-instances",
+            )
+            if code == 0:
+                replicas = int(out.strip() or "0")
+                actual_status = "running" if replicas > 0 else "stopped"
+            else:
+                actual_status = "error"
+        elif current_status in ["deprovisioned", "provisioning"]:
+            # Keep current status if it makes sense
+            actual_status = current_status
+        else:
+            actual_status = "error"
+
+        # Update database
+        now = datetime.now(UTC).isoformat()
+        sb.table("instances").update(
+            {
+                "status": actual_status,
+                "kubernetes_synced_at": now,
+                "updated_at": now,
+            },
+        ).eq("instance_id", instance_id).execute()
+
+        total_time = (time.perf_counter() - start) * 1000
+        k8s_time = (time.perf_counter() - k8s_start) * 1000
+        logger.info(
+            "Background K8s sync for instance %s: status=%s, K8s calls %.2fms, total %.2fms",
+            instance_id,
+            actual_status,
+            k8s_time,
+            total_time,
+        )
+    finally:
+        _syncing_instances.discard(instance_id)
+
 
 @router.get("/my/instances", response_model=InstancesResponse)
-async def list_user_instances(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
-    """List instances for current user."""
+async def list_user_instances(
+    user: Annotated[dict, Depends(verify_user)],
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    """List instances for current user with background status refresh."""
+    start = time.perf_counter()
     sb = ensure_supabase()
     account_id = user["account_id"]
+
+    db_start = time.perf_counter()
     result = sb.table("instances").select("*").eq("account_id", account_id).execute()
-    return {"instances": result.data or []}
+    db_time = (time.perf_counter() - db_start) * 1000
+
+    instances = result.data or []
+
+    # Check if any instance needs a background sync (older than 30 seconds)
+    stale_threshold = datetime.now(UTC) - timedelta(seconds=30)
+    for instance in instances:
+        instance_id = instance.get("instance_id")
+        if not instance_id:
+            continue
+
+        # Skip if already being synced
+        if str(instance_id) in _syncing_instances:
+            continue
+
+        # Check if kubernetes_synced_at is missing or stale
+        synced_at = instance.get("kubernetes_synced_at")
+        if not synced_at:
+            needs_sync = True
+        else:
+            # Parse ISO timestamp (handle both Z and +00:00 formats)
+            if synced_at.endswith("Z"):
+                synced_at = synced_at[:-1] + "+00:00"
+            synced_time = datetime.fromisoformat(synced_at)
+            needs_sync = synced_time < stale_threshold
+
+        if needs_sync:
+            logger.info("Instance %s has stale K8s status, scheduling background sync", instance_id)
+            background_tasks.add_task(_background_sync_instance_status, str(instance_id))
+
+    # Log cache effectiveness
+    total_time = (time.perf_counter() - start) * 1000
+    logger.info("Instances endpoint: DB query %.2fms, total %.2fms (cached K8s status)", db_time, total_time)
+
+    # Return cached data immediately
+    return {"instances": instances}
 
 
 @router.post("/my/instances/provision", response_model=ProvisionResponse)
@@ -48,8 +158,22 @@ async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -
         .execute()
     )
     if inst_result.data:
-        # Idempotent: return existing instance metadata
         existing = inst_result.data[0]
+
+        # If instance is deprovisioned, reprovision it
+        if existing.get("status") == "deprovisioned":
+            logger.info("Reprovisioning deprovisioned instance %s for user %s", existing["instance_id"], account_id)
+            return await provision_instance(
+                data={
+                    "subscription_id": subscription["id"],
+                    "account_id": account_id,
+                    "tier": subscription["tier"],
+                    "instance_id": existing["instance_id"],  # Reuse the same instance ID
+                },
+                authorization=f"Bearer {PROVISIONER_API_KEY}",
+            )
+
+        # Otherwise return existing instance metadata
         return {
             "success": True,
             "message": "Instance already exists",

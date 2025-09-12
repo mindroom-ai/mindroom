@@ -86,6 +86,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     else:
         # Insert instance first to get a generated numeric instance_id (as text)
         try:
+            now = datetime.now(UTC).isoformat()
             insert_res = (
                 sb.table("instances")
                 .insert(
@@ -94,8 +95,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                         "account_id": account_id,
                         "status": "provisioning",
                         "tier": tier,
-                        "created_at": datetime.now(UTC).isoformat(),
-                        "updated_at": datetime.now(UTC).isoformat(),
+                        "created_at": now,
+                        "updated_at": now,
                     },
                 )
                 .execute()
@@ -427,10 +428,12 @@ async def sync_instances(
             if not exists:
                 if current_status not in ["error", "deprovisioned"]:
                     logger.info("Instance %s not found in cluster, marking as error", instance_id)
+                    now = datetime.now(UTC).isoformat()
                     sb.table("instances").update(
                         {
                             "status": "error",
-                            "updated_at": datetime.now(UTC).isoformat(),
+                            "kubernetes_synced_at": now,
+                            "updated_at": now,
                         },
                     ).eq("id", instance["id"]).execute()
 
@@ -464,10 +467,12 @@ async def sync_instances(
                                 current_status,
                                 actual_status,
                             )
+                            now = datetime.now(UTC).isoformat()
                             sb.table("instances").update(
                                 {
                                     "status": actual_status,
-                                    "updated_at": datetime.now(UTC).isoformat(),
+                                    "kubernetes_synced_at": now,
+                                    "updated_at": now,
                                 },
                             ).eq("id", instance["id"]).execute()
 
