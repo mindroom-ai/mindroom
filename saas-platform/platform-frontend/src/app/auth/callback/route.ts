@@ -32,9 +32,9 @@ export async function GET(request: NextRequest) {
 
             // If user is admin and was trying to go to admin, redirect there
             if (data.is_admin) {
-              const publicUrl = process.env.APP_URL ||
-                `https://${request.headers.get('host')}` ||
-                request.url
+              const publicUrl = process.env.PLATFORM_DOMAIN
+                ? `https://app.${process.env.PLATFORM_DOMAIN}`
+                : `https://${request.headers.get('host')}` || request.url
               // Use normal admin redirect
               return NextResponse.redirect(new URL(next, publicUrl))
             }
@@ -48,9 +48,9 @@ export async function GET(request: NextRequest) {
 
   // URL to redirect to after sign in process completes
   // Use the public app URL from environment or construct from headers
-  const publicUrl = process.env.APP_URL ||
-    `https://${request.headers.get('host')}` ||
-    request.url
+  const publicUrl = process.env.PLATFORM_DOMAIN
+    ? `https://app.${process.env.PLATFORM_DOMAIN}`
+    : `https://${request.headers.get('host')}` || request.url
 
   // Redirect to a client page that sets the SSO cookie before navigating to `next`
   const completeUrl = new URL('/auth/complete', publicUrl)

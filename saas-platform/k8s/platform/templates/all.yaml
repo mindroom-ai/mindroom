@@ -80,6 +80,11 @@ spec:
         env:
         - name: NODE_ENV
           value: production
+        - name: PLATFORM_DOMAIN
+          valueFrom:
+            secretKeyRef:
+              name: platform-secrets
+              key: PLATFORM_DOMAIN
         # Next.js public env vars for client-side
         - name: NEXT_PUBLIC_SUPABASE_URL
           valueFrom:

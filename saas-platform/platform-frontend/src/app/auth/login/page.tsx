@@ -8,7 +8,9 @@ export default async function LoginPage({ searchParams }: { searchParams: { redi
   const nextTarget = searchParams?.redirect_to || '/dashboard'
   const hdrs = await headers()
   const host = hdrs.get('host') || ''
-  const base = process.env.APP_URL || (host ? `https://${host}` : '')
+  const base = process.env.PLATFORM_DOMAIN
+    ? `https://app.${process.env.PLATFORM_DOMAIN}`
+    : (host ? `https://${host}` : '')
   const callback = `${base}/auth/callback?next=${encodeURIComponent(nextTarget)}`
 
   return (
