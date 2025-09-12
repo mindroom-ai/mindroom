@@ -21,22 +21,32 @@ ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
 # Set them as environment variables for the build
 ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
 ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+ENV NODE_ENV=production
 # Build production bundle with optimizations
+# Next.js standalone output creates minimal production build
 RUN cd platform-frontend && pnpm run build
 
-# Production stage - optimized for Next.js
+# Production stage - optimized for Next.js standalone
 FROM public.ecr.aws/docker/library/node:20-alpine AS final
 WORKDIR /app
 
+# Add non-root user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001
+
 # Only copy what's needed for production
-COPY --from=builder /app/platform-frontend/.next ./platform-frontend/.next
-COPY --from=builder /app/platform-frontend/public ./platform-frontend/public
-COPY --from=builder /app/platform-frontend/package.json ./platform-frontend/package.json
-COPY --from=builder /app/platform-frontend/node_modules ./platform-frontend/node_modules
+# The standalone folder has a minimal node_modules with only production dependencies
+COPY --from=builder --chown=nextjs:nodejs /app/platform-frontend/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/platform-frontend/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/platform-frontend/public ./public
 
 # Set environment variables
-# Next.js needs to know it's running in production
 ENV NODE_ENV=production
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+
+# Switch to non-root user
+USER nextjs
 
 # Expose port
 EXPOSE 3000
@@ -44,4 +54,5 @@ EXPOSE 3000
 # No health check needed - K8s handles this via readiness/liveness probes
 
 # Start Next.js server
-CMD ["sh", "-c", "cd platform-frontend && npm start"]
+# Note: standalone output creates a server.js file
+CMD ["node", "server.js"]
