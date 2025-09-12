@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { useSubscription } from '@/hooks/useSubscription'
 import { createPortalSession } from '@/lib/api'
 import { PRICING_PLANS, formatLimit, type PlanId } from '@/lib/pricing-config'
+import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Loader2, CreditCard, TrendingUp, Check } from 'lucide-react'
 
 export default function BillingPage() {
@@ -22,16 +23,6 @@ export default function BillingPage() {
         refresh()
       }
     }
-
-    // Also refresh on page focus (when user returns from another tab)
-    const handleFocus = () => {
-      if (document.hasFocus() && refresh) {
-        refresh()
-      }
-    }
-
-    window.addEventListener('focus', handleFocus)
-    return () => window.removeEventListener('focus', handleFocus)
   }, [refresh])
 
   const openStripePortal = async () => {
@@ -47,11 +38,7 @@ export default function BillingPage() {
   }
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <Loader2 className="w-8 h-8 animate-spin text-orange-500" />
-      </div>
-    )
+    return <DashboardLoader message="Loading billing information..." />
   }
 
   const currentTier = (subscription?.tier || 'free') as PlanId

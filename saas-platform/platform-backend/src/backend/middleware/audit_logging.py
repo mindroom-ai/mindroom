@@ -59,10 +59,11 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
         if not should_audit:
             return await call_next(request)
 
-        # Get user from request state
-        # For public endpoints, auth middleware sets these to None
-        user_id = request.state.user_id
-        user_email = request.state.user_email
+        # Get user from request state if available
+        # Note: Authentication happens at route level via dependencies,
+        # so these may not be set yet in the middleware
+        user_id = getattr(request.state, "user_id", None)
+        user_email = getattr(request.state, "user_email", None)
 
         # Determine action and resource type
         action = self._get_action(request.method)

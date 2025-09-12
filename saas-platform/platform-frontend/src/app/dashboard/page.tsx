@@ -6,8 +6,8 @@ import { useSubscription } from '@/hooks/useSubscription'
 import { InstanceCard } from '@/components/dashboard/InstanceCard'
 import { UsageChart } from '@/components/dashboard/UsageChart'
 import { QuickActions } from '@/components/dashboard/QuickActions'
+import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Card, CardHeader } from '@/components/ui/Card'
-import { Loader2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { setSsoCookie, setupAccount } from '@/lib/api'
@@ -26,6 +26,10 @@ export default function DashboardPage() {
     // Refresh cookie periodically for longer sessions
     const id = setInterval(() => { setSsoCookie().catch((e) => console.warn('Failed to refresh SSO cookie', e)) }, 15 * 60 * 1000)
 
+    return () => clearInterval(id)
+  }, [])
+
+  useEffect(() => {
     // Auto-setup free tier if user has no subscription
     const setupFreeTier = async () => {
       // Skip if: not logged in, still loading, already has subscription, already setting up,
@@ -57,30 +61,15 @@ export default function DashboardPage() {
     }
 
     setupFreeTier()
-    return () => clearInterval(id)
-  }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, instance, instanceLoading, setupAttempted])
+  }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, instance, instanceLoading, setupAttempted, router])
 
   if (authLoading || instanceLoading || subscriptionLoading) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <div className="text-center">
-          <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-4" />
-          <p className="text-gray-600 dark:text-gray-400">Loading...</p>
-        </div>
-      </div>
-    )
+    return <DashboardLoader />
   }
 
   // Show setup message only when actively setting up AND no instance exists yet
   if (isSettingUp && !subscription && !instance) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <div className="text-center">
-          <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-4" />
-          <p className="text-gray-600 dark:text-gray-400">Setting up your free MindRoom instance...</p>
-        </div>
-      </div>
-    )
+    return <DashboardLoader message="Setting up your free MindRoom instance..." />
   }
 
   return (

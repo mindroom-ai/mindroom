@@ -80,6 +80,8 @@ class UsageMetricOut(BaseModel):
 class UsageAggregateOut(BaseModel):
     """Aggregated usage statistics model."""
 
+    model_config = {"populate_by_name": True}
+
     total_messages: int = Field(alias="totalMessages")
     total_agents: int = Field(alias="totalAgents")
     total_storage: float | int = Field(alias="totalStorage")
