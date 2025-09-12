@@ -31,6 +31,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from starlette.responses import JSONResponse
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -67,6 +68,25 @@ allowed_hosts = [f"*.{PLATFORM_DOMAIN}", PLATFORM_DOMAIN]
 if ENVIRONMENT != "production":
     allowed_hosts += ["localhost", "127.0.0.1"]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+
+
+# Request size limit middleware (1 MiB default)
+MAX_REQUEST_BYTES = 1024 * 1024
+
+
+@app.middleware("http")
+async def enforce_request_size(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[StarletteResponse]],
+) -> StarletteResponse:
+    """Return 413 if Content-Length exceeds MAX_REQUEST_BYTES."""
+    try:
+        length = int(request.headers.get("content-length", "0") or "0")
+    except ValueError:
+        length = 0
+    if length and length > MAX_REQUEST_BYTES:
+        return JSONResponse({"detail": "Request too large"}, status_code=413)
+    return await call_next(request)
 
 
 # Basic security headers
