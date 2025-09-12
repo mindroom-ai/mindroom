@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from './useAuth'
 import { apiCall } from '@/lib/api'
-import { cache } from '@/lib/cache'
+import { subscriptionCache } from '@/lib/cache'
 
 export interface Subscription {
   id: string
@@ -24,13 +24,18 @@ export interface Subscription {
 }
 
 export function useSubscription() {
-  const cachedSubscription = cache.get('user-subscription') as Subscription | null
+  const cachedSubscription = subscriptionCache.get('user-subscription') as Subscription | null
   const [subscription, setSubscription] = useState<Subscription | null>(cachedSubscription)
   const [loading, setLoading] = useState(!cachedSubscription)
   const { user, loading: authLoading } = useAuth()
 
-  const fetchSubscription = async (isInitial = false) => {
+  const fetchSubscription = async (isInitial = false, forceRefresh = false) => {
     if (!user) return
+
+    // Clear cache if force refresh is requested
+    if (forceRefresh) {
+      subscriptionCache.delete('user-subscription')
+    }
 
     // Only show loading on initial fetch when there's no cached data
     if (isInitial && !cachedSubscription) {
@@ -43,10 +48,10 @@ export function useSubscription() {
       if (response.ok) {
         const data = await response.json()
         setSubscription(data)
-        cache.set('user-subscription', data)
+        subscriptionCache.set('user-subscription', data)
       } else if (response.status === 404) {
         setSubscription(null)
-        cache.remove('user-subscription')
+        subscriptionCache.delete('user-subscription')
       } else {
         console.error('Error fetching subscription:', response.statusText)
       }
@@ -68,13 +73,13 @@ export function useSubscription() {
 
     fetchSubscription(true)  // Initial fetch
 
-    // Poll for updates every 30 seconds instead of using real-time
-    const interval = setInterval(() => fetchSubscription(false), 30000)  // Background updates
+    // Poll for updates every 10 seconds for more responsive updates
+    const interval = setInterval(() => fetchSubscription(false, false), 10000)  // Background updates
 
     return () => {
       clearInterval(interval)
     }
   }, [user, authLoading])
 
-  return { subscription, loading, refresh: () => fetchSubscription(false) }
+  return { subscription, loading, refresh: (forceRefresh = true) => fetchSubscription(false, forceRefresh) }
 }

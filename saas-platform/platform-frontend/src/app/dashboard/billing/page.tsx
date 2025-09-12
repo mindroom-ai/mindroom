@@ -5,7 +5,7 @@ import { useSubscription } from '@/hooks/useSubscription'
 import { createPortalSession } from '@/lib/api'
 import { PRICING_PLANS, formatLimit, type PlanId } from '@/lib/pricing-config'
 import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
-import { Loader2, CreditCard, TrendingUp, Check } from 'lucide-react'
+import { Loader2, CreditCard, TrendingUp, Check, RefreshCw } from 'lucide-react'
 
 export default function BillingPage() {
   const { subscription, loading, refresh } = useSubscription()
@@ -18,9 +18,9 @@ export default function BillingPage() {
     if (urlParams.has('success') || urlParams.has('return')) {
       // Clear the URL params
       window.history.replaceState({}, document.title, window.location.pathname)
-      // Refresh subscription data
+      // Force refresh subscription data (clears cache)
       if (refresh) {
-        refresh()
+        refresh(true)
       }
     }
   }, [refresh])
@@ -51,7 +51,17 @@ export default function BillingPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold dark:text-white">Billing & Subscription</h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold dark:text-white">Billing & Subscription</h1>
+        <button
+          onClick={() => refresh(true)}
+          className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
+          title="Refresh subscription data"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Refresh
+        </button>
+      </div>
 
       {/* Cancellation Warning Banner */}
       {subscription?.cancelled_at && subscription?.status !== 'cancelled' && (
