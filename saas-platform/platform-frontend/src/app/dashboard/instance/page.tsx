@@ -31,6 +31,7 @@ export default function InstancePage() {
   const [refreshing, setRefreshing] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
 
+
   useEffect(() => {
     // Only fetch if no cached data, otherwise fetch silently in background
     if (!cachedInstance) {
@@ -106,9 +107,23 @@ export default function InstancePage() {
 
       // Refresh instance status
       await fetchInstance()
-    } catch (error) {
-      console.error(`Error performing ${action}:`, error)
-      alert(`Failed to ${action} instance. Please try again.`)
+    } catch (error: any) {
+      // Don't show error for cancelled requests (user navigated away/refreshed)
+      // Check for various abort/cancel conditions
+      const isAborted =
+        error?.name === 'AbortError' ||
+        error?.message?.includes('aborted') ||
+        error?.message?.includes('cancelled') ||
+        error?.message?.includes('Failed to fetch') ||
+        error?.code === 'ECONNABORTED' ||
+        error?.code === 20 || // Chrome abort code
+        !error?.message || // Empty errors often indicate cancellation
+        error?.message === ''
+
+      if (!isAborted) {
+        console.error(`Error performing ${action}:`, error)
+        alert(`Failed to ${action} instance. Please try again.`)
+      }
     } finally {
       setActionLoading(null)
     }

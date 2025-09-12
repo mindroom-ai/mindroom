@@ -41,10 +41,3 @@ async def run_helm(args: list[str]) -> tuple[int, str, str]:
     """Run a helm command and return (returncode, stdout, stderr)."""
     cmd = ["helm", *args]
     return await run_cmd(cmd)
-
-
-# TODO: not used
-async def run_kill(pid: int, signal: str = "TERM") -> tuple[int, str, str]:
-    """Run `kill -SIGNAL <pid>` and return (returncode, stdout, stderr)."""
-    cmd = ["kill", f"-{signal}", str(pid)]
-    return await run_cmd(cmd)

@@ -37,3 +37,9 @@ class TTLCache<T = any> {
 
 // Export default cache instance
 export const cache = new TTLCache()
+
+// Shorter TTL cache for subscription data (10 seconds)
+export const subscriptionCache = new TTLCache(10)
+
+// Shorter TTL cache for instance data (15 seconds)
+export const instanceCache = new TTLCache(15)

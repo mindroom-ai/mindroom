@@ -6,8 +6,8 @@ import { useSubscription } from '@/hooks/useSubscription'
 import { InstanceCard } from '@/components/dashboard/InstanceCard'
 import { UsageChart } from '@/components/dashboard/UsageChart'
 import { QuickActions } from '@/components/dashboard/QuickActions'
+import { DashboardLoader } from '@/components/dashboard/DashboardLoader'
 import { Card, CardHeader } from '@/components/ui/Card'
-import { Loader2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { setSsoCookie, setupAccount } from '@/lib/api'
@@ -26,29 +26,38 @@ export default function DashboardPage() {
     // Refresh cookie periodically for longer sessions
     const id = setInterval(() => { setSsoCookie().catch((e) => console.warn('Failed to refresh SSO cookie', e)) }, 15 * 60 * 1000)
 
+    return () => clearInterval(id)
+  }, [])
+
+  useEffect(() => {
     // Auto-setup free tier if user has no subscription
     const setupFreeTier = async () => {
-      // Skip if: not logged in, still loading, already has subscription, already setting up,
-      // an instance already exists, or we've already attempted setup once in this session.
+      // Skip if: not logged in, already has subscription, already setting up,
+      // or we've already attempted setup once in this session.
       if (
-        authLoading ||
         !user ||
-        subscriptionLoading ||
-        instanceLoading ||
         subscription ||
         isSettingUp ||
-        instance ||
         setupAttempted
       ) {
         return
       }
 
+      // Wait a bit for data to load before setting up
+      if (authLoading || subscriptionLoading) {
+        return
+      }
+
+      console.log('Setting up free tier account...')
       setSetupAttempted(true)
       setIsSettingUp(true)
       try {
-        await setupAccount()
+        const result = await setupAccount()
+        console.log('Free tier setup result:', result)
         // Trigger a refresh; hooks poll and will pick up the new subscription
         router.refresh()
+        // Force reload after a short delay to ensure data is updated
+        setTimeout(() => window.location.reload(), 2000)
       } catch (error) {
         console.error('Error setting up free tier:', error)
       } finally {
@@ -57,30 +66,22 @@ export default function DashboardPage() {
     }
 
     setupFreeTier()
-    return () => clearInterval(id)
-  }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, instance, instanceLoading, setupAttempted])
+  }, [authLoading, user, subscriptionLoading, subscription, isSettingUp, setupAttempted, router])
 
-  if (authLoading || instanceLoading || subscriptionLoading) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <div className="text-center">
-          <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-4" />
-          <p className="text-gray-600 dark:text-gray-400">Loading...</p>
-        </div>
-      </div>
-    )
+  // Only show loading if we're still loading auth AND have no cached data
+  // This prevents the flash of loading screen when navigating between pages
+  if (authLoading && !instance && !subscription) {
+    return <DashboardLoader />
+  }
+
+  // Also show loading if auth is done but we have no user and are still loading data
+  if (!authLoading && !user && (instanceLoading || subscriptionLoading)) {
+    return <DashboardLoader />
   }
 
   // Show setup message only when actively setting up AND no instance exists yet
   if (isSettingUp && !subscription && !instance) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <div className="text-center">
-          <Loader2 className="w-8 h-8 animate-spin text-orange-500 mx-auto mb-4" />
-          <p className="text-gray-600 dark:text-gray-400">Setting up your free MindRoom instance...</p>
-        </div>
-      </div>
-    )
+    return <DashboardLoader message="Setting up your free MindRoom instance..." />
   }
 
   return (

@@ -127,10 +127,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     logger.info("Deploying instance %s to namespace %s", customer_id, namespace)
 
     # Compute URLs and persist them (subdomain is set via trigger if null)
-    base_domain = PLATFORM_DOMAIN
-    frontend_url = f"https://{customer_id}.{base_domain}"
-    api_url = f"https://{customer_id}.api.{base_domain}"
-    matrix_url = f"https://{customer_id}.matrix.{base_domain}"
+    frontend_url = f"https://{customer_id}.{PLATFORM_DOMAIN}"
+    api_url = f"https://{customer_id}.api.{PLATFORM_DOMAIN}"
+    matrix_url = f"https://{customer_id}.matrix.{PLATFORM_DOMAIN}"
     try:
         sb.table("instances").update(
             {

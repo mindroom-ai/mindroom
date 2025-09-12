@@ -141,12 +141,15 @@ async def list_user_instances(
 
 
 @router.post("/my/instances/provision", response_model=ProvisionResponse)
-async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def provision_user_instance(
+    user: Annotated[dict, Depends(verify_user)],
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
     """Provision an instance for the current user."""
     sb = ensure_supabase()
 
     account_id = user["account_id"]
-    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
+    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).execute()
     if not sub_result.data:
         raise HTTPException(status_code=404, detail="No subscription found")
     subscription = sub_result.data[0]
@@ -162,7 +165,12 @@ async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -
 
         # If instance is deprovisioned, reprovision it
         if existing.get("status") == "deprovisioned":
-            logger.info("Reprovisioning deprovisioned instance %s for user %s", existing["instance_id"], account_id)
+            logger.info(
+                "Reprovisioning %s instance %s for user %s",
+                existing.get("status"),
+                existing["instance_id"],
+                account_id,
+            )
             return await provision_instance(
                 data={
                     "subscription_id": subscription["id"],
@@ -171,12 +179,20 @@ async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -
                     "instance_id": existing["instance_id"],  # Reuse the same instance ID
                 },
                 authorization=f"Bearer {PROVISIONER_API_KEY}",
+                background_tasks=background_tasks,
             )
 
         # Otherwise return existing instance metadata
+        status = existing.get("status", "unknown")
+        message = "Instance is already provisioning" if status == "provisioning" else "Instance already exists"
+        logger.info(
+            "Instance already exists for user %s with status %s, returning existing metadata",
+            account_id,
+            status,
+        )
         return {
             "success": True,
-            "message": "Instance already exists",
+            "message": message,
             "customer_id": existing.get("instance_id") or existing.get("subdomain") or "",
             "frontend_url": existing.get("frontend_url") or existing.get("instance_url"),
             "api_url": existing.get("backend_url") or existing.get("api_url"),
@@ -190,6 +206,7 @@ async def provision_user_instance(user: Annotated[dict, Depends(verify_user)]) -
             "tier": subscription["tier"],
         },
         authorization=f"Bearer {PROVISIONER_API_KEY}",
+        background_tasks=background_tasks,
     )
 
 

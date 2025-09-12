@@ -32,6 +32,9 @@ importers:
       '@supabase/supabase-js':
         specifier: ^2.57.0
         version: 2.57.0
+      '@types/js-yaml':
+        specifier: ^4.0.9
+        version: 4.0.9
       lucide-react:
         specifier: ^0.542.0
         version: 0.542.0(react@19.1.0)
@@ -784,6 +787,9 @@ packages:
 
   '@types/d3-timer@3.0.2':
     resolution: {integrity: sha512-Ps3T8E8dZDam6fUyNiMkekK3XUsaUEik+idO9/YjPtfj2qruF8tFBXS7XhtE4iIXBLxhmLjP3SXpLhVf21I9Lw==}
+
+  '@types/js-yaml@4.0.9':
+    resolution: {integrity: sha512-k4MGaQl5TGo/iipqb2UDG2UwjXziSWkh0uysQelTlJpX1qGlpUZYm8PnO4DxG1qBomtJUdYJ6qR6xdIah10JLg==}
 
   '@types/node@20.19.13':
     resolution: {integrity: sha512-yCAeZl7a0DxgNVteXFHt9+uyFbqXGy/ShC4BlcHkoE0AfGXYv/BUiplV72DjMYXHDBXFjhvr6DD1NiRVfB4j8g==}
@@ -2348,6 +2354,8 @@ snapshots:
   '@types/d3-time@3.0.4': {}
 
   '@types/d3-timer@3.0.2': {}
+
+  '@types/js-yaml@4.0.9': {}
 
   '@types/node@20.19.13':
     dependencies:

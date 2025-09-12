@@ -21,8 +21,13 @@ export async function apiCall(
       ...options,
       headers,
     })
-  } catch (error) {
-    console.error(`API call failed: ${url}`, error)
+  } catch (error: any) {
+    // Log the error but check if it's a cancellation
+    if (error?.name === 'AbortError' || !error?.message) {
+      console.log(`Request cancelled: ${url}`)
+    } else {
+      console.error(`API call failed: ${url}`, error)
+    }
     throw error
   }
 }
@@ -59,8 +64,14 @@ export async function listInstances() {
 export async function provisionInstance() {
   const response = await apiCall('/my/instances/provision', { method: 'POST' })
   if (!response.ok) {
-    const error = await response.text()
-    throw new Error(error || 'Failed to provision instance')
+    let errorText = ''
+    try {
+      errorText = await response.text()
+    } catch {
+      // If we can't read the response (e.g., connection aborted), use generic message
+      errorText = ''
+    }
+    throw new Error(errorText || 'Failed to provision instance')
   }
   return response.json()
 }
@@ -92,11 +103,21 @@ export async function restartInstance(instanceId: string | number) {
   return response.json()
 }
 
-// Stripe Integration (to be added)
-export async function createCheckoutSession(priceId: string, tier: string) {
+// Pricing
+export async function getPricingConfig() {
+  const response = await apiCall('/pricing/config')
+  if (!response.ok) {
+    const error = await response.text()
+    throw new Error(error || 'Failed to fetch pricing configuration')
+  }
+  return response.json()
+}
+
+// Stripe Integration
+export async function createCheckoutSession(tier: string, billingCycle: 'monthly' | 'yearly' = 'monthly', quantity: number = 1) {
   const response = await apiCall('/stripe/checkout', {
     method: 'POST',
-    body: JSON.stringify({ price_id: priceId, tier })
+    body: JSON.stringify({ tier, billing_cycle: billingCycle, quantity })
   })
   if (!response.ok) {
     const error = await response.text()

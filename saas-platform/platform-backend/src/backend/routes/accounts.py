@@ -6,13 +6,13 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.deps import ensure_supabase, verify_user
-from backend.models import AdminStatusOut
+from backend.models import AccountSetupResponse, AccountWithRelationsOut, AdminStatusOut
 from fastapi import APIRouter, Depends, HTTPException
 
 router = APIRouter()
 
 
-@router.get("/my/account")
+@router.get("/my/account", response_model=AccountWithRelationsOut)
 async def get_current_account(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get current user's account with subscription and instances."""
     sb = ensure_supabase()
@@ -41,7 +41,7 @@ async def check_admin_status(user: Annotated[dict, Depends(verify_user)]) -> dic
     return AdminStatusOut(is_admin=bool(account_result.data.get("is_admin", False))).model_dump()
 
 
-@router.post("/my/account/setup")
+@router.post("/my/account/setup", response_model=AccountSetupResponse)
 async def setup_account(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Setup free tier account for new user."""
     sb = ensure_supabase()

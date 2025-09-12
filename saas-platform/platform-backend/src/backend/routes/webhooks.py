@@ -2,61 +2,250 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.config import STRIPE_WEBHOOK_SECRET, logger, stripe
 from backend.deps import ensure_supabase
+from backend.models import WebhookResponse
+from backend.pricing import get_plan_limits_from_metadata
 from fastapi import APIRouter, Header, HTTPException, Request
 
 router = APIRouter()
+
+
+def _timestamp_to_iso(timestamp: float) -> str:
+    """Convert Unix timestamp to ISO format string."""
+    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
+
+
+def _maybe_timestamp_to_iso(timestamp: float | None) -> str | None:
+    """Convert Unix timestamp to ISO format string, or None if timestamp is None."""
+    return _timestamp_to_iso(timestamp) if timestamp is not None else None
+
+
+def _get_tier_from_price(price: dict) -> str:
+    """Extract tier from price metadata.
+
+    Our sync-stripe-prices.py script sets metadata.plan with the tier name.
+    """
+    if (metadata := price.get("metadata", {})) and (plan := metadata.get("plan")):
+        return plan
+
+    msg = (
+        f"Unable to determine tier from price. "
+        f"Price metadata: {price.get('metadata')}, "
+        f"lookup_key: {price.get('lookup_key')}"
+    )
+    raise ValueError(msg)
+
+
+def _get_billing_cycle_from_price(price: dict) -> str:
+    """Extract billing cycle from price metadata.
+
+    Our sync-stripe-prices.py script sets metadata.billing_cycle.
+    """
+    if (metadata := price.get("metadata", {})) and (cycle := metadata.get("billing_cycle")):
+        return cycle
+
+    msg = f"Unable to determine billing cycle from price. Price metadata: {price.get('metadata')}"
+    raise ValueError(msg)
 
 
 def handle_subscription_created(subscription: dict) -> None:
     """Handle Stripe subscription creation events."""
     logger.info("Subscription created: %s", subscription["id"])
     sb = ensure_supabase()
-    sb.table("subscriptions").upsert(
-        {
-            "subscription_id": subscription["id"],
-            "customer_id": subscription["customer"],
-            "status": subscription["status"],
-            "tier": subscription["items"]["data"][0]["price"].get("lookup_key", "free")
-            if subscription.get("items", {}).get("data")
-            else "free",
-        },
-    ).execute()
+
+    # Get customer ID and find associated account
+    customer_id = subscription["customer"]
+    account_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+
+    if not account_result.data:
+        logger.error("No account found for customer %s", customer_id)
+        return
+
+    account_id = account_result.data["id"]
+
+    # Extract subscription details
+    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
+    tier = _get_tier_from_price(price_data)
+    _billing_cycle = _get_billing_cycle_from_price(price_data)
+    quantity = subscription["items"]["data"][0].get("quantity", 1) if subscription.get("items", {}).get("data") else 1
+
+    # Get plan limits
+    limits = get_plan_limits_from_metadata(tier)
+
+    # Handle per-user limits for professional plan
+    if tier == "professional" and quantity > 1:
+        # Scale limits by user count
+        if limits.get("max_agents") and isinstance(limits["max_agents"], int):
+            limits["max_agents"] = limits["max_agents"] * quantity
+        if limits.get("max_messages_per_day") and isinstance(limits["max_messages_per_day"], int):
+            limits["max_messages_per_day"] = limits["max_messages_per_day"] * quantity
+
+    # Prepare subscription data
+    subscription_data = {
+        "account_id": account_id,
+        "stripe_subscription_id": subscription["id"],
+        "stripe_price_id": price_data.get("id"),
+        "tier": tier,
+        "status": subscription["status"],
+        "max_agents": limits.get("max_agents", 1),
+        "max_messages_per_day": limits.get("max_messages_per_day", 100),
+        "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+    # Add period dates if available
+    if start := subscription.get("current_period_start"):
+        subscription_data["current_period_start"] = _timestamp_to_iso(start)
+    if end := subscription.get("current_period_end"):
+        subscription_data["current_period_end"] = _timestamp_to_iso(end)
+
+    # Check if subscription already exists for this account
+    existing = sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
+
+    if existing.data:
+        # Update existing subscription
+        sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
+    else:
+        # Create new subscription
+        sb.table("subscriptions").insert(subscription_data).execute()
+
+    logger.info("Subscription created for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
+
+
+def handle_subscription_updated(subscription: dict) -> None:
+    """Handle Stripe subscription update events."""
+    logger.info("Subscription updated: %s", subscription["id"])
+    sb = ensure_supabase()
+
+    # Get customer ID and find associated account
+    customer_id = subscription["customer"]
+    account_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+
+    if not account_result.data:
+        logger.error("No account found for customer %s", customer_id)
+        return
+
+    account_id = account_result.data["id"]
+
+    # Extract subscription details
+    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
+    tier = _get_tier_from_price(price_data)
+    _billing_cycle = _get_billing_cycle_from_price(price_data)
+    quantity = subscription["items"]["data"][0].get("quantity", 1) if subscription.get("items", {}).get("data") else 1
+
+    # Get plan limits
+    limits = get_plan_limits_from_metadata(tier)
+
+    # Handle per-user limits for professional plan
+    if tier == "professional" and quantity > 1:
+        # Scale limits by user count
+        if limits.get("max_agents") and isinstance(limits["max_agents"], int):
+            limits["max_agents"] = limits["max_agents"] * quantity
+        if limits.get("max_messages_per_day") and isinstance(limits["max_messages_per_day"], int):
+            limits["max_messages_per_day"] = limits["max_messages_per_day"] * quantity
+
+    # Prepare subscription data
+    subscription_data = {
+        "stripe_subscription_id": subscription["id"],
+        "stripe_price_id": price_data.get("id"),
+        "tier": tier,
+        "status": subscription["status"],
+        "max_agents": limits.get("max_agents", 1),
+        "max_messages_per_day": limits.get("max_messages_per_day", 100),
+        "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
+        "cancelled_at": _maybe_timestamp_to_iso(subscription.get("canceled_at")),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+    # Add period dates if available
+    if start := subscription.get("current_period_start"):
+        subscription_data["current_period_start"] = _timestamp_to_iso(start)
+    if end := subscription.get("current_period_end"):
+        subscription_data["current_period_end"] = _timestamp_to_iso(end)
+
+    # Update subscription
+    sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
+
+    logger.info("Subscription updated for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
 
 
 def handle_subscription_deleted(subscription: dict) -> None:
     """Handle Stripe subscription deletion events."""
     logger.info("Subscription deleted: %s", subscription["id"])
     sb = ensure_supabase()
-    sb.table("subscriptions").update({"status": "cancelled"}).eq(
-        "subscription_id",
-        subscription["id"],
-    ).execute()
+
+    # Update subscription status to cancelled
+    sb.table("subscriptions").update(
+        {
+            "status": "cancelled",
+            "cancelled_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
+        },
+    ).eq("stripe_subscription_id", subscription["id"]).execute()
 
 
 def handle_payment_succeeded(invoice: dict) -> None:
     """Handle successful Stripe payment events."""
     logger.info("Payment succeeded: %s", invoice["id"])
+
+    # Skip if no subscription (one-time payments)
+    if not invoice.get("subscription"):
+        return
+
     sb = ensure_supabase()
-    sb.table("payments").insert(
+
+    # Get account from customer
+    customer_id = invoice["customer"]
+    account_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+
+    if not account_result.data:
+        logger.error("No account found for customer %s", customer_id)
+        return
+
+    # Record the payment
+    sb.table("usage").insert(
         {
-            "invoice_id": invoice["id"],
-            "subscription_id": invoice["subscription"],
-            "customer_id": invoice["customer"],
-            "amount": invoice["amount_paid"] / 100,
-            "currency": invoice["currency"],
-            "status": "succeeded",
+            "account_id": account_result.data["id"],
+            "metric_type": "payment",
+            "metric_value": invoice["amount_paid"] / 100,  # Convert from cents
+            "metadata": {
+                "invoice_id": invoice["id"],
+                "subscription_id": invoice["subscription"],
+                "currency": invoice["currency"],
+                "billing_reason": invoice.get("billing_reason", "subscription_cycle"),
+            },
+            "timestamp": _timestamp_to_iso(invoice["created"]),
         },
     ).execute()
 
 
-@router.post("/webhooks/stripe")
-async def stripe_webhook(
+def handle_payment_failed(invoice: dict) -> None:
+    """Handle failed Stripe payment events."""
+    logger.info("Payment failed: %s", invoice["id"])
+
+    # Skip if no subscription
+    if not invoice.get("subscription"):
+        return
+
+    sb = ensure_supabase()
+
+    # Update subscription status to past_due
+    sb.table("subscriptions").update(
+        {
+            "status": "past_due",
+            "updated_at": datetime.now(UTC).isoformat(),
+        },
+    ).eq("stripe_subscription_id", invoice["subscription"]).execute()
+
+
+@router.post("/webhooks/stripe", response_model=WebhookResponse)
+async def stripe_webhook(  # noqa: C901
     request: Request,
-    stripe_signature: Annotated[str | None, Header()] = None,
+    stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,
 ) -> dict[str, Any]:
     """Handle incoming Stripe webhook events."""
     if not stripe_signature:
@@ -71,12 +260,25 @@ async def stripe_webhook(
         raise HTTPException(status_code=400, detail="Invalid signature") from e
 
     try:
+        # Subscription lifecycle events
         if event.type == "customer.subscription.created":
             handle_subscription_created(event.data.object)
+        elif event.type == "customer.subscription.updated":
+            handle_subscription_updated(event.data.object)
         elif event.type == "customer.subscription.deleted":
             handle_subscription_deleted(event.data.object)
+
+        # Payment events
         elif event.type == "invoice.payment_succeeded":
             handle_payment_succeeded(event.data.object)
+        elif event.type == "invoice.payment_failed":
+            handle_payment_failed(event.data.object)
+
+        # Trial events
+        elif event.type == "customer.subscription.trial_will_end":
+            # Log for now, could send email notifications later
+            logger.info("Trial ending soon for subscription: %s", event.data.object["id"])
+
         else:
             logger.info("Unhandled event type: %s", event.type)
     except Exception as e:

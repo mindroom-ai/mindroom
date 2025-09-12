@@ -3,14 +3,15 @@
 import Link from 'next/link'
 import { Check, X, Sparkles, Zap, Crown } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { PRICING_PLANS } from '@/lib/pricing-config'
+import { PLAN_GRADIENTS } from '@/lib/pricing-config'
 
-// Transform pricing plans to landing page format
-const plans = [
+// Default pricing data - will be replaced at build time if API is available
+const defaultPlans = [
   {
     name: 'Self-Hosted',
     icon: Sparkles,
     price: '$0',
+    yearlyPrice: '$0',
     period: 'forever',
     description: 'Full control on your infrastructure',
     features: [
@@ -29,31 +30,52 @@ const plans = [
     gradient: 'from-gray-500 to-gray-600',
   },
   {
-    name: PRICING_PLANS.starter.name,
+    name: 'Starter',
     icon: Zap,
-    price: PRICING_PLANS.starter.price,
-    period: PRICING_PLANS.starter.period,
-    description: PRICING_PLANS.starter.description,
-    features: PRICING_PLANS.starter.features.map(text => ({ text, included: true }))
-      .concat([{ text: 'SSO & SAML', included: false }]),
+    price: '$10',
+    yearlyPrice: '$96',
+    period: '/month',
+    description: 'Perfect for individuals',
+    features: [
+      { text: '100 AI Agents', included: true },
+      { text: 'Unlimited messages', included: true },
+      { text: '5GB storage', included: true },
+      { text: 'Email support', included: true },
+      { text: 'All integrations', included: true },
+      { text: 'Custom workflows', included: true },
+      { text: 'Analytics dashboard', included: true },
+      { text: 'SSO & SAML', included: false },
+    ],
     cta: 'Start 14-Day Trial',
     href: '/auth/signup?plan=starter',
-    featured: PRICING_PLANS.starter.recommended || false,
-    gradient: PRICING_PLANS.starter.gradient || 'from-orange-500 to-orange-600',
+    featured: true,
+    gradient: PLAN_GRADIENTS.starter,
   },
   {
-    name: PRICING_PLANS.professional.name,
+    name: 'Professional',
     icon: Crown,
-    price: PRICING_PLANS.professional.price,
-    period: PRICING_PLANS.professional.period,
-    description: PRICING_PLANS.professional.description,
-    features: PRICING_PLANS.professional.features.map(text => ({ text, included: true })),
+    price: '$8',
+    yearlyPrice: '$76.80',
+    period: '/user/month',
+    description: 'For teams and businesses',
+    features: [
+      { text: 'Unlimited AI Agents', included: true },
+      { text: 'Unlimited messages', included: true },
+      { text: '10GB storage per user', included: true },
+      { text: 'Priority support', included: true },
+      { text: 'Advanced analytics', included: true },
+      { text: 'SSO & SAML', included: true },
+      { text: 'SLA guarantee', included: true },
+      { text: 'Team training', included: true },
+    ],
     cta: 'Start 14-Day Trial',
     href: '/auth/signup?plan=professional',
     featured: false,
-    gradient: PRICING_PLANS.professional.gradient || 'from-purple-500 to-purple-600',
+    gradient: PLAN_GRADIENTS.professional,
   },
 ]
+
+const plans = defaultPlans
 
 export function Pricing() {
   const [isVisible, setIsVisible] = useState(false)
@@ -127,11 +149,7 @@ export function Pricing() {
         <div className="grid lg:grid-cols-3 gap-8 max-w-6xl mx-auto">
           {plans.map((plan, index) => {
             const Icon = plan.icon
-            const price = billingCycle === 'yearly' && plan.price !== '$0'
-              ? plan.name === 'Professional'
-                ? `$${Math.floor(8 * 0.8 * 12)}` // $8 * 0.8 * 12 months = $76.80/year per user
-                : `$${Math.floor(parseInt(plan.price.slice(1)) * 0.8 * 12)}` // monthly * 0.8 * 12
-              : plan.price
+            const price = billingCycle === 'yearly' && plan.yearlyPrice ? plan.yearlyPrice : plan.price
 
             return (
               <div

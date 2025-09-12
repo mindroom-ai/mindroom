@@ -1,0 +1,128 @@
+product:
+  name: MindRoom Subscription
+  description: AI-powered team collaboration platform
+  metadata:
+    platform: mindroom
+plans:
+  free:
+    name: Free
+    price_monthly: 0
+    price_yearly: 0
+    description: Get started with basic features
+    features:
+    - 1 AI Agent
+    - 100 messages per day
+    - 1GB storage
+    - Community support
+    - Basic integrations
+    limits:
+      max_agents: 1
+      max_messages_per_day: 100
+      storage_gb: 1
+      support: Community
+      integrations: Basic
+      workflows: false
+      analytics: basic
+      sla: false
+      training: false
+      sso: false
+      custom_development: false
+      on_premise: false
+      dedicated_infrastructure: false
+  starter:
+    name: Starter
+    price_monthly: 1000
+    price_yearly: 9600
+    description: Perfect for individuals
+    stripe_price_id_monthly: price_1S6FvF3GVsrZHuzXrDZ5H7EW
+    stripe_price_id_yearly: price_1S6FvF3GVsrZHuzXDjv76gwE
+    recommended: true
+    features:
+    - 100 AI Agents
+    - Unlimited messages
+    - 5GB storage
+    - Email support
+    - All integrations
+    - Custom workflows
+    - Analytics dashboard
+    limits:
+      max_agents: 100
+      max_messages_per_day: unlimited
+      storage_gb: 5
+      support: Email
+      integrations: All integrations
+      workflows: true
+      analytics: advanced
+      sla: false
+      training: false
+      sso: false
+      custom_development: false
+      on_premise: false
+      dedicated_infrastructure: false
+  professional:
+    name: Professional
+    price_monthly: 800
+    price_yearly: 7680
+    price_model: per_user
+    description: For teams and businesses
+    stripe_price_id_monthly: price_1S6FvG3GVsrZHuzXBwljASJB
+    stripe_price_id_yearly: price_1S6FvG3GVsrZHuzXQV9y2VEo
+    features:
+    - Unlimited AI Agents
+    - Unlimited messages
+    - 10GB storage per user
+    - Priority support
+    - Advanced analytics
+    - SSO & SAML
+    - SLA guarantee
+    - Team training
+    limits:
+      max_agents: unlimited
+      max_messages_per_day: unlimited
+      storage_gb: 10
+      support: Priority support
+      integrations: All integrations + custom
+      workflows: true
+      analytics: advanced
+      sla: true
+      training: true
+      sso: true
+      custom_development: false
+      on_premise: false
+      dedicated_infrastructure: false
+  enterprise:
+    name: Enterprise
+    price_monthly: custom
+    price_yearly: custom
+    description: Tailored for large organizations
+    features:
+    - Unlimited everything
+    - Custom limits
+    - Dedicated infrastructure
+    - White-glove support
+    - Custom development
+    - On-premise option
+    - Compliance certifications
+    - Dedicated account manager
+    limits:
+      max_agents: unlimited
+      max_messages_per_day: unlimited
+      storage_gb: unlimited
+      support: White-glove
+      integrations: Custom development
+      workflows: true
+      analytics: custom
+      sla: true
+      training: true
+      sso: true
+      custom_development: true
+      on_premise: true
+      dedicated_infrastructure: true
+trial:
+  enabled: true
+  days: 14
+  applicable_plans:
+  - starter
+  - professional
+discounts:
+  annual_percentage: 20

@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
 import { listInstances, restartInstance as apiRestartInstance } from '@/lib/api'
-import { cache } from '@/lib/cache'
+import { instanceCache } from '@/lib/cache'
 
 export interface Instance {
   id: string // UUID
@@ -41,7 +41,7 @@ const DEV_INSTANCE: Instance | null =
     : null
 
 export function useInstance() {
-  const cachedInstance = cache.get('user-instance') as Instance | null
+  const cachedInstance = instanceCache.get('user-instance') as Instance | null
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
   const [loading, setLoading] = useState(!cachedInstance)
   const { user, loading: authLoading } = useAuth()
@@ -57,22 +57,31 @@ export function useInstance() {
     // Use dev instance if in development mode
     if (DEV_INSTANCE) {
       setInstance(DEV_INSTANCE)
-      cache.set('user-instance', DEV_INSTANCE)
+      instanceCache.set('user-instance', DEV_INSTANCE)
       setLoading(false)
       return
     }
 
     // Get user's instance through the API endpoint
-    const fetchInstance = async () => {
+    const fetchInstance = async (isInitial = false) => {
+      // Check for cached data right before deciding to show loading
+      const currentCache = instanceCache.get('user-instance') as Instance | null
+
+      // Only show loading on initial fetch when there's no cached data
+      if (isInitial && !currentCache && !instance) {
+        setLoading(true)
+      }
+
       try {
         const data = await listInstances()
         if (data.instances && data.instances.length > 0) {
           const newInstance = data.instances[0]
           setInstance(newInstance)
-          cache.set('user-instance', newInstance)
+          instanceCache.set('user-instance', newInstance)
         } else {
           // No instances found
           setInstance(null)
+          instanceCache.delete('user-instance')
         }
       } catch (error) {
         console.error('Error fetching instance:', error)
@@ -81,37 +90,24 @@ export function useInstance() {
           console.error('Error details:', error.message)
         }
       } finally {
-        setLoading(false)
+        if (isInitial) {
+          setLoading(false)
+        }
       }
     }
 
-    fetchInstance()
+    fetchInstance(true)  // Initial fetch
 
     // Skip polling in dev mode
     if (DEV_INSTANCE) {
       return
     }
 
-    // Poll for changes every 10 seconds instead of realtime subscription
+    // Poll for changes every 15 seconds for more responsive updates
     // (avoids RLS issues with direct Supabase access)
-    let errorCount = 0
     const interval = setInterval(async () => {
-      try {
-        const data = await listInstances()
-        if (data.instances && data.instances.length > 0) {
-          const newInstance = data.instances[0]
-          setInstance(newInstance)
-          cache.set('user-instance', newInstance)
-        }
-        errorCount = 0 // Reset error count on success
-      } catch (err) {
-        errorCount++
-        // Only log first error and every 10th error to avoid spamming
-        if (errorCount === 1 || errorCount % 10 === 0) {
-          console.error(`Error polling instance status (attempt ${errorCount}):`, err)
-        }
-      }
-    }, 10000)
+      await fetchInstance(false)  // Background update, no loading state
+    }, 15000)
 
     return () => {
       clearInterval(interval)

@@ -17,6 +17,7 @@
     "@supabase/auth-ui-shared": "^0.1.8",
     "@supabase/ssr": "^0.7.0",
     "@supabase/supabase-js": "^2.57.0",
+    "@types/js-yaml": "^4.0.9",
     "lucide-react": "^0.542.0",
     "nanoid": "^5.1.5",
     "next": "15.5.2",
