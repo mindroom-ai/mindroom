@@ -34,8 +34,8 @@ plans:
     price_monthly: 1000
     price_yearly: 9600
     description: Perfect for individuals
-    stripe_price_id_monthly: price_1S6EmY3GVsrZHuzXTpwM8Gqx
-    stripe_price_id_yearly: price_1S6EmY3GVsrZHuzXCHBA7s8b
+    stripe_price_id_monthly: price_1S6FvF3GVsrZHuzXrDZ5H7EW
+    stripe_price_id_yearly: price_1S6FvF3GVsrZHuzXDjv76gwE
     recommended: true
     features:
     - 100 AI Agents
@@ -65,8 +65,8 @@ plans:
     price_yearly: 7680
     price_model: per_user
     description: For teams and businesses
-    stripe_price_id_monthly: price_1S6EmZ3GVsrZHuzXpdUKcgCU
-    stripe_price_id_yearly: price_1S6EmZ3GVsrZHuzXr1m0Bwuh
+    stripe_price_id_monthly: price_1S6FvG3GVsrZHuzXBwljASJB
+    stripe_price_id_yearly: price_1S6FvG3GVsrZHuzXQV9y2VEo
     features:
     - Unlimited AI Agents
     - Unlimited messages
