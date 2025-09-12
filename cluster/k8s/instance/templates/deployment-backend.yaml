@@ -22,6 +22,7 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        runAsNonRoot: true
         fsGroupChangePolicy: OnRootMismatch
       containers:
       - name: mindroom-backend
@@ -71,6 +72,11 @@ spec:
           limits:
             memory: "2Gi"
             cpu: "1000m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
       imagePullSecrets:
       - name: gitea-registry
       volumes:

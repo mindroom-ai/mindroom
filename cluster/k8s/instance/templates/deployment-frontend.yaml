@@ -32,6 +32,7 @@ spec:
         - name: nginx-config
           mountPath: /etc/nginx/nginx.conf
           subPath: nginx.conf
+        # Note: runs as root to bind port 80; do not drop NET_BIND_SERVICE
 
       # MindRoom frontend (UI only, API now in backend)
       - name: mindroom-frontend
@@ -59,6 +60,13 @@ spec:
           limits:
             memory: "4Gi"
             cpu: "2000m"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
       imagePullSecrets:
       - name: gitea-registry
       volumes:
