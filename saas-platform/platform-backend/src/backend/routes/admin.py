@@ -25,9 +25,40 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 router = APIRouter()
 
 
+def audit_log_entry(
+    account_id: str,
+    action: str,
+    resource_type: str,
+    resource_id: str | None = None,
+    details: dict | None = None,
+) -> None:
+    """Log an admin action to the audit_logs table (best effort)."""
+    try:
+        sb = ensure_supabase()
+        sb.table("audit_logs").insert(
+            {
+                "account_id": account_id,
+                "action": action,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "details": details,
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        ).execute()
+    except Exception:
+        logger.warning(
+            f"Failed to log audit: {action} on {resource_type}{f'/{resource_id}' if resource_id else ''}",
+        )
+
+
 @router.get("/admin/stats", response_model=AdminStatsOut)
-async def get_admin_stats(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
+async def get_admin_stats(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Get platform statistics for admin dashboard."""
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="view",
+        resource_type="stats",
+    )
     sb = ensure_supabase()
 
     try:
@@ -58,32 +89,60 @@ async def _proxy_to_provisioner(
 @router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
 async def admin_start_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Start an instance (admin proxy)."""
-    return await _proxy_to_provisioner(start_instance_provisioner, instance_id, admin)
+    result = await _proxy_to_provisioner(start_instance_provisioner, instance_id, admin)
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="start",
+        resource_type="instance",
+        resource_id=str(instance_id),
+    )
+    return result
 
 
 @router.post("/admin/instances/{instance_id}/stop", response_model=ActionResult)
 async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Stop an instance (admin proxy)."""
-    return await _proxy_to_provisioner(stop_instance_provisioner, instance_id, admin)
+    result = await _proxy_to_provisioner(stop_instance_provisioner, instance_id, admin)
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="stop",
+        resource_type="instance",
+        resource_id=str(instance_id),
+    )
+    return result
 
 
 @router.post("/admin/instances/{instance_id}/restart", response_model=ActionResult)
 async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Restart an instance (admin proxy)."""
-    return await _proxy_to_provisioner(restart_instance_provisioner, instance_id, admin)
+    result = await _proxy_to_provisioner(restart_instance_provisioner, instance_id, admin)
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="restart",
+        resource_type="instance",
+        resource_id=str(instance_id),
+    )
+    return result
 
 
 @router.delete("/admin/instances/{instance_id}/uninstall", response_model=ActionResult)
 async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Uninstall an instance (admin proxy)."""
-    return await _proxy_to_provisioner(uninstall_instance, instance_id, admin)
+    result = await _proxy_to_provisioner(uninstall_instance, instance_id, admin)
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="uninstall",
+        resource_type="instance",
+        resource_id=str(instance_id),
+    )
+    return result
 
 
 @router.post("/admin/instances/{instance_id}/provision")
 async def admin_provision_instance(
     instance_id: int,
     background_tasks: BackgroundTasks,
-    admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001
+    admin: Annotated[dict, Depends(verify_admin)],
 ) -> dict[str, Any]:
     """Provision a deprovisioned instance."""
     sb = ensure_supabase()
@@ -105,13 +164,28 @@ async def admin_provision_instance(
         "instance_id": instance_id,  # Re-use existing instance ID
     }
 
-    return await provision_instance(data, f"Bearer {PROVISIONER_API_KEY}", background_tasks)
+    result = await provision_instance(data, f"Bearer {PROVISIONER_API_KEY}", background_tasks)
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="provision",
+        resource_type="instance",
+        resource_id=str(instance_id),
+        details={"account_id": instance.get("account_id"), "tier": instance.get("tier")},
+    )
+    return result
 
 
 @router.post("/admin/sync-instances")
-async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: ARG001
+async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
     """Sync instance states between database and Kubernetes (admin proxy)."""
-    return await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
+    result = await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="sync",
+        resource_type="instances",
+        details={"operation": "sync_k8s_database"},
+    )
+    return result
 
 
 @router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
@@ -143,16 +217,13 @@ async def update_account_status(
         if not result.data:
             raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
 
-        sb.table("audit_logs").insert(
-            {
-                "account_id": admin["user_id"],
-                "action": "update",
-                "resource_type": "account",
-                "resource_id": account_id,
-                "details": {"status": status},
-                "created_at": datetime.now(UTC).isoformat(),
-            },
-        ).execute()
+        audit_log_entry(
+            account_id=admin["user_id"],
+            action="update",
+            resource_type="account",
+            resource_id=account_id,
+            details={"status": status},
+        )
 
         return {"status": "success", "account_id": account_id, "new_status": status}  # noqa: TRY300
     except Exception as e:
@@ -170,6 +241,7 @@ async def admin_logout() -> dict[str, bool]:
 @router.get("/admin/{resource}")
 async def admin_get_list(
     resource: str,
+    admin: Annotated[dict, Depends(verify_admin)],
     _sort: Annotated[str | None, Query()] = None,
     _order: Annotated[str | None, Query()] = None,
     _start: Annotated[int, Query()] = 0,
@@ -178,6 +250,13 @@ async def admin_get_list(
 ) -> dict[str, Any]:
     """Generic list endpoint for React Admin."""
     sb = ensure_supabase()
+
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="list",
+        resource_type=resource,
+        details={"query": q, "start": _start, "end": _end},
+    )
 
     try:
         # Special-case: instances should include account info
@@ -211,9 +290,20 @@ async def admin_get_list(
 
 
 @router.get("/admin/{resource}/{resource_id}")
-async def admin_get_one(resource: str, resource_id: str) -> dict[str, Any]:
+async def admin_get_one(
+    resource: str,
+    resource_id: str,
+    admin: Annotated[dict, Depends(verify_admin)],
+) -> dict[str, Any]:
     """Get single record for React Admin."""
     sb = ensure_supabase()
+
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="read",
+        resource_type=resource,
+        resource_id=resource_id,
+    )
 
     try:
         result = sb.table(resource).select("*").eq("id", resource_id).single().execute()
@@ -224,37 +314,80 @@ async def admin_get_one(resource: str, resource_id: str) -> dict[str, Any]:
 
 
 @router.post("/admin/{resource}")
-async def admin_create(resource: str, data: dict) -> dict[str, Any]:
+async def admin_create(
+    resource: str,
+    data: dict,
+    admin: Annotated[dict, Depends(verify_admin)],
+) -> dict[str, Any]:
     """Create record for React Admin."""
     sb = ensure_supabase()
 
     try:
         result = sb.table(resource).insert(data).execute()
+
+        # Log admin creation
+        if result.data:
+            new_id = result.data[0].get("id") if result.data[0] else None
+            audit_log_entry(
+                account_id=admin["user_id"],
+                action="create",
+                resource_type=resource,
+                resource_id=str(new_id) if new_id else None,
+                details={"data": data},
+            )
+
         return {"data": result.data[0] if result.data else None}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.put("/admin/{resource}/{resource_id}")
-async def admin_update(resource: str, resource_id: str, data: dict) -> dict[str, Any]:
+async def admin_update(
+    resource: str,
+    resource_id: str,
+    data: dict,
+    admin: Annotated[dict, Depends(verify_admin)],
+) -> dict[str, Any]:
     """Update record for React Admin."""
     sb = ensure_supabase()
 
     try:
         data.pop("id", None)
         result = sb.table(resource).update(data).eq("id", resource_id).execute()
+
+        # Log admin update
+        audit_log_entry(
+            account_id=admin["user_id"],
+            action="update",
+            resource_type=resource,
+            resource_id=resource_id,
+            details={"data": data},
+        )
+
         return {"data": result.data[0] if result.data else None}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.delete("/admin/{resource}/{resource_id}")
-async def admin_delete(resource: str, resource_id: str) -> dict[str, Any]:
+async def admin_delete(
+    resource: str,
+    resource_id: str,
+    admin: Annotated[dict, Depends(verify_admin)],
+) -> dict[str, Any]:
     """Delete record for React Admin."""
     sb = ensure_supabase()
 
     try:
         sb.table(resource).delete().eq("id", resource_id).execute()
+
+        # Log admin deletion
+        audit_log_entry(
+            account_id=admin["user_id"],
+            action="delete",
+            resource_type=resource,
+            resource_id=resource_id,
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     else:
@@ -262,8 +395,15 @@ async def admin_delete(resource: str, resource_id: str) -> dict[str, Any]:
 
 
 @router.get("/admin/metrics/dashboard")
-async def get_dashboard_metrics() -> dict[str, Any]:
+async def get_dashboard_metrics(
+    admin: Annotated[dict, Depends(verify_admin)],
+) -> dict[str, Any]:
     """Get dashboard metrics for admin panel."""
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="view",
+        resource_type="dashboard_metrics",
+    )
     try:
         sb = ensure_supabase()
     except HTTPException:

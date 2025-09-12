@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hmac
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -15,6 +17,9 @@ if TYPE_CHECKING:
 
 # TTL cache for auth verification (5 minutes, max 100 entries)
 _auth_cache = TTLCache(maxsize=100, ttl=300)
+
+# Minimum time for auth operations to prevent timing attacks
+MIN_AUTH_TIME = 0.1  # 100ms minimum
 
 
 def ensure_supabase() -> Client:
@@ -31,16 +36,44 @@ def _ensure_auth_client() -> Client:
     return auth_client
 
 
-async def verify_user(authorization: str = Header(None)) -> dict:
+def _extract_bearer_token(authorization: str | None) -> str:
+    """Extract and validate bearer token from authorization header.
+
+    This function provides secure token extraction avoiding common pitfalls.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+
+    # Split and validate format
+    parts = authorization.split()
+    if len(parts) != 2:
+        raise HTTPException(status_code=401, detail="Invalid authorization format")
+
+    # Use constant-time comparison for Bearer prefix
+    scheme = parts[0]
+    if not hmac.compare_digest(scheme.lower().encode(), b"bearer"):
+        raise HTTPException(status_code=401, detail="Invalid authorization scheme")
+
+    return parts[1]
+
+
+async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901, PLR0912, PLR0915
     """Verify regular user via Supabase JWT.
 
     With the current schema, `account.id == auth.user.id`.
     Ensures the `accounts` row exists, creating it if necessary.
     """
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header")
+    # Track timing to ensure constant-time operations
+    start_time = time.perf_counter()
 
-    token = authorization.replace("Bearer ", "")
+    try:
+        token = _extract_bearer_token(authorization)
+    except HTTPException:
+        # Ensure minimum time even for early failures
+        elapsed = time.perf_counter() - start_time
+        if elapsed < MIN_AUTH_TIME:
+            await asyncio.sleep(MIN_AUTH_TIME - elapsed)
+        raise
 
     # Check cache first
     if token in _auth_cache:
@@ -106,14 +139,28 @@ async def verify_user(authorization: str = Header(None)) -> dict:
         _auth_cache[token] = user_data
 
         # Log the time taken for database auth
-        logger.info("Auth database lookup: %.2fms", (time.perf_counter() - start) * 1000)
+        db_time = time.perf_counter() - start
+        logger.info("Auth database lookup: %.2fms", db_time * 1000)
 
     except HTTPException:
+        # Ensure minimum time for all error paths
+        elapsed = time.perf_counter() - start_time
+        if elapsed < MIN_AUTH_TIME:
+            await asyncio.sleep(MIN_AUTH_TIME - elapsed)
         raise
     except Exception:
         logger.exception("User verification error")
+        # Ensure minimum time for all error paths
+        elapsed = time.perf_counter() - start_time
+        if elapsed < MIN_AUTH_TIME:
+            await asyncio.sleep(MIN_AUTH_TIME - elapsed)
         msg = "Authentication failed"
         raise HTTPException(status_code=401, detail=msg) from None
+
+    # Ensure minimum time for successful auth too
+    elapsed = time.perf_counter() - start_time
+    if elapsed < MIN_AUTH_TIME:
+        await asyncio.sleep(MIN_AUTH_TIME - elapsed)
 
     return user_data
 
@@ -130,10 +177,7 @@ async def verify_user_optional(authorization: str = Header(None)) -> dict | None
 
 async def verify_admin(authorization: str = Header(None)) -> dict:
     """Verify admin access via Supabase auth."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header")
-
-    token = authorization.replace("Bearer ", "")
+    token = _extract_bearer_token(authorization)
 
     sb = ensure_supabase()
     ac = _ensure_auth_client()
@@ -149,6 +193,8 @@ async def verify_admin(authorization: str = Header(None)) -> dict:
             msg = "Admin access required"
             raise HTTPException(status_code=403, detail=msg)  # noqa: TRY301
         return {"user_id": user.user.id, "email": user.user.email}  # noqa: TRY300
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Admin verification error")
         msg = "Authentication failed"
