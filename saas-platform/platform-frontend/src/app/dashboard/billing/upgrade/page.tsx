@@ -4,36 +4,30 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Check, ArrowLeft, Sparkles } from 'lucide-react'
 import { useSubscription } from '@/hooks/useSubscription'
-import { createCheckoutSession } from '@/lib/api'
-import { PRICING_PLANS, type PlanId } from '@/lib/pricing-config'
+import { createCheckoutSession, getPricingConfig } from '@/lib/api'
 
-// Filter out free plan and map to upgrade options
-const plans = Object.values(PRICING_PLANS)
-  .filter(plan => plan.id !== 'free')
-  .map(plan => ({
-    id: plan.id,
-    name: plan.name,
-    price: plan.price,
-    description: plan.description,
-    features: plan.features,
-    recommended: plan.recommended,
-  }))
-
-// Pricing with yearly discount (20% off)
-const PRICING_DETAILS = {
-  starter: {
-    monthly: { price: '$10', period: '/month', total: '$10' },
-    yearly: { price: '$8', period: '/month', total: '$96/year', savings: 'Save $24' }
-  },
-  professional: {
-    monthly: { price: '$8', period: '/user/month', total: '$8/user' },
-    yearly: { price: '$6.40', period: '/user/month', total: '$76.80/user/year', savings: 'Save 20%' }
-  },
-  enterprise: {
-    monthly: { price: 'Custom', period: '', total: 'Contact Sales' },
-    yearly: { price: 'Custom', period: '', total: 'Contact Sales', savings: '' }
+interface PricingPlan {
+  id: string
+  name: string
+  price_monthly: string
+  price_yearly: string
+  price_model?: string
+  description: string
+  features: string[]
+  recommended?: boolean
+  limits?: {
+    max_agents: number | string
+    max_messages_per_day: number | string
+    storage_gb: number | string
   }
-} as const
+}
+
+interface PricingConfig {
+  plans: Record<string, PricingPlan>
+  discounts?: {
+    annual_percentage: number
+  }
+}
 
 export default function UpgradePage() {
   const router = useRouter()
@@ -42,21 +36,35 @@ export default function UpgradePage() {
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly')
   const [isProcessing, setIsProcessing] = useState(false)
   const [userCount, setUserCount] = useState(1)
+  const [pricingConfig, setPricingConfig] = useState<PricingConfig | null>(null)
+  const [pricingLoading, setPricingLoading] = useState(true)
+
+  useEffect(() => {
+    // Fetch pricing configuration from backend
+    getPricingConfig()
+      .then(setPricingConfig)
+      .catch(console.error)
+      .finally(() => setPricingLoading(false))
+  }, [])
 
   useEffect(() => {
     // Pre-select the recommended plan if user is on free tier
-    if (!loading && subscription?.tier === 'free') {
-      setSelectedPlan('starter')
+    if (!loading && subscription?.tier === 'free' && pricingConfig) {
+      const recommendedPlan = Object.entries(pricingConfig.plans)
+        .find(([_, plan]) => plan.recommended)?.[0]
+      if (recommendedPlan) {
+        setSelectedPlan(recommendedPlan)
+      }
     }
-  }, [subscription, loading])
+  }, [subscription, loading, pricingConfig])
 
   const handleUpgrade = async () => {
-    if (!selectedPlan) return
+    if (!selectedPlan || !pricingConfig) return
 
-    const plan = plans.find(p => p.id === selectedPlan)
+    const plan = pricingConfig.plans[selectedPlan]
     if (!plan) return
 
-    if (plan.id === 'enterprise') {
+    if (selectedPlan === 'enterprise') {
       window.location.href = 'mailto:sales@mindroom.chat?subject=Enterprise Plan Inquiry'
       return
     }
@@ -65,8 +73,8 @@ export default function UpgradePage() {
 
     try {
       // Pass quantity for professional plan
-      const quantity = plan.id === 'professional' ? userCount : 1
-      const { url } = await createCheckoutSession(plan.id, billingCycle, quantity)
+      const quantity = plan.price_model === 'per_user' ? userCount : 1
+      const { url } = await createCheckoutSession(selectedPlan, billingCycle, quantity)
       window.location.href = url
     } catch (error) {
       console.error('Error creating checkout session:', error)
@@ -75,7 +83,7 @@ export default function UpgradePage() {
     }
   }
 
-  if (loading) {
+  if (loading || pricingLoading) {
     return (
       <div className="flex items-center justify-center h-screen">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500"></div>
@@ -83,7 +91,26 @@ export default function UpgradePage() {
     )
   }
 
+  if (!pricingConfig) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <div className="text-red-500">Failed to load pricing configuration</div>
+      </div>
+    )
+  }
+
   const currentTier = subscription?.tier || 'free'
+  const discountPercentage = pricingConfig.discounts?.annual_percentage || 20
+
+  // Filter out free plan and sort plans
+  const plans = Object.entries(pricingConfig.plans)
+    .filter(([key]) => key !== 'free')
+    .map(([key, plan]) => ({ ...plan, id: key }))
+    .sort((a, b) => {
+      // Sort order: starter, professional, enterprise
+      const order = ['starter', 'professional', 'enterprise']
+      return order.indexOf(a.id) - order.indexOf(b.id)
+    })
 
   return (
     <div className="max-w-6xl mx-auto p-6">
@@ -138,7 +165,7 @@ export default function UpgradePage() {
           >
             Yearly
             <span className="ml-2 px-2 py-0.5 bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 text-xs rounded-full">
-              Save 20%
+              Save {discountPercentage}%
             </span>
           </button>
         </div>
@@ -149,7 +176,27 @@ export default function UpgradePage() {
         {plans.map((plan) => {
           const isCurrentPlan = plan.id === currentTier
           const isDowngrade = plans.findIndex(p => p.id === plan.id) < plans.findIndex(p => p.id === currentTier)
-          const pricing = PRICING_DETAILS[plan.id as keyof typeof PRICING_DETAILS][billingCycle]
+
+          // Parse prices and calculate display values
+          const monthlyPrice = plan.price_monthly
+          const yearlyPrice = plan.price_yearly
+          const isPerUser = plan.price_model === 'per_user'
+          const isCustom = monthlyPrice === 'Custom'
+
+          // Calculate yearly monthly equivalent (with discount)
+          const yearlyMonthlyEquivalent = !isCustom && yearlyPrice !== 'Custom'
+            ? `$${(parseFloat(yearlyPrice.replace('$', '')) / 12).toFixed(2)}`
+            : yearlyPrice
+
+          // Calculate total yearly price
+          const yearlyTotal = !isCustom && yearlyPrice !== 'Custom'
+            ? yearlyPrice + '/year'
+            : 'Contact Sales'
+
+          // Calculate savings
+          const yearlySavings = !isCustom && monthlyPrice !== 'Custom' && yearlyPrice !== 'Custom'
+            ? `Save ${discountPercentage}%`
+            : ''
 
           return (
             <div
@@ -186,18 +233,24 @@ export default function UpgradePage() {
 
               <div className="mb-6">
                 <div className="flex items-baseline">
-                  <span className="text-3xl font-bold dark:text-white">{pricing.price}</span>
-                  {pricing.period && <span className="text-gray-600 dark:text-gray-400 ml-1">{pricing.period}</span>}
+                  <span className="text-3xl font-bold dark:text-white">
+                    {billingCycle === 'monthly' ? monthlyPrice : yearlyMonthlyEquivalent}
+                  </span>
+                  {!isCustom && (
+                    <span className="text-gray-600 dark:text-gray-400 ml-1">
+                      {isPerUser ? '/user/month' : '/month'}
+                    </span>
+                  )}
                 </div>
-                {billingCycle === 'yearly' && pricing.savings && (
+                {billingCycle === 'yearly' && yearlySavings && (
                   <div className="mt-2">
-                    <span className="text-sm text-green-600 dark:text-green-400 font-medium">{pricing.savings}</span>
+                    <span className="text-sm text-green-600 dark:text-green-400 font-medium">{yearlySavings}</span>
                     <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Billed as {pricing.total}
+                      Billed as {yearlyTotal}
                     </div>
                   </div>
                 )}
-                {plan.id === 'professional' && billingCycle === 'monthly' && (
+                {isPerUser && billingCycle === 'monthly' && (
                   <div className="mt-3 space-y-2">
                     <label className="text-sm text-gray-600 dark:text-gray-400">Number of users:</label>
                     <input
@@ -211,11 +264,11 @@ export default function UpgradePage() {
                       disabled={selectedPlan !== plan.id}
                     />
                     <div className="text-xs text-gray-500 dark:text-gray-400">
-                      Total: ${(8 * userCount).toFixed(2)}/month
+                      Total: ${(parseFloat(monthlyPrice.replace('$', '')) * userCount).toFixed(2)}/month
                     </div>
                   </div>
                 )}
-                {plan.id === 'professional' && billingCycle === 'yearly' && (
+                {isPerUser && billingCycle === 'yearly' && (
                   <div className="mt-3 space-y-2">
                     <label className="text-sm text-gray-600 dark:text-gray-400">Number of users:</label>
                     <input
@@ -229,7 +282,7 @@ export default function UpgradePage() {
                       disabled={selectedPlan !== plan.id}
                     />
                     <div className="text-xs text-gray-500 dark:text-gray-400">
-                      Total: ${(76.80 * userCount).toFixed(2)}/year
+                      Total: ${(parseFloat(yearlyPrice.replace('$', '')) * userCount).toFixed(2)}/year
                     </div>
                   </div>
                 )}
@@ -258,15 +311,15 @@ export default function UpgradePage() {
           {selectedPlan && (
             <div>
               <p className="text-sm text-gray-600 dark:text-gray-400">
-                Selected: <span className="font-semibold dark:text-white">{plans.find(p => p.id === selectedPlan)?.name}</span>
+                Selected: <span className="font-semibold dark:text-white">{pricingConfig.plans[selectedPlan]?.name}</span>
                 {' '}({billingCycle === 'yearly' ? 'Yearly' : 'Monthly'} billing)
               </p>
-              {selectedPlan === 'professional' && (
+              {pricingConfig.plans[selectedPlan]?.price_model === 'per_user' && (
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                   {userCount} user{userCount > 1 ? 's' : ''} •
                   {billingCycle === 'yearly'
-                    ? ` $${(76.80 * userCount).toFixed(2)}/year`
-                    : ` $${(8 * userCount).toFixed(2)}/month`
+                    ? ` $${(parseFloat(pricingConfig.plans[selectedPlan].price_yearly.replace('$', '')) * userCount).toFixed(2)}/year`
+                    : ` $${(parseFloat(pricingConfig.plans[selectedPlan].price_monthly.replace('$', '')) * userCount).toFixed(2)}/month`
                   }
                 </p>
               )}
@@ -314,7 +367,7 @@ export default function UpgradePage() {
         <ul className="text-sm text-blue-800 dark:text-blue-400 space-y-1">
           <li>• All plans include a 14-day free trial</li>
           <li>• Cancel or change your plan anytime</li>
-          <li>• {billingCycle === 'yearly' ? 'Save 20% with annual billing' : 'Switch to yearly billing and save 20%'}</li>
+          <li>• {billingCycle === 'yearly' ? `Save ${discountPercentage}% with annual billing` : `Switch to yearly billing and save ${discountPercentage}%`}</li>
           <li>• Upgrades are prorated to your billing cycle</li>
           <li>• No setup fees or hidden charges</li>
         </ul>
