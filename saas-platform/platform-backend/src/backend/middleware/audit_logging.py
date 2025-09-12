@@ -4,24 +4,27 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from fastapi import Request, Response
+
 from backend.config import logger, supabase
-from fastapi import Request, Response
+from backend.tasks.usage_metrics import update_realtime_metrics
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
 
 
 class AuditLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware to log important actions to audit_logs table."""
 
     # Actions to audit
-    AUDIT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+    AUDIT_METHODS: ClassVar[set[str]] = {"POST", "PUT", "PATCH", "DELETE"}
 
     # Path patterns to audit
-    AUDIT_PATHS = [
+    AUDIT_PATHS: ClassVar[list[str]] = [
         "/admin/",  # All admin actions
         "/api/accounts",  # Account modifications
         "/api/subscriptions",  # Subscription changes
@@ -30,7 +33,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
     ]
 
     # Map of path patterns to resource types
-    RESOURCE_TYPES = {
+    RESOURCE_TYPES: ClassVar[dict[str, str]] = {
         "accounts": "account",
         "subscriptions": "subscription",
         "instances": "instance",
@@ -56,14 +59,10 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
         if not should_audit:
             return await call_next(request)
 
-        # Get request details
-        try:
-            # Try to get user from request state (set by auth middleware)
-            user_id = getattr(request.state, "user_id", None)
-            user_email = getattr(request.state, "user_email", None)
-        except AttributeError:
-            user_id = None
-            user_email = None
+        # Get user from request state
+        # For public endpoints, auth middleware sets these to None
+        user_id = request.state.user_id
+        user_email = request.state.user_email
 
         # Determine action and resource type
         action = self._get_action(request.method)
@@ -77,8 +76,6 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                 # Store the body for later use
                 body = await request.body()
                 # Recreate the request with the stored body
-                from starlette.requests import Request as StarletteRequest
-
                 # Create a new request with the body we read
                 request = StarletteRequest(
                     scope={
@@ -128,8 +125,6 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
 
             # Track API usage metrics
             if user_id:
-                from backend.tasks.usage_metrics import update_realtime_metrics
-
                 await update_realtime_metrics(user_id, "api_calls", 1)
 
                 # Track specific actions as messages
@@ -165,9 +160,10 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
             try:
                 # Check if it's a numeric ID
                 int(part)
-                return part
             except ValueError:
                 continue
+            else:
+                return part
         return None
 
     async def _create_audit_log(
@@ -207,5 +203,5 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
 
             supabase.table("audit_logs").insert(log_entry).execute()
         except Exception as e:
-            # Don't fail the request if audit logging fails
             logger.error(f"Failed to create audit log: {e}")
+            # Let audit failures be visible but don't block the request

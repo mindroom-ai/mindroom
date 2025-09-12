@@ -26,7 +26,6 @@ from fastapi.middleware.cors import CORSMiddleware
 # FastAPI app
 app = FastAPI(title="MindRoom Backend")
 
-# CORS (must be added before other middleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,

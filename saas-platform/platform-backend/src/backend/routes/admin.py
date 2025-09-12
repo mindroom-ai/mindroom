@@ -42,24 +42,19 @@ async def get_admin_stats(admin: Annotated[dict, Depends(verify_admin)]) -> dict
 
         recent_activity = []
         if recent_logs.data:
-            for log in recent_logs.data:
-                recent_activity.append(
-                    {
-                        "type": log.get("action", "unknown"),
-                        "description": f"{log.get('resource_type', '')} {log.get('action', '')} by {log.get('accounts', {}).get('email', 'System')}",
-                        "timestamp": log.get("created_at", ""),
-                    },
-                )
+            recent_activity.extend(
+                {
+                    "type": log.get("action", "unknown"),
+                    "description": f"{log.get('resource_type', '')} {log.get('action', '')} by {log.get('accounts', {}).get('email', 'System')}",
+                    "timestamp": log.get("created_at", ""),
+                }
+                for log in recent_logs.data
+            )
 
         return {
-            # Frontend expects these exact field names
             "accounts_count": len(accounts.data) if accounts.data else 0,
             "subscriptions_count": len(subscriptions.data) if subscriptions.data else 0,
             "instances_count": len(instances.data) if instances.data else 0,
-            # Backwards compatibility
-            "accounts": len(accounts.data) if accounts.data else 0,
-            "active_subscriptions": len(subscriptions.data) if subscriptions.data else 0,
-            "running_instances": len(instances.data) if instances.data else 0,
             "recent_activity": recent_activity,
         }
     except Exception as e:
@@ -148,7 +143,7 @@ async def get_account_details(
         # Get account details
         account_result = sb.table("accounts").select("*").eq("id", account_id).single().execute()
         if not account_result.data:
-            raise HTTPException(status_code=404, detail="Account not found")
+            raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
 
         account = account_result.data
 
@@ -168,13 +163,11 @@ async def get_account_details(
         )
 
         # Build response
-        response = {
+        return {
             **account,
             "subscription": subscription_result.data[0] if subscription_result.data else None,
             "instances": instances_result.data if instances_result.data else [],
         }
-
-        return response
     except HTTPException:
         raise
     except Exception as e:
@@ -338,18 +331,7 @@ async def admin_delete(resource: str, resource_id: str) -> dict[str, Any]:
 @router.get("/admin/metrics/dashboard")
 async def get_dashboard_metrics() -> dict[str, Any]:
     """Get dashboard metrics for admin panel."""
-    try:
-        sb = ensure_supabase()
-    except HTTPException:
-        return {
-            "totalAccounts": 0,
-            "activeSubscriptions": 0,
-            "runningInstances": 0,
-            "mrr": 0,
-            "dailyMessages": [],
-            "instanceStatuses": [],
-            "recentActivity": [],
-        }
+    sb = ensure_supabase()
 
     try:
         accounts = sb.table("accounts").select("*", count="exact", head=True).execute()

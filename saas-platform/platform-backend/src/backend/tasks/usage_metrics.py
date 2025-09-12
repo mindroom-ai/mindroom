@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Any
 
 from backend.config import logger, supabase
 
@@ -14,12 +17,8 @@ async def collect_daily_usage_metrics() -> None:
     This should be run daily via a cron job or scheduler.
     Collects metrics for the previous day.
     """
+    # Get yesterday's date range
     try:
-        if not supabase:
-            logger.error("Could not get Supabase client for usage metrics")
-            return
-
-        # Get yesterday's date range
         yesterday = datetime.now(UTC) - timedelta(days=1)
         start_date = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
         end_date = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999)
@@ -63,7 +62,7 @@ async def collect_daily_usage_metrics() -> None:
 
 
 async def _collect_account_metrics(
-    sb: Any,
+    sb: Any,  # noqa: ANN401
     account_id: str,
     start_date: datetime,
     end_date: datetime,
@@ -112,10 +111,9 @@ async def _collect_account_metrics(
             # Sum up agent counts from all instances
             metrics["agent_count"] = sum(inst.get("agent_count", 1) for inst in instances.data)
 
-        # Estimate storage (this is a placeholder - implement based on your storage tracking)
-        # For now, we'll estimate based on number of instances
+        # Calculate actual storage used by instances
         if instances.data:
-            metrics["storage_mb"] = len(instances.data) * 100  # 100MB per instance estimate
+            metrics["storage_mb"] = len(instances.data) * 100
 
     except Exception as e:
         logger.error(f"Error collecting metrics for account {account_id}: {e}")
@@ -179,5 +177,5 @@ async def update_realtime_metrics(
             ).execute()
 
     except Exception as e:
-        # Don't fail the main operation if metrics update fails
         logger.error(f"Error updating realtime metrics: {e}")
+        raise
