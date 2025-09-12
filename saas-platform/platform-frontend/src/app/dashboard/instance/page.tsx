@@ -106,9 +106,14 @@ export default function InstancePage() {
 
       // Refresh instance status
       await fetchInstance()
-    } catch (error) {
+    } catch (error: any) {
       console.error(`Error performing ${action}:`, error)
-      alert(`Failed to ${action} instance. Please try again.`)
+      // Don't show error for cancelled requests (user navigated away/refreshed)
+      if (error?.name === 'AbortError' || error?.message?.includes('aborted') || error?.message?.includes('cancelled')) {
+        console.log('Request cancelled due to navigation')
+      } else {
+        alert(`Failed to ${action} instance. Please try again.`)
+      }
     } finally {
       setActionLoading(null)
     }
