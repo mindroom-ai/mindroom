@@ -67,7 +67,7 @@ pnpm install && pnpm run dev
 #### Deployment
 ```bash
 # Set kubeconfig path
-export KUBECONFIG=./saas-platform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
+export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
 # Deploy platform
 cd cluster/k8s/platform
