@@ -95,23 +95,6 @@ variable "stripe_webhook_secret" {
   default     = ""
 }
 
-variable "stripe_price_starter" {
-  description = "Stripe price ID for starter tier"
-  type        = string
-  default     = ""
-}
-
-variable "stripe_price_professional" {
-  description = "Stripe price ID for professional tier"
-  type        = string
-  default     = ""
-}
-
-variable "stripe_price_enterprise" {
-  description = "Stripe price ID for enterprise tier"
-  type        = string
-  default     = ""
-}
 
 variable "provisioner_api_key" {
   description = "API key for the instance provisioner service"

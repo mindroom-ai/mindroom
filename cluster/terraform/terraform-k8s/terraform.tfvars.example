@@ -36,11 +36,6 @@ google_oauth_client_secret = ""
 github_oauth_client_id     = ""
 github_oauth_client_secret = ""
 
-# Supabase Management API (Optional)
-# Required only for declarative auth configuration
-# Get from https://supabase.com/dashboard/account/tokens
-supabase_access_token = ""
-
 # Docker Registry (Gitea)
 gitea_token = "YOUR_GITEA_TOKEN"
 registry    = "git.nijho.lt/basnijholt"

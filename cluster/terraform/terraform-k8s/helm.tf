@@ -53,12 +53,9 @@ locals {
     }
 
     stripe = {
-      publishableKey      = var.stripe_publishable_key
-      secretKey           = var.stripe_secret_key
-      webhookSecret       = var.stripe_webhook_secret
-      priceStarter        = var.stripe_price_starter
-      priceProfessional   = var.stripe_price_professional
-      priceEnterprise     = var.stripe_price_enterprise
+      publishableKey = var.stripe_publishable_key
+      secretKey      = var.stripe_secret_key
+      webhookSecret  = var.stripe_webhook_secret
     }
 
     provisioner = {
