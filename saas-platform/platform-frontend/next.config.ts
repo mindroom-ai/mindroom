@@ -40,6 +40,7 @@ const nextConfig: NextConfig = {
       "style-src 'self' 'unsafe-inline'",
       `connect-src ${connectSrc.join(' ')}`,
       'upgrade-insecure-requests',
+      'report-uri /api/csp-report',
     ].join('; ')
 
     return [
