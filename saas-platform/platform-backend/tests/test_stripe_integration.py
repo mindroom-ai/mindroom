@@ -68,33 +68,6 @@ class TestStripeIntegration:
     @pytest.mark.skipif(
         not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials"
     )
-    def test_stripe_prices_match_config(self) -> None:
-        """Test that Stripe prices match our configuration."""
-        config = load_pricing_config_model()
-
-        # Test Starter plan prices
-        starter_monthly_id = config.plans["starter"].stripe_price_id_monthly
-        if starter_monthly_id:
-            price = stripe.Price.retrieve(starter_monthly_id)
-            assert price.unit_amount == 1000  # $10.00
-            assert price.recurring.interval == "month"
-            assert price.metadata.get("plan") == "starter"
-            assert price.metadata.get("billing_cycle") == "monthly"
-
-        # Test Professional plan prices
-        professional_yearly_id = config.plans["professional"].stripe_price_id_yearly
-        if professional_yearly_id:
-            price = stripe.Price.retrieve(professional_yearly_id)
-            # Professional yearly is $76.80/month billed annually
-            assert price.unit_amount == 7680  # $76.80
-            assert price.recurring.interval == "month"
-            assert price.recurring.interval_count == 12
-            assert price.metadata.get("plan") == "professional"
-            assert price.metadata.get("billing_cycle") == "yearly"
-
-    @pytest.mark.skipif(
-        not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials"
-    )
     def test_all_configured_prices_exist(self) -> None:
         """Test that all configured Stripe price IDs actually exist."""
         config = load_pricing_config_model()

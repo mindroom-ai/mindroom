@@ -28,9 +28,14 @@ def _get_tier_from_price(price: dict) -> str:
     """Extract tier from price metadata.
 
     Our sync-stripe-prices.py script sets metadata.plan with the tier name.
+    Also supports metadata.tier for backward compatibility.
     """
-    if (metadata := price.get("metadata", {})) and (plan := metadata.get("plan")):
-        return plan
+    if metadata := price.get("metadata", {}):
+        # Try 'plan' first (new format), then 'tier' (old format)
+        if plan := metadata.get("plan"):
+            return plan
+        if tier := metadata.get("tier"):
+            return tier
 
     msg = (
         f"Unable to determine tier from price. "
@@ -45,7 +50,9 @@ def _get_billing_cycle_from_price(price: dict) -> str:
 
     Our sync-stripe-prices.py script sets metadata.billing_cycle.
     """
-    if (metadata := price.get("metadata", {})) and (cycle := metadata.get("billing_cycle")):
+    if (metadata := price.get("metadata", {})) and (
+        cycle := metadata.get("billing_cycle")
+    ):
         return cycle
 
     msg = f"Unable to determine billing cycle from price. Price metadata: {price.get('metadata')}"
@@ -64,7 +71,13 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
 
     # Get customer ID and find associated account
     customer_id = subscription["customer"]
-    account_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+    account_result = (
+        sb.table("accounts")
+        .select("id")
+        .eq("stripe_customer_id", customer_id)
+        .single()
+        .execute()
+    )
 
     if not account_result.data:
         logger.error("No account found for customer %s", customer_id)
@@ -73,10 +86,18 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
     account_id = account_result.data["id"]
 
     # Extract subscription details
-    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
+    price_data = (
+        subscription["items"]["data"][0]["price"]
+        if subscription.get("items", {}).get("data")
+        else {}
+    )
     tier = _get_tier_from_price(price_data)
     _billing_cycle = _get_billing_cycle_from_price(price_data)
-    quantity = subscription["items"]["data"][0].get("quantity", 1) if subscription.get("items", {}).get("data") else 1
+    quantity = (
+        subscription["items"]["data"][0].get("quantity", 1)
+        if subscription.get("items", {}).get("data")
+        else 1
+    )
 
     # Get plan limits
     limits = get_plan_limits_from_metadata(tier)
@@ -86,7 +107,9 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
         # Scale limits by user count
         if limits.get("max_agents") and isinstance(limits["max_agents"], int):
             limits["max_agents"] = limits["max_agents"] * quantity
-        if limits.get("max_messages_per_day") and isinstance(limits["max_messages_per_day"], int):
+        if limits.get("max_messages_per_day") and isinstance(
+            limits["max_messages_per_day"], int
+        ):
             limits["max_messages_per_day"] = limits["max_messages_per_day"] * quantity
 
     # Prepare subscription data
@@ -109,16 +132,25 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
         subscription_data["current_period_end"] = _timestamp_to_iso(end)
 
     # Check if subscription already exists for this account
-    existing = sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
+    existing = (
+        sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
+    )
 
     if existing.data:
         # Update existing subscription
-        sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
+        sb.table("subscriptions").update(subscription_data).eq(
+            "account_id", account_id
+        ).execute()
     else:
         # Create new subscription
         sb.table("subscriptions").insert(subscription_data).execute()
 
-    logger.info("Subscription created for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
+    logger.info(
+        "Subscription created for account %s: tier=%s, status=%s",
+        account_id,
+        tier,
+        subscription["status"],
+    )
     return True, account_id
 
 
@@ -134,7 +166,13 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
 
     # Get customer ID and find associated account
     customer_id = subscription["customer"]
-    account_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+    account_result = (
+        sb.table("accounts")
+        .select("id")
+        .eq("stripe_customer_id", customer_id)
+        .single()
+        .execute()
+    )
 
     if not account_result.data:
         logger.error("No account found for customer %s", customer_id)
@@ -143,10 +181,18 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
     account_id = account_result.data["id"]
 
     # Extract subscription details
-    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
+    price_data = (
+        subscription["items"]["data"][0]["price"]
+        if subscription.get("items", {}).get("data")
+        else {}
+    )
     tier = _get_tier_from_price(price_data)
     _billing_cycle = _get_billing_cycle_from_price(price_data)
-    quantity = subscription["items"]["data"][0].get("quantity", 1) if subscription.get("items", {}).get("data") else 1
+    quantity = (
+        subscription["items"]["data"][0].get("quantity", 1)
+        if subscription.get("items", {}).get("data")
+        else 1
+    )
 
     # Get plan limits
     limits = get_plan_limits_from_metadata(tier)
@@ -156,7 +202,9 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
         # Scale limits by user count
         if limits.get("max_agents") and isinstance(limits["max_agents"], int):
             limits["max_agents"] = limits["max_agents"] * quantity
-        if limits.get("max_messages_per_day") and isinstance(limits["max_messages_per_day"], int):
+        if limits.get("max_messages_per_day") and isinstance(
+            limits["max_messages_per_day"], int
+        ):
             limits["max_messages_per_day"] = limits["max_messages_per_day"] * quantity
 
     # Prepare subscription data
@@ -179,9 +227,16 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
         subscription_data["current_period_end"] = _timestamp_to_iso(end)
 
     # Update subscription with tenant validation
-    sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
+    sb.table("subscriptions").update(subscription_data).eq(
+        "account_id", account_id
+    ).execute()
 
-    logger.info("Subscription updated for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
+    logger.info(
+        "Subscription updated for account %s: tier=%s, status=%s",
+        account_id,
+        tier,
+        subscription["status"],
+    )
     return True, account_id
 
 
@@ -205,7 +260,9 @@ def handle_subscription_deleted(subscription: dict) -> tuple[bool, str | None]:
     )
 
     if not sub_result.data:
-        logger.warning(f"Webhook received for unknown subscription: {subscription['id']}")
+        logger.warning(
+            f"Webhook received for unknown subscription: {subscription['id']}"
+        )
         return False, None
 
     account_id = sub_result.data["account_id"]
@@ -242,7 +299,13 @@ def handle_payment_succeeded(invoice: dict) -> tuple[bool, str | None]:
 
     # Get account from customer
     customer_id = invoice["customer"]
-    account_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+    account_result = (
+        sb.table("accounts")
+        .select("id")
+        .eq("stripe_customer_id", customer_id)
+        .single()
+        .execute()
+    )
 
     if not account_result.data:
         logger.warning(f"No account found for customer_id: {customer_id} in payment")
@@ -322,7 +385,9 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
     )
 
     if not sub_result.data:
-        logger.warning(f"No subscription found for payment failure: {invoice['subscription']}")
+        logger.warning(
+            f"No subscription found for payment failure: {invoice['subscription']}"
+        )
         return False, None
 
     account_id = sub_result.data["account_id"]
@@ -354,7 +419,9 @@ async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
     body = await request.body()
 
     try:
-        event = stripe.Webhook.construct_event(body, stripe_signature, STRIPE_WEBHOOK_SECRET)
+        event = stripe.Webhook.construct_event(
+            body, stripe_signature, STRIPE_WEBHOOK_SECRET
+        )
     except Exception as e:
         logger.exception("Webhook error")
         raise HTTPException(status_code=400, detail="Invalid signature") from e
@@ -392,11 +459,19 @@ async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
         # Trial events
         elif event.type == "customer.subscription.trial_will_end":
             # Log for now, could send email notifications later
-            logger.info("Trial ending soon for subscription: %s", event.data.object["id"])
+            logger.info(
+                "Trial ending soon for subscription: %s", event.data.object["id"]
+            )
             # Try to get account_id for audit
             if hasattr(event.data.object, "customer"):
                 customer_id = event.data.object.customer
-                acc_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+                acc_result = (
+                    sb.table("accounts")
+                    .select("id")
+                    .eq("stripe_customer_id", customer_id)
+                    .single()
+                    .execute()
+                )
                 if acc_result.data:
                     account_id = acc_result.data["id"]
 
@@ -405,7 +480,13 @@ async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
             # For unhandled events, try to extract account_id from common fields
             if hasattr(event.data.object, "customer"):
                 customer_id = event.data.object.customer
-                acc_result = sb.table("accounts").select("id").eq("stripe_customer_id", customer_id).single().execute()
+                acc_result = (
+                    sb.table("accounts")
+                    .select("id")
+                    .eq("stripe_customer_id", customer_id)
+                    .single()
+                    .execute()
+                )
                 if acc_result.data:
                     account_id = acc_result.data["id"]
     except Exception as e:
