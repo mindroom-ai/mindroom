@@ -22,7 +22,7 @@ resource "kubernetes_namespace" "mindroom_instances" {
 
 # Apply ClusterIssuer for Let's Encrypt Production
 resource "kubectl_manifest" "cluster_issuer_prod" {
-  yaml_body = file("../k8s/cert-manager/cluster-issuer-prod.yaml")
+  yaml_body = file("${path.module}/manifests/cert-manager/cluster-issuer-prod.yaml")
 
   depends_on = [
     time_sleep.wait_for_cert_manager
@@ -31,7 +31,7 @@ resource "kubectl_manifest" "cluster_issuer_prod" {
 
 # Apply ClusterIssuer for Let's Encrypt Staging (for testing)
 resource "kubectl_manifest" "cluster_issuer_staging" {
-  yaml_body = file("../k8s/cert-manager/cluster-issuer-staging.yaml")
+  yaml_body = file("${path.module}/manifests/cert-manager/cluster-issuer-staging.yaml")
 
   depends_on = [
     time_sleep.wait_for_cert_manager
