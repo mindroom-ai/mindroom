@@ -11,6 +11,7 @@ class MockStripeError:
     AuthenticationError = Exception
     APIConnectionError = Exception
     StripeError = Exception
+    InvalidRequestError = Exception
 
 
 class MockCheckoutSession:
@@ -69,28 +70,32 @@ class MockPrice:
                 product="prod_test",
                 unit_amount=1000,
                 recurring=types.SimpleNamespace(interval="month"),
-                metadata={},
+                metadata={"plan": "starter", "billing_cycle": "monthly"},
+                active=True,
             ),
             types.SimpleNamespace(
                 id="price_1S6FvF3GVsrZHuzXDjv76gwE",
                 product="prod_test",
                 unit_amount=9600,
                 recurring=types.SimpleNamespace(interval="year"),
-                metadata={},
+                metadata={"plan": "starter", "billing_cycle": "yearly"},
+                active=True,
             ),
             types.SimpleNamespace(
                 id="price_1S6FvG3GVsrZHuzXBwljASJB",
                 product="prod_test",
                 unit_amount=800,
                 recurring=types.SimpleNamespace(interval="month"),
-                metadata={},
+                metadata={"plan": "professional", "billing_cycle": "monthly"},
+                active=True,
             ),
             types.SimpleNamespace(
                 id="price_1S6FvG3GVsrZHuzXQV9y2VEo",
                 product="prod_test",
                 unit_amount=7680,
                 recurring=types.SimpleNamespace(interval="year"),
-                metadata={},
+                metadata={"plan": "professional", "billing_cycle": "yearly"},
+                active=True,
             ),
         ]
         mock_response.has_more = False
@@ -114,6 +119,7 @@ class MockPrice:
                 unit_amount=amount,
                 recurring=types.SimpleNamespace(interval=interval),
                 metadata={},
+                active=True,
             )
         msg = f"Price {price_id} not found"
         raise MockStripeError.StripeError(msg)
