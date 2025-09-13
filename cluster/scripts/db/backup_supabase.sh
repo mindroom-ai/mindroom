@@ -4,6 +4,7 @@
 
 set -euo pipefail
 
+<<<<<<< HEAD:cluster/scripts/db/backup_supabase.sh
 # 1) Load environment variables from saas-platform/.env (preferred)
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/saas-platform/.env}"
@@ -20,6 +21,12 @@ else
     set +a
   fi
 fi
+=======
+# 1) Load environment variables from .env file
+set -a
+eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
+set +a
+>>>>>>> d0e206f7 (scripts: move backup_supabase.sh to saas-platform/scripts/db and update Makefile target):saas-platform/scripts/db/backup_supabase.sh
 
 # 2) Resolve database URL
 # Prefer DATABASE_URL or SUPABASE_DB_URL if set explicitly in .env.
@@ -33,11 +40,19 @@ if [[ -z "${DB_URL}" ]]; then
   fi
 
   if [[ -z "${SUPA_URL_HOST}" ]] || [[ -z "${SUPABASE_DB_PASSWORD:-}" ]]; then
+<<<<<<< HEAD:cluster/scripts/db/backup_supabase.sh
   echo "[ERROR] Cannot determine database URL." >&2
   echo "- Set DATABASE_URL or SUPABASE_DB_URL in .env, OR" >&2
   echo "- Provide SUPABASE_URL and SUPABASE_DB_PASSWORD in saas-platform/.env to auto-construct." >&2
   echo "  (Tip: Find DB password in Supabase → Project → Settings → Database)" >&2
   exit 1
+=======
+    echo "[ERROR] Cannot determine database URL." >&2
+    echo "- Set DATABASE_URL or SUPABASE_DB_URL in .env, OR" >&2
+    echo "- Provide SUPABASE_URL and SUPABASE_DB_PASSWORD in .env to auto-construct." >&2
+    echo "  (Tip: Find DB password in Supabase → Project → Settings → Database)" >&2
+    exit 1
+>>>>>>> d0e206f7 (scripts: move backup_supabase.sh to saas-platform/scripts/db and update Makefile target):saas-platform/scripts/db/backup_supabase.sh
   fi
 
   DB_USER=${SUPABASE_DB_USER:-postgres}
