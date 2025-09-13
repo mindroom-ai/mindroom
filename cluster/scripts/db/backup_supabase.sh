@@ -1,49 +1,40 @@
 #!/usr/bin/env bash
 # Backup full Supabase Postgres database using pg_dump.
-# Loads env vars from .env via python-dotenv (using uvx), then resolves a DB URL.
+# Loads env vars from saas-platform/.env via python-dotenv (uvx),
+# then resolves the database URL from env or constructs it from Supabase vars.
 
 set -euo pipefail
 
-<<<<<<< HEAD:cluster/scripts/db/backup_supabase.sh
-<<<<<<< HEAD:cluster/scripts/db/backup_supabase.sh
 # 1) Load environment variables from saas-platform/.env (preferred)
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [ -z "${REPO_ROOT:-}" ]; then
+  REPO_ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+fi
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/saas-platform/.env}"
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
+
+if [ -f "$ENV_FILE" ]; then
+  if command -v uvx >/dev/null 2>&1; then
+    set -a
+    eval "$(uvx --from 'python-dotenv[cli]' dotenv -f "$ENV_FILE" list --format shell)"
+    set +a
+  else
+    # Fallback: source the file directly (best-effort)
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+  fi
 else
   # Fallback: try loading .env in CWD via python-dotenv if available
   if command -v uvx >/dev/null 2>&1; then
     set -a
-    eval "$(uvx --from python-dotenv[cli] dotenv list --format shell)"
+    eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
     set +a
   fi
 fi
-=======
-# 1) Load environment variables from .env file
-=======
-# 1) Load environment variables from saas-platform/.env file
-# Resolve path to saas-platform directory (two levels up from this script dir)
-SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
-PLATFORM_DIR=$(cd -- "$SCRIPT_DIR/../.." && pwd)
-ENV_FILE="$PLATFORM_DIR/.env"
-
->>>>>>> c2dc252d (db: backup script now explicitly loads saas-platform/.env via python-dotenv):saas-platform/scripts/db/backup_supabase.sh
-set -a
-if [ -f "$ENV_FILE" ]; then
-  eval "$(uvx --from 'python-dotenv[cli]' dotenv -f "$ENV_FILE" list --format shell)"
-else
-  # Fallback to current directory .env if saas-platform/.env is missing
-  eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
-fi
-set +a
->>>>>>> d0e206f7 (scripts: move backup_supabase.sh to saas-platform/scripts/db and update Makefile target):saas-platform/scripts/db/backup_supabase.sh
 
 # 2) Resolve database URL
-# Prefer DATABASE_URL or SUPABASE_DB_URL if set explicitly in .env.
+# Prefer DATABASE_URL or SUPABASE_DB_URL if set explicitly in env.
 DB_URL=${DATABASE_URL:-${SUPABASE_DB_URL:-}}
 
 if [[ -z "${DB_URL}" ]]; then
@@ -54,24 +45,28 @@ if [[ -z "${DB_URL}" ]]; then
   fi
 
   if [[ -z "${SUPA_URL_HOST}" ]] || [[ -z "${SUPABASE_DB_PASSWORD:-}" ]]; then
-<<<<<<< HEAD:cluster/scripts/db/backup_supabase.sh
-  echo "[ERROR] Cannot determine database URL." >&2
-  echo "- Set DATABASE_URL or SUPABASE_DB_URL in .env, OR" >&2
-  echo "- Provide SUPABASE_URL and SUPABASE_DB_PASSWORD in saas-platform/.env to auto-construct." >&2
-  echo "  (Tip: Find DB password in Supabase → Project → Settings → Database)" >&2
-  exit 1
-=======
     echo "[ERROR] Cannot determine database URL." >&2
-    echo "- Set DATABASE_URL or SUPABASE_DB_URL in .env, OR" >&2
-    echo "- Provide SUPABASE_URL and SUPABASE_DB_PASSWORD in .env to auto-construct." >&2
+    echo "- Set DATABASE_URL or SUPABASE_DB_URL in saas-platform/.env, OR" >&2
+    echo "- Provide SUPABASE_URL and SUPABASE_DB_PASSWORD in saas-platform/.env to auto-construct." >&2
     echo "  (Tip: Find DB password in Supabase → Project → Settings → Database)" >&2
     exit 1
->>>>>>> d0e206f7 (scripts: move backup_supabase.sh to saas-platform/scripts/db and update Makefile target):saas-platform/scripts/db/backup_supabase.sh
   fi
 
   DB_USER=${SUPABASE_DB_USER:-postgres}
   DB_NAME=${SUPABASE_DB_NAME:-postgres}
   DB_HOST="db.${SUPA_URL_HOST}"
+  # Resolve IPv4 address to avoid IPv6 connectivity issues
+  DB_HOSTADDR=$(python - <<PY
+import socket
+host = "${DB_HOST}"
+try:
+    infos = socket.getaddrinfo(host, 5432, family=socket.AF_INET, type=socket.SOCK_STREAM)
+    if infos:
+        print(infos[0][4][0])
+except Exception:
+    pass
+PY
+)
   # URL-encode the password to handle special characters like @, *, !, etc.
   ENC_PASS=$(python - <<'PY'
 from urllib.parse import quote
@@ -79,7 +74,11 @@ import os
 print(quote(os.environ.get('SUPABASE_DB_PASSWORD',''), safe=''))
 PY
 )
-  DB_URL="postgresql://${DB_USER}:${ENC_PASS}@${DB_HOST}:5432/${DB_NAME}?sslmode=require"
+  QUERY_PARAMS="?sslmode=require"
+  if [ -n "${DB_HOSTADDR}" ]; then
+    QUERY_PARAMS="${QUERY_PARAMS}&hostaddr=${DB_HOSTADDR}"
+  fi
+  DB_URL="postgresql://${DB_USER}:${ENC_PASS}@${DB_HOST}:5432/${DB_NAME}${QUERY_PARAMS}"
 fi
 
 # 3) Choose output path
