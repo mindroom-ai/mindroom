@@ -185,10 +185,9 @@ env-saas:
 test-saas-backend:
     cd saas-platform/platform-backend && uv run pytest
 
-# SaaS platform frontend sanity (no test script configured) – build verifies compile/types
-# Build SaaS platform frontend (sanity check)
+# Run SaaS platform frontend tests (Jest)
 test-saas-frontend:
-    cd saas-platform/platform-frontend && pnpm install && pnpm run build
+    cd saas-platform/platform-frontend && pnpm install && pnpm test
 
 # Core frontend tests (vitest)
 # Run core frontend tests (vitest)
