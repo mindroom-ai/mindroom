@@ -1,63 +1,64 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 # Simple K8s deployment script
-# Usage: ./deploy.sh [app-name]
-#
-# Available apps:
-#   ./deploy.sh platform-frontend
-#   ./deploy.sh backend
-#
-# Note: Uses 'latest' tag and forces K8s to pull the new image via rollout restart
+# Usage: ./deploy.sh [frontend|backend|platform-frontend|platform-backend]
+# - Builds the image with correct context and args
+# - Pushes to registry
+# - Restarts the deployment in the env namespace
 
 APP=${1:-platform-frontend}
 
-# Load env vars from saas-platform directory
-if [ ! -f .env ]; then
-    echo "Error: .env file not found in saas-platform directory"
-    exit 1
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+
+# Load env vars from saas-platform/.env
+if [ ! -f "$SCRIPT_DIR/.env" ]; then
+  echo "Error: $SCRIPT_DIR/.env file not found" >&2
+  exit 1
 fi
 
-# Use python-dotenv for proper .env parsing
 set -a
-eval "$(uvx --from python-dotenv[cli] dotenv list --format shell)"
+eval "$(uvx --from python-dotenv[cli] dotenv -f "$SCRIPT_DIR/.env" list --format shell)"
 set +a
 
-# Map app names to Docker image names
-if [ "$APP" = "backend" ]; then
-    APP="platform-backend"
-fi
-if [ "$APP" = "frontend" ]; then
-    APP="platform-frontend"
-fi
+# Normalize app names
+if [ "$APP" = "backend" ]; then APP="platform-backend"; fi
+if [ "$APP" = "frontend" ]; then APP="platform-frontend"; fi
 
-# Build with appropriate args based on app
-echo "Building $APP..."
+IMAGE="git.nijho.lt/basnijholt/$APP:latest"
+
+echo "[build] Building $APP from repo root context..."
 if [ "$APP" = "platform-frontend" ]; then
-    # Customer portal needs NEXT_PUBLIC_ vars at build time
-    docker build \
-        --build-arg NEXT_PUBLIC_SUPABASE_URL="$SUPABASE_URL" \
-        --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
-        -t git.nijho.lt/basnijholt/$APP:latest \
-        -f Dockerfile.$APP .
+  docker build \
+    --build-arg NEXT_PUBLIC_SUPABASE_URL="${SUPABASE_URL:-}" \
+    --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-}" \
+    -t "$IMAGE" \
+    -f "$SCRIPT_DIR/Dockerfile.$APP" \
+    "$REPO_ROOT"
 else
-    # Other apps don't need build args - secrets stay server-side
-    docker build -t git.nijho.lt/basnijholt/$APP:latest -f Dockerfile.$APP .
+  docker build \
+    -t "$IMAGE" \
+    -f "$SCRIPT_DIR/Dockerfile.$APP" \
+    "$REPO_ROOT"
 fi
 
-echo "Pushing $APP..."
-docker push git.nijho.lt/basnijholt/$APP:latest
+echo "[push] Pushing $IMAGE..."
+docker push "$IMAGE"
 
-echo "Updating deployment..."
-cd terraform-k8s
+# Kubeconfig and namespace
+KUBECONFIG_PATH="$REPO_ROOT/cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"
+if [ ! -f "$KUBECONFIG_PATH" ]; then
+  echo "Error: kubeconfig not found at $KUBECONFIG_PATH" >&2
+  exit 1
+fi
+export KUBECONFIG="$KUBECONFIG_PATH"
 
+NAMESPACE="mindroom-${ENVIRONMENT:-test}"
 
-# Force Kubernetes to pull the new image by restarting the deployment
-echo "Restarting $APP deployment to pull new image..."
-kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout restart deployment/$APP -n mindroom-staging
-
-# Wait for rollout to complete
-echo "Waiting for rollout to complete..."
-kubectl --kubeconfig=./mindroom-k8s_kubeconfig.yaml rollout status deployment/$APP -n mindroom-staging
+echo "[k8s] Restarting deployment/$APP in namespace $NAMESPACE..."
+kubectl -n "$NAMESPACE" rollout restart "deployment/$APP"
+echo "[k8s] Waiting for rollout..."
+kubectl -n "$NAMESPACE" rollout status "deployment/$APP" --timeout=180s
 
 echo "✅ Done!"

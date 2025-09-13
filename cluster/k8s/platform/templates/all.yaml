@@ -13,11 +13,7 @@ metadata:
   namespace: mindroom-{{ .Values.environment }}
 {{ $prov := .Values.provisioner | default (dict) }}
 data:
-  {{- if eq .Values.environment "production" }}
   PLATFORM_DOMAIN: {{ .Values.domain }}
-  {{- else }}
-  PLATFORM_DOMAIN: {{ .Values.environment }}.{{ .Values.domain }}
-  {{- end }}
   ENVIRONMENT: {{ .Values.environment }}
   SUPABASE_URL: {{ .Values.supabase.url | default "" | quote }}
   SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey | default "" | quote }}
