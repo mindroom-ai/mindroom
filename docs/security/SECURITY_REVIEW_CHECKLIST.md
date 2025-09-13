@@ -13,7 +13,7 @@ This document provides a systematic security review checklist for the MindRoom b
 - Remaining: secrets lifecycle (env → K8s Secrets/External Secrets + rotation + etcd encryption), monitoring/alerts and IR playbook, internal TLS/mTLS, CSP, broader rate‑limit coverage, backup reliability (IPv6)
 
 ## Critical Issues Found (Immediate Action Required)
-- [x] **CRITICAL**: Default Matrix admin password is set to "changeme" in `saas-platform/k8s/instance/values.yaml`
+- [x] **CRITICAL**: Default Matrix admin password is set to "changeme" in `cluster/k8s/instance/values.yaml`
 - [x] **CRITICAL**: Docker Compose uses default passwords for Postgres and Redis in `docker-compose.platform.yml`
 
 ---

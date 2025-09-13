@@ -11,21 +11,20 @@ kind: ConfigMap
 metadata:
   name: platform-config
   namespace: mindroom-{{ .Values.environment }}
-type: Opaque
 {{ $prov := .Values.provisioner | default (dict) }}
-stringData:
+data:
   {{- if eq .Values.environment "production" }}
   PLATFORM_DOMAIN: {{ .Values.domain }}
   {{- else }}
   PLATFORM_DOMAIN: {{ .Values.environment }}.{{ .Values.domain }}
   {{- end }}
   ENVIRONMENT: {{ .Values.environment }}
-  SUPABASE_URL: {{ .Values.supabase.url }}
-  SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey }}
-  STRIPE_PUBLISHABLE_KEY: {{ .Values.stripe.publishableKey }}
-  STRIPE_SECRET_KEY: {{ .Values.stripe.secretKey }}
-  STRIPE_WEBHOOK_SECRET: {{ .Values.stripe.webhookSecret }}
-  PROVISIONER_API_KEY: {{ index $prov "apiKey" | default "" }}
+  SUPABASE_URL: {{ .Values.supabase.url | default "" | quote }}
+  SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey | default "" | quote }}
+  STRIPE_PUBLISHABLE_KEY: {{ .Values.stripe.publishableKey | default "" | quote }}
+  STRIPE_SECRET_KEY: {{ .Values.stripe.secretKey | default "" | quote }}
+  STRIPE_WEBHOOK_SECRET: {{ .Values.stripe.webhookSecret | default "" | quote }}
+  PROVISIONER_API_KEY: {{ (index $prov "apiKey" | default "") | quote }}
   PLATFORM_BACKEND_URL: "http://platform-backend:8000"
   GITEA_USER: {{ .Values.gitea.user }}
 ---

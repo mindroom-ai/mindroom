@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 from backend.deps import ensure_supabase, limiter, verify_user
 from backend.models import AccountSetupResponse, AccountWithRelationsOut, AdminStatusOut
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 router = APIRouter()
 
@@ -43,7 +43,7 @@ async def check_admin_status(user: Annotated[dict, Depends(verify_user)]) -> dic
 
 @router.post("/my/account/setup", response_model=AccountSetupResponse)
 @limiter.limit("5/minute")
-async def setup_account(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def setup_account(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:  # noqa: ARG001
     """Setup free tier account for new user."""
     sb = ensure_supabase()
 

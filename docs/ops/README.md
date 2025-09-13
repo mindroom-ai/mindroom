@@ -38,6 +38,27 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
     - Helm charts: `cluster/k8s/platform`, `cluster/k8s/instance`
     - Ops scripts: `cluster/scripts`
 
+## Local Kubernetes (kind)
+
+Use kind to spin up a throwaway local K8s cluster and install the platform chart for smoke testing and development.
+
+- Prereqs: `kind`, `kubectl`, `helm`, and Docker.
+- With Nix: use the root dev shell (`nix-shell`) which now includes `kind`,
+  or the focused one at `nix-shell cluster/k8s/kind/shell.nix`.
+- Quickstart:
+  - `just cluster-kind-up`
+  - `just cluster-kind-build-load` (builds platform images and loads them into kind)
+  - `just cluster-kind-install-platform`
+  - Or run the one-shot script: `cluster/k8s/kind/start-fresh.sh`
+  - Port-forward:
+    - Backend: `just cluster-kind-port-backend` -> http://localhost:8000
+    - Frontend: `just cluster-kind-port-frontend` -> http://localhost:3000
+
+Notes:
+- The Helm chart defaults reference a private registry. The `cluster-kind-build-load` step tags and loads images with those names so the cluster uses local images (no registry pull needed).
+- Ingress and TLS: In kind we install ingress-nginx, but TLS certificates are not provisioned. Prefer port-forwarding for local testing. If you do use ingress, HTTP is mapped to `localhost:30080`.
+- Secrets (Supabase, Stripe, etc.) default to empty; the backend handles missing values for local smoke tests.
+
 - Platform app development
   - Backend dev: `just platform-app-backend-dev`
   - Frontend dev: `just platform-app-frontend-dev`

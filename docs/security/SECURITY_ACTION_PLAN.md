@@ -42,7 +42,7 @@ The comprehensive security review of MindRoom has identified **47 security vulne
 
 4. **REPLACE ALL DEFAULT PASSWORDS** 🔐
    - **Files to update:**
-     - `saas-platform/k8s/instance/values.yaml:22` - Matrix admin password
+     - `cluster/k8s/instance/values.yaml:22` - Matrix admin password
      - `docker-compose.platform.yml:86` - PostgreSQL password
      - `docker-compose.platform.yml:105` - Redis password
    - **Generate secure passwords:**

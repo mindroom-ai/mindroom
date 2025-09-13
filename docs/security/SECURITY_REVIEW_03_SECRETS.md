@@ -64,7 +64,7 @@ Action: Ensure `.env` and other secret files were never committed; if they were,
 
 Changes:
 - `docker-compose.platform.yml`: no default password fallbacks; explicit env required
-- `saas-platform/k8s/instance/values.yaml`: defaults empty; templates generate strong secrets
+- `cluster/k8s/instance/values.yaml`: defaults empty; templates generate strong secrets
 
 ### 8. ✅ Implement secure password generation for Matrix user accounts
 **Status: PASS - Strong defaults when not provided**

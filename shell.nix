@@ -35,6 +35,7 @@ pkgs.mkShell {
 
     # Infra tooling
     terraform
+    kind
     kubectl
     kubernetes-helm
     kubeconform
@@ -50,6 +51,8 @@ pkgs.mkShell {
     echo "Tip: run backend tests with:"
     echo "  (cd saas-platform/platform-backend && PYTHONPATH=src uv run pytest -q)"
     echo "Render Helm templates with:"
-    echo "  helm template platform ./saas-platform/k8s/platform -f saas-platform/k8s/platform/values.yaml | kubeconform -ignore-missing-schemas"
+    echo "  helm template platform ./cluster/k8s/platform -f cluster/k8s/platform/values.yaml | kubeconform -ignore-missing-schemas"
+    echo "Kind cluster helpers:"
+    echo "  just cluster-kind-up && just cluster-kind-build-load && just cluster-kind-install-platform"
   '';
 }
