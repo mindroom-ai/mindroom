@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import sys
-import types
 
-# Stub external deps not needed for this test
-sys.modules.setdefault("stripe", types.SimpleNamespace(api_key=""))
+# Use proper Stripe mock
+from tests.stripe_mock import create_stripe_mock
+
+sys.modules.setdefault("stripe", create_stripe_mock())
 
 from backend.deps import verify_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import sys
-import types
 
-sys.modules.setdefault("stripe", types.SimpleNamespace(api_key=""))
+# Use proper Stripe mock
+from tests.stripe_mock import create_stripe_mock
+
+sys.modules.setdefault("stripe", create_stripe_mock())
 
 import backend.routes.admin as admin_mod  # noqa: E402
 from backend.deps import verify_admin  # noqa: E402
