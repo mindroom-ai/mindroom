@@ -68,7 +68,7 @@ def audit_log_entry(
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
 @limiter.limit("30/minute")
-async def get_admin_stats(_request: Request, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008
+async def get_admin_stats(request: Request, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
     """Get platform statistics for admin dashboard."""
     audit_log_entry(
         account_id=admin["user_id"],
@@ -335,7 +335,7 @@ async def admin_logout() -> dict[str, bool]:
 @router.get("/admin/{resource}", response_model=AdminListResponse)
 @limiter.limit("60/minute")
 async def admin_get_list(  # noqa: C901
-    _request: Request,
+    request: Request,  # noqa: ARG001
     resource: str,
     admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
     _sort: Annotated[str | None, Query()] = None,
@@ -396,7 +396,7 @@ async def admin_get_list(  # noqa: C901
 @router.get("/admin/{resource}/{resource_id}", response_model=AdminGetOneResponse)
 @limiter.limit("60/minute")
 async def admin_get_one(
-    _request: Request,
+    request: Request,  # noqa: ARG001
     resource: str,
     resource_id: str,
     admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
@@ -425,7 +425,7 @@ async def admin_get_one(
 @router.post("/admin/{resource}", response_model=AdminCreateResponse)
 @limiter.limit("15/minute")
 async def admin_create(
-    _request: Request,
+    request: Request,  # noqa: ARG001
     resource: str,
     data: dict,
     admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
@@ -458,7 +458,7 @@ async def admin_create(
 @router.put("/admin/{resource}/{resource_id}", response_model=AdminUpdateResponse)
 @limiter.limit("15/minute")
 async def admin_update(
-    _request: Request,
+    request: Request,  # noqa: ARG001
     resource: str,
     resource_id: str,
     data: dict,
@@ -491,7 +491,7 @@ async def admin_update(
 @router.delete("/admin/{resource}/{resource_id}", response_model=AdminDeleteResponse)
 @limiter.limit("10/minute")
 async def admin_delete(
-    _request: Request,
+    request: Request,  # noqa: ARG001
     resource: str,
     resource_id: str,
     admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
@@ -521,7 +521,7 @@ async def admin_delete(
 @router.get("/admin/metrics/dashboard", response_model=AdminDashboardMetricsResponse)
 @limiter.limit("30/minute")
 async def get_dashboard_metrics(
-    _request: Request,
+    request: Request,  # noqa: ARG001
     admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Get dashboard metrics for admin panel."""

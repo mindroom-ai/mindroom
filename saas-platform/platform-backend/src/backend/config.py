@@ -81,6 +81,7 @@ GITEA_TOKEN = _get_secret("GITEA_TOKEN", "")
 # CORS allowed origins
 ALLOWED_ORIGINS = [
     "https://app.staging.mindroom.chat",
+    "https://app.test.mindroom.chat",
     "https://app.mindroom.chat",
     "http://localhost:3000",
     "http://localhost:3001",

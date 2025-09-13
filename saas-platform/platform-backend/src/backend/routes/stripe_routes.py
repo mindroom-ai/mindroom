@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from backend.config import PLATFORM_DOMAIN, logger, stripe
-from backend.deps import ensure_supabase, verify_user, verify_user_optional
+from backend.deps import ensure_supabase, limiter, verify_user, verify_user_optional
 from backend.models import UrlResponse
 from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -23,8 +23,10 @@ class CheckoutRequest(BaseModel):
 
 
 @router.post("/stripe/checkout", response_model=UrlResponse)
+@limiter.limit("5/minute")
 async def create_checkout_session(
-    request: CheckoutRequest,
+    request: Request,
+    payload: CheckoutRequest,
     user: Annotated[dict | None, Depends(verify_user_optional)],
 ) -> dict[str, Any]:
     """Create Stripe checkout session for subscription."""
@@ -32,7 +34,7 @@ async def create_checkout_session(
         raise HTTPException(status_code=500, detail="Stripe not configured")
 
     # Get price ID from config
-    price_id = get_stripe_price_id(request.tier, request.billing_cycle)
+    price_id = get_stripe_price_id(payload.tier, payload.billing_cycle)
     if not price_id:
         raise HTTPException(status_code=400, detail=f"No price found for {request.tier} ({request.billing_cycle})")
 
@@ -75,7 +77,7 @@ async def create_checkout_session(
                 return {"url": portal_session.url}
 
     # Use quantity for professional plan (per-user pricing)
-    quantity = request.quantity if request.tier == "professional" else 1
+    quantity = payload.quantity if payload.tier == "professional" else 1
 
     checkout_params = {
         "line_items": [{"price": price_id, "quantity": quantity}],
@@ -86,8 +88,8 @@ async def create_checkout_session(
         "billing_address_collection": "required",
         "subscription_data": {
             "metadata": {
-                "tier": request.tier,
-                "billing_cycle": request.billing_cycle,
+                "tier": payload.tier,
+                "billing_cycle": payload.billing_cycle,
                 "quantity": str(quantity),
                 "supabase_user_id": user["account_id"] if user else "",
             },
@@ -95,7 +97,7 @@ async def create_checkout_session(
     }
 
     # Add trial period if enabled for this plan
-    if is_trial_enabled_for_plan(request.tier):
+    if is_trial_enabled_for_plan(payload.tier):
         checkout_params["subscription_data"]["trial_period_days"] = get_trial_days()
 
     if customer_id:
@@ -106,7 +108,8 @@ async def create_checkout_session(
 
 
 @router.post("/stripe/portal", response_model=UrlResponse)
-async def create_portal_session(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+@limiter.limit("10/minute")
+async def create_portal_session(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:  # noqa: ARG001
     """Create Stripe customer portal session for subscription management."""
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")

@@ -51,7 +51,7 @@ async def set_sso_cookie(
 
 @router.delete("/my/sso-cookie", response_model=StatusResponse)
 @limiter.limit("10/minute")
-async def clear_sso_cookie(_request: Request, response: Response) -> dict[str, str]:
+async def clear_sso_cookie(request: Request, response: Response) -> dict[str, str]:  # noqa: ARG001
     """Clear the SSO cookie on logout."""
     # Normalize cookie domain: ensure it applies to all subdomains
     domain = PLATFORM_DOMAIN
