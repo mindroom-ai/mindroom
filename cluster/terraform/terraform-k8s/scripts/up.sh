@@ -35,22 +35,18 @@ export KUBECONFIG="$KUBECONFIG_PATH"
 echo "Cluster nodes:"
 kubectl get nodes -o wide || true
 
-# Decide DNS
-if [[ "${ENABLE_DNS:-auto}" == "auto" ]]; then
-  TF_ENABLE_DNS=$([[ -n "${PORKBUN_API_KEY:-}" && -n "${PORKBUN_SECRET_API_KEY:-}" ]] && echo true || echo false)
-else
-  TF_ENABLE_DNS=true
+echo "Validating DNS credentials (required)..."
+if [[ -z "${PORKBUN_API_KEY:-}" || -z "${PORKBUN_SECRET_API_KEY:-}" ]]; then
+  echo "[error] Missing Porkbun credentials. Set PORKBUN_API_KEY and PORKBUN_SECRET_API_KEY in saas-platform/.env" >&2
+  exit 1
 fi
 
-echo "DNS enablement: $TF_ENABLE_DNS"
-
-echo "Applying platform (phase 2)..."
+echo "Applying platform (phase 2, with DNS)..."
 terraform apply -auto-approve \
   -var="hcloud_token=${HCLOUD_TOKEN}" \
   -var="deploy_platform=${DEPLOY_PLATFORM:-true}" \
-  -var="enable_dns=${TF_ENABLE_DNS}" \
-  ${PORKBUN_API_KEY:+-var="porkbun_api_key=${PORKBUN_API_KEY}"} \
-  ${PORKBUN_SECRET_API_KEY:+-var="porkbun_secret_key=${PORKBUN_SECRET_API_KEY}"}
+  -var="porkbun_api_key=${PORKBUN_API_KEY}" \
+  -var="porkbun_secret_key=${PORKBUN_SECRET_API_KEY}"
 
 echo "Verifying namespace and ingress..."
 kubectl get ns || true

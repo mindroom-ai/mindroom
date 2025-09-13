@@ -26,9 +26,9 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
   - Location: `local/instances/deploy`
 
 - Cluster (Kubernetes + Terraform) SaaS platform
-  - Pre-req: Fill `saas-platform/.env` (see `.env.example`)
+  - Pre-req: Fill `saas-platform/.env` (see `.env.example`) including Porkbun DNS keys
   - Commands:
-    - `just cluster-tf-up` (or `just cluster-tf-up-dns` to force DNS)
+    - `just cluster-tf-up`
     - `just cluster-tf-status`
     - `just cluster-tf-destroy`
     - `just cluster-helm-template`, `just cluster-helm-lint`

@@ -20,11 +20,6 @@ variable "environment" {
   default     = "test"
 }
 
-variable "enable_dns" {
-  description = "Whether to manage DNS records via Porkbun"
-  type        = bool
-  default     = false
-}
 
 variable "deploy_platform" {
   description = "Whether to deploy the MindRoom platform via Helm"

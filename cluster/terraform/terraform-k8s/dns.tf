@@ -1,5 +1,4 @@
 module "dns" {
-  count               = var.enable_dns ? 1 : 0
   source              = "./modules/dns"
   domain              = var.domain
   environment         = var.environment

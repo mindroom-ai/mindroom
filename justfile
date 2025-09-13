@@ -119,13 +119,8 @@ cluster-helm-lint:
     helm lint ./cluster/k8s/platform
 
 # Terraform
-# Apply Terraform (cluster + platform)
 cluster-tf-up:
     bash cluster/terraform/terraform-k8s/scripts/up.sh
-
-# Apply Terraform (force DNS)
-cluster-tf-up-dns:
-    ENABLE_DNS=true bash cluster/terraform/terraform-k8s/scripts/up.sh
 
 # Show Terraform outputs and cluster status
 cluster-tf-status:
