@@ -1,13 +1,27 @@
 """Integration tests for Stripe functionality."""
 
+import os
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 import stripe
 from backend.pricing import get_stripe_price_id, load_pricing_config_model
+from dotenv import load_dotenv
 from fastapi.testclient import TestClient
 
-# These tests will use mocked Stripe
+# Load environment variables from saas-platform/.env
+env_path = Path(__file__).parent.parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+
+# Check if we have real Stripe credentials
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+HAS_STRIPE_CREDENTIALS = bool(
+    STRIPE_SECRET_KEY and STRIPE_SECRET_KEY.startswith("sk_test_")
+)
+
+# These tests will use mocked or real Stripe depending on credentials
 
 
 class TestStripeIntegration:
@@ -16,10 +30,15 @@ class TestStripeIntegration:
     @pytest.fixture(autouse=True)
     def setup(self) -> None:
         """Set up Stripe API key."""
-        # Use mock key for tests
-        stripe.api_key = "sk_test_mock"
+        if HAS_STRIPE_CREDENTIALS:
+            stripe.api_key = STRIPE_SECRET_KEY
+        else:
+            # Use mock key for tests
+            stripe.api_key = "sk_test_mock"
 
-    @pytest.mark.skip(reason="Requires real Stripe API credentials")
+    @pytest.mark.skipif(
+        not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials"
+    )
     def test_stripe_connection(self) -> None:
         """Test that we can connect to Stripe."""
         try:
@@ -28,7 +47,9 @@ class TestStripeIntegration:
         except stripe.error.AuthenticationError:
             pytest.fail("Failed to authenticate with Stripe")
 
-    @pytest.mark.skip(reason="Requires real Stripe API credentials")
+    @pytest.mark.skipif(
+        not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials"
+    )
     def test_mindroom_product_exists(self) -> None:
         """Test that MindRoom product exists in Stripe."""
         products = stripe.Product.list(limit=100)
@@ -44,7 +65,9 @@ class TestStripeIntegration:
         assert product.name == "MindRoom Subscription"
         assert product.metadata.get("platform") == "mindroom"
 
-    @pytest.mark.skip(reason="Requires real Stripe API credentials")
+    @pytest.mark.skipif(
+        not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials"
+    )
     def test_stripe_prices_match_config(self) -> None:
         """Test that Stripe prices match our configuration."""
         config = load_pricing_config_model()
@@ -69,7 +92,9 @@ class TestStripeIntegration:
             assert price.metadata.get("plan") == "professional"
             assert price.metadata.get("billing_cycle") == "yearly"
 
-    @pytest.mark.skip(reason="Requires real Stripe API credentials")
+    @pytest.mark.skipif(
+        not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials"
+    )
     def test_all_configured_prices_exist(self) -> None:
         """Test that all configured Stripe price IDs actually exist."""
         config = load_pricing_config_model()
@@ -107,8 +132,11 @@ class TestCheckoutEndpoint:
     @pytest.fixture(autouse=True)
     def setup(self) -> None:
         """Set up Stripe API key."""
-        # Use mock key for tests
-        stripe.api_key = "sk_test_mock"
+        if HAS_STRIPE_CREDENTIALS:
+            stripe.api_key = STRIPE_SECRET_KEY
+        else:
+            # Use mock key for tests
+            stripe.api_key = "sk_test_mock"
 
     def test_checkout_creates_session(self, client: TestClient) -> None:
         """Test that checkout endpoint creates a Stripe session."""

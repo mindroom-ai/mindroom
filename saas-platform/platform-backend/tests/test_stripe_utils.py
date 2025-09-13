@@ -1,23 +1,41 @@
 """Utility tests for Stripe debugging and validation."""
 
+import os
 from pathlib import Path
 
 import pytest
 import stripe
 import yaml
+from dotenv import load_dotenv
+
+# Load environment variables from saas-platform/.env
+env_path = Path(__file__).parent.parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+
+# Check if we have real Stripe credentials
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+HAS_STRIPE_CREDENTIALS = bool(
+    STRIPE_SECRET_KEY and STRIPE_SECRET_KEY.startswith("sk_test_")
+)
 
 
-# Tests will use mocked Stripe
+# Tests will use mocked or real Stripe depending on credentials
 class TestStripeDebugUtils:
     """Utility tests for debugging Stripe integration."""
 
     @pytest.fixture(autouse=True)
     def setup(self) -> None:
         """Set up Stripe API key."""
-        # Use mock key for tests
-        stripe.api_key = "sk_test_mock"
+        if HAS_STRIPE_CREDENTIALS:
+            stripe.api_key = STRIPE_SECRET_KEY
+        else:
+            # Use mock key for tests
+            stripe.api_key = "sk_test_mock"
 
-    @pytest.mark.skip(reason="Requires real Stripe API credentials")
+    @pytest.mark.skipif(
+        not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials"
+    )
     def test_mindroom_product_configuration(self) -> None:
         """Test that MindRoom products are properly configured in Stripe."""
         products = stripe.Product.list(limit=100)
@@ -58,7 +76,9 @@ class TestStripeDebugUtils:
 
         return None
 
-    @pytest.mark.skip(reason="Requires real Stripe API credentials")
+    @pytest.mark.skipif(
+        not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials"
+    )
     def test_yaml_prices_match_stripe(self) -> None:
         """Test that YAML configuration matches actual Stripe prices."""
         # Load YAML config
@@ -100,7 +120,9 @@ class TestStripeDebugUtils:
 
         assert len(errors) == 0, "Price mismatches found:\n" + "\n".join(errors)
 
-    @pytest.mark.skip(reason="Requires real Stripe API credentials")
+    @pytest.mark.skipif(
+        not HAS_STRIPE_CREDENTIALS, reason="Requires real Stripe API credentials"
+    )
     def test_no_orphaned_prices(self) -> None:
         """Test that there are no orphaned Stripe prices not in our configuration."""
         # Load YAML config

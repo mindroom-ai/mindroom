@@ -24,6 +24,8 @@ dependencies = [
 dev = [
   "pytest>=8.4",
   "pytest-asyncio>=0.23",
+  "pytest-cov>=7",
+  "pytest-timeout>=2",
 ]
 
 [tool.hatch.build]
@@ -35,3 +37,17 @@ include = [
 
 [tool.ruff]
 extend-exclude = [ "tests/conftest.py" ]
+
+[tool.pytest.ini_options]
+testpaths = [ "tests" ]
+python_files = "test_*.py"
+addopts = """
+    -vvv
+    --cov=backend
+    --cov-report term
+    --cov-report html
+    --cov-report xml
+    --asyncio-mode=strict
+    --timeout 60
+    --durations 20
+"""
