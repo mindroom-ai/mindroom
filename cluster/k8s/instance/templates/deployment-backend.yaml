@@ -33,18 +33,10 @@ spec:
         - containerPort: 8765
           name: api
         env:
-        - name: OPENAI_API_KEY
-          value: {{ .Values.openai_key | quote }}
-        {{- if .Values.secrets.enabled }}
         - name: OPENAI_API_KEY_FILE
           value: "/etc/secrets/openai_key"
-        {{- end }}
-        - name: ANTHROPIC_API_KEY
-          value: {{ .Values.anthropic_key | quote }}
-        {{- if .Values.secrets.enabled }}
         - name: ANTHROPIC_API_KEY_FILE
           value: "/etc/secrets/anthropic_key"
-        {{- end }}
         - name: ACCOUNT_ID
           value: {{ .Values.accountId | quote }}
         - name: CUSTOMER_ID
@@ -59,26 +51,12 @@ spec:
           value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: SUPABASE_URL
           value: {{ .Values.supabaseUrl | quote }}
-        - name: SUPABASE_SERVICE_KEY
-          value: {{ .Values.supabaseServiceKey | quote }}
-        {{- if .Values.secrets.enabled }}
         - name: SUPABASE_SERVICE_KEY_FILE
           value: "/etc/secrets/supabase_service_key"
-        {{- end }}
         - name: SUPABASE_ANON_KEY
           value: {{ .Values.supabaseAnonKey | quote }}
-        {{- if .Values.secrets.enabled }}
-        - name: PROVISIONER_API_KEY_FILE
-          value: "/etc/secrets/provisioner_api_key"
-        - name: STRIPE_SECRET_KEY_FILE
-          value: "/etc/secrets/stripe_secret_key"
-        {{- end }}
-        - name: OPENROUTER_API_KEY
-          value: {{ .Values.openrouter_key | quote }}
-        {{- if .Values.secrets.enabled }}
         - name: OPENROUTER_API_KEY_FILE
           value: "/etc/secrets/openrouter_key"
-        {{- end }}
         - name: HOME
           value: {{ .Values.storagePath }}
         volumeMounts:
@@ -87,11 +65,9 @@ spec:
         - name: config
           mountPath: /app/config.yaml
           subPath: config.yaml
-        {{- if .Values.secrets.enabled }}
         - name: api-keys
           mountPath: /etc/secrets
           readOnly: true
-        {{- end }}
         resources:
           requests:
             memory: "512Mi"
@@ -113,9 +89,7 @@ spec:
       - name: config
         configMap:
           name: mindroom-config-{{ .Values.customer }}
-      {{- if .Values.secrets.enabled }}
       - name: api-keys
         secret:
-          secretName: {{ ternary .Values.secrets.name (printf "mindroom-api-keys-%s" .Values.customer) (ne .Values.secrets.name "") }}
+          secretName: mindroom-api-keys-{{ .Values.customer }}
           defaultMode: 0400
-      {{- end }}

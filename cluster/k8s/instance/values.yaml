@@ -8,18 +8,11 @@ mindroom_image: git.nijho.lt/basnijholt/mindroom-frontend:latest
 mindroom_backend_image: git.nijho.lt/basnijholt/mindroom-backend:latest
 synapse_image: matrixdotorg/synapse:latest
 
-# API Keys (set via --set)
+# API keys and secrets (referenced via Secret in deployment)
+# Provide values here or inject via a separate Secret overwrite.
 openai_key: ""
 anthropic_key: ""
 openrouter_key: ""
-
-# Optional: mount API keys as files (more secure)
-secrets:
-  enabled: false
-  create: false
-  name: ""  # if set, mount this Secret name; otherwise expect it exists or set create=true with stringData/data
-  data: {}
-  stringData: {}
 
 # Supabase (shared auth)
 supabaseUrl: ""

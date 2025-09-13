@@ -6,6 +6,7 @@ while allowing the frontend to read the current state.
 """
 
 import os
+from pathlib import Path
 
 from .credentials import get_credentials_manager
 from .logging_config import get_logger
@@ -25,6 +26,26 @@ ENV_TO_SERVICE_MAP = {
 }
 
 
+def _get_secret(name: str) -> str | None:
+    """Read a secret from NAME or NAME_FILE.
+
+    If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
+    a readable file, return its stripped contents. Else return None.
+    """
+    val = os.getenv(name)
+    if val:
+        return val
+    file_var = f"{name}_FILE"
+    file_path = os.getenv(file_var)
+    if file_path and Path(file_path).exists():
+        try:
+            return Path(file_path).read_text(encoding="utf-8").strip()
+        except Exception:
+            # Avoid noisy logs here; callers can handle None gracefully
+            return None
+    return None
+
+
 def sync_env_to_credentials() -> None:
     """Sync API keys from environment variables to CredentialsManager.
 
@@ -37,7 +58,8 @@ def sync_env_to_credentials() -> None:
     updated_count = 0
 
     for env_var, service in ENV_TO_SERVICE_MAP.items():
-        env_value = os.getenv(env_var)
+        # Prefer file-based secrets if provided (NAME_FILE), fallback to NAME
+        env_value = _get_secret(env_var)
 
         if not env_value:
             continue
@@ -53,7 +75,7 @@ def sync_env_to_credentials() -> None:
         else:
             # Regular API key handling
             current_key = creds_manager.get_api_key(service)
-            if current_key != env_value:
+            if env_value and current_key != env_value:
                 creds_manager.set_api_key(service, env_value)
                 logger.info(f"Updated {service} API key from environment")
                 updated_count += 1
