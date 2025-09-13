@@ -80,7 +80,8 @@ resource "helm_release" "mindroom_platform" {
 
   name       = "mindroom-${var.environment}"
   namespace  = var.environment
-  chart      = "${path.module}/../k8s/platform"
+  # Charts live at cluster/k8s/platform relative to this module
+  chart      = "${path.module}/../../k8s/platform"
 
   create_namespace = true
   wait             = true
