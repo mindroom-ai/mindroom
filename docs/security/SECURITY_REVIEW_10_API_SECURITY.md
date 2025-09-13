@@ -69,15 +69,13 @@ RATE_LIMITS = {
 
 ---
 
-## 2. Request Size Limits (PARTIAL)
+## 2. Request Size Limits (PASS)
 
-### Current Status: **PARTIAL** ⚠️
+### Current Status: **PASS** ✅
 
 **Findings:**
-- **Nginx level**: `proxy-body-size: "100m"` configured in ingress
-- **FastAPI level**: No explicit request size limits in application code
-- **uvicorn level**: Default limits apply (16MB typically)
-- **Kubernetes level**: No resource quotas for request processing
+- Application-level request size limit implemented (1 MiB)
+- Ingress limits and upstream defaults can be tuned per endpoint as needed
 
 **Potential Attack Vectors:**
 ```bash
@@ -91,31 +89,23 @@ curl -X POST /webhooks/stripe \
   -d "$(cat /dev/zero | head -c 100m)"  # Memory exhaustion
 ```
 
-### Recommended Improvements
-
-**1. Application-Level Limits**
+### Implementation
 ```python
-from starlette.middleware.base import BaseHTTPMiddleware
+# main.py
+MAX_REQUEST_BYTES = 1024 * 1024
 
-class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, max_size: int = 1024 * 1024):  # 1MB default
-        super().__init__(app)
-        self.max_size = max_size
-
-    async def dispatch(self, request, call_next):
-        if request.headers.get("content-length"):
-            content_length = int(request.headers["content-length"])
-            if content_length > self.max_size:
-                return JSONResponse(
-                    status_code=413,
-                    content={"error": "Request too large"}
-                )
-        return await call_next(request)
-
-app.add_middleware(RequestSizeLimitMiddleware, max_size=1024*1024)  # 1MB
+@app.middleware("http")
+async def enforce_request_size(request: Request, call_next):
+    try:
+        length = int(request.headers.get("content-length", "0") or "0")
+    except ValueError:
+        length = 0
+    if length and length > MAX_REQUEST_BYTES:
+        return JSONResponse({"detail": "Request too large"}, status_code=413)
+    return await call_next(request)
 ```
 
-**2. Endpoint-Specific Limits**
+**Endpoint-Specific Limits (optional)**
 ```python
 ENDPOINT_SIZE_LIMITS = {
     "/my/account/setup": 10240,      # 10KB - account data

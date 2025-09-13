@@ -8,37 +8,26 @@ Initial security review of the MindRoom codebase has identified several critical
 ## Status Update (2025-09-12)
 
 Completed:
-- Removed default passwords in tracked configs:
-  - `saas-platform/k8s/instance/values.yaml`: no default Matrix password; strong random defaults in templates
-  - `docker-compose.platform.yml`: removed `:-changeme` fallbacks for Postgres/Redis
-- Added FastAPI rate limiting on admin and provisioner endpoints
-- Hardened provisioner auth using constant-time comparison
-- Added per-instance Kubernetes NetworkPolicy and hardened pod security contexts
+- Removed insecure defaults in tracked configs (Matrix/Compose); templates generate strong secrets by default
+- Admin endpoints authenticated, allowlisted, and rate‑limited; audit logging added
+- Provisioner auth uses constant‑time comparison; route limits applied
+- Request size limiter (1 MiB), CORS restrictions, security headers, trusted host enforcement
+- Per‑instance Kubernetes NetworkPolicy; backend RBAC scoped to namespace with RoleBinding
+- Multi‑tenancy: added account_id + RLS for webhook_events and payments; handlers validate ownership; tests added
 
 Remaining (highest priority):
-- API key rotation and revocation workflow
-- Apply rate limits to user/SSO endpoints where appropriate
-- Migrate runtime secrets to Kubernetes Secrets/secret manager; define rotation policy
-- Add monitoring/alerts for failed auth and admin actions
+- Secrets lifecycle: migrate env → K8s Secrets/External Secrets; define rotation; confirm etcd encryption
+- Monitoring and incident response: alerts for failed auth/admin actions; incident playbook; security@ and security.txt
+- Internal TLS: evaluate mTLS/service mesh for in‑cluster traffic
+- Extend rate limits to additional user/webhook endpoints where appropriate
 
-## Critical Findings (Immediate Action Required)
+## Resolved Critical Findings
 
-### 1. Default Passwords in Production Code
-**Severity: CRITICAL**
+### Default Passwords in Tracked Configurations
+**Status: FIXED**
 
-#### Matrix Admin Password
-- **Location**: `saas-platform/k8s/instance/values.yaml:6`
-- **Issue**: Matrix admin password hardcoded as "changeme"
-- **Impact**: Anyone who knows this can access all Matrix instances with admin privileges
-- **Recommendation**: Generate secure random passwords for each instance deployment
-
-#### Docker Compose Passwords
-- **Location**: `docker-compose.platform.yml`
-- **Issues**:
-  - PostgreSQL password defaults to "changeme"
-  - Redis password defaults to "changeme"
-- **Impact**: Development/staging environments vulnerable to unauthorized access
-- **Recommendation**: Use environment variables with strong passwords, never commit defaults
+- Matrix Helm values default to empty and templates generate strong secrets
+- Compose requires explicit Postgres/Redis passwords; no default fallbacks
 
 ---
 
@@ -109,12 +98,11 @@ Remaining (highest priority):
 - File paths not validated for directory traversal
 - **Recommendation**: Implement comprehensive input validation using Pydantic models
 
-### 6. Rate Limiting Missing
-**Severity: MEDIUM**
+### 6. Rate Limiting
+**Severity: PARTIAL → IMPROVED**
 
-- No rate limiting observed on authentication endpoints
-- No rate limiting on API endpoints
-- **Recommendation**: Implement rate limiting to prevent brute force and DoS attacks
+- Admin and provisioner routes are rate‑limited; SSO endpoints covered
+- Recommendation: evaluate user and webhook endpoints for appropriate limits
 
 ---
 
@@ -128,10 +116,9 @@ Remaining (highest priority):
 - **Recommendation**: Implement proper error handling with sanitized messages
 
 ### 8. CORS Configuration
-**Severity: LOW**
+**Severity: LOW → PASS**
 
-- CORS allows localhost origins in production config
-- **Recommendation**: Remove localhost from production CORS configuration
+- CORS restricted; in production, localhost origins are filtered
 
 ---
 
@@ -155,21 +142,15 @@ Remaining (highest priority):
 
 ## Immediate Action Items
 
-1. **TODAY**: Change all "changeme" passwords
-   ```bash
-   # Generate secure passwords
-   openssl rand -base64 32
-   ```
+1. **Near‑term**:
+   - Secrets lifecycle: env → K8s Secrets/External Secrets; confirm etcd encryption
+   - Monitoring/alerts for failed auth/admin actions; incident playbook
+   - Extend rate limits and validate error handling/log sanitization
 
-2. **Before Beta**:
-   - Implement rate limiting
-   - Add audit logging for admin actions
-   - Set up dependency vulnerability scanning
-
-3. **Before Public Release**:
-   - Complete all items in SECURITY_REVIEW_CHECKLIST.md
-   - Consider professional penetration testing
-   - Set up security monitoring and alerting
+2. **Before Public Release**:
+   - Complete checklist
+   - Enable automated dependency/image scanning and pin critical images
+   - Conduct penetration test and address findings
 
 ---
 
