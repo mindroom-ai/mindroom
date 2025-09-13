@@ -31,6 +31,7 @@ local-matrix-reset:
     rm -f matrix_state.yaml
     docker volume prune -f
     rm -rf tmp/
+    @echo "✅ Reset complete! Run 'just create' then 'mindroom run' to start fresh."
 
 #########################################
 # Local: Instances orchestration (Compose)
@@ -134,7 +135,6 @@ cluster-tf-status:
 cluster-tf-destroy:
     bash cluster/terraform/terraform-k8s/scripts/destroy.sh
 
-# DB
 # Backup Supabase database (requires env in saas-platform/.env)
 cluster-db-backup:
     bash cluster/scripts/db/backup_supabase.sh
