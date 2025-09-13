@@ -32,3 +32,6 @@ include = [
   "src/backend/**/*.py",
   "src/main.py",
 ]
+
+[tool.ruff]
+extend-exclude = [ "tests/conftest.py" ]

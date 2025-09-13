@@ -58,9 +58,11 @@ def test_stripe_webhook_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     # Set the webhook secret to a test value
     monkeypatch.setattr(wh, "STRIPE_WEBHOOK_SECRET", "test_secret")
 
-    # Monkeypatch stripe construct_event to return a benign event
+    # Monkeypatch stripe construct_event to raise an exception (invalid signature)
     def _construct_event(_body: bytes, _sig: str, _secret: str) -> _Event:
-        return _Event("unhandled.event", {"note": "test"})
+        # Simulate invalid signature by raising an exception
+        msg = "Invalid signature"
+        raise ValueError(msg)
 
     monkeypatch.setattr(wh.stripe.Webhook, "construct_event", _construct_event)  # type: ignore[attr-defined]
     # Stub Supabase insert for webhook_events
@@ -79,7 +81,9 @@ def test_stripe_webhook_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
         r = client.post("/webhooks/stripe", headers=headers, content=b"{}")
         statuses.append(r.status_code)
 
-    # The first 20 requests should return 400 (missing signature due to TestClient limitation)
+    # The first 20 requests should return 400 (invalid signature)
     # The 21st request should be rate limited (429)
-    assert statuses[:20] == [400] * 20, f"Expected 20 400 responses, got: {statuses[:20]}"
+    assert statuses[:20] == [400] * 20, (
+        f"Expected 20 400 responses, got: {statuses[:20]}"
+    )
     assert statuses[20] == 429, f"Expected 429 on 21st request, got: {statuses[20]}"

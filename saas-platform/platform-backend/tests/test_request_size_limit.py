@@ -15,10 +15,13 @@ def test_request_too_large_returns_413() -> None:
     """Payload >1 MiB should be rejected with 413."""
     app.dependency_overrides[verify_user] = _override_verify_user
     client = TestClient(app)
-    headers = {"Authorization": "Bearer test-token"}
 
     # Build a payload larger than 1 MiB
     big = "x" * (1024 * 1024 + 100)
+    headers = {
+        "Authorization": "Bearer test-token",
+        "Content-Length": str(len(big)),  # Explicitly set Content-Length
+    }
     r = client.post("/my/sso-cookie", headers=headers, data=big)
     assert r.status_code == 413
     assert r.json().get("detail") == "Request too large"
