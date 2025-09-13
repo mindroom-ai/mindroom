@@ -7,7 +7,6 @@ terraform {
   }
 }
 
-
 variable "domain" { type = string }
 variable "environment" { type = string }
 variable "porkbun_api_key" { type = string }
