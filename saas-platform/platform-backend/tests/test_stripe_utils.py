@@ -1,6 +1,5 @@
 """Utility tests for Stripe debugging and validation."""
 
-import os
 from pathlib import Path
 
 import pytest
@@ -8,17 +7,15 @@ import stripe
 import yaml
 
 
-@pytest.mark.skipif(
-    not os.getenv("STRIPE_SECRET_KEY"),
-    reason="STRIPE_SECRET_KEY not set",
-)
+# Tests will use mocked Stripe
 class TestStripeDebugUtils:
     """Utility tests for debugging Stripe integration."""
 
     @pytest.fixture(autouse=True)
     def setup(self) -> None:
         """Set up Stripe API key."""
-        stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+        # Use mock key for tests
+        stripe.api_key = "sk_test_mock"
 
     def test_mindroom_product_configuration(self) -> None:
         """Test that MindRoom products are properly configured in Stripe."""

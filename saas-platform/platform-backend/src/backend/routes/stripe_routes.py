@@ -25,7 +25,7 @@ class CheckoutRequest(BaseModel):
 @router.post("/stripe/checkout", response_model=UrlResponse)
 @limiter.limit("5/minute")
 async def create_checkout_session(
-    request: Request,
+    request: Request,  # noqa: ARG001
     payload: CheckoutRequest,
     user: Annotated[dict | None, Depends(verify_user_optional)],
 ) -> dict[str, Any]:
@@ -36,7 +36,7 @@ async def create_checkout_session(
     # Get price ID from config
     price_id = get_stripe_price_id(payload.tier, payload.billing_cycle)
     if not price_id:
-        raise HTTPException(status_code=400, detail=f"No price found for {request.tier} ({request.billing_cycle})")
+        raise HTTPException(status_code=400, detail=f"No price found for {payload.tier} ({payload.billing_cycle})")
 
     sb = ensure_supabase()
 

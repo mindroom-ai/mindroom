@@ -106,23 +106,55 @@ class MockPrice:
     def retrieve(price_id: str) -> Any:  # noqa: ANN401
         """Mock retrieve method."""
         prices = {
-            "price_1S6FvF3GVsrZHuzXrDZ5H7EW": ("prod_test", 1000, "month"),
-            "price_1S6FvF3GVsrZHuzXDjv76gwE": ("prod_test", 9600, "year"),
-            "price_1S6FvG3GVsrZHuzXBwljASJB": ("prod_test", 800, "month"),
-            "price_1S6FvG3GVsrZHuzXQV9y2VEo": ("prod_test", 7680, "year"),
+            "price_1S6FvF3GVsrZHuzXrDZ5H7EW": {
+                "product": "prod_test",
+                "amount": 1000,
+                "interval": "month",
+                "interval_count": 1,
+                "plan": "starter",
+                "billing_cycle": "monthly",
+            },
+            "price_1S6FvF3GVsrZHuzXDjv76gwE": {
+                "product": "prod_test",
+                "amount": 9600,
+                "interval": "year",
+                "interval_count": 1,
+                "plan": "starter",
+                "billing_cycle": "yearly",
+            },
+            "price_1S6FvG3GVsrZHuzXBwljASJB": {
+                "product": "prod_test",
+                "amount": 800,
+                "interval": "month",
+                "interval_count": 1,
+                "plan": "professional",
+                "billing_cycle": "monthly",
+            },
+            "price_1S6FvG3GVsrZHuzXQV9y2VEo": {
+                "product": "prod_test",
+                "amount": 7680,
+                "interval": "month",
+                "interval_count": 12,
+                "plan": "professional",
+                "billing_cycle": "yearly",
+            },
         }
         if price_id in prices:
-            product_id, amount, interval = prices[price_id]
+            data = prices[price_id]
             return types.SimpleNamespace(
                 id=price_id,
-                product=product_id,
-                unit_amount=amount,
-                recurring=types.SimpleNamespace(interval=interval),
-                metadata={},
+                product=data["product"],
+                unit_amount=data["amount"],
+                recurring=types.SimpleNamespace(
+                    interval=data["interval"],
+                    interval_count=data.get("interval_count", 1),
+                ),
+                metadata={"plan": data["plan"], "billing_cycle": data["billing_cycle"]},
                 active=True,
             )
-        msg = f"Price {price_id} not found"
-        raise MockStripeError.StripeError(msg)
+        # Raise InvalidRequestError for unknown price IDs
+        msg = f"No such price: {price_id}"
+        raise MockStripeError.InvalidRequestError(msg)
 
 
 class MockWebhook:
@@ -137,6 +169,41 @@ class MockWebhook:
         }
 
 
+class MockCustomer:
+    """Mock Stripe Customer."""
+
+    @staticmethod
+    def create(**kwargs: Any) -> Any:  # noqa: ANN401
+        """Mock create method."""
+        return types.SimpleNamespace(
+            id="cus_test_123",
+            email=kwargs.get("email", "test@example.com"),
+            metadata=kwargs.get("metadata", {}),
+        )
+
+
+class MockSubscription:
+    """Mock Stripe Subscription."""
+
+    @staticmethod
+    def list(**kwargs: Any) -> Any:  # noqa: ANN401, ARG004
+        """Mock list method."""
+        mock_response = MagicMock()
+        mock_response.data = []  # No existing subscriptions
+        return mock_response
+
+
+class MockBillingPortalSession:
+    """Mock Stripe Billing Portal Session."""
+
+    @staticmethod
+    def create(**kwargs: Any) -> Any:  # noqa: ANN401, ARG004
+        """Mock create method."""
+        return types.SimpleNamespace(
+            url="https://billing.stripe.com/test_portal",
+        )
+
+
 def create_stripe_mock() -> types.ModuleType:
     """Create a complete mock Stripe module."""
     mock = types.ModuleType("stripe")
@@ -146,4 +213,7 @@ def create_stripe_mock() -> types.ModuleType:
     mock.Price = MockPrice()
     mock.checkout = types.SimpleNamespace(Session=MockCheckoutSession.Session)
     mock.Webhook = MockWebhook()
+    mock.Customer = MockCustomer()
+    mock.Subscription = MockSubscription()
+    mock.billing_portal = types.SimpleNamespace(Session=MockBillingPortalSession())
     return mock

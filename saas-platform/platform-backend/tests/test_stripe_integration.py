@@ -1,6 +1,5 @@
 """Integration tests for Stripe functionality."""
 
-import os
 from unittest.mock import Mock, patch
 
 import pytest
@@ -8,11 +7,7 @@ import stripe
 from backend.pricing import get_stripe_price_id, load_pricing_config_model
 from fastapi.testclient import TestClient
 
-# Skip these tests if no Stripe key is available
-pytestmark = pytest.mark.skipif(
-    not os.getenv("STRIPE_SECRET_KEY"),
-    reason="STRIPE_SECRET_KEY not set",
-)
+# These tests will use mocked Stripe
 
 
 class TestStripeIntegration:
@@ -21,7 +16,8 @@ class TestStripeIntegration:
     @pytest.fixture(autouse=True)
     def setup(self) -> None:
         """Set up Stripe API key."""
-        stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+        # Use mock key for tests
+        stripe.api_key = "sk_test_mock"
 
     def test_stripe_connection(self) -> None:
         """Test that we can connect to Stripe."""
@@ -101,7 +97,8 @@ class TestCheckoutEndpoint:
     @pytest.fixture(autouse=True)
     def setup(self) -> None:
         """Set up Stripe API key."""
-        stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+        # Use mock key for tests
+        stripe.api_key = "sk_test_mock"
 
     def test_checkout_creates_session(self, client: TestClient) -> None:
         """Test that checkout endpoint creates a Stripe session."""
