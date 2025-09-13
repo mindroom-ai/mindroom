@@ -16,7 +16,7 @@ spec:
   ingress:
   # Allow only required service ports from any source (ingress controller / external)
   - ports:
-    - port: 80      # nginx-auth (frontend proxy)
+    - port: 8080    # nginx-auth (frontend proxy)
     - port: 3003    # frontend app
     - port: 8765    # backend API
     - port: 8008    # synapse HTTP

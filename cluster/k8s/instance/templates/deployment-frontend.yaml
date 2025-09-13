@@ -26,13 +26,24 @@ spec:
       - name: nginx-auth
         image: nginx:alpine
         ports:
-        - containerPort: 80
+        - containerPort: 8080
           name: http
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 101
+          runAsGroup: 101
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
         volumeMounts:
         - name: nginx-config
           mountPath: /etc/nginx/nginx.conf
           subPath: nginx.conf
-        # Note: runs as root to bind port 80; do not drop NET_BIND_SERVICE
+        - name: nginx-run
+          mountPath: /var/run
+        - name: nginx-cache
+          mountPath: /var/cache/nginx
 
       # MindRoom frontend (UI only, API now in backend)
       - name: mindroom-frontend
@@ -73,3 +84,7 @@ spec:
       - name: nginx-config
         configMap:
           name: nginx-auth-config-{{ .Values.customer }}
+      - name: nginx-run
+        emptyDir: {}
+      - name: nginx-cache
+        emptyDir: {}

@@ -11,7 +11,7 @@ spec:
   type: ClusterIP
   ports:
   - port: 3003
-    targetPort: 80  # Targets nginx auth proxy
+    targetPort: 8080  # Targets nginx auth proxy (non-root)
     name: http
   selector:
     app: mindroom-frontend
