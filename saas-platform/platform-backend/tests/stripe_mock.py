@@ -43,6 +43,7 @@ class MockProduct:
                 id="prod_test",
                 name="MindRoom Subscription",
                 metadata={"platform": "mindroom"},
+                active=True,
             ),
         ]
         return mock_response

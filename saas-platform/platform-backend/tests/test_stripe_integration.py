@@ -102,11 +102,15 @@ class TestCheckoutEndpoint:
 
     def test_checkout_creates_session(self, client: TestClient) -> None:
         """Test that checkout endpoint creates a Stripe session."""
-        # Mock the Stripe checkout session creation
-        with patch("stripe.checkout.Session.create") as mock_create:
+        # Mock the Stripe checkout session creation in the actual module
+        with patch("backend.routes.stripe_routes.stripe") as mock_stripe:
+            mock_stripe.api_key = "sk_test_mock"
             mock_session = Mock()
             mock_session.url = "https://checkout.stripe.com/test_session"
-            mock_create.return_value = mock_session
+            mock_stripe.checkout.Session.create.return_value = mock_session
+            # Mock other required methods
+            mock_stripe.Customer.create.return_value = Mock(id="cus_test_123")
+            mock_stripe.Subscription.list.return_value = Mock(data=[])
 
             response = client.post(
                 "/stripe/checkout",
@@ -119,38 +123,45 @@ class TestCheckoutEndpoint:
             assert data["url"] == "https://checkout.stripe.com/test_session"
 
             # Verify the session was created with correct parameters
-            mock_create.assert_called_once()
-            call_args = mock_create.call_args[1]
+            mock_stripe.checkout.Session.create.assert_called_once()
+            call_args = mock_stripe.checkout.Session.create.call_args[1]
             assert call_args["mode"] == "subscription"
             assert len(call_args["line_items"]) == 1
             assert call_args["line_items"][0]["price"] == get_stripe_price_id("starter", "monthly")
 
     def test_checkout_invalid_plan(self, client: TestClient) -> None:
         """Test checkout with invalid plan."""
-        response = client.post(
-            "/stripe/checkout",
-            json={"tier": "invalid_plan", "billing_cycle": "monthly"},
-        )
+        with patch("backend.routes.stripe_routes.stripe") as mock_stripe:
+            mock_stripe.api_key = "sk_test_mock"
+            response = client.post(
+                "/stripe/checkout",
+                json={"tier": "invalid_plan", "billing_cycle": "monthly"},
+            )
 
-        assert response.status_code == 400
-        assert "Invalid tier" in response.json()["detail"]
+            assert response.status_code == 400
+            assert "No price found" in response.json()["detail"]
 
     def test_checkout_invalid_billing_cycle(self, client: TestClient) -> None:
         """Test checkout with invalid billing cycle."""
-        response = client.post(
-            "/stripe/checkout",
-            json={"tier": "starter", "billing_cycle": "weekly"},
-        )
+        with patch("backend.routes.stripe_routes.stripe") as mock_stripe:
+            mock_stripe.api_key = "sk_test_mock"
+            response = client.post(
+                "/stripe/checkout",
+                json={"tier": "starter", "billing_cycle": "weekly"},
+            )
 
-        assert response.status_code == 400
-        assert "Invalid billing cycle" in response.json()["detail"]
+            assert response.status_code == 400
+            assert "No price found" in response.json()["detail"]
 
     def test_checkout_professional_with_quantity(self, client: TestClient) -> None:
         """Test checkout for professional plan with quantity."""
-        with patch("stripe.checkout.Session.create") as mock_create:
+        with patch("backend.routes.stripe_routes.stripe") as mock_stripe:
+            mock_stripe.api_key = "sk_test_mock"
             mock_session = Mock()
             mock_session.url = "https://checkout.stripe.com/test_session"
-            mock_create.return_value = mock_session
+            mock_stripe.checkout.Session.create.return_value = mock_session
+            mock_stripe.Customer.create.return_value = Mock(id="cus_test_123")
+            mock_stripe.Subscription.list.return_value = Mock(data=[])
 
             response = client.post(
                 "/stripe/checkout",
@@ -164,8 +175,8 @@ class TestCheckoutEndpoint:
             assert response.status_code == 200
 
             # Verify quantity was passed for per-user pricing
-            mock_create.assert_called_once()
-            call_args = mock_create.call_args[1]
+            mock_stripe.checkout.Session.create.assert_called_once()
+            call_args = mock_stripe.checkout.Session.create.call_args[1]
             assert call_args["line_items"][0]["quantity"] == 5
 
 

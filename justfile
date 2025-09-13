@@ -182,7 +182,7 @@ env-saas:
 
 # SaaS platform backend tests
 # Run SaaS platform backend tests
-test-saas-back:
+test-saas-backend:
     cd saas-platform/platform-backend && uv run pytest -q
 
 # SaaS platform frontend sanity (no test script configured) – build verifies compile/types
