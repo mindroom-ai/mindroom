@@ -72,7 +72,14 @@ if [[ -z "${DB_URL}" ]]; then
   DB_USER=${SUPABASE_DB_USER:-postgres}
   DB_NAME=${SUPABASE_DB_NAME:-postgres}
   DB_HOST="db.${SUPA_URL_HOST}"
-  DB_URL="postgresql://${DB_USER}:${SUPABASE_DB_PASSWORD}@${DB_HOST}:5432/${DB_NAME}?sslmode=require"
+  # URL-encode the password to handle special characters like @, *, !, etc.
+  ENC_PASS=$(python - <<'PY'
+from urllib.parse import quote
+import os
+print(quote(os.environ.get('SUPABASE_DB_PASSWORD',''), safe=''))
+PY
+)
+  DB_URL="postgresql://${DB_USER}:${ENC_PASS}@${DB_HOST}:5432/${DB_NAME}?sslmode=require"
 fi
 
 # 3) Choose output path
