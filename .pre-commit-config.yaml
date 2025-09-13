@@ -6,7 +6,7 @@ repos:
       - id: end-of-file-fixer
       - id: check-docstring-first
       - id: check-yaml
-        exclude: (saas-platform/k8s/.*/templates/.*\.yaml$|saas-platform/k8s/.*\.yaml$)
+        exclude: (saas-platform/k8s/.*/templates/.*\.yaml$|saas-platform/k8s/.*\.yaml$|cluster/k8s/.*/templates/.*\.yaml$|cluster/k8s/.*\.yaml$)
       - id: debug-statements
       - id: check-ast
 

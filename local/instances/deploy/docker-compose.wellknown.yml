@@ -1,6 +1,4 @@
 # Well-known server for Matrix federation
-version: '3.8'
-
 services:
   wellknown:
     image: nginx:alpine

@@ -27,8 +27,8 @@ jobs:
             dockerfile: Dockerfile.platform-frontend
             context: saas-platform
           - name: platform-backend
-            dockerfile: Dockerfile.platform-backend
-            context: saas-platform
+            dockerfile: saas-platform/Dockerfile.platform-backend
+            context: .
 
     steps:
       - name: Checkout repository

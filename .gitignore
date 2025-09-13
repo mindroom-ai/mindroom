@@ -234,3 +234,9 @@ deploy/instance_data/
 deploy/bridge_instances.json
 terraform.tfstate
 .vite/
+
+# Local artifacts
+backups/
+saas-platform/.env.backup
+wgcf-account.toml
+wgcf-profile.conf

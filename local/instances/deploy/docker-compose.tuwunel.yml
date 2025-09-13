@@ -41,6 +41,7 @@ services:
       - "m-test-4.mindroom.chat:172.20.0.1"
       - "m-test-5.mindroom.chat:172.20.0.1"
       - "m-test.mindroom.chat:172.20.0.1"
+      - "m-default.localhost:172.20.0.1"
     ulimits:
       nofile:
         soft: 1048567

@@ -17,15 +17,15 @@ COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /app
 
-# Copy project files
-COPY platform-backend/pyproject.toml platform-backend/uv.lock /app/
+# Copy project files (build context is saas-platform/)
+COPY saas-platform/platform-backend/pyproject.toml saas-platform/platform-backend/uv.lock /app/
 
 # Install dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev
 
 # Copy source code
-COPY platform-backend/src /app/src
+COPY saas-platform/platform-backend/src /app/src
 
 # Install the project itself
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -46,9 +46,9 @@ COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
 COPY --from=builder /app /app
 
 # Copy additional files needed by platform-backend
-COPY k8s/instance /app/k8s/instance/
-COPY default-config.yaml /app/default-config.yaml
-COPY pricing-config.yaml /app/pricing-config.yaml
+COPY cluster/k8s/instance /app/k8s/instance/
+COPY saas-platform/default-config.yaml /app/default-config.yaml
+COPY saas-platform/pricing-config.yaml /app/pricing-config.yaml
 
 EXPOSE 8000
 

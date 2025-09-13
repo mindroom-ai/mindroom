@@ -22,4 +22,15 @@ stripe:
 
 # Gitea registry auth
 gitea:
+  user: "basnijholt"
   token: ""
+
+# Provisioner
+provisioner:
+  apiKey: ""
+
+# Optional AI API keys
+apiKeys:
+  openai: ""
+  anthropic: ""
+  openrouter: ""

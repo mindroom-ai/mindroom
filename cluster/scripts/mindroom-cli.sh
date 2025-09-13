@@ -7,7 +7,7 @@ set -e
 
 # Load environment variables from .env file
 set -a
-eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
+eval "$(uvx --from python-dotenv[cli] dotenv list --format shell)"
 set +a
 
 KUBECONFIG="${KUBECONFIG:-./terraform-k8s/mindroom-k8s_kubeconfig.yaml}"

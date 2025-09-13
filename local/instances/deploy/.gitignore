@@ -1,10 +1,10 @@
 
 # Mindroom instance files
-deploy/.env.*
+.env.*
 envs/*.env
-deploy/instances.json
-deploy/instance_data/
+instances.json
+instance_data/
 *.yaml.backup
-deploy/matrix-data/
+matrix-data/
 # Generated well-known files for Matrix federation
 well-known-*.json

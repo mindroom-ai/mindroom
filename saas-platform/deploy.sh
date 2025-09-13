@@ -20,7 +20,7 @@ fi
 
 # Use python-dotenv for proper .env parsing
 set -a
-eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
+eval "$(uvx --from python-dotenv[cli] dotenv list --format shell)"
 set +a
 
 # Map app names to Docker image names
