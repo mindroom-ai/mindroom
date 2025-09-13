@@ -63,7 +63,7 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 
 # Stripe configuration
 stripe.api_key = _get_secret("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_WEBHOOK_SECRET = _get_secret("STRIPE_WEBHOOK_SECRET", "")
 
 # Provisioner API key for internal provisioning actions
 PROVISIONER_API_KEY = _get_secret("PROVISIONER_API_KEY", "")

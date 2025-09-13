@@ -5,11 +5,11 @@ kind: Namespace
 metadata:
   name: mindroom-{{ .Values.environment }}
 ---
-# Secrets for platform services
+# Non-sensitive config for platform services
 apiVersion: v1
-kind: Secret
+kind: ConfigMap
 metadata:
-  name: platform-secrets
+  name: platform-config
   namespace: mindroom-{{ .Values.environment }}
 type: Opaque
 {{ $prov := .Values.provisioner | default (dict) }}
@@ -22,13 +22,25 @@ stringData:
   ENVIRONMENT: {{ .Values.environment }}
   SUPABASE_URL: {{ .Values.supabase.url }}
   SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey }}
-  SUPABASE_SERVICE_KEY: {{ .Values.supabase.serviceKey }}
   STRIPE_PUBLISHABLE_KEY: {{ .Values.stripe.publishableKey }}
   STRIPE_SECRET_KEY: {{ .Values.stripe.secretKey }}
   STRIPE_WEBHOOK_SECRET: {{ .Values.stripe.webhookSecret }}
   PROVISIONER_API_KEY: {{ index $prov "apiKey" | default "" }}
   PLATFORM_BACKEND_URL: "http://platform-backend:8000"
   GITEA_USER: {{ .Values.gitea.user }}
+---
+# Sensitive secrets for platform services
+apiVersion: v1
+kind: Secret
+metadata:
+  name: platform-secrets
+  namespace: mindroom-{{ .Values.environment }}
+type: Opaque
+stringData:
+  SUPABASE_SERVICE_KEY: {{ .Values.supabase.serviceKey }}
+  STRIPE_SECRET_KEY: {{ .Values.stripe.secretKey }}
+  STRIPE_WEBHOOK_SECRET: {{ .Values.stripe.webhookSecret }}
+  PROVISIONER_API_KEY: {{ .Values.provisioner.apiKey }}
   GITEA_TOKEN: {{ .Values.gitea.token }}
   OPENAI_API_KEY: {{ .Values.apiKeys.openai | default "" }}
   ANTHROPIC_API_KEY: {{ .Values.apiKeys.anthropic | default "" }}
@@ -73,37 +85,39 @@ spec:
         ports:
         - containerPort: 3000
         envFrom:
-        - secretRef:
-            name: platform-secrets
+        - configMapRef:
+            name: platform-config
         env:
         - name: NODE_ENV
           value: production
         - name: PLATFORM_DOMAIN
           valueFrom:
-            secretKeyRef:
-              name: platform-secrets
+            configMapKeyRef:
+              name: platform-config
               key: PLATFORM_DOMAIN
         # Next.js public env vars for client-side
         - name: NEXT_PUBLIC_SUPABASE_URL
           valueFrom:
-            secretKeyRef:
-              name: platform-secrets
+            configMapKeyRef:
+              name: platform-config
               key: SUPABASE_URL
         - name: NEXT_PUBLIC_SUPABASE_ANON_KEY
           valueFrom:
-            secretKeyRef:
-              name: platform-secrets
+            configMapKeyRef:
+              name: platform-config
               key: SUPABASE_ANON_KEY
+        - name: NEXT_PUBLIC_API_URL
+          value: https://api.{{ .Values.domain }}
         # Also provide without prefix for server-side
         - name: SUPABASE_URL
           valueFrom:
-            secretKeyRef:
-              name: platform-secrets
+            configMapKeyRef:
+              name: platform-config
               key: SUPABASE_URL
         - name: SUPABASE_ANON_KEY
           valueFrom:
-            secretKeyRef:
-              name: platform-secrets
+            configMapKeyRef:
+              name: platform-config
               key: SUPABASE_ANON_KEY
 ---
 apiVersion: v1
@@ -149,8 +163,35 @@ spec:
         ports:
         - containerPort: 8000
         envFrom:
-        - secretRef:
-            name: platform-secrets
+        - configMapRef:
+            name: platform-config
+        env:
+        # Point backend secrets to mounted files for safer access
+        - name: SUPABASE_SERVICE_KEY_FILE
+          value: "/etc/secrets/supabase_service_key"
+        - name: STRIPE_SECRET_KEY_FILE
+          value: "/etc/secrets/stripe_secret_key"
+        - name: STRIPE_WEBHOOK_SECRET_FILE
+          value: "/etc/secrets/stripe_webhook_secret"
+        - name: PROVISIONER_API_KEY_FILE
+          value: "/etc/secrets/provisioner_api_key"
+        - name: GITEA_TOKEN_FILE
+          value: "/etc/secrets/gitea_token"
+        - name: OPENAI_API_KEY_FILE
+          value: "/etc/secrets/openai_key"
+        - name: ANTHROPIC_API_KEY_FILE
+          value: "/etc/secrets/anthropic_key"
+        - name: OPENROUTER_API_KEY_FILE
+          value: "/etc/secrets/openrouter_key"
+        volumeMounts:
+        - name: platform-sensitive
+          mountPath: /etc/secrets
+          readOnly: true
+      volumes:
+      - name: platform-sensitive
+        secret:
+          secretName: platform-secrets
+          defaultMode: 0400
 ---
 apiVersion: v1
 kind: Service
