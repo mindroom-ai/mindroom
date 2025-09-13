@@ -12,18 +12,18 @@ global.fetch = jest.fn()
 
 // Mock next/navigation
 jest.mock('next/navigation', () => ({
-  useRouter: () => ({
+  useRouter: jest.fn(() => ({
     push: jest.fn(),
     replace: jest.fn(),
     prefetch: jest.fn(),
     back: jest.fn(),
     forward: jest.fn(),
     refresh: jest.fn(),
-  }),
-  useSearchParams: () => ({
+  })),
+  useSearchParams: jest.fn(() => ({
     get: jest.fn(),
-  }),
-  usePathname: () => '/test-path',
+  })),
+  usePathname: jest.fn(() => '/test-path'),
 }))
 
 // Mock window.matchMedia
