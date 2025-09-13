@@ -37,14 +37,14 @@ metadata:
   namespace: mindroom-{{ .Values.environment }}
 type: Opaque
 stringData:
-  SUPABASE_SERVICE_KEY: {{ .Values.supabase.serviceKey }}
-  STRIPE_SECRET_KEY: {{ .Values.stripe.secretKey }}
-  STRIPE_WEBHOOK_SECRET: {{ .Values.stripe.webhookSecret }}
-  PROVISIONER_API_KEY: {{ .Values.provisioner.apiKey }}
-  GITEA_TOKEN: {{ .Values.gitea.token }}
-  OPENAI_API_KEY: {{ .Values.apiKeys.openai | default "" }}
-  ANTHROPIC_API_KEY: {{ .Values.apiKeys.anthropic | default "" }}
-  OPENROUTER_API_KEY: {{ .Values.apiKeys.openrouter | default "" }}
+  supabase_service_key: {{ .Values.supabase.serviceKey }}
+  stripe_secret_key: {{ .Values.stripe.secretKey }}
+  stripe_webhook_secret: {{ .Values.stripe.webhookSecret }}
+  provisioner_api_key: {{ .Values.provisioner.apiKey }}
+  gitea_token: {{ .Values.gitea.token }}
+  openai_key: {{ .Values.apiKeys.openai | default "" }}
+  anthropic_key: {{ .Values.apiKeys.anthropic | default "" }}
+  openrouter_key: {{ .Values.apiKeys.openrouter | default "" }}
 ---
 # Docker registry secret
 apiVersion: v1
