@@ -5,6 +5,7 @@
 set -euo pipefail
 
 <<<<<<< HEAD:cluster/scripts/db/backup_supabase.sh
+<<<<<<< HEAD:cluster/scripts/db/backup_supabase.sh
 # 1) Load environment variables from saas-platform/.env (preferred)
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/saas-platform/.env}"
@@ -23,8 +24,21 @@ else
 fi
 =======
 # 1) Load environment variables from .env file
+=======
+# 1) Load environment variables from saas-platform/.env file
+# Resolve path to saas-platform directory (two levels up from this script dir)
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+PLATFORM_DIR=$(cd -- "$SCRIPT_DIR/../.." && pwd)
+ENV_FILE="$PLATFORM_DIR/.env"
+
+>>>>>>> c2dc252d (db: backup script now explicitly loads saas-platform/.env via python-dotenv):saas-platform/scripts/db/backup_supabase.sh
 set -a
-eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
+if [ -f "$ENV_FILE" ]; then
+  eval "$(uvx --from 'python-dotenv[cli]' dotenv -f "$ENV_FILE" list --format shell)"
+else
+  # Fallback to current directory .env if saas-platform/.env is missing
+  eval "$(uvx --from 'python-dotenv[cli]' dotenv list --format shell)"
+fi
 set +a
 >>>>>>> d0e206f7 (scripts: move backup_supabase.sh to saas-platform/scripts/db and update Makefile target):saas-platform/scripts/db/backup_supabase.sh
 
