@@ -198,7 +198,7 @@ docker-build-saas-frontend:
         --build-arg NEXT_PUBLIC_SUPABASE_URL="${NEXT_PUBLIC_SUPABASE_URL:-${SUPABASE_URL:-}}" \
         --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="${NEXT_PUBLIC_SUPABASE_ANON_KEY:-${SUPABASE_ANON_KEY:-}}" \
         -t platform-frontend:dev \
-        -f Dockerfile.platform-frontend .
+        -f saas-platform/Dockerfile.platform-frontend .
 
 # Build SaaS platform backend (FastAPI)
 docker-build-saas-backend:
