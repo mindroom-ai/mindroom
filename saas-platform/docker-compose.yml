@@ -2,26 +2,20 @@ services:
   platform-backend:
     build:
       context: ..
-      dockerfile: Dockerfile.platform-backend
+      dockerfile: saas-platform/Dockerfile.platform-backend
     ports:
       - "8000:8000"
     env_file:
       - .env
-    volumes:
-      - ./saas-platform/platform-backend:/app
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
   platform-frontend:
     build:
       context: ..
-      dockerfile: Dockerfile.dev
+      dockerfile: saas-platform/Dockerfile.platform-frontend
     ports:
       - "3000:3000"
     env_file:
       - .env
-    volumes:
-      - ./saas-platform/platform-frontend:/app
-      - /app/node_modules
     environment:
       - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
       - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
