@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from backend.deps import ensure_supabase, verify_user
+from backend.deps import ensure_supabase, limiter, verify_user
 from backend.models import AccountSetupResponse, AccountWithRelationsOut, AdminStatusOut
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -42,6 +42,7 @@ async def check_admin_status(user: Annotated[dict, Depends(verify_user)]) -> dic
 
 
 @router.post("/my/account/setup", response_model=AccountSetupResponse)
+@limiter.limit("5/minute")
 async def setup_account(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Setup free tier account for new user."""
     sb = ensure_supabase()

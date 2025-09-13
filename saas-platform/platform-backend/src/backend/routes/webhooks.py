@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.config import STRIPE_WEBHOOK_SECRET, logger, stripe
-from backend.deps import ensure_supabase
+from backend.deps import ensure_supabase, limiter
 from backend.models import WebhookResponse
 from backend.pricing import get_plan_limits_from_metadata
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -342,6 +342,7 @@ def handle_payment_failed(invoice: dict) -> tuple[bool, str | None]:
 
 
 @router.post("/webhooks/stripe", response_model=WebhookResponse)
+@limiter.limit("20/minute")
 async def stripe_webhook(  # noqa: C901, PLR0912, PLR0915
     request: Request,
     stripe_signature: Annotated[str | None, Header(alias="Stripe-Signature")] = None,
