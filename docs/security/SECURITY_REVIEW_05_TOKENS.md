@@ -18,7 +18,7 @@ The MindRoom SaaS platform uses **Supabase Auth** as its primary authentication 
 - ✅ JWT signature validation handled by Supabase (robust)
 - ✅ Proper token extraction and Bearer scheme validation
 - ✅ Secure logout implementation with SSO cookie cleanup
-- ❌ **CRITICAL**: No rate limiting on authentication endpoints
+- ⚠️ **PARTIAL**: Rate limiting added to admin/provisioner; apply to user/SSO
 - ❌ Token caching without proper invalidation mechanisms
 - ⚠️ Minimal validation of JWT claims beyond signature
 
@@ -165,20 +165,17 @@ JWT with modified claims - REJECTED by signature mismatch
 ---
 
 ### 6. Rate Limiting on Authentication Endpoints
-**Status**: ❌ **FAIL** (No rate limiting implemented)
+**Status**: ⚠️ **PARTIAL** (Implemented on admin/provisioner routes)
 
 **Analysis:**
-- **CRITICAL SECURITY GAP**: No rate limiting on any endpoints
-- Authentication endpoints vulnerable to brute force attacks
-- No throttling on login attempts, token refresh, or SSO operations
-- Missing FastAPI rate limiting middleware
+- Implemented per-route limits for admin and provisioner endpoints
+- Remaining: throttling for SSO and user endpoints (`/my/*`) where appropriate
+- FastAPI rate limiting middleware (slowapi) integrated
 
-**Vulnerable Endpoints:**
+**Remaining High-Risk Endpoints:**
 ```python
-# No rate limiting on these critical endpoints:
-@router.post("/my/sso-cookie")  # SSO cookie creation
-@router.delete("/my/sso-cookie")  # SSO logout
-# All /my/* endpoints using verify_user dependency
+# /my/sso-cookie (create/delete)
+# /my/* endpoints using verify_user dependency (review per-route necessity)
 ```
 
 **Attack Vectors:**
@@ -186,7 +183,7 @@ JWT with modified claims - REJECTED by signature mismatch
 - DoS attacks via excessive authentication requests
 - Token enumeration attacks
 
-**Risk Level**: **CRITICAL** - Immediate remediation required
+**Risk Level**: **HIGH** - Complete coverage recommended before public beta
 
 ---
 

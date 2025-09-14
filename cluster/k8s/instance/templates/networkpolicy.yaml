@@ -1,0 +1,33 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: instance-traffic-controls-{{ .Values.customer }}
+  namespace: mindroom-instances
+  labels:
+    app.kubernetes.io/name: mindroom-instance
+    customer: {{ .Values.customer | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      customer: {{ .Values.customer | quote }}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow only required service ports from any source (ingress controller / external)
+  - ports:
+    - port: 8080    # nginx-auth (frontend proxy)
+    - port: 3003    # frontend app
+    - port: 8765    # backend API
+    - port: 8008    # synapse HTTP
+  egress:
+  # Allow DNS
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  # Allow HTTP/HTTPS outbound
+  - ports:
+    - port: 80
+    - port: 443

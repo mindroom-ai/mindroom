@@ -8,7 +8,8 @@ mindroom_image: git.nijho.lt/basnijholt/mindroom-frontend:latest
 mindroom_backend_image: git.nijho.lt/basnijholt/mindroom-backend:latest
 synapse_image: matrixdotorg/synapse:latest
 
-# API Keys (set via --set)
+# API keys and secrets (referenced via Secret in deployment)
+# Provide values here or inject via a separate Secret overwrite.
 openai_key: ""
 anthropic_key: ""
 openrouter_key: ""
@@ -18,5 +19,5 @@ supabaseUrl: ""
 supabaseAnonKey: ""
 supabaseServiceKey: ""
 
-# Matrix admin user
-matrix_admin_password: "changeme"
+# Matrix admin user (leave empty and set via --set or Secret)
+matrix_admin_password: ""

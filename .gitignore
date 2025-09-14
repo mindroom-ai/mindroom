@@ -233,6 +233,8 @@ deploy/.env.*
 deploy/instance_data/
 deploy/bridge_instances.json
 terraform.tfstate
+# Terraform kubeconfigs (local artifacts)
+*/terraform-k8s/*_kubeconfig.yaml
 .vite/
 
 # Local artifacts

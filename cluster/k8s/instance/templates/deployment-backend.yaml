@@ -22,6 +22,7 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        runAsNonRoot: true
         fsGroupChangePolicy: OnRootMismatch
       containers:
       - name: mindroom-backend
@@ -32,10 +33,10 @@ spec:
         - containerPort: 8765
           name: api
         env:
-        - name: OPENAI_API_KEY
-          value: {{ .Values.openai_key | quote }}
-        - name: ANTHROPIC_API_KEY
-          value: {{ .Values.anthropic_key | quote }}
+        - name: OPENAI_API_KEY_FILE
+          value: "/etc/secrets/openai_key"
+        - name: ANTHROPIC_API_KEY_FILE
+          value: "/etc/secrets/anthropic_key"
         - name: ACCOUNT_ID
           value: {{ .Values.accountId | quote }}
         - name: CUSTOMER_ID
@@ -50,12 +51,12 @@ spec:
           value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: SUPABASE_URL
           value: {{ .Values.supabaseUrl | quote }}
-        - name: SUPABASE_SERVICE_KEY
-          value: {{ .Values.supabaseServiceKey | quote }}
+        - name: SUPABASE_SERVICE_KEY_FILE
+          value: "/etc/secrets/supabase_service_key"
         - name: SUPABASE_ANON_KEY
           value: {{ .Values.supabaseAnonKey | quote }}
-        - name: OPENROUTER_API_KEY
-          value: {{ .Values.openrouter_key | quote }}
+        - name: OPENROUTER_API_KEY_FILE
+          value: "/etc/secrets/openrouter_key"
         - name: HOME
           value: {{ .Values.storagePath }}
         volumeMounts:
@@ -64,6 +65,9 @@ spec:
         - name: config
           mountPath: /app/config.yaml
           subPath: config.yaml
+        - name: api-keys
+          mountPath: /etc/secrets
+          readOnly: true
         resources:
           requests:
             memory: "512Mi"
@@ -71,6 +75,11 @@ spec:
           limits:
             memory: "2Gi"
             cpu: "1000m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
       imagePullSecrets:
       - name: gitea-registry
       volumes:
@@ -80,3 +89,7 @@ spec:
       - name: config
         configMap:
           name: mindroom-config-{{ .Values.customer }}
+      - name: api-keys
+        secret:
+          secretName: mindroom-api-keys-{{ .Values.customer }}
+          defaultMode: 0400

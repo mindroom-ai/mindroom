@@ -10,6 +10,10 @@ terraform {
       source  = "cullenmcdermott/porkbun"
       version = "~> 0.2"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
     helm = {
       source  = "hashicorp/helm"
       version = "~> 2.12"
@@ -33,6 +37,10 @@ provider "hcloud" {
   token = var.hcloud_token
 }
 
+resource "tls_private_key" "cluster" {
+  algorithm = "ED25519"
+}
+
 module "kube-hetzner" {
   source = "kube-hetzner/kube-hetzner/hcloud"
   version = "2.15.0"
@@ -50,8 +58,8 @@ module "kube-hetzner" {
   cluster_name = var.cluster_name
 
   # SSH key configuration - use dedicated cluster key
-  ssh_public_key = file("./cluster_ssh_key.pub")
-  ssh_private_key = file("./cluster_ssh_key")
+  ssh_public_key = tls_private_key.cluster.public_key_openssh
+  ssh_private_key = tls_private_key.cluster.private_key_pem
 
   # Single node configuration - everything runs on one node
   control_plane_nodepools = [

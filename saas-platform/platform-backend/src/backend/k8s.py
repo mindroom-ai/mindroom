@@ -9,10 +9,7 @@ from backend.process import run_cmd
 async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-instances") -> bool:
     """Check if a Kubernetes deployment exists for an instance."""
     try:
-        code, _out, err = await run_kubectl(
-            ["get", f"deployment/mindroom-backend-{instance_id}"],
-            namespace=namespace,
-        )
+        code, _out, err = await run_kubectl(["get", f"deployment/mindroom-backend-{instance_id}"], namespace=namespace)
         if code != 0:
             if "not found" in err.lower() or "notfound" in err.lower():
                 logger.info("Deployment mindroom-backend-%s not found in namespace %s", instance_id, namespace)
@@ -24,9 +21,7 @@ async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-i
 
 
 async def wait_for_deployment_ready(
-    instance_id: str,
-    namespace: str = "mindroom-instances",
-    timeout_seconds: int = 120,
+    instance_id: str, namespace: str = "mindroom-instances", timeout_seconds: int = 120
 ) -> bool:
     """Block until the instance deployment reports ready or timeout.
 
@@ -35,12 +30,7 @@ async def wait_for_deployment_ready(
     """
     try:
         code, out, err = await run_kubectl(
-            [
-                "rollout",
-                "status",
-                f"deployment/mindroom-backend-{instance_id}",
-                f"--timeout={timeout_seconds}s",
-            ],
+            ["rollout", "status", f"deployment/mindroom-backend-{instance_id}", f"--timeout={timeout_seconds}s"],
             namespace=namespace,
         )
         if code == 0:
@@ -69,11 +59,7 @@ async def run_kubectl(args: list[str], namespace: str | None = None) -> tuple[in
 
 
 async def ensure_docker_registry_secret(
-    secret_name: str,
-    server: str,
-    username: str,
-    password: str,
-    namespace: str = "mindroom-instances",
+    secret_name: str, server: str, username: str, password: str, namespace: str = "mindroom-instances"
 ) -> bool:
     """Ensure a docker-registry secret exists; create if missing.
 

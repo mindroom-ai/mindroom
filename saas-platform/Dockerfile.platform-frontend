@@ -6,7 +6,7 @@ RUN npm install -g pnpm
 # Dependencies stage
 FROM base AS deps
 WORKDIR /app
-COPY platform-frontend/package.json platform-frontend/pnpm-lock.yaml ./platform-frontend/
+COPY saas-platform/platform-frontend/package.json saas-platform/platform-frontend/pnpm-lock.yaml ./platform-frontend/
 # Use cache mount for pnpm store to speed up builds
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     cd platform-frontend && pnpm install --frozen-lockfile
@@ -14,7 +14,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 # Build stage
 FROM deps AS builder
 WORKDIR /app
-COPY platform-frontend/ ./platform-frontend/
+COPY saas-platform/platform-frontend/ ./platform-frontend/
 # Accept build arguments for Next.js public env vars
 ARG NEXT_PUBLIC_SUPABASE_URL
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY

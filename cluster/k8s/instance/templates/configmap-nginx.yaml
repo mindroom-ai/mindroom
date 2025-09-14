@@ -15,7 +15,7 @@ data:
       error_log /dev/stderr warn;
 
       server {
-        listen 80;
+        listen 8080;
 
         {{- if .Values.supabaseUrl }}
         # Platform mode: Use SSO cookie set by platform backend.

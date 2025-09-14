@@ -67,10 +67,10 @@ pnpm install && pnpm run dev
 #### Deployment
 ```bash
 # Set kubeconfig path
-export KUBECONFIG=./saas-platform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
+export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
 # Deploy platform
-cd saas-platform/k8s/platform
+cd cluster/k8s/platform
 helm upgrade --install platform . -f values.yaml --namespace mindroom-staging
 
 # Deploy instance - ALWAYS use the provisioner API:

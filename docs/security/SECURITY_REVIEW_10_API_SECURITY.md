@@ -12,33 +12,27 @@ This review examines the API security posture of the MindRoom platform backend, 
 
 ---
 
-## 1. Rate Limiting Implementation (FAIL)
+## 1. Rate Limiting Implementation (PARTIAL)
 
-### Current Status: **FAIL** ❌
+### Current Status: **PARTIAL** ⚠️
 
 **Findings:**
-- **No rate limiting middleware detected** in FastAPI application
-- No use of `slowapi`, `fastapi-limiter`, or similar rate limiting libraries
-- No rate limiting configuration in `main.py` or route files
-- No Redis or memory-based rate limiting implementation
-- Only authentication-based access control exists
+- FastAPI rate limiting integrated via `slowapi`; 429 handler registered
+- Per-route limits applied to admin and provisioner endpoints
+- Remaining: evaluate user/SSO endpoints and public routes for appropriate limits
 
-**Vulnerable Endpoints:**
+**High-Risk Endpoints Remaining:**
 ```python
-# ALL 45+ endpoints lack rate limiting, including:
-/health                          # Public endpoint - DoS risk
-/my/account/setup               # Account creation - abuse risk
-/stripe/checkout                # Payment processing - financial risk
-/webhooks/stripe                # External webhook - DoS risk
-/admin/stats                    # Admin endpoint - resource exhaustion
-/system/provision               # Instance provisioning - resource DoS
+# /my/account/setup               # Account creation - abuse risk
+# /stripe/checkout                # Payment processing - financial risk
+# /webhooks/stripe                # External webhook - DoS risk
 ```
 
 **Security Impact:**
-- **DoS Attacks**: Unlimited requests can overwhelm the server
-- **Brute Force**: Authentication endpoints vulnerable to credential attacks
-- **Resource Exhaustion**: Expensive operations (provisioning, stats) unprotected
-- **Cost Amplification**: Stripe API calls and Kubernetes operations unlimited
+- DoS Attacks – mitigated on admin/provisioner; review remaining surfaces
+- Brute Force – apply limits to auth/SSO flows
+- Resource Exhaustion – admin/provisioner now protected
+- Cost Amplification – reduce by limiting payment/webhook endpoints
 
 ### Recommended Implementation
 
@@ -75,15 +69,13 @@ RATE_LIMITS = {
 
 ---
 
-## 2. Request Size Limits (PARTIAL)
+## 2. Request Size Limits (PASS)
 
-### Current Status: **PARTIAL** ⚠️
+### Current Status: **PASS** ✅
 
 **Findings:**
-- **Nginx level**: `proxy-body-size: "100m"` configured in ingress
-- **FastAPI level**: No explicit request size limits in application code
-- **uvicorn level**: Default limits apply (16MB typically)
-- **Kubernetes level**: No resource quotas for request processing
+- Application-level request size limit implemented (1 MiB)
+- Ingress limits and upstream defaults can be tuned per endpoint as needed
 
 **Potential Attack Vectors:**
 ```bash
@@ -97,31 +89,23 @@ curl -X POST /webhooks/stripe \
   -d "$(cat /dev/zero | head -c 100m)"  # Memory exhaustion
 ```
 
-### Recommended Improvements
-
-**1. Application-Level Limits**
+### Implementation
 ```python
-from starlette.middleware.base import BaseHTTPMiddleware
+# main.py
+MAX_REQUEST_BYTES = 1024 * 1024
 
-class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, max_size: int = 1024 * 1024):  # 1MB default
-        super().__init__(app)
-        self.max_size = max_size
-
-    async def dispatch(self, request, call_next):
-        if request.headers.get("content-length"):
-            content_length = int(request.headers["content-length"])
-            if content_length > self.max_size:
-                return JSONResponse(
-                    status_code=413,
-                    content={"error": "Request too large"}
-                )
-        return await call_next(request)
-
-app.add_middleware(RequestSizeLimitMiddleware, max_size=1024*1024)  # 1MB
+@app.middleware("http")
+async def enforce_request_size(request: Request, call_next):
+    try:
+        length = int(request.headers.get("content-length", "0") or "0")
+    except ValueError:
+        length = 0
+    if length and length > MAX_REQUEST_BYTES:
+        return JSONResponse({"detail": "Request too large"}, status_code=413)
+    return await call_next(request)
 ```
 
-**2. Endpoint-Specific Limits**
+**Endpoint-Specific Limits (optional)**
 ```python
 ENDPOINT_SIZE_LIMITS = {
     "/my/account/setup": 10240,      # 10KB - account data

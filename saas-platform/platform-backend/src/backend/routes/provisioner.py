@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -17,11 +18,16 @@ from backend.config import (
     logger,
 )
 from backend.db_utils import update_instance_status
-from backend.deps import ensure_supabase
-from backend.k8s import check_deployment_exists, ensure_docker_registry_secret, run_kubectl, wait_for_deployment_ready
+from backend.deps import _extract_bearer_token, ensure_supabase, limiter
+from backend.k8s import (
+    check_deployment_exists,
+    ensure_docker_registry_secret,
+    run_kubectl,
+    wait_for_deployment_ready,
+)
 from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
 from backend.process import run_helm
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 router = APIRouter()
 
@@ -37,20 +43,34 @@ async def _background_mark_running_when_ready(instance_id: str, namespace: str =
                     {"status": "running", "updated_at": datetime.now(UTC).isoformat()},
                 ).eq("instance_id", instance_id).execute()
             except Exception:
-                logger.warning("Background update: failed to mark instance %s as running", instance_id)
+                logger.warning(
+                    "Background update: failed to mark instance %s as running",
+                    instance_id,
+                )
     except Exception:
         logger.exception("Background readiness wait failed for instance %s", instance_id)
 
 
+def _require_provisioner_auth(authorization: str | None) -> None:
+    """Validate provisioner API key using constant-time comparison."""
+    try:
+        token = _extract_bearer_token(authorization)
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Unauthorized") from None
+    if not PROVISIONER_API_KEY or not hmac.compare_digest(token, PROVISIONER_API_KEY):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 @router.post("/system/provision", response_model=ProvisionResponse)
+@limiter.limit("5/minute")
 async def provision_instance(  # noqa: C901, PLR0912, PLR0915
+    request: Request,  # noqa: ARG001
     data: dict,
     authorization: Annotated[str | None, Header()] = None,
     background_tasks: BackgroundTasks = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Provision a new instance (compatible with customer portal)."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     sb = ensure_supabase()
 
@@ -112,7 +132,12 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             raise HTTPException(status_code=500, detail=f"Failed to insert instance: {e!s}") from e
 
     helm_release_name = f"instance-{customer_id}"
-    logger.info("Provisioning instance for subscription %s, new id: %s, tier: %s", subscription_id, customer_id, tier)
+    logger.info(
+        "Provisioning instance for subscription %s, new id: %s, tier: %s",
+        subscription_id,
+        customer_id,
+        tier,
+    )
 
     namespace = "mindroom-instances"
     try:
@@ -227,7 +252,10 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         try:
             background_tasks.add_task(_background_mark_running_when_ready, customer_id, namespace)
         except Exception:
-            logger.warning("Failed to schedule background readiness task for instance %s", customer_id)
+            logger.warning(
+                "Failed to schedule background readiness task for instance %s",
+                customer_id,
+            )
 
     return {
         "customer_id": customer_id,
@@ -240,13 +268,14 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 
 
 @router.post("/system/instances/{instance_id}/start", response_model=ActionResult)
+@limiter.limit("10/minute")
 async def start_instance_provisioner(
+    request: Request,  # noqa: ARG001
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Start an instance (provisioner API compatible)."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     logger.info("Starting instance %s", instance_id)
 
@@ -279,13 +308,14 @@ async def start_instance_provisioner(
 
 
 @router.post("/system/instances/{instance_id}/stop", response_model=ActionResult)
+@limiter.limit("10/minute")
 async def stop_instance_provisioner(
+    request: Request,  # noqa: ARG001
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Stop an instance (provisioner API compatible)."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     logger.info("Stopping instance %s", instance_id)
 
@@ -318,13 +348,14 @@ async def stop_instance_provisioner(
 
 
 @router.post("/system/instances/{instance_id}/restart", response_model=ActionResult)
+@limiter.limit("10/minute")
 async def restart_instance_provisioner(
+    request: Request,  # noqa: ARG001
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Restart an instance (provisioner API compatible)."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     logger.info("Restarting instance %s", instance_id)
 
@@ -350,17 +381,21 @@ async def restart_instance_provisioner(
         logger.exception("Failed to restart instance %s", instance_id)
         raise HTTPException(status_code=500, detail=f"Failed to restart instance: {e}") from e
 
-    return {"success": True, "message": f"Instance {instance_id} restarted successfully"}
+    return {
+        "success": True,
+        "message": f"Instance {instance_id} restarted successfully",
+    }
 
 
 @router.delete("/system/instances/{instance_id}/uninstall", response_model=ActionResult)
+@limiter.limit("2/minute")
 async def uninstall_instance(
+    request: Request,  # noqa: ARG001
     instance_id: int,
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Completely uninstall/deprovision an instance."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     logger.info("Uninstalling instance %s", instance_id)
 
@@ -388,16 +423,21 @@ async def uninstall_instance(
         logger.exception("Failed to uninstall instance %s", instance_id)
         raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {e}") from e
 
-    return {"success": True, "message": f"Instance {instance_id} uninstalled successfully", "instance_id": instance_id}
+    return {
+        "success": True,
+        "message": f"Instance {instance_id} uninstalled successfully",
+        "instance_id": instance_id,
+    }
 
 
 @router.post("/system/sync-instances", response_model=SyncResult)
+@limiter.limit("5/minute")
 async def sync_instances(
+    request: Request,  # noqa: ARG001
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
     """Sync instance states between database and Kubernetes cluster."""
-    if authorization != f"Bearer {PROVISIONER_API_KEY}":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_provisioner_auth(authorization)
 
     sb = ensure_supabase()
 
@@ -426,7 +466,10 @@ async def sync_instances(
 
             if not exists:
                 if current_status not in ["error", "deprovisioned"]:
-                    logger.info("Instance %s not found in cluster, marking as error", instance_id)
+                    logger.info(
+                        "Instance %s not found in cluster, marking as error",
+                        instance_id,
+                    )
                     now = datetime.now(UTC).isoformat()
                     sb.table("instances").update(
                         {

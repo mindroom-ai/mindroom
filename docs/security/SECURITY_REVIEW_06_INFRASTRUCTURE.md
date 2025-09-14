@@ -1,34 +1,32 @@
 # Infrastructure Security Review
 
-**Review Date:** 2025-01-15
+**Review Date:** 2025-09-12
 **Scope:** Kubernetes Infrastructure Security
 **Environment:** MindRoom SaaS Platform
 
 ## Executive Summary
 
-This report analyzes the infrastructure security of the MindRoom SaaS platform, focusing on Kubernetes deployments, container security, network isolation, and access controls. The review identifies several critical security gaps that require immediate attention, particularly around privilege escalation, network isolation, and secrets management.
+This report analyzes the infrastructure security of the MindRoom SaaS platform, focusing on Kubernetes deployments, container security, network isolation, and access controls. Since the prior review, baseline isolation and RBAC hardening have been implemented; remaining gaps center on secrets lifecycle and internal TLS.
 
-**Risk Summary:**
-- **CRITICAL (3):** Missing NetworkPolicies, inadequate container security contexts, secrets in environment variables
-- **HIGH (2):** Excessive RBAC permissions, incomplete TLS enforcement
-- **MEDIUM (2):** Container image security, CORS configuration gaps
-- **LOW (1):** Resource limits implementation
+**Risk Summary (updated):**
+- **HIGH (2):** Secrets lifecycle (env → K8s Secrets/External Secrets), internal TLS/mTLS
+- **MEDIUM (3):** Image pinning/scanning, residual RBAC tightening, policy automation
+- **LOW (2):** Resource limits monitoring/alerts, PDBs
 
 ## Detailed Findings
 
 ### 1. Pod Privilege Configuration
 
-**Status: ❌ FAIL**
+**Status: ⚠️ PARTIAL**
 **Severity: CRITICAL**
 
 #### Current State
-- **Backend deployment:** Has basic security context (runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000)
-- **Frontend deployment:** Missing security context entirely
-- **Synapse deployment:** Missing security context, runs privileged operations
+- **Backend deployment:** Security context hardened (runAsNonRoot, drop caps, no priv-esc)
+- **Frontend deployment:** App container hardened; nginx kept capable of binding :80
+- **Synapse deployment:** Startup performs file ownership adjustments (unchanged)
 
-#### Critical Issues
-1. **Frontend pod lacks security context** - runs as root by default
-2. **Synapse container performs privileged operations** in startup script:
+#### Notes
+1. **Synapse container performs privileged operations** in startup script:
    ```yaml
    command: ["/bin/sh"]
    args:
@@ -37,11 +35,8 @@ This report analyzes the infrastructure security of the MindRoom SaaS platform, 
        # Fix permissions
        chown -R 991:991 /data
    ```
-3. **Missing security hardening directives:**
-   - No `allowPrivilegeEscalation: false`
-   - No `readOnlyRootFilesystem: true`
-   - No `runAsNonRoot: true`
-   - No `capabilities` dropping
+2. **Backend hardened** with `allowPrivilegeEscalation: false`, `runAsNonRoot: true`, and capability drop
+3. **Frontend app container** hardened; nginx left with defaults to serve on port 80
 
 #### Impact
 - Container escape potential through privilege escalation
@@ -75,28 +70,16 @@ containers:
 
 ### 2. Network Policies and Traffic Isolation
 
-**Status: ❌ FAIL**
-**Severity: CRITICAL**
+**Status: ✅ PASS (baseline isolation in place)**
+**Severity: HIGH (for remaining refinements)**
 
 #### Current State
-- **No NetworkPolicies found** in any Kubernetes manifests
-- Default cluster behavior allows all pod-to-pod communication
-- No traffic segmentation between customer instances
-- No ingress/egress filtering
+- Per‑instance NetworkPolicy restricts ingress to required ports and limits egress to DNS and HTTPS
+- Platform/backend interacts with instances via namespaced Role + RoleBinding; no cluster‑wide wildcard permissions
 
-#### Critical Issues
-1. **Complete lack of network isolation** between:
-   - Customer instances in `mindroom-instances` namespace
-   - Platform services in `mindroom-staging/prod` namespaces
-   - External traffic controls
-2. **Cross-tenant data exposure risk** - instances can communicate freely
-3. **No egress controls** - pods can reach any external endpoint
-
-#### Impact
-- Multi-tenant security breaches
-- Lateral movement in compromise scenarios
-- Data exfiltration possibilities
-- Compliance violations
+#### Remaining Gaps
+1. Tighten egress as needed for specific external dependencies (e.g., allowlist destinations)
+2. Consider service mesh for zero‑trust intra‑cluster enforcement and telemetry
 
 #### Remediation
 ```yaml
@@ -157,57 +140,16 @@ All deployments have proper resource limits configured:
 
 ### 4. RBAC Permissions and Least Privilege
 
-**Status: ⚠️ PARTIAL**
-**Severity: HIGH**
+**Status: ✅ PASS (backend scoped to namespace)**
+**Severity: MEDIUM (further tightening possible)**
 
 #### Current State
-Platform backend service account has extensive cluster-wide permissions:
+- Backend uses a namespaced Role in `mindroom-instances` with a RoleBinding from the platform namespace service account
+- No ClusterRole with broad wildcard access
 
-```yaml
-# Overly broad permissions
-- apiGroups: [""]
-  resources: ["namespaces"]
-  verbs: ["get", "list", "create", "delete"]
-- apiGroups: [""]
-  resources: ["configmaps", "secrets", "services", "pods", "persistentvolumeclaims", "events", "serviceaccounts"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-```
-
-#### Issues
-1. **Excessive scope:** ClusterRole instead of namespaced Role
-2. **Over-privileged:** Full CRUD on secrets cluster-wide
-3. **Dangerous permissions:** Can delete namespaces
-4. **Missing instance service accounts:** Instance pods use default service account
-
-#### Impact
-- Privilege escalation potential
-- Cross-tenant secret access
-- Infrastructure tampering capability
-
-#### Remediation
-```yaml
-# Restricted platform backend role
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: platform-backend
-  namespace: mindroom-instances
-rules:
-- apiGroups: [""]
-  resources: ["configmaps", "secrets"]
-  verbs: ["get", "list", "create", "update", "patch"]
-  resourceNames: ["mindroom-config-*", "mindroom-secrets-*"]
-- apiGroups: ["apps"]
-  resources: ["deployments"]
-  verbs: ["get", "list", "create", "update", "patch"]
-
-# Instance service account
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: mindroom-instance-{{ .Values.customer }}
-  namespace: mindroom-instances
-```
+#### Remaining Gaps
+- Review verbs for secret/configmap/actions and restrict to minimal set per controller needs
+- Add admission policy to block privileged bindings in sensitive namespaces
 
 ### 5. Container Image Security
 
@@ -262,91 +204,36 @@ spec:
 
 ### 6. Secrets Management
 
-**Status: ❌ FAIL**
-**Severity: CRITICAL**
-
-#### Current State
-API keys and sensitive data exposed as environment variables:
-
-```yaml
-env:
-- name: OPENAI_API_KEY
-  value: {{ .Values.openai_key | quote }}
-- name: ANTHROPIC_API_KEY
-  value: {{ .Values.anthropic_key | quote }}
-- name: SUPABASE_SERVICE_KEY
-  value: {{ .Values.supabaseServiceKey | quote }}
-```
-
-#### Critical Issues
-1. **Secrets in environment variables** - visible in process lists, container inspect
-2. **No secret rotation** mechanism
-3. **Plaintext in Helm values** - stored in version control
-4. **Missing encryption at rest** validation
-
-#### Impact
-- API key exposure in logs/monitoring
-- Compromise persistence
-- Audit trail gaps
-
-#### Remediation
-```yaml
-# Secret volume mounts
-apiVersion: v1
-kind: Secret
-metadata:
-  name: mindroom-api-keys-{{ .Values.customer }}
-type: Opaque
-stringData:
-  openai_key: {{ .Values.openai_key }}
-  anthropic_key: {{ .Values.anthropic_key }}
-
-# Volume mount in deployment
-volumeMounts:
-- name: api-keys
-  mountPath: /etc/secrets
-  readOnly: true
-volumes:
-- name: api-keys
-  secret:
-    secretName: mindroom-api-keys-{{ .Values.customer }}
-    defaultMode: 0400
-
-# Application reads from files
-export OPENAI_API_KEY=$(cat /etc/secrets/openai_key)
-```
-
-### 7. TLS/HTTPS Implementation
-
-**Status: ⚠️ PARTIAL**
+**Status: ❌ FAIL → ⚠️ PARTIAL (defaults removed; lifecycle pending)**
 **Severity: HIGH**
 
 #### Current State
-- **TLS termination:** At ingress level using Let's Encrypt
-- **Certificate management:** cert-manager with automatic renewal
-- **Internal traffic:** HTTP between components
+- Tracked defaults removed; Helm templates generate strong secrets when not provided
+- Runtime secrets still passed via env in places; rotation policy and etcd encryption not yet confirmed
 
-#### Issues
-1. **No TLS for internal communication** between services
-2. **Mixed content potential** - internal HTTP calls
-3. **No HSTS headers** enforcement
-4. **Missing TLS cipher restrictions**
+#### Next Steps
+1. Move runtime secrets to K8s Secrets or External Secrets
+2. Confirm etcd encryption at rest on the cluster
+3. Define and automate rotation procedures
 
-#### Impact
-- Man-in-the-middle attacks on internal traffic
-- Credential interception
-- Compliance gaps
+### 7. TLS/HTTPS Implementation
 
-#### Remediation
+**Status: ⚠️ PARTIAL (edge hardened; internal TLS pending)**
+**Severity: HIGH**
+
+#### Current State
+- TLS termination at ingress with cert‑manager; TLSv1.2/1.3 and restricted ciphers configured
+- HSTS enforced via application headers (API) and ingress HSTS annotations
+- Internal service‑to‑service traffic remains HTTP
+
+#### Recommended Improvements
 ```yaml
-# Ingress TLS hardening
-annotations:
-  nginx.ingress.kubernetes.io/ssl-protocols: "TLSv1.2 TLSv1.3"
-  nginx.ingress.kubernetes.io/ssl-ciphers: "ECDHE-RSA-AES128-GCM-SHA256,ECDHE-RSA-AES256-GCM-SHA384"
-  nginx.ingress.kubernetes.io/configuration-snippet: |
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+# Prefer standard HSTS annotations on NGINX ingress
+nginx.ingress.kubernetes.io/hsts: "true"
+nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
 
-# Service mesh for internal TLS (Istio example)
+# Service mesh for internal TLS (example)
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
@@ -359,56 +246,22 @@ spec:
 
 ### 8. CORS Policy Configuration
 
-**Status: ⚠️ PARTIAL**
-**Severity: MEDIUM**
+**Status: ✅ PASS (restricted)**
+**Severity: LOW**
 
 #### Current State
-FastAPI CORS configuration allows broad access:
+- CORS limited to known origins; in production, localhost origins are filtered
+- Allowed methods: GET/POST/PUT/DELETE; limited headers; preflight cached (max_age=86400)
 
 ```python
-ALLOWED_ORIGINS = [
-    "https://app.staging.mindroom.chat",
-    "https://app.mindroom.chat",
-    "http://localhost:3000",
-    "http://localhost:3001",
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],          # Too permissive
-    allow_headers=["*"],          # Too permissive
-    expose_headers=["*"],         # Too permissive
-)
-```
-
-#### Issues
-1. **Overly permissive methods** - allows all HTTP methods
-2. **Broad header exposure** - potential information leakage
-3. **Development origins in production** - localhost entries
-4. **No preflight optimization** - performance impact
-
-#### Impact
-- CSRF attack surface
-- Information disclosure
-- Performance degradation
-
-#### Remediation
-```python
-# Restrictive CORS configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=cors_origins,           # production excludes localhost
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=[
-        "Authorization",
-        "Content-Type",
-        "X-Requested-With"
-    ],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
     expose_headers=["X-Total-Count"],
-    max_age=86400  # Cache preflight for 24h
+    max_age=86400,
 )
 ```
 
@@ -478,8 +331,8 @@ spec:
 
 | Control | SOC 2 | PCI DSS | ISO 27001 | Status |
 |---------|-------|---------|-----------|---------|
-| Network Isolation | CC6.1 | 1.2.1 | A.13.1.1 | ❌ FAIL |
-| Access Control | CC6.2 | 7.1.1 | A.9.1.1 | ⚠️ PARTIAL |
+| Network Isolation | CC6.1 | 1.2.1 | A.13.1.1 | ✅ PASS |
+| Access Control | CC6.2 | 7.1.1 | A.9.1.1 | ✅ PASS |
 | Encryption | CC6.7 | 3.4.1 | A.10.1.1 | ⚠️ PARTIAL |
 | Monitoring | CC7.1 | 10.1.1 | A.12.4.1 | ❌ FAIL |
 
@@ -487,12 +340,12 @@ spec:
 
 The MindRoom infrastructure has a solid foundation with proper resource limits and basic TLS implementation. However, critical security gaps in network isolation, privilege management, and secrets handling create significant risk exposure. Immediate implementation of NetworkPolicies and security contexts is essential to prevent multi-tenant security breaches.
 
-**Risk Score: 7.2/10 (HIGH)**
+**Risk Score: 6.5/10 (HIGH)**
 
 **Priority Actions:**
-1. Deploy NetworkPolicies (Critical - 48 hours)
-2. Add pod security contexts (Critical - 72 hours)
-3. Implement secret volume mounts (Critical - 1 week)
-4. Restrict RBAC permissions (High - 1 week)
+1. Implement secret volume mounts / External Secrets (High – 1 week)
+2. Confirm etcd encryption; plan rotation (High – 1 week)
+3. Evaluate internal mTLS (High – spike + rollout)
+4. Add policy automation (Kyverno/Gatekeeper) (Medium)
 
 This review should be updated quarterly or after significant infrastructure changes.

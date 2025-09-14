@@ -30,11 +30,15 @@ pkgs.mkShell {
     nodejs_20
     pnpm
 
-    # Python for backend
-    python311
-
     # uv for Python package management
     uv
+
+    # Infra tooling
+    terraform
+    kind
+    kubectl
+    kubernetes-helm
+    kubeconform
   ];
 
   shellHook = ''
@@ -43,5 +47,12 @@ pkgs.mkShell {
     echo "Chromium available for screenshots"
     export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
     export PUPPETEER_EXECUTABLE_PATH=${pkgs.chromium}/bin/chromium
+
+    echo "Tip: run backend tests with:"
+    echo "  (cd saas-platform/platform-backend && PYTHONPATH=src uv run pytest -q)"
+    echo "Render Helm templates with:"
+    echo "  helm template platform ./cluster/k8s/platform -f cluster/k8s/platform/values.yaml | kubeconform -ignore-missing-schemas"
+    echo "Kind cluster helpers:"
+    echo "  just cluster-kind-up && just cluster-kind-build-load && just cluster-kind-install-platform"
   '';
 }

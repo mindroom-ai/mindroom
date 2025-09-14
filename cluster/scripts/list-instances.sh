@@ -12,7 +12,9 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Check if we're in the saas-platform directory or parent
-if [ -f "./terraform-k8s/mindroom-k8s_kubeconfig.yaml" ]; then
+if [ -f "./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml" ]; then
+    KUBECONFIG="./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"
+elif [ -f "./terraform-k8s/mindroom-k8s_kubeconfig.yaml" ]; then
     KUBECONFIG="./terraform-k8s/mindroom-k8s_kubeconfig.yaml"
 elif [ -f "./saas-platform/terraform-k8s/mindroom-k8s_kubeconfig.yaml" ]; then
     KUBECONFIG="./saas-platform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"

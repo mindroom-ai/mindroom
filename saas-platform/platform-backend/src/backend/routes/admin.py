@@ -10,7 +10,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from backend.config import PROVISIONER_API_KEY, logger
-from backend.deps import ensure_supabase, verify_admin
+from pydantic import BaseModel
+from backend.deps import ensure_supabase, limiter, verify_admin
 from backend.models import (
     ActionResult,
     AdminAccountDetailsResponse,
@@ -34,9 +35,16 @@ from backend.routes.provisioner import (
     sync_instances,
     uninstall_instance,
 )
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 router = APIRouter()
+ALLOWED_RESOURCES = {
+    "accounts",
+    "subscriptions",
+    "instances",
+    "audit_logs",
+    "usage_metrics",
+}
 
 
 def audit_log_entry(
@@ -66,7 +74,8 @@ def audit_log_entry(
 
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
-async def get_admin_stats(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+@limiter.limit("30/minute")
+async def get_admin_stats(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
     """Get platform statistics for admin dashboard."""
     audit_log_entry(
         account_id=admin["user_id"],
@@ -117,7 +126,12 @@ async def _proxy_to_provisioner(
 
 
 @router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
-async def admin_start_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+@limiter.limit("10/minute")
+async def admin_start_instance(
+    request: Request,  # noqa: ARG001
+    instance_id: int,
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
+) -> dict[str, Any]:
     """Start an instance (admin proxy)."""
     result = await _proxy_to_provisioner(start_instance_provisioner, instance_id, admin)
     audit_log_entry(
@@ -130,7 +144,7 @@ async def admin_start_instance(instance_id: int, admin: Annotated[dict, Depends(
 
 
 @router.post("/admin/instances/{instance_id}/stop", response_model=ActionResult)
-async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008
     """Stop an instance (admin proxy)."""
     result = await _proxy_to_provisioner(stop_instance_provisioner, instance_id, admin)
     audit_log_entry(
@@ -143,7 +157,12 @@ async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(v
 
 
 @router.post("/admin/instances/{instance_id}/restart", response_model=ActionResult)
-async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+@limiter.limit("10/minute")
+async def admin_restart_instance(
+    request: Request,  # noqa: ARG001
+    instance_id: int,
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
+) -> dict[str, Any]:
     """Restart an instance (admin proxy)."""
     result = await _proxy_to_provisioner(restart_instance_provisioner, instance_id, admin)
     audit_log_entry(
@@ -156,7 +175,12 @@ async def admin_restart_instance(instance_id: int, admin: Annotated[dict, Depend
 
 
 @router.delete("/admin/instances/{instance_id}/uninstall", response_model=ActionResult)
-async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+@limiter.limit("2/minute")
+async def admin_uninstall_instance(
+    request: Request,  # noqa: ARG001
+    instance_id: int,
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
+) -> dict[str, Any]:
     """Uninstall an instance (admin proxy)."""
     result = await _proxy_to_provisioner(uninstall_instance, instance_id, admin)
     audit_log_entry(
@@ -169,10 +193,12 @@ async def admin_uninstall_instance(instance_id: int, admin: Annotated[dict, Depe
 
 
 @router.post("/admin/instances/{instance_id}/provision", response_model=ProvisionResponse)
+@limiter.limit("5/minute")
 async def admin_provision_instance(
+    request: Request,  # noqa: ARG001
     instance_id: int,
     background_tasks: BackgroundTasks,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Provision a deprovisioned instance."""
     sb = ensure_supabase()
@@ -184,7 +210,10 @@ async def admin_provision_instance(
 
     instance = result.data[0]
     if instance.get("status") not in ["deprovisioned", "error"]:
-        raise HTTPException(status_code=400, detail="Instance must be deprovisioned or in error state to provision")
+        raise HTTPException(
+            status_code=400,
+            detail="Instance must be deprovisioned or in error state to provision",
+        )
 
     # Call provisioner with existing instance data
     data = {
@@ -200,13 +229,17 @@ async def admin_provision_instance(
         action="provision",
         resource_type="instance",
         resource_id=str(instance_id),
-        details={"account_id": instance.get("account_id"), "tier": instance.get("tier")},
+        details={
+            "account_id": instance.get("account_id"),
+            "tier": instance.get("tier"),
+        },
     )
     return result
 
 
 @router.post("/admin/sync-instances", response_model=SyncResult)
-async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:
+@limiter.limit("5/minute")
+async def admin_sync_instances(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
     """Sync instance states between database and Kubernetes (admin proxy)."""
     result = await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
     audit_log_entry(
@@ -221,7 +254,7 @@ async def admin_sync_instances(admin: Annotated[dict, Depends(verify_admin)]) ->
 @router.get("/admin/accounts/{account_id}", response_model=AdminAccountDetailsResponse)
 async def get_account_details(
     account_id: str,
-    admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001, FAST002, B008
 ) -> dict[str, Any]:
     """Get detailed account information including subscription and instances."""
     sb = ensure_supabase()
@@ -251,7 +284,7 @@ async def get_account_details(
 
         # Build response
         return {
-            **account,
+            "account": account,
             "subscription": subscription_result.data[0] if subscription_result.data else None,
             "instances": instances_result.data if instances_result.data else [],
         }
@@ -262,17 +295,24 @@ async def get_account_details(
         raise HTTPException(status_code=500, detail="Failed to fetch account details") from e
 
 
+class UpdateAccountStatusRequest(BaseModel):
+    """Request model for updating account status."""
+
+    status: str
+    reason: str | None = None
+
+
 @router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
 async def update_account_status(
     account_id: str,
-    status: str,
-    admin: Annotated[dict, Depends(verify_admin)],
+    request: UpdateAccountStatusRequest,
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Update account status (active, suspended, etc)."""
     sb = ensure_supabase()
 
     valid_statuses = ["active", "suspended", "deleted", "pending_verification"]
-    if status not in valid_statuses:
+    if request.status not in valid_statuses:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
 
     try:
@@ -280,7 +320,7 @@ async def update_account_status(
             sb.table("accounts")
             .update(
                 {
-                    "status": status,
+                    "status": request.status,
                     "updated_at": datetime.now(UTC).isoformat(),
                 },
             )
@@ -296,10 +336,14 @@ async def update_account_status(
             action="update",
             resource_type="account",
             resource_id=account_id,
-            details={"status": status},
+            details={"status": request.status, "reason": request.reason},
         )
 
-        return {"status": "success", "account_id": account_id, "new_status": status}  # noqa: TRY300
+        return {
+            "status": "success",
+            "account_id": account_id,
+            "new_status": request.status,
+        }  # noqa: TRY300
     except Exception as e:
         logger.exception("Error updating account status")
         raise HTTPException(status_code=500, detail="Failed to update account status") from e
@@ -311,18 +355,113 @@ async def admin_logout() -> dict[str, bool]:
     return {"success": True}
 
 
+@router.get("/admin/metrics/dashboard", response_model=AdminDashboardMetricsResponse)
+@limiter.limit("30/minute")
+async def get_dashboard_metrics(
+    request: Request,  # noqa: ARG001
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
+) -> dict[str, Any]:
+    """Get dashboard metrics for admin panel."""
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="view",
+        resource_type="dashboard_metrics",
+    )
+    sb = ensure_supabase()
+
+    try:
+        accounts = sb.table("accounts").select("*", count="exact", head=True).execute()
+        active_subs = sb.table("subscriptions").select("*", count="exact", head=True).eq("status", "active").execute()
+        _ = sb.table("instances").select("*", count="exact", head=True).eq("status", "running").execute()
+
+        subs_data = sb.table("subscriptions").select("tier").eq("status", "active").execute()
+        tier_prices = {"starter": 49, "professional": 199, "enterprise": 999, "free": 0}
+        mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
+
+        seven_days_ago = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+        messages = (
+            sb.table("usage_metrics")
+            .select("metric_date, messages_sent")
+            .gte("metric_date", seven_days_ago)
+            .order("metric_date")
+            .execute()
+        )
+
+        if messages.data:
+            by_date = defaultdict(int)
+            for m in messages.data:
+                date = m["metric_date"][:10]
+                by_date[date] += m.get("messages_sent", 0)
+            _ = [  # noqa: F841
+                {"date": date, "messages_sent": count} for date, count in sorted(by_date.items())
+            ]
+
+        all_instances = sb.table("instances").select("status").execute()
+        status_counts: dict[str, int] = {}
+        if all_instances.data:
+            for inst in all_instances.data:
+                status = inst.get("status", "unknown")
+                status_counts[status] = status_counts.get(status, 0) + 1
+
+        audit_logs = (
+            sb.table("audit_logs")
+            .select("created_at, action, account_id")
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+        recent_activity = audit_logs.data if audit_logs.data else []
+    except Exception:
+        logger.exception("Error fetching metrics")
+        return {
+            "total_accounts": 0,
+            "active_subscriptions": 0,
+            "total_instances": 0,
+            "instances_by_status": {},
+            "subscription_revenue": 0.0,
+            "subscriptions_by_tier": {},
+            "recent_signups": [],
+            "recent_instances": [],
+        }
+    else:
+        # Build subscriptions by tier
+        subscriptions_by_tier = {}
+        if subs_data.data:
+            for sub in subs_data.data:
+                tier = sub.get("tier", "free")
+                subscriptions_by_tier[tier] = subscriptions_by_tier.get(tier, 0) + 1
+
+        # Build instances by status dict
+        instances_by_status = {status: count for status, count in status_counts.items()}
+
+        return {
+            "total_accounts": accounts.count or 0,
+            "active_subscriptions": active_subs.count or 0,
+            "total_instances": len(all_instances.data) if all_instances.data else 0,
+            "instances_by_status": instances_by_status,
+            "subscription_revenue": float(mrr),
+            "subscriptions_by_tier": subscriptions_by_tier,
+            "recent_signups": [],  # Not implemented yet
+            "recent_instances": recent_activity if recent_activity else [],
+        }
+
+
 # === React Admin Data Provider ===
 @router.get("/admin/{resource}", response_model=AdminListResponse)
-async def admin_get_list(
+@limiter.limit("60/minute")
+async def admin_get_list(  # noqa: C901
+    request: Request,  # noqa: ARG001
     resource: str,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
     _sort: Annotated[str | None, Query()] = None,
     _order: Annotated[str | None, Query()] = None,
-    _start: Annotated[int, Query()] = 0,
-    _end: Annotated[int, Query()] = 10,
+    _start: int = Query(0),  # noqa: FAST002
+    _end: int = Query(10),  # noqa: FAST002
     q: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
     """Generic list endpoint for React Admin."""
+    if resource not in ALLOWED_RESOURCES:
+        raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
     audit_log_entry(
@@ -370,12 +509,16 @@ async def admin_get_list(
 
 
 @router.get("/admin/{resource}/{resource_id}", response_model=AdminGetOneResponse)
+@limiter.limit("60/minute")
 async def admin_get_one(
+    request: Request,  # noqa: ARG001
     resource: str,
     resource_id: str,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Get single record for React Admin."""
+    if resource not in ALLOWED_RESOURCES:
+        raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
     audit_log_entry(
@@ -387,19 +530,24 @@ async def admin_get_one(
 
     try:
         result = sb.table(resource).select("*").eq("id", resource_id).single().execute()
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception:
+        logger.exception("Error fetching single resource")
+        raise HTTPException(status_code=404, detail="Not found") from None
     else:
         return {"data": result.data}
 
 
 @router.post("/admin/{resource}", response_model=AdminCreateResponse)
+@limiter.limit("15/minute")
 async def admin_create(
+    request: Request,  # noqa: ARG001
     resource: str,
     data: dict,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Create record for React Admin."""
+    if resource not in ALLOWED_RESOURCES:
+        raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
     try:
@@ -417,18 +565,23 @@ async def admin_create(
             )
 
         return {"data": result.data[0] if result.data else None}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        logger.exception("Error creating resource")
+        raise HTTPException(status_code=400, detail="Invalid request") from None
 
 
 @router.put("/admin/{resource}/{resource_id}", response_model=AdminUpdateResponse)
+@limiter.limit("15/minute")
 async def admin_update(
+    request: Request,  # noqa: ARG001
     resource: str,
     resource_id: str,
     data: dict,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Update record for React Admin."""
+    if resource not in ALLOWED_RESOURCES:
+        raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
     try:
@@ -445,17 +598,22 @@ async def admin_update(
         )
 
         return {"data": result.data[0] if result.data else None}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        logger.exception("Error updating resource")
+        raise HTTPException(status_code=400, detail="Invalid request") from None
 
 
 @router.delete("/admin/{resource}/{resource_id}", response_model=AdminDeleteResponse)
+@limiter.limit("10/minute")
 async def admin_delete(
+    request: Request,  # noqa: ARG001
     resource: str,
     resource_id: str,
-    admin: Annotated[dict, Depends(verify_admin)],
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Delete record for React Admin."""
+    if resource not in ALLOWED_RESOURCES:
+        raise HTTPException(status_code=400, detail="Invalid resource")
     sb = ensure_supabase()
 
     try:
@@ -468,86 +626,8 @@ async def admin_delete(
             resource_type=resource,
             resource_id=resource_id,
         )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception:
+        logger.exception("Error deleting resource")
+        raise HTTPException(status_code=400, detail="Invalid request") from None
     else:
         return {"data": {"id": resource_id}}
-
-
-@router.get("/admin/metrics/dashboard", response_model=AdminDashboardMetricsResponse)
-async def get_dashboard_metrics(
-    admin: Annotated[dict, Depends(verify_admin)],
-) -> dict[str, Any]:
-    """Get dashboard metrics for admin panel."""
-    audit_log_entry(
-        account_id=admin["user_id"],
-        action="view",
-        resource_type="dashboard_metrics",
-    )
-    sb = ensure_supabase()
-
-    try:
-        accounts = sb.table("accounts").select("*", count="exact", head=True).execute()
-        active_subs = sb.table("subscriptions").select("*", count="exact", head=True).eq("status", "active").execute()
-        running_instances = (
-            sb.table("instances").select("*", count="exact", head=True).eq("status", "running").execute()
-        )
-
-        subs_data = sb.table("subscriptions").select("tier").eq("status", "active").execute()
-        tier_prices = {"starter": 49, "professional": 199, "enterprise": 999, "free": 0}
-        mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
-
-        seven_days_ago = (datetime.now(UTC) - timedelta(days=7)).isoformat()
-        messages = (
-            sb.table("usage_metrics")
-            .select("metric_date, messages_sent")
-            .gte("metric_date", seven_days_ago)
-            .order("metric_date")
-            .execute()
-        )
-
-        daily_messages = []
-        if messages.data:
-            by_date = defaultdict(int)
-            for m in messages.data:
-                date = m["metric_date"][:10]
-                by_date[date] += m.get("messages_sent", 0)
-            daily_messages = [{"date": date, "messages_sent": count} for date, count in sorted(by_date.items())]
-
-        all_instances = sb.table("instances").select("status").execute()
-        status_counts: dict[str, int] = {}
-        if all_instances.data:
-            for inst in all_instances.data:
-                status = inst.get("status", "unknown")
-                status_counts[status] = status_counts.get(status, 0) + 1
-        instance_statuses = [{"status": status, "count": count} for status, count in status_counts.items()]
-
-        audit_logs = (
-            sb.table("audit_logs")
-            .select("created_at, action, account_id")
-            .order("created_at", desc=True)
-            .limit(10)
-            .execute()
-        )
-        recent_activity = audit_logs.data if audit_logs.data else []
-    except Exception:
-        logger.exception("Error fetching metrics")
-        return {
-            "totalAccounts": 0,
-            "activeSubscriptions": 0,
-            "runningInstances": 0,
-            "mrr": 0,
-            "dailyMessages": [],
-            "instanceStatuses": [],
-            "recentActivity": [],
-        }
-    else:
-        return {
-            "totalAccounts": accounts.count or 0,
-            "activeSubscriptions": active_subs.count or 0,
-            "runningInstances": running_instances.count or 0,
-            "mrr": mrr,
-            "dailyMessages": daily_messages,
-            "instanceStatuses": instance_statuses,
-            "recentActivity": recent_activity,
-        }

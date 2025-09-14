@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 from backend.config import auth_client, logger, supabase
 from cachetools import TTLCache
 from fastapi import Header, HTTPException
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 if TYPE_CHECKING:
     from supabase import Client
@@ -20,6 +22,9 @@ _auth_cache = TTLCache(maxsize=100, ttl=300)
 
 # Minimum time for auth operations to prevent timing attacks
 MIN_AUTH_TIME = 0.1  # 100ms minimum
+
+# Global rate limiter for the FastAPI app and routes
+limiter = Limiter(key_func=get_remote_address)
 
 
 def ensure_supabase() -> Client:
@@ -114,7 +119,7 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901,
                             else "",
                             "created_at": now,
                             "updated_at": now,
-                        },
+                        }
                     )
                     .execute()
                 )

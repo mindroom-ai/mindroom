@@ -5,10 +5,14 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from backend.config import PLATFORM_DOMAIN, logger, stripe
-from backend.deps import ensure_supabase, verify_user, verify_user_optional
+from backend.deps import ensure_supabase, limiter, verify_user, verify_user_optional
 from backend.models import UrlResponse
-from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
-from fastapi import APIRouter, Depends, HTTPException
+from backend.pricing import (
+    get_stripe_price_id,
+    get_trial_days,
+    is_trial_enabled_for_plan,
+)
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -23,8 +27,10 @@ class CheckoutRequest(BaseModel):
 
 
 @router.post("/stripe/checkout", response_model=UrlResponse)
+@limiter.limit("5/minute")
 async def create_checkout_session(
-    request: CheckoutRequest,
+    request: Request,  # noqa: ARG001
+    payload: CheckoutRequest,
     user: Annotated[dict | None, Depends(verify_user_optional)],
 ) -> dict[str, Any]:
     """Create Stripe checkout session for subscription."""
@@ -32,9 +38,12 @@ async def create_checkout_session(
         raise HTTPException(status_code=500, detail="Stripe not configured")
 
     # Get price ID from config
-    price_id = get_stripe_price_id(request.tier, request.billing_cycle)
+    price_id = get_stripe_price_id(payload.tier, payload.billing_cycle)
     if not price_id:
-        raise HTTPException(status_code=400, detail=f"No price found for {request.tier} ({request.billing_cycle})")
+        raise HTTPException(
+            status_code=400,
+            detail=f"No price found for {payload.tier} ({payload.billing_cycle})",
+        )
 
     sb = ensure_supabase()
 
@@ -75,7 +84,7 @@ async def create_checkout_session(
                 return {"url": portal_session.url}
 
     # Use quantity for professional plan (per-user pricing)
-    quantity = request.quantity if request.tier == "professional" else 1
+    quantity = payload.quantity if payload.tier == "professional" else 1
 
     checkout_params = {
         "line_items": [{"price": price_id, "quantity": quantity}],
@@ -86,8 +95,8 @@ async def create_checkout_session(
         "billing_address_collection": "required",
         "subscription_data": {
             "metadata": {
-                "tier": request.tier,
-                "billing_cycle": request.billing_cycle,
+                "tier": payload.tier,
+                "billing_cycle": payload.billing_cycle,
                 "quantity": str(quantity),
                 "supabase_user_id": user["account_id"] if user else "",
             },
@@ -95,18 +104,24 @@ async def create_checkout_session(
     }
 
     # Add trial period if enabled for this plan
-    if is_trial_enabled_for_plan(request.tier):
+    if is_trial_enabled_for_plan(payload.tier):
         checkout_params["subscription_data"]["trial_period_days"] = get_trial_days()
 
     if customer_id:
         checkout_params["customer"] = customer_id
 
-    session = stripe.checkout.Session.create(**checkout_params)
+    try:
+        session = stripe.checkout.Session.create(**checkout_params)
+    except Exception as e:
+        logger.exception("Error creating checkout session")
+        raise HTTPException(status_code=500, detail="Failed to create checkout session") from e
+
     return {"url": session.url}
 
 
 @router.post("/stripe/portal", response_model=UrlResponse)
-async def create_portal_session(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+@limiter.limit("10/minute")
+async def create_portal_session(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:  # noqa: ARG001
     """Create Stripe customer portal session for subscription management."""
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")
@@ -117,9 +132,13 @@ async def create_portal_session(user: Annotated[dict, Depends(verify_user)]) -> 
     if not result.data or not result.data.get("stripe_customer_id"):
         raise HTTPException(status_code=404, detail="No Stripe customer found")
 
-    session = stripe.billing_portal.Session.create(
-        customer=result.data["stripe_customer_id"],
-        return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing?return=true",
-    )
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=result.data["stripe_customer_id"],
+            return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing?return=true",
+        )
+    except Exception as e:
+        logger.exception("Error creating portal session")
+        raise HTTPException(status_code=500, detail="Failed to create portal session") from e
 
     return {"url": session.url}

@@ -31,6 +31,7 @@ local-matrix-reset:
     rm -f matrix_state.yaml
     docker volume prune -f
     rm -rf tmp/
+    @echo "✅ Reset complete! Run 'just create' then 'mindroom run' to start fresh."
 
 #########################################
 # Local: Instances orchestration (Compose)
@@ -118,13 +119,8 @@ cluster-helm-lint:
     helm lint ./cluster/k8s/platform
 
 # Terraform
-# Apply Terraform (cluster + platform)
 cluster-tf-up:
     bash cluster/terraform/terraform-k8s/scripts/up.sh
-
-# Apply Terraform (force DNS)
-cluster-tf-up-dns:
-    ENABLE_DNS=true bash cluster/terraform/terraform-k8s/scripts/up.sh
 
 # Show Terraform outputs and cluster status
 cluster-tf-status:
@@ -134,10 +130,45 @@ cluster-tf-status:
 cluster-tf-destroy:
     bash cluster/terraform/terraform-k8s/scripts/destroy.sh
 
-# DB
+# Set up Terraform state symlinks (one-time setup for new clones)
+cluster-tf-state-setup:
+    bash cluster/scripts/setup-terraform-state.sh
+
 # Backup Supabase database (requires env in saas-platform/.env)
 cluster-db-backup:
     bash cluster/scripts/db/backup_supabase.sh
+
+############################
+# Cluster: Local kind setup #
+############################
+
+# Create kind cluster with ingress (local) via Nix shell
+cluster-kind-up:
+    nix-shell cluster/k8s/kind/shell.nix --run 'bash cluster/k8s/kind/up.sh'
+
+# Build images and load into kind (avoids registry pulls) via Nix shell
+cluster-kind-build-load:
+    nix-shell cluster/k8s/kind/shell.nix --run 'env DOCKER_BUILDKIT=1 bash cluster/k8s/kind/build_load_images.sh'
+
+# Install platform Helm chart into kind via Nix shell
+cluster-kind-install-platform:
+    nix-shell cluster/k8s/kind/shell.nix --run 'bash cluster/k8s/kind/install_platform.sh'
+
+# Port-forward backend service (kind) via Nix shell
+cluster-kind-port-backend:
+    nix-shell cluster/k8s/kind/shell.nix --run 'kubectl -n mindroom-staging port-forward svc/platform-backend 8000:8000'
+
+# Port-forward frontend service (kind) via Nix shell
+cluster-kind-port-frontend:
+    nix-shell cluster/k8s/kind/shell.nix --run 'kubectl -n mindroom-staging port-forward svc/platform-frontend 3000:3000'
+
+# Tear down kind cluster via Nix shell
+cluster-kind-down:
+    nix-shell cluster/k8s/kind/shell.nix --run 'bash cluster/k8s/kind/down.sh'
+
+# One-shot: fresh kind up + build+load + install
+cluster-kind-fresh:
+    nix-shell cluster/k8s/kind/shell.nix --run 'bash cluster/k8s/kind/start-fresh.sh'
 
 #################
 # Env helpers    #
@@ -155,13 +186,12 @@ env-saas:
 
 # SaaS platform backend tests
 # Run SaaS platform backend tests
-test-saas-back:
-    cd saas-platform/platform-backend && uv run pytest -q
+test-saas-backend:
+    cd saas-platform/platform-backend && uv run pytest
 
-# SaaS platform frontend sanity (no test script configured) – build verifies compile/types
-# Build SaaS platform frontend (sanity check)
+# Run SaaS platform frontend tests (Jest)
 test-saas-frontend:
-    cd saas-platform/platform-frontend && pnpm install && pnpm run build
+    cd saas-platform/platform-frontend && pnpm install && pnpm test
 
 # Core frontend tests (vitest)
 # Run core frontend tests (vitest)
@@ -173,7 +203,6 @@ test-front:
 test-backend:
     uv run pytest -q
 
-####################
 #############################
 # Developer-friendly aliases
 #############################
@@ -198,7 +227,7 @@ docker-build-saas-frontend:
         --build-arg NEXT_PUBLIC_SUPABASE_URL="${NEXT_PUBLIC_SUPABASE_URL:-${SUPABASE_URL:-}}" \
         --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="${NEXT_PUBLIC_SUPABASE_ANON_KEY:-${SUPABASE_ANON_KEY:-}}" \
         -t platform-frontend:dev \
-        -f Dockerfile.platform-frontend .
+        -f saas-platform/Dockerfile.platform-frontend .
 
 # Build SaaS platform backend (FastAPI)
 docker-build-saas-backend:

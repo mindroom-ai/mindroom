@@ -2,6 +2,10 @@
 # Kubernetes and Helm Providers
 # ===========================================
 
+locals {
+  dns_domain = var.environment == "production" ? var.domain : "${var.environment}.${var.domain}"
+}
+
 # Configure Kubernetes provider to use the cluster we just created
 provider "kubernetes" {
   config_path = "${path.module}/${var.cluster_name}_kubeconfig.yaml"
@@ -49,12 +53,9 @@ locals {
     }
 
     stripe = {
-      publishableKey      = var.stripe_publishable_key
-      secretKey           = var.stripe_secret_key
-      webhookSecret       = var.stripe_webhook_secret
-      priceStarter        = var.stripe_price_starter
-      priceProfessional   = var.stripe_price_professional
-      priceEnterprise     = var.stripe_price_enterprise
+      publishableKey = var.stripe_publishable_key
+      secretKey      = var.stripe_secret_key
+      webhookSecret  = var.stripe_webhook_secret
     }
 
     provisioner = {
@@ -70,6 +71,7 @@ locals {
 
 # Deploy the platform Helm chart
 resource "helm_release" "mindroom_platform" {
+  count = var.deploy_platform ? 1 : 0
   depends_on = [
     time_sleep.wait_for_cluster,
     kubectl_manifest.cluster_issuer_prod,
@@ -78,7 +80,8 @@ resource "helm_release" "mindroom_platform" {
 
   name       = "mindroom-${var.environment}"
   namespace  = var.environment
-  chart      = "${path.module}/../k8s/platform"
+  # Charts live at cluster/k8s/platform relative to this module
+  chart      = "${path.module}/../../k8s/platform"
 
   create_namespace = true
   wait             = true
@@ -94,16 +97,21 @@ resource "helm_release" "mindroom_platform" {
 # ===========================================
 
 output "platform_status" {
-  value = {
+  value = var.deploy_platform ? {
     status    = "✅ Platform deployed"
     namespace = var.environment
-    release   = helm_release.mindroom_platform.name
+    release   = helm_release.mindroom_platform[0].name
     urls      = {
       app      = "https://app.${local.dns_domain}"
       admin    = "https://admin.${local.dns_domain}"
       api      = "https://api.${local.dns_domain}"
       webhooks = "https://webhooks.${local.dns_domain}"
     }
+  } : {
+    status    = "ℹ️ Platform deployment skipped (deploy_platform=false)"
+    namespace = var.environment
+    release   = ""
+    urls      = {}
   }
   description = "Platform deployment status"
 }

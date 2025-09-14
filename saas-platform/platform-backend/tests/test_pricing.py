@@ -126,10 +126,12 @@ class TestPricingConfig:
 
     def test_missing_config_file(self) -> None:
         """Test behavior when config file is missing."""
-        # Create a mock path object that behaves like a non-existent file
-
+        # Create a proper mock that raises FileNotFoundError when opened
         mock_path = MagicMock()
         mock_path.exists.return_value = False
+        mock_path.open.side_effect = FileNotFoundError(
+            "Pricing configuration file not found. This file is required for the application to run.",
+        )
 
         with patch("backend.pricing.config_path", mock_path):
             # Should raise FileNotFoundError when config file is missing

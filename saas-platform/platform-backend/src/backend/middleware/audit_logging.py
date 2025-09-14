@@ -95,7 +95,13 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                         details = {"body": "non-json"}
                     else:
                         # Remove sensitive fields
-                        sensitive_fields = {"password", "api_key", "secret", "token", "credit_card"}
+                        sensitive_fields = {
+                            "password",
+                            "api_key",
+                            "secret",
+                            "token",
+                            "credit_card",
+                        }
                         details = {
                             k: v
                             for k, v in data.items()

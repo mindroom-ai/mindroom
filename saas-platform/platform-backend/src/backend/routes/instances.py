@@ -129,12 +129,19 @@ async def list_user_instances(
             needs_sync = synced_time < stale_threshold
 
         if needs_sync:
-            logger.info("Instance %s has stale K8s status, scheduling background sync", instance_id)
+            logger.info(
+                "Instance %s has stale K8s status, scheduling background sync",
+                instance_id,
+            )
             background_tasks.add_task(_background_sync_instance_status, str(instance_id))
 
     # Log cache effectiveness
     total_time = (time.perf_counter() - start) * 1000
-    logger.info("Instances endpoint: DB query %.2fms, total %.2fms (cached K8s status)", db_time, total_time)
+    logger.info(
+        "Instances endpoint: DB query %.2fms, total %.2fms (cached K8s status)",
+        db_time,
+        total_time,
+    )
 
     # Return cached data immediately
     return {"instances": instances}

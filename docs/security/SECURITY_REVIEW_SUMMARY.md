@@ -1,121 +1,64 @@
 # MindRoom Security Review Summary
 
-**Date:** September 11, 2025
-**Status:** 🔴 **CRITICAL - NOT SAFE FOR DEPLOYMENT**
+**Date:** September 12, 2025
+**Status:** 🟠 HIGH – Staging-ready with constraints (not production-ready)
 
 ## Overview
 
-A comprehensive security review was conducted across 12 security categories, identifying 47 vulnerabilities that must be addressed before deployment.
+The security review has been refreshed across 12 categories. Most P0/P1 blockers are remediated: admin endpoints are authenticated and rate‑limited, provisioner auth is hardened, core security headers and trusted‑host checks are in place, multi‑tenancy isolation gaps are fixed, and baseline Kubernetes isolation is deployed. Remaining work focuses on secrets lifecycle, monitoring/alerting, internal TLS, and frontend CSP.
 
-## Vulnerability Summary
+## Current Posture (high level)
 
-| Severity | Count | Impact |
-|----------|-------|--------|
-| **CRITICAL** | 15 | System compromise, data breach, complete unauthorized access |
-| **HIGH** | 12 | Privilege escalation, data exposure, service disruption |
-| **MEDIUM** | 14 | Information disclosure, partial access, compliance gaps |
-| **LOW** | 6 | Minor security improvements needed |
-| **TOTAL** | **47** | **Platform currently at extreme risk** |
+- Critical blockers: 0
+- High risks: secrets lifecycle; monitoring/alerting; internal TLS/mTLS
+- Medium risks: dependency scanning/pinning; CSP; broader rate‑limit coverage; backup path (IPv6)
+- Low risks: minor RBAC tightening; policy automation; docs/process
 
-## Top 5 Critical Issues
+## What’s Fixed Since Last Review
 
-1. **Complete Admin Authentication Bypass** - Anonymous access to ALL customer data via `/admin/{resource}` endpoints
-2. **Production API Keys Exposed in Git** - OpenAI, Anthropic, Google, OpenRouter, Deepseek keys committed
-3. **Default Passwords in Production** - "changeme" used for Matrix admin, PostgreSQL, Redis
-4. **No Rate Limiting** - All endpoints vulnerable to brute force and DoS attacks
-5. **No Network Isolation** - Missing Kubernetes NetworkPolicies between customer instances
+- Admin endpoints: verify_admin enforced, resource allowlist, rate limits, audit logging added
+- Provisioner: constant‑time API key check, rate limits on start/stop/provision/uninstall
+- API hardening: request size limit (1 MiB), CORS restricted, HSTS + basic headers, trusted hosts
+- Multi‑tenancy: migrations add account_id + RLS to webhook_events and payments; handlers validate ownership; tests added
+- K8s: per‑instance NetworkPolicy; namespaced Role + RoleBinding for backend; ingress TLS protocols/ciphers; HSTS
+- Defaults removed: no "changeme" in tracked configs; Helm templates generate strong secrets by default; Compose requires explicit passwords
 
-## Prioritized Action Plan
+## Top Remaining Risks (priority order)
 
-### 🚨 IMMEDIATE (24-48 hours)
+1. Secrets lifecycle and rotation
+   - Migrate runtime secrets from env to K8s Secrets/External Secrets; define rotation policy; confirm etcd encryption
+2. Monitoring and incident response
+   - Alerts for failed auth/admin actions; audit log review; security@ inbox and security.txt
+3. Internal service encryption
+   - Evaluate service mesh or mTLS between internal components; document cipher policy at ingress
+4. Frontend protections
+   - Add CSP, audit 3rd‑party scripts, verify SSO cookie usage end‑to‑end
+5. Broader rate‑limit coverage
+   - Evaluate user and webhook endpoints; maintain per‑route budgets
+6. Backup reliability
+   - Resolve IPv6 egress to Supabase for pg_dump, or run backups from dual‑stack host/cluster job
 
-1. **Fix Admin Authentication Bypass**
-   - Add `verify_admin` to `admin.py` lines 170, 188, 206, 224, 242
-   - Blocks anonymous access to customer data
+## Deployment Guidance
 
-2. **Rotate ALL Exposed API Keys**
-   - Revoke and regenerate: OpenAI, Anthropic, Google, OpenRouter, Deepseek
-   - Remove `.env` from git history: `git filter-branch --force --index-filter "git rm --cached --ignore-unmatch .env"`
+- Staging: safe to continue functional testing behind trusted users
+- Production: hold until secrets/monitoring/internal‑TLS/CSP are addressed and a final validation pass completes
 
-3. **Change Default Passwords**
-   - Replace all "changeme" passwords
-   - Generate secure: `openssl rand -base64 32`
+## Updated References
 
-### 🔴 Week 1 - Critical Security
-
-4. **Implement Rate Limiting** - Add `slowapi` middleware
-5. **Deploy NetworkPolicies** - Isolate customer instances
-6. **Fix Container Security** - Run as non-root user
-7. **Move Secrets to Volumes** - Remove from environment variables
-
-### 🟡 Week 2-3 - High Priority
-
-8. **Fix Shell Injection** - Validate all inputs in scripts
-9. **Add Input Validation** - Pydantic models for all endpoints
-10. **Enable Database Encryption** - Encrypt PII at rest
-11. **Remove Sensitive Logging** - No `console.log` in production
-12. **Add GDPR Compliance** - Consent, export, deletion
-13. **Deploy Security Monitoring** - Audit logs and alerts
-
-### 🟢 Week 4-6 - Medium Priority
-
-14. **Add Security Headers** - CSP, X-Frame-Options
-15. **Fix Frontend Security** - Remove dev auth bypass
-16. **Update Dependencies** - Fix npm vulnerabilities
-17. **Create Incident Response** - Playbook and procedures
-
-### 🔵 Week 7-8 - Final Hardening
-
-18. **Security Testing** - Penetration testing
-19. **Documentation** - Security procedures
-20. **Training** - Team security awareness
-
-## Deployment Blockers
-
-**DO NOT DEPLOY** until complete:
-- [ ] Admin endpoints authenticated
-- [ ] API keys rotated
-- [ ] Default passwords changed
-- [ ] Rate limiting active
-- [ ] Network isolation deployed
-
-## Resource Requirements
-
-- **Engineering:** 3-4 developers × 6-8 weeks
-- **Tools:** $500-1000/month for monitoring
-- **Testing:** $10-20K for penetration testing
-- **Ongoing:** 20% of senior developer time
+1. SECURITY_REVIEW_CHECKLIST.md – updated with current pass/fail items
+2. SECURITY_REVIEW_FINDINGS.md – reconciled with latest fixes and gaps
+3. SECURITY_REVIEW_02_MULTITENANCY.md – reflects applied migrations and tests
+4. SECURITY_REVIEW_06_INFRASTRUCTURE.md – updated status for NetworkPolicies, RBAC, TLS/HSTS, CORS
+5. SECURITY_REVIEW_10_API_SECURITY.md – notes request‑size limiter and rate‑limit scope
+6. SECURITY_REVIEW_03_SECRETS.md – clarified state; added rotation/etcd encryption items
 
 ## Risk Assessment
 
-- **Current Risk:** 9.5/10 (CRITICAL)
-- **Target Risk:** 2.5/10 (LOW)
-- **Timeline:** 6-8 weeks for full remediation
-
-## Security Review Documents
-
-1. **SECURITY_REVIEW_CHECKLIST.md** - 82-item comprehensive checklist
-2. **SECURITY_REVIEW_FINDINGS.md** - Initial findings report
-3. **SECURITY_REVIEW_01_AUTH.md** - Authentication & Authorization (7 critical issues)
-4. **SECURITY_REVIEW_02_MULTITENANCY.md** - Multi-tenancy & Data Isolation
-5. **SECURITY_REVIEW_03_SECRETS.md** - Secrets Management (exposed API keys)
-6. **SECURITY_REVIEW_04_INJECTION.md** - Input Validation & Injection
-7. **SECURITY_REVIEW_05_TOKENS.md** - Session & Token Management
-8. **SECURITY_REVIEW_06_INFRASTRUCTURE.md** - Infrastructure Security
-9. **SECURITY_REVIEW_07_DATA_PROTECTION.md** - Data Protection & Privacy
-10. **SECURITY_REVIEW_08_DEPENDENCIES.md** - Dependency & Supply Chain
-11. **SECURITY_REVIEW_09_ERROR_HANDLING.md** - Error Handling & Info Disclosure
-12. **SECURITY_REVIEW_10_API_SECURITY.md** - API Security
-13. **SECURITY_REVIEW_11_MONITORING.md** - Monitoring & Incident Response
-14. **SECURITY_REVIEW_12_FRONTEND.md** - Frontend Security
-15. **SECURITY_ACTION_PLAN.md** - Detailed remediation plan
-16. **SECURITY_EXECUTIVE_SUMMARY.md** - Executive summary for leadership
-
-## Recommendation
-
-**Delay launch by 6-8 weeks** to properly address security issues. The current state poses unacceptable legal, financial, and reputational risks. With proper remediation, the platform can achieve industry-standard security.
+- Current risk: ~6.8/10 (HIGH)
+- Target risk: ≤3/10 (LOW)
+- Estimated effort: 2–4 weeks (2–3 engineers) to close remaining High items
 
 ---
 
-*Generated: September 11, 2025*
-*Next Review: After Phase 1 completion*
+Generated: September 12, 2025
+Next Review: After secrets/monitoring/internal‑TLS/CSP land

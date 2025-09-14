@@ -7,12 +7,7 @@ import asyncio
 from backend.config import logger
 
 
-async def run_cmd(
-    cmd: list[str],
-    *,
-    env: dict[str, str] | None = None,
-    cwd: str | None = None,
-) -> tuple[int, str, str]:
+async def run_cmd(cmd: list[str], *, env: dict[str, str] | None = None, cwd: str | None = None) -> tuple[int, str, str]:
     """Run a command asynchronously and return (returncode, stdout, stderr).
 
     - cmd: full argv, e.g., ["helm", "install", ...]
@@ -21,11 +16,7 @@ async def run_cmd(
     """
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=cwd,
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env, cwd=cwd
         )
         stdout_b, stderr_b = await proc.communicate()
         return proc.returncode, stdout_b.decode(), stderr_b.decode()

@@ -3,7 +3,7 @@
 pkgs.mkShell {
   buildInputs = with pkgs; [
     # Kubernetes tools
-    kind  # This is what we need!
+    kind
     kubectl
     kubernetes-helm
     k9s

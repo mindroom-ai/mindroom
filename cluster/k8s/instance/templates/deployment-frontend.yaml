@@ -26,12 +26,25 @@ spec:
       - name: nginx-auth
         image: nginx:alpine
         ports:
-        - containerPort: 80
+        - containerPort: 8080
           name: http
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 101
+          runAsGroup: 101
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
         volumeMounts:
         - name: nginx-config
           mountPath: /etc/nginx/nginx.conf
           subPath: nginx.conf
+        - name: nginx-run
+          mountPath: /var/run
+        - name: nginx-cache
+          mountPath: /var/cache/nginx
 
       # MindRoom frontend (UI only, API now in backend)
       - name: mindroom-frontend
@@ -59,9 +72,21 @@ spec:
           limits:
             memory: "4Gi"
             cpu: "2000m"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
       imagePullSecrets:
       - name: gitea-registry
       volumes:
       - name: nginx-config
         configMap:
           name: nginx-auth-config-{{ .Values.customer }}
+      - name: nginx-run
+        emptyDir: {}
+      - name: nginx-cache
+        emptyDir: {}

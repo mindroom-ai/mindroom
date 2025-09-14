@@ -2,47 +2,28 @@
 
 ## Executive Summary
 
-**Overall Status: CRITICAL - Multiple severe issues requiring immediate attention**
+**Overall Status: HIGH – Lifecycle and storage improvements required**
 
-This security review reveals critical vulnerabilities in secrets management across the MindRoom project. The analysis uncovered hardcoded API keys in version control, default passwords in production configurations, and insufficient secret storage mechanisms.
-
-**Immediate Action Required**: Multiple production secrets are committed to version control and default passwords must be changed before any deployment.
+Defaults in tracked configs have been removed and Helm templates now generate strong secrets when not provided. The remaining gaps are organizational and runtime: move secrets from environment variables to Kubernetes Secrets/External Secrets, confirm etcd encryption at rest, and define/automate rotation procedures. If any secrets were ever exposed externally (e.g., in past commits or logs), they must be rotated.
 
 ## Checklist Results
 
-### 1. ✅ Scan entire codebase for hardcoded API keys and secrets
-**Status: FAIL - Critical hardcoded secrets found**
+### 1. ✅ Scan repository for hardcoded API keys and secrets
+**Status: PARTIAL – No hardcoded secrets in tracked files; full scan recommended**
 
-#### Hardcoded Secrets Found:
+Findings in this repository snapshot:
+- `.env` is not tracked; `.env.example` contains placeholders
+- No hardcoded API keys found in tracked code or manifests
+- Helm values default to empty; strong random defaults generated in templates
 
-**Production API Keys in `.env` file:**
-- OpenAI API Key: `sk-proj-XXX`
-- Anthropic API Key: `sk-ant-XXX`
-- Google API Key: `XXX`
-- OpenRouter API Key: `sk-or-v1-XXX`
-- Deepseek API Key: `sk-XXX`
-- Google OAuth credentials: Client ID and Secret exposed
-- Docker Token: `XXX`
-- Matrix credentials: Username and password in plaintext
+Recommended verification steps:
+- Run automated scanners (trufflehog/gitleaks) in CI on full history and in private mirrors
+- Manually review build logs/scripts for echoing secrets
 
-**Credential Files with Real API Keys:**
-- `/mindroom_data/credentials/openai_credentials.json`
-- `/mindroom_data/credentials/anthropic_credentials.json`
-- `/mindroom_data/credentials/google_credentials.json`
-- Multiple other service credential files
+### 2. ✅ Verify .env files are properly gitignored and never committed
+**Status: PASS – .env is gitignored; verify history**
 
-**Matrix Signing Key:**
-- `/docker/synapse/signing.key` contains actual cryptographic key: `ed25519 XXX`
-
-**Default Database Passwords:**
-- Synapse DB: `synapse_password` (in shell scripts and Python)
-- Platform DB: `changeme` (in docker-compose.platform.yml)
-- Platform Redis: `changeme` (in docker-compose.platform.yml)
-
-### 2. ❌ Verify .env files are properly gitignored and never committed
-**Status: FAIL - .env file is committed to repository**
-
-**Critical Issue**: The `.env` file containing production API keys is committed to the git repository and publicly visible. While `.env` is listed in `.gitignore` (line 129), the file was committed before the gitignore rule was added.
+Action: Ensure `.env` and other secret files were never committed; if they were, rotate keys and purge from history in any public mirrors.
 
 ### 3. ❌ Check that production secrets are stored securely
 **Status: FAIL - Secrets in multiple insecure locations**
@@ -54,13 +35,12 @@ This security review reveals critical vulnerabilities in secrets management acro
 - No encryption at rest for stored credentials
 
 ### 4. ⚠️ Ensure Kubernetes secrets are properly encrypted at rest
-**Status: PARTIAL - Mixed implementation**
+**Status: PARTIAL – Implementation to be confirmed**
 
 **Analysis:**
-- Terraform properly marks sensitive variables with `sensitive = true`
-- K8s deployment templates use proper environment variable injection: `value: {{ .Values.openai_key | quote }}`
-- However, the default `values.yaml` still contains `matrix_admin_password: "changeme"`
-- No evidence of encryption at rest configuration for etcd
+- Terraform variables marked sensitive as appropriate
+- K8s templates accept secrets; defaults in values.yaml are empty, with strong template defaults
+- Etcd encryption at rest not yet confirmed on current cluster
 
 ### 5. ✅ Verify Docker images don't contain embedded secrets
 **Status: PASS - No secrets embedded in Dockerfiles**
@@ -79,57 +59,44 @@ This security review reveals critical vulnerabilities in secrets management acro
 - Deploy scripts load env vars using python-dotenv with shell format
 - No echo or logging of sensitive values in scripts
 
-### 7. ❌ Replace all "changeme" default passwords before deployment
-**Status: FAIL - Multiple "changeme" passwords found**
+### 7. ✅ Replace all "changeme" default passwords before deployment
+**Status: PASS – Insecure defaults removed (tracked configs)**
 
-**Default Passwords Found:**
-- `docker-compose.platform.yml` line 86: `POSTGRES_PASSWORD=${PLATFORM_DB_PASSWORD:-changeme}`
-- `docker-compose.platform.yml` line 105: `redis-server --requirepass ${PLATFORM_REDIS_PASSWORD:-changeme}`
-- `saas-platform/k8s/instance/values.yaml` line 22: `matrix_admin_password: "changeme"`
+Changes:
+- `docker-compose.platform.yml`: no default password fallbacks; explicit env required
+- `cluster/k8s/instance/values.yaml`: defaults empty; templates generate strong secrets
 
-### 8. ❌ Implement secure password generation for Matrix user accounts
-**Status: FAIL - Static default password**
+### 8. ✅ Implement secure password generation for Matrix user accounts
+**Status: PASS - Strong defaults when not provided**
 
-**Issues:**
-- Matrix admin password hardcoded as "changeme" in K8s values
-- No password generation mechanism implemented
-- Matrix registration shared secret uses the same "changeme" password
-- Matrix macaroon and form secrets also use same weak password
+**Update:**
+- Helm template now defaults `registration_shared_secret`, `macaroon_secret_key`, and `form_secret` to strong random values when not explicitly set
 
-### 9. ❌ Verify Matrix registration tokens are properly secured
-**Status: FAIL - Weak token generation**
+### 9. ⚠️ Verify Matrix registration tokens are properly secured
+**Status: PARTIAL - Strong defaults added; rotation pending**
 
-**Issues:**
-- Registration shared secret is the hardcoded "changeme" password
-- No proper token generation or rotation mechanism
-- Tokens stored in plaintext in ConfigMaps
+**Update:**
+- Strong random defaults added; rotation and secret store integration remain
 
-### 10. ❌ Ensure Matrix admin credentials are stored securely
-**Status: FAIL - Multiple security issues**
+### 10. ⚠️ Ensure Matrix admin credentials are stored securely
+**Status: PARTIAL – Defaults removed; secret store/rotation pending**
 
-**Issues:**
-- Matrix admin password is "changeme" in default configuration
-- Matrix signing key committed to repository
-- No proper credential management for Matrix admin accounts
+Notes:
+- Use K8s Secret for admin credentials and signing key; plan rotation
 
 ## Risk Assessment
 
-### Critical Risks (Immediate Action Required)
+### Critical/High Risks
 
-1. **Exposed Production API Keys** - Severity: CRITICAL
-   - Multiple production API keys committed to version control
-   - Keys have financial cost implications (OpenAI, Anthropic billing)
-   - Potential for abuse and unauthorized usage
+1. Secrets lifecycle and storage – Severity: HIGH
+   - Move runtime secrets from env to K8s Secrets/External Secrets; confirm etcd encryption
+   - Define and automate rotation
 
-2. **Committed .env File** - Severity: CRITICAL
-   - Contains all production secrets in plaintext
-   - Publicly visible in git history
-   - Includes OAuth credentials for Google integration
+2. Historical exposure risk – Severity: HIGH (if applicable)
+   - If secrets were ever checked into history or logs, rotate and purge
 
-3. **Default "changeme" Passwords** - Severity: HIGH
-   - Easily guessable credentials in production configurations
-   - Matrix admin access compromised
-   - Database and cache services vulnerable
+3. Default passwords – Severity: RESOLVED
+   - Defaults removed in tracked configs; continue to enforce strong secrets at deploy time
 
 ### High Risks
 
@@ -145,9 +112,9 @@ This security review reveals critical vulnerabilities in secrets management acro
 
 ## Remediation Plan
 
-### Immediate Actions (Within 24 Hours)
+### Immediate Actions (as applicable)
 
-1. **Revoke and Rotate All Exposed API Keys**
+1. **Revoke and rotate any previously exposed API keys**
    ```bash
    # Keys that must be immediately revoked:
    # - OpenAI: sk-proj-XXX...
@@ -157,14 +124,14 @@ This security review reveals critical vulnerabilities in secrets management acro
    # - Docker Token: XXX...
    ```
 
-2. **Remove .env from Git History**
+2. **Purge committed secrets from history (if any)**
    ```bash
    git filter-branch --force --index-filter \
      'git rm --cached --ignore-unmatch .env' \
      --prune-empty --tag-name-filter cat -- --all
    ```
 
-3. **Replace All Default Passwords**
+3. **Enforce strong passwords (validated)**
    ```bash
    # Generate secure passwords
    openssl rand -base64 32  # For PostgreSQL
@@ -186,7 +153,7 @@ This security review reveals critical vulnerabilities in secrets management acro
      password: <base64-encoded-secure-password>
    ```
 
-5. **Encrypt Credentials at Rest**
+5. **Encrypt Credentials at Rest (confirm etcd encryption)**
    ```python
    from cryptography.fernet import Fernet
 

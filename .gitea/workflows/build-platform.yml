@@ -24,8 +24,8 @@ jobs:
       matrix:
         service:
           - name: platform-frontend
-            dockerfile: Dockerfile.platform-frontend
-            context: saas-platform
+            dockerfile: saas-platform/Dockerfile.platform-frontend
+            context: .
           - name: platform-backend
             dockerfile: saas-platform/Dockerfile.platform-backend
             context: .
