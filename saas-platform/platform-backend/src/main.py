@@ -76,8 +76,7 @@ MAX_REQUEST_BYTES = 1024 * 1024
 
 @app.middleware("http")
 async def enforce_request_size(
-    request: Request,
-    call_next: Callable[[Request], Awaitable[StarletteResponse]],
+    request: Request, call_next: Callable[[Request], Awaitable[StarletteResponse]]
 ) -> StarletteResponse:
     """Return 413 if Content-Length exceeds MAX_REQUEST_BYTES."""
     try:
@@ -92,8 +91,7 @@ async def enforce_request_size(
 # Basic security headers
 @app.middleware("http")
 async def add_security_headers(
-    request: Request,
-    call_next: Callable[[Request], Awaitable[StarletteResponse]],
+    request: Request, call_next: Callable[[Request], Awaitable[StarletteResponse]]
 ) -> StarletteResponse:
     """Inject basic security headers into every response."""
     response = await call_next(request)
@@ -135,12 +133,7 @@ app.include_router(sso.router)
 app.include_router(webhooks.router)
 
 # Keep a reference list of primary endpoints for tooling/tests that grep this file
-EXPOSED_ENDPOINTS = [
-    "/my/subscription",
-    "/my/usage",
-    "/my/account/admin-status",
-    "/admin/stats",
-]
+EXPOSED_ENDPOINTS = ["/my/subscription", "/my/usage", "/my/account/admin-status", "/admin/stats"]
 
 
 if __name__ == "__main__":

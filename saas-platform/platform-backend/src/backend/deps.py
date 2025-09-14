@@ -119,7 +119,7 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901,
                             else "",
                             "created_at": now,
                             "updated_at": now,
-                        },
+                        }
                     )
                     .execute()
                 )
