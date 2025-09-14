@@ -130,6 +130,10 @@ cluster-tf-status:
 cluster-tf-destroy:
     bash cluster/terraform/terraform-k8s/scripts/destroy.sh
 
+# Set up Terraform state symlinks (one-time setup for new clones)
+cluster-tf-state-setup:
+    bash cluster/scripts/setup-terraform-state.sh
+
 # Backup Supabase database (requires env in saas-platform/.env)
 cluster-db-backup:
     bash cluster/scripts/db/backup_supabase.sh
