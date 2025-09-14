@@ -63,10 +63,6 @@ describe('AuthWrapper', () => {
       }
     }
     ;(createClient as jest.Mock).mockReturnValue(mockSupabaseClient)
-
-    // Mock window.location.origin
-    delete (window as any).location
-    window.location = { ...window.location, origin: 'http://localhost:3000' } as any
   })
 
   describe('Basic Rendering', () => {

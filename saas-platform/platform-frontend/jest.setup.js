@@ -40,3 +40,16 @@ Object.defineProperty(window, 'matchMedia', {
     dispatchEvent: jest.fn(),
   })),
 })
+
+// Mock window.location
+delete window.location
+window.location = {
+  origin: 'http://localhost:3000',
+  href: 'http://localhost:3000',
+  pathname: '/',
+  search: '',
+  hash: '',
+  reload: jest.fn(),
+  replace: jest.fn(),
+  assign: jest.fn(),
+}
