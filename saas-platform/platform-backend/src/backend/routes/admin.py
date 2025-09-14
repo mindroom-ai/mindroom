@@ -228,7 +228,7 @@ async def admin_provision_instance(
         "instance_id": instance_id,  # Re-use existing instance ID
     }
 
-    result = await provision_instance(request, data, f"Bearer {PROVISIONER_API_KEY}", background_tasks)
+    result = await provision_instance(request, data, f"Bearer {PROVISIONER_API_KEY}", background_tasks=background_tasks)
     audit_log_entry(
         account_id=admin["user_id"],
         action="provision",
