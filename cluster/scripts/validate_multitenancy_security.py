@@ -26,10 +26,10 @@ def check_webhook_events_isolation() -> tuple[bool, str]:
         sb = ensure_supabase()
 
         # Check if account_id column exists
-        result = sb.table("webhook_events").select("account_id").limit(1).execute()
+        _ = sb.table("webhook_events").select("account_id").limit(1).execute()
 
         # If we get here without error, the column exists
-        return True, "✅ webhook_events table has account_id column"
+        return True, "✅ webhook_events table has account_id column"  # noqa: TRY300
     except Exception as e:
         if "account_id" in str(e):
             return False, "❌ webhook_events table missing account_id column"
@@ -42,10 +42,10 @@ def check_payments_isolation() -> tuple[bool, str]:
         sb = ensure_supabase()
 
         # Check if account_id column exists
-        result = sb.table("payments").select("account_id").limit(1).execute()
+        _ = sb.table("payments").select("account_id").limit(1).execute()
 
         # If we get here without error, the column exists
-        return True, "✅ payments table has account_id column"
+        return True, "✅ payments table has account_id column"  # noqa: TRY300
     except Exception as e:
         if "account_id" in str(e):
             return False, "❌ payments table missing account_id column"
@@ -72,7 +72,7 @@ def check_rls_policies() -> list[tuple[bool, str]]:
     for table in tables_to_check:
         try:
             # Try to query the table (service role bypasses RLS)
-            result = sb.table(table).select("*").limit(0).execute()
+            _ = sb.table(table).select("*").limit(0).execute()
             results.append((True, f"✅ {table} table accessible (RLS configured)"))
         except Exception as e:
             results.append((False, f"❌ {table} table error: {e}"))

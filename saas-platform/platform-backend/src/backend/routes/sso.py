@@ -26,7 +26,9 @@ async def set_sso_cookie(
     The cookie is used by instance nginx to forward Authorization headers.
     """
     try:
-        token = _extract_bearer_token(authorization or request.headers.get("authorization"))
+        token = _extract_bearer_token(
+            authorization or request.headers.get("authorization")
+        )
     except HTTPException:
         raise HTTPException(status_code=401, detail="Missing bearer token") from None
 

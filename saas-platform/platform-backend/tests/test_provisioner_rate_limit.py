@@ -30,11 +30,15 @@ def _setup_provisioner_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(prov, "check_deployment_exists", _exists)
 
-    async def _fake_kubectl(args: list[str], namespace: str = "mindroom-instances") -> tuple[int, str, str]:  # noqa: ARG001
+    async def _fake_kubectl(
+        args: list[str], namespace: str = "mindroom-instances"
+    ) -> tuple[int, str, str]:  # noqa: ARG001
         return 0, "ok", ""
 
     monkeypatch.setattr(prov, "run_kubectl", _fake_kubectl)
-    monkeypatch.setattr(prov, "update_instance_status", lambda instance_id, status: True)  # noqa: ARG005
+    monkeypatch.setattr(
+        prov, "update_instance_status", lambda instance_id, status: True
+    )  # noqa: ARG005
 
     # Also stub helm for uninstall route
     async def _fake_helm(args: list[str]) -> tuple[int, str, str]:  # noqa: ARG001

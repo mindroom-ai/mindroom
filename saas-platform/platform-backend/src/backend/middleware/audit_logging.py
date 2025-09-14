@@ -95,12 +95,20 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                         details = {"body": "non-json"}
                     else:
                         # Remove sensitive fields
-                        sensitive_fields = {"password", "api_key", "secret", "token", "credit_card"}
+                        sensitive_fields = {
+                            "password",
+                            "api_key",
+                            "secret",
+                            "token",
+                            "credit_card",
+                        }
                         details = {
                             k: v
                             for k, v in data.items()
                             if k.lower() not in sensitive_fields
-                            and not any(sensitive in k.lower() for sensitive in sensitive_fields)
+                            and not any(
+                                sensitive in k.lower() for sensitive in sensitive_fields
+                            )
                         }
             except Exception as e:
                 logger.warning(f"Failed to parse request body for audit: {e}")

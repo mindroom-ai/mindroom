@@ -24,7 +24,9 @@ async def collect_daily_usage_metrics() -> None:
         end_date = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999)
 
         # Get all active accounts
-        accounts_result = supabase.table("accounts").select("id").eq("status", "active").execute()
+        accounts_result = (
+            supabase.table("accounts").select("id").eq("status", "active").execute()
+        )
 
         if not accounts_result.data:
             logger.info("No active accounts to collect metrics for")
@@ -95,7 +97,10 @@ async def _collect_account_metrics(
             metrics["messages_sent"] = sum(
                 1
                 for log in audit_logs.data
-                if any(action in log.get("action", "").lower() for action in message_actions)
+                if any(
+                    action in log.get("action", "").lower()
+                    for action in message_actions
+                )
             )
 
         # Get instance count for this account
@@ -109,7 +114,9 @@ async def _collect_account_metrics(
 
         if instances.data:
             # Sum up agent counts from all instances
-            metrics["agent_count"] = sum(inst.get("agent_count", 1) for inst in instances.data)
+            metrics["agent_count"] = sum(
+                inst.get("agent_count", 1) for inst in instances.data
+            )
 
         # Calculate actual storage used by instances
         if instances.data:

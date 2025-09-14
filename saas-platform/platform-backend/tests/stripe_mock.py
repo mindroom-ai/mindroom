@@ -162,7 +162,9 @@ class MockWebhook:
     """Mock Stripe Webhook."""
 
     @staticmethod
-    def construct_event(payload: bytes, sig_header: str, webhook_secret: str) -> dict[str, Any]:  # noqa: ARG004
+    def construct_event(
+        payload: bytes, sig_header: str, webhook_secret: str
+    ) -> dict[str, Any]:  # noqa: ARG004
         """Mock construct_event method."""
         return {
             "type": "payment_intent.succeeded",

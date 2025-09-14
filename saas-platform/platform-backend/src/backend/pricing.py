@@ -91,7 +91,8 @@ def find_pricing_config_path() -> Path:
     """
     possible_paths = [
         Path("/app/pricing-config.yaml"),  # Docker container path
-        Path(__file__).parent.parent.parent.parent / "pricing-config.yaml",  # Development path
+        Path(__file__).parent.parent.parent.parent
+        / "pricing-config.yaml",  # Development path
         Path("pricing-config.yaml"),  # Current directory
     ]
 

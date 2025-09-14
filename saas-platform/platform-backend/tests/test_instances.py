@@ -206,10 +206,30 @@ class TestInstancesEndpoints:
             "account_id": "acc_test_123",
             "tier": "starter",
         }
-        mock_supabase.table().select().eq().execute.side_effect = [
-            Mock(data=[subscription]),  # subscription query
-            Mock(data=[]),  # instance query (no existing)
-        ]
+
+        # Setup mock chains for different queries
+        subscription_mock = MagicMock()
+        subscription_mock.select.return_value = subscription_mock
+        subscription_mock.eq.return_value = subscription_mock
+        subscription_mock.execute.return_value = Mock(data=[subscription])
+
+        instance_mock = MagicMock()
+        instance_mock.select.return_value = instance_mock
+        instance_mock.eq.return_value = instance_mock
+        instance_mock.limit.return_value = instance_mock
+        instance_mock.execute.return_value = Mock(data=[])  # No existing instance
+
+        call_count = [0]
+
+        def table_side_effect(table_name):
+            call_count[0] += 1
+            if table_name == "subscriptions":
+                return subscription_mock
+            elif table_name == "instances":
+                return instance_mock
+            return MagicMock()
+
+        mock_supabase.table = Mock(side_effect=table_side_effect)
 
         # Make request
         response = client.post("/my/instances/provision")

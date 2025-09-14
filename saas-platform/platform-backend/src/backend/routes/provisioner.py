@@ -19,7 +19,12 @@ from backend.config import (
 )
 from backend.db_utils import update_instance_status
 from backend.deps import _extract_bearer_token, ensure_supabase, limiter
-from backend.k8s import check_deployment_exists, ensure_docker_registry_secret, run_kubectl, wait_for_deployment_ready
+from backend.k8s import (
+    check_deployment_exists,
+    ensure_docker_registry_secret,
+    run_kubectl,
+    wait_for_deployment_ready,
+)
 from backend.models import ActionResult, ProvisionResponse, SyncResult, SyncUpdateOut
 from backend.process import run_helm
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
@@ -27,10 +32,14 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 router = APIRouter()
 
 
-async def _background_mark_running_when_ready(instance_id: str, namespace: str = "mindroom-instances") -> None:
+async def _background_mark_running_when_ready(
+    instance_id: str, namespace: str = "mindroom-instances"
+) -> None:
     """Background task: wait longer and mark instance running when ready."""
     try:
-        ready = await wait_for_deployment_ready(instance_id, namespace=namespace, timeout_seconds=600)
+        ready = await wait_for_deployment_ready(
+            instance_id, namespace=namespace, timeout_seconds=600
+        )
         if ready:
             try:
                 sb = ensure_supabase()
@@ -38,9 +47,14 @@ async def _background_mark_running_when_ready(instance_id: str, namespace: str =
                     {"status": "running", "updated_at": datetime.now(UTC).isoformat()},
                 ).eq("instance_id", instance_id).execute()
             except Exception:
-                logger.warning("Background update: failed to mark instance %s as running", instance_id)
+                logger.warning(
+                    "Background update: failed to mark instance %s as running",
+                    instance_id,
+                )
     except Exception:
-        logger.exception("Background readiness wait failed for instance %s", instance_id)
+        logger.exception(
+            "Background readiness wait failed for instance %s", instance_id
+        )
 
 
 def _require_provisioner_auth(authorization: str | None) -> None:
@@ -94,7 +108,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             raise
         except Exception as e:
             logger.exception("Failed to update instance for re-provisioning")
-            raise HTTPException(status_code=500, detail=f"Failed to update instance: {e!s}") from e
+            raise HTTPException(
+                status_code=500, detail=f"Failed to update instance: {e!s}"
+            ) from e
     else:
         # Insert instance first to get a generated numeric instance_id (as text)
         try:
@@ -121,10 +137,17 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             raise
         except Exception as e:
             logger.exception("Failed to insert instance")
-            raise HTTPException(status_code=500, detail=f"Failed to insert instance: {e!s}") from e
+            raise HTTPException(
+                status_code=500, detail=f"Failed to insert instance: {e!s}"
+            ) from e
 
     helm_release_name = f"instance-{customer_id}"
-    logger.info("Provisioning instance for subscription %s, new id: %s, tier: %s", subscription_id, customer_id, tier)
+    logger.info(
+        "Provisioning instance for subscription %s, new id: %s, tier: %s",
+        subscription_id,
+        customer_id,
+        tier,
+    )
 
     namespace = "mindroom-instances"
     try:
@@ -205,7 +228,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                     {"status": "error", "updated_at": datetime.now(UTC).isoformat()},
                 ).eq("instance_id", customer_id).execute()
             except Exception:
-                logger.warning("Failed to update instance status to error after helm failure")
+                logger.warning(
+                    "Failed to update instance status to error after helm failure"
+                )
             msg = f"Helm install failed: {stderr}"
             raise HTTPException(status_code=500, detail=msg)  # noqa: TRY301
         logger.info("Helm install output: %s", stdout)
@@ -219,11 +244,17 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 {"status": "error", "updated_at": datetime.now(UTC).isoformat()},
             ).eq("instance_id", customer_id).execute()
         except Exception:
-            logger.warning("Failed to update instance status to error after deploy exception")
-        raise HTTPException(status_code=500, detail=f"Failed to deploy instance: {e!s}") from e
+            logger.warning(
+                "Failed to update instance status to error after deploy exception"
+            )
+        raise HTTPException(
+            status_code=500, detail=f"Failed to deploy instance: {e!s}"
+        ) from e
 
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
-    ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
+    ready = await wait_for_deployment_ready(
+        customer_id, namespace=namespace, timeout_seconds=180
+    )
     try:
         sb.table("instances").update(
             {
@@ -237,9 +268,14 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     if not ready and background_tasks is not None:
         # Fire-and-forget longer background wait to mark running later
         try:
-            background_tasks.add_task(_background_mark_running_when_ready, customer_id, namespace)
+            background_tasks.add_task(
+                _background_mark_running_when_ready, customer_id, namespace
+            )
         except Exception:
-            logger.warning("Failed to schedule background readiness task for instance %s", customer_id)
+            logger.warning(
+                "Failed to schedule background readiness task for instance %s",
+                customer_id,
+            )
 
     return {
         "customer_id": customer_id,
@@ -247,7 +283,9 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         "api_url": api_url,
         "matrix_url": matrix_url,
         "success": True,
-        "message": "Instance provisioned successfully" if ready else "Provisioning started; instance is getting ready",
+        "message": "Instance provisioned successfully"
+        if ready
+        else "Provisioning started; instance is getting ready",
     }
 
 
@@ -283,10 +321,14 @@ async def start_instance_provisioner(
         logger.info("Started instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
         if not update_instance_status(instance_id, "running"):
-            logger.warning("Failed to update DB status to running for instance %s", instance_id)
+            logger.warning(
+                "Failed to update DB status to running for instance %s", instance_id
+            )
     except Exception as e:
         logger.exception("Failed to start instance %s", instance_id)
-        raise HTTPException(status_code=500, detail=f"Failed to start instance: {e}") from e
+        raise HTTPException(
+            status_code=500, detail=f"Failed to start instance: {e}"
+        ) from e
 
     return {"success": True, "message": f"Instance {instance_id} started successfully"}
 
@@ -323,10 +365,14 @@ async def stop_instance_provisioner(
         logger.info("Stopped instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
         if not update_instance_status(instance_id, "stopped"):
-            logger.warning("Failed to update DB status to stopped for instance %s", instance_id)
+            logger.warning(
+                "Failed to update DB status to stopped for instance %s", instance_id
+            )
     except Exception as e:
         logger.exception("Failed to stop instance %s", instance_id)
-        raise HTTPException(status_code=500, detail=f"Failed to stop instance: {e}") from e
+        raise HTTPException(
+            status_code=500, detail=f"Failed to stop instance: {e}"
+        ) from e
 
     return {"success": True, "message": f"Instance {instance_id} stopped successfully"}
 
@@ -363,9 +409,14 @@ async def restart_instance_provisioner(
         logger.info("Restarted instance %s: %s", instance_id, out)
     except Exception as e:
         logger.exception("Failed to restart instance %s", instance_id)
-        raise HTTPException(status_code=500, detail=f"Failed to restart instance: {e}") from e
+        raise HTTPException(
+            status_code=500, detail=f"Failed to restart instance: {e}"
+        ) from e
 
-    return {"success": True, "message": f"Instance {instance_id} restarted successfully"}
+    return {
+        "success": True,
+        "message": f"Instance {instance_id} restarted successfully",
+    }
 
 
 @router.delete("/system/instances/{instance_id}/uninstall", response_model=ActionResult)
@@ -382,7 +433,9 @@ async def uninstall_instance(
 
     try:
         helm_release_name = f"instance-{instance_id}"
-        code, stdout, stderr = await run_helm(["uninstall", helm_release_name, "--namespace=mindroom-instances"])
+        code, stdout, stderr = await run_helm(
+            ["uninstall", helm_release_name, "--namespace=mindroom-instances"]
+        )
 
         if code != 0:
             error_msg = stderr
@@ -402,9 +455,15 @@ async def uninstall_instance(
         raise
     except Exception as e:
         logger.exception("Failed to uninstall instance %s", instance_id)
-        raise HTTPException(status_code=500, detail=f"Failed to uninstall instance: {e}") from e
+        raise HTTPException(
+            status_code=500, detail=f"Failed to uninstall instance: {e}"
+        ) from e
 
-    return {"success": True, "message": f"Instance {instance_id} uninstalled successfully", "instance_id": instance_id}
+    return {
+        "success": True,
+        "message": f"Instance {instance_id} uninstalled successfully",
+        "instance_id": instance_id,
+    }
 
 
 @router.post("/system/sync-instances", response_model=SyncResult)
@@ -434,7 +493,9 @@ async def sync_instances(
         for instance in instances:
             instance_id = instance.get("instance_id") or instance.get("subdomain")
             if not instance_id:
-                logger.warning("Instance %s has no instance_id or subdomain", instance.get("id"))
+                logger.warning(
+                    "Instance %s has no instance_id or subdomain", instance.get("id")
+                )
                 sync_results["errors"] += 1
                 continue
 
@@ -443,7 +504,10 @@ async def sync_instances(
 
             if not exists:
                 if current_status not in ["error", "deprovisioned"]:
-                    logger.info("Instance %s not found in cluster, marking as error", instance_id)
+                    logger.info(
+                        "Instance %s not found in cluster, marking as error",
+                        instance_id,
+                    )
                     now = datetime.now(UTC).isoformat()
                     sb.table("instances").update(
                         {
@@ -509,4 +573,6 @@ async def sync_instances(
         return sync_results  # noqa: TRY300
     except Exception as e:
         logger.exception("Failed to sync instances")
-        raise HTTPException(status_code=500, detail=f"Failed to sync instances: {e}") from e
+        raise HTTPException(
+            status_code=500, detail=f"Failed to sync instances: {e}"
+        ) from e

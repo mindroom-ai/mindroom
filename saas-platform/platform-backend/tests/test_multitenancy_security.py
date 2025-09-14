@@ -28,7 +28,9 @@ def account_b_id() -> str:
 class TestWebhookEventIsolation:
     """Test that webhook events are properly isolated by account."""
 
-    def test_webhook_events_have_account_association(self, account_a_id: str, account_b_id: str) -> None:
+    def test_webhook_events_have_account_association(
+        self, account_a_id: str, account_b_id: str
+    ) -> None:
         """Verify webhook events are associated with the correct account."""
         # Mock the database operations
         with patch("backend.deps.ensure_supabase") as mock_ensure_supabase:
@@ -37,8 +39,16 @@ class TestWebhookEventIsolation:
 
             # Mock webhook events data
             webhook_events = [
-                {"id": "evt1", "account_id": account_a_id, "event_type": "payment.success"},
-                {"id": "evt2", "account_id": account_b_id, "event_type": "payment.success"},
+                {
+                    "id": "evt1",
+                    "account_id": account_a_id,
+                    "event_type": "payment.success",
+                },
+                {
+                    "id": "evt2",
+                    "account_id": account_b_id,
+                    "event_type": "payment.success",
+                },
             ]
 
             # Mock the query chain
@@ -54,14 +64,21 @@ class TestWebhookEventIsolation:
             from backend.deps import ensure_supabase  # noqa: PLC0415
 
             sb = ensure_supabase()
-            result = sb.table("webhook_events").select("*").eq("account_id", account_a_id).execute()
+            result = (
+                sb.table("webhook_events")
+                .select("*")
+                .eq("account_id", account_a_id)
+                .execute()
+            )
 
             # Verify only account A's events are returned
             assert len(result.data) == 1
             assert result.data[0]["account_id"] == account_a_id
             assert result.data[0]["id"] == "evt1"
 
-    def test_webhook_events_cannot_be_accessed_cross_tenant(self, account_a_id: str, account_b_id: str) -> None:  # noqa: ARG002
+    def test_webhook_events_cannot_be_accessed_cross_tenant(
+        self, account_a_id: str, account_b_id: str
+    ) -> None:  # noqa: ARG002
         """Verify that one account cannot access another account's webhook events."""
         with patch("backend.deps.ensure_supabase") as mock_ensure_supabase:
             mock_client = MagicMock()
@@ -79,7 +96,12 @@ class TestWebhookEventIsolation:
 
             sb = ensure_supabase()
             # Try to access account B's events with account A's context
-            result = sb.table("webhook_events").select("*").eq("account_id", account_b_id).execute()
+            result = (
+                sb.table("webhook_events")
+                .select("*")
+                .eq("account_id", account_b_id)
+                .execute()
+            )
 
             # Should return no data (RLS would block this in real scenario)
             assert len(result.data) == 0
@@ -140,7 +162,12 @@ class TestInstanceIsolation:
             from backend.deps import ensure_supabase  # noqa: PLC0415
 
             sb = ensure_supabase()
-            result = sb.table("instances").select("*").eq("account_id", account_a_id).execute()
+            result = (
+                sb.table("instances")
+                .select("*")
+                .eq("account_id", account_a_id)
+                .execute()
+            )
 
             assert len(result.data) == 1
             assert result.data[0]["account_id"] == account_a_id
@@ -167,7 +194,13 @@ class TestWebhookHandlerValidation:
 
             sb = ensure_supabase()
             # Simulate webhook handler looking up account by customer ID
-            result = sb.table("accounts").select("id").eq("stripe_customer_id", "cus_123").single().execute()
+            result = (
+                sb.table("accounts")
+                .select("id")
+                .eq("stripe_customer_id", "cus_123")
+                .single()
+                .execute()
+            )
 
             assert result.data["id"] == account_a_id
 
@@ -188,7 +221,13 @@ class TestWebhookHandlerValidation:
             from backend.deps import ensure_supabase  # noqa: PLC0415
 
             sb = ensure_supabase()
-            result = sb.table("subscriptions").select("*").eq("subscription_id", "unknown_sub").single().execute()
+            result = (
+                sb.table("subscriptions")
+                .select("*")
+                .eq("subscription_id", "unknown_sub")
+                .single()
+                .execute()
+            )
 
             assert result.data is None
 
@@ -217,7 +256,11 @@ class TestWebhookHandlerValidation:
 
             sb = ensure_supabase()
             result = (
-                sb.table("accounts").select("id").eq("stripe_customer_id", payment_data["customer"]).single().execute()
+                sb.table("accounts")
+                .select("id")
+                .eq("stripe_customer_id", payment_data["customer"])
+                .single()
+                .execute()
             )
 
             assert result.data["id"] == account_a_id
@@ -226,7 +269,9 @@ class TestWebhookHandlerValidation:
 class TestCrossTenantProtection:
     """Test protection against cross-tenant data access."""
 
-    def test_cannot_modify_other_account_subscription(self, account_a_id: str, account_b_id: str) -> None:  # noqa: ARG002
+    def test_cannot_modify_other_account_subscription(
+        self, account_a_id: str, account_b_id: str
+    ) -> None:  # noqa: ARG002
         """Verify one account cannot modify another's subscription."""
         with patch("backend.deps.ensure_supabase") as mock_ensure_supabase:
             mock_client = MagicMock()
@@ -237,18 +282,27 @@ class TestCrossTenantProtection:
             mock_client.table.return_value = mock_table
             mock_table.update.return_value = mock_table
             mock_table.eq.return_value = mock_table
-            mock_table.execute.return_value = MagicMock(data=[])  # Empty result means no rows updated
+            mock_table.execute.return_value = MagicMock(
+                data=[]
+            )  # Empty result means no rows updated
 
             from backend.deps import ensure_supabase  # noqa: PLC0415
 
             sb = ensure_supabase()
             # Try to update account B's subscription with account A's context
-            result = sb.table("subscriptions").update({"status": "cancelled"}).eq("account_id", account_b_id).execute()
+            result = (
+                sb.table("subscriptions")
+                .update({"status": "cancelled"})
+                .eq("account_id", account_b_id)
+                .execute()
+            )
 
             # Should not update any rows
             assert len(result.data) == 0
 
-    def test_webhook_event_backfill_maintains_isolation(self, account_a_id: str) -> None:
+    def test_webhook_event_backfill_maintains_isolation(
+        self, account_a_id: str
+    ) -> None:
         """Verify backfilled webhook events maintain account isolation."""
         with patch("backend.deps.ensure_supabase") as mock_ensure_supabase:
             mock_client = MagicMock()

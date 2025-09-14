@@ -14,7 +14,15 @@ class InstanceOut(BaseModel):
     instance_id: int | str
     subscription_id: str
     subdomain: str | None = None
-    status: Literal["provisioning", "running", "stopped", "failed", "error", "deprovisioned", "restarting"]
+    status: Literal[
+        "provisioning",
+        "running",
+        "stopped",
+        "failed",
+        "error",
+        "deprovisioned",
+        "restarting",
+    ]
     frontend_url: str | None = None
     backend_url: str | None = None
     matrix_server_url: str | None = None

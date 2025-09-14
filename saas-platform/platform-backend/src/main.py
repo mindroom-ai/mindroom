@@ -50,7 +50,11 @@ app = FastAPI(title="MindRoom Backend")
 app.add_middleware(AuditLoggingMiddleware)
 
 # Compute CORS origins: exclude localhost in production
-cors_origins = [o for o in ALLOWED_ORIGINS if not (ENVIRONMENT == "production" and o.startswith("http://localhost"))]
+cors_origins = [
+    o
+    for o in ALLOWED_ORIGINS
+    if not (ENVIRONMENT == "production" and o.startswith("http://localhost"))
+]
 
 # CORS middleware (added last, runs first - ensures CORS headers on ALL responses)
 app.add_middleware(
@@ -100,9 +104,13 @@ async def add_security_headers(
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+    )
     return response
 
 
@@ -112,9 +120,13 @@ app.state.limiter = limiter
 rate_logger = logging.getLogger("mindroom.ratelimit")
 
 
-async def _logged_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) -> StarletteResponse:  # type: ignore[override]
+async def _logged_rate_limit_exceeded(
+    request: Request, exc: RateLimitExceeded
+) -> StarletteResponse:  # type: ignore[override]
     client = request.client.host if request.client else "unknown"
-    rate_logger.warning("429 Too Many Requests: path=%s client=%s", request.url.path, client)
+    rate_logger.warning(
+        "429 Too Many Requests: path=%s client=%s", request.url.path, client
+    )
     return _rate_limit_exceeded_handler(request, exc)
 
 

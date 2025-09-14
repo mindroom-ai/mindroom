@@ -268,7 +268,7 @@ class TestAccountsEndpoints:
             else:
                 # 6th should be rate limited
                 assert response.status_code == 429
-                assert "Rate limit exceeded" in response.json()["detail"]
+                assert "Rate limit exceeded" in response.json()["error"]
 
     def test_get_account_with_no_subscriptions(
         self,

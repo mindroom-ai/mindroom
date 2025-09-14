@@ -401,6 +401,113 @@ async def admin_logout() -> dict[str, bool]:
     return {"success": True}
 
 
+@router.get("/admin/metrics/dashboard", response_model=AdminDashboardMetricsResponse)
+@limiter.limit("30/minute")
+async def get_dashboard_metrics(
+    request: Request,  # noqa: ARG001
+    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+) -> dict[str, Any]:
+    """Get dashboard metrics for admin panel."""
+    audit_log_entry(
+        account_id=admin["user_id"],
+        action="view",
+        resource_type="dashboard_metrics",
+    )
+    sb = ensure_supabase()
+
+    try:
+        accounts = sb.table("accounts").select("*", count="exact", head=True).execute()
+        active_subs = (
+            sb.table("subscriptions")
+            .select("*", count="exact", head=True)
+            .eq("status", "active")
+            .execute()
+        )
+        _ = (
+            sb.table("instances")
+            .select("*", count="exact", head=True)
+            .eq("status", "running")
+            .execute()
+        )
+
+        subs_data = (
+            sb.table("subscriptions").select("tier").eq("status", "active").execute()
+        )
+        tier_prices = {"starter": 49, "professional": 199, "enterprise": 999, "free": 0}
+        mrr = sum(
+            tier_prices.get(sub.get("tier", "free"), 0)
+            for sub in (subs_data.data or [])
+        )
+
+        seven_days_ago = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+        messages = (
+            sb.table("usage_metrics")
+            .select("metric_date, messages_sent")
+            .gte("metric_date", seven_days_ago)
+            .order("metric_date")
+            .execute()
+        )
+
+        if messages.data:
+            by_date = defaultdict(int)
+            for m in messages.data:
+                date = m["metric_date"][:10]
+                by_date[date] += m.get("messages_sent", 0)
+            _ = [  # noqa: F841
+                {"date": date, "messages_sent": count}
+                for date, count in sorted(by_date.items())
+            ]
+
+        all_instances = sb.table("instances").select("status").execute()
+        status_counts: dict[str, int] = {}
+        if all_instances.data:
+            for inst in all_instances.data:
+                status = inst.get("status", "unknown")
+                status_counts[status] = status_counts.get(status, 0) + 1
+
+        audit_logs = (
+            sb.table("audit_logs")
+            .select("created_at, action, account_id")
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+        recent_activity = audit_logs.data if audit_logs.data else []
+    except Exception:
+        logger.exception("Error fetching metrics")
+        return {
+            "total_accounts": 0,
+            "active_subscriptions": 0,
+            "total_instances": 0,
+            "instances_by_status": {},
+            "subscription_revenue": 0.0,
+            "subscriptions_by_tier": {},
+            "recent_signups": [],
+            "recent_instances": [],
+        }
+    else:
+        # Build subscriptions by tier
+        subscriptions_by_tier = {}
+        if subs_data.data:
+            for sub in subs_data.data:
+                tier = sub.get("tier", "free")
+                subscriptions_by_tier[tier] = subscriptions_by_tier.get(tier, 0) + 1
+
+        # Build instances by status dict
+        instances_by_status = {status: count for status, count in status_counts.items()}
+
+        return {
+            "total_accounts": accounts.count or 0,
+            "active_subscriptions": active_subs.count or 0,
+            "total_instances": len(all_instances.data) if all_instances.data else 0,
+            "instances_by_status": instances_by_status,
+            "subscription_revenue": float(mrr),
+            "subscriptions_by_tier": subscriptions_by_tier,
+            "recent_signups": [],  # Not implemented yet
+            "recent_instances": recent_activity if recent_activity else [],
+        }
+
+
 # === React Admin Data Provider ===
 @router.get("/admin/{resource}", response_model=AdminListResponse)
 @limiter.limit("60/minute")
@@ -594,103 +701,3 @@ async def admin_delete(
         raise HTTPException(status_code=400, detail="Invalid request") from None
     else:
         return {"data": {"id": resource_id}}
-
-
-@router.get("/admin/metrics/dashboard", response_model=AdminDashboardMetricsResponse)
-@limiter.limit("30/minute")
-async def get_dashboard_metrics(
-    request: Request,  # noqa: ARG001
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
-) -> dict[str, Any]:
-    """Get dashboard metrics for admin panel."""
-    audit_log_entry(
-        account_id=admin["user_id"],
-        action="view",
-        resource_type="dashboard_metrics",
-    )
-    sb = ensure_supabase()
-
-    try:
-        accounts = sb.table("accounts").select("*", count="exact", head=True).execute()
-        active_subs = (
-            sb.table("subscriptions")
-            .select("*", count="exact", head=True)
-            .eq("status", "active")
-            .execute()
-        )
-        running_instances = (
-            sb.table("instances")
-            .select("*", count="exact", head=True)
-            .eq("status", "running")
-            .execute()
-        )
-
-        subs_data = (
-            sb.table("subscriptions").select("tier").eq("status", "active").execute()
-        )
-        tier_prices = {"starter": 49, "professional": 199, "enterprise": 999, "free": 0}
-        mrr = sum(
-            tier_prices.get(sub.get("tier", "free"), 0)
-            for sub in (subs_data.data or [])
-        )
-
-        seven_days_ago = (datetime.now(UTC) - timedelta(days=7)).isoformat()
-        messages = (
-            sb.table("usage_metrics")
-            .select("metric_date, messages_sent")
-            .gte("metric_date", seven_days_ago)
-            .order("metric_date")
-            .execute()
-        )
-
-        daily_messages = []
-        if messages.data:
-            by_date = defaultdict(int)
-            for m in messages.data:
-                date = m["metric_date"][:10]
-                by_date[date] += m.get("messages_sent", 0)
-            daily_messages = [
-                {"date": date, "messages_sent": count}
-                for date, count in sorted(by_date.items())
-            ]
-
-        all_instances = sb.table("instances").select("status").execute()
-        status_counts: dict[str, int] = {}
-        if all_instances.data:
-            for inst in all_instances.data:
-                status = inst.get("status", "unknown")
-                status_counts[status] = status_counts.get(status, 0) + 1
-        instance_statuses = [
-            {"status": status, "count": count}
-            for status, count in status_counts.items()
-        ]
-
-        audit_logs = (
-            sb.table("audit_logs")
-            .select("created_at, action, account_id")
-            .order("created_at", desc=True)
-            .limit(10)
-            .execute()
-        )
-        recent_activity = audit_logs.data if audit_logs.data else []
-    except Exception:
-        logger.exception("Error fetching metrics")
-        return {
-            "totalAccounts": 0,
-            "activeSubscriptions": 0,
-            "runningInstances": 0,
-            "mrr": 0,
-            "dailyMessages": [],
-            "instanceStatuses": [],
-            "recentActivity": [],
-        }
-    else:
-        return {
-            "totalAccounts": accounts.count or 0,
-            "activeSubscriptions": active_subs.count or 0,
-            "runningInstances": running_instances.count or 0,
-            "mrr": mrr,
-            "dailyMessages": daily_messages,
-            "instanceStatuses": instance_statuses,
-            "recentActivity": recent_activity,
-        }
