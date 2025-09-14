@@ -3,7 +3,10 @@
 
 CUSTOMER_ID=${1:-6ca9f23a}
 COMPONENT=${2:-backend}
-KUBECONFIG=${KUBECONFIG:-terraform-k8s/mindroom-k8s_kubeconfig.yaml}
+
+# Get kubeconfig path relative to this script's location
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+KUBECONFIG="$SCRIPT_DIR/../terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"
 
 echo "Viewing logs for $COMPONENT of instance $CUSTOMER_ID..."
 echo ""
