@@ -45,11 +45,9 @@ if [[ -z "${PORKBUN_API_KEY:-}" || -z "${PORKBUN_SECRET_API_KEY:-}" ]]; then
 fi
 
 echo "Applying platform (phase 2, with DNS)..."
-terraform apply -auto-approve \
-  -var="hcloud_token=${HCLOUD_TOKEN}" \
-  -var="deploy_platform=${DEPLOY_PLATFORM:-true}" \
-  -var="porkbun_api_key=${PORKBUN_API_KEY}" \
-  -var="porkbun_secret_key=${PORKBUN_SECRET_API_KEY}"
+# Set deploy_platform as env var since it's not in .env by default
+export TF_VAR_deploy_platform="${DEPLOY_PLATFORM:-true}"
+terraform apply -auto-approve
 
 echo "Verifying namespace and ingress..."
 kubectl get ns || true

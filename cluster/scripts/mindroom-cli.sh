@@ -10,7 +10,9 @@ set -a
 eval "$(uvx --from python-dotenv[cli] dotenv list --format shell)"
 set +a
 
-KUBECONFIG="${KUBECONFIG:-./terraform-k8s/mindroom-k8s_kubeconfig.yaml}"
+# Get kubeconfig path relative to this script's location
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+KUBECONFIG="$SCRIPT_DIR/../terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"
 
 case "$1" in
     list|ls)
