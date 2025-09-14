@@ -25,7 +25,7 @@ echo "Initializing Terraform..."
 terraform init -upgrade -input=false
 
 echo "Applying cluster (phase 1)..."
-terraform apply -auto-approve -target=module.kube-hetzner -var="hcloud_token=${HCLOUD_TOKEN}"
+terraform apply -auto-approve -target=module.kube-hetzner
 
 # Determine kubeconfig path from output
 if KUBECONFIG_PATH=$(terraform output -raw kubeconfig_path 2>/dev/null); then

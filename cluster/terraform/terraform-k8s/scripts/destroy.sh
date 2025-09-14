@@ -20,6 +20,6 @@ unset SSH_AUTH_SOCK
 cd "$ROOT_DIR"
 
 echo "Destroying platform and cluster..."
-terraform destroy -auto-approve -var="hcloud_token=${HCLOUD_TOKEN}" || true
+terraform destroy -auto-approve || true
 
 echo "Done."
