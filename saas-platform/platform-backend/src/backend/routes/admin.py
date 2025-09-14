@@ -75,7 +75,10 @@ def audit_log_entry(
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
 @limiter.limit("30/minute")
-async def get_admin_stats(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
+async def get_admin_stats(
+    request: Request,
+    admin: Annotated[dict, Depends(verify_admin)],
+) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
     """Get platform statistics for admin dashboard."""
     audit_log_entry(
         account_id=admin["user_id"],
@@ -117,23 +120,24 @@ async def get_admin_stats(request: Request, admin: Annotated[dict, Depends(verif
 
 # Generic proxy for instance management actions
 async def _proxy_to_provisioner(
+    request: Request,
     provisioner_func: Callable,
     instance_id: int,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001
 ) -> dict[str, Any]:
     """Proxy request to provisioner with API key."""
-    return await provisioner_func(instance_id, f"Bearer {PROVISIONER_API_KEY}")
+    return await provisioner_func(request, instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
 @router.post("/admin/instances/{instance_id}/start", response_model=ActionResult)
 @limiter.limit("10/minute")
 async def admin_start_instance(
-    request: Request,  # noqa: ARG001
+    request: Request,
     instance_id: int,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Start an instance (admin proxy)."""
-    result = await _proxy_to_provisioner(start_instance_provisioner, instance_id, admin)
+    result = await _proxy_to_provisioner(request, start_instance_provisioner, instance_id, admin)
     audit_log_entry(
         account_id=admin["user_id"],
         action="start",
@@ -144,9 +148,14 @@ async def admin_start_instance(
 
 
 @router.post("/admin/instances/{instance_id}/stop", response_model=ActionResult)
-async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008
+@limiter.limit("10/minute")
+async def admin_stop_instance(
+    request: Request,
+    instance_id: int,
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
+) -> dict[str, Any]:
     """Stop an instance (admin proxy)."""
-    result = await _proxy_to_provisioner(stop_instance_provisioner, instance_id, admin)
+    result = await _proxy_to_provisioner(request, stop_instance_provisioner, instance_id, admin)
     audit_log_entry(
         account_id=admin["user_id"],
         action="stop",
@@ -159,12 +168,12 @@ async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(v
 @router.post("/admin/instances/{instance_id}/restart", response_model=ActionResult)
 @limiter.limit("10/minute")
 async def admin_restart_instance(
-    request: Request,  # noqa: ARG001
+    request: Request,
     instance_id: int,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Restart an instance (admin proxy)."""
-    result = await _proxy_to_provisioner(restart_instance_provisioner, instance_id, admin)
+    result = await _proxy_to_provisioner(request, restart_instance_provisioner, instance_id, admin)
     audit_log_entry(
         account_id=admin["user_id"],
         action="restart",
@@ -177,12 +186,12 @@ async def admin_restart_instance(
 @router.delete("/admin/instances/{instance_id}/uninstall", response_model=ActionResult)
 @limiter.limit("2/minute")
 async def admin_uninstall_instance(
-    request: Request,  # noqa: ARG001
+    request: Request,
     instance_id: int,
     admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Uninstall an instance (admin proxy)."""
-    result = await _proxy_to_provisioner(uninstall_instance, instance_id, admin)
+    result = await _proxy_to_provisioner(request, uninstall_instance, instance_id, admin)
     audit_log_entry(
         account_id=admin["user_id"],
         action="uninstall",
@@ -223,7 +232,7 @@ async def admin_provision_instance(
         "instance_id": instance_id,  # Re-use existing instance ID
     }
 
-    result = await provision_instance(data, f"Bearer {PROVISIONER_API_KEY}", background_tasks)
+    result = await provision_instance(request, data, f"Bearer {PROVISIONER_API_KEY}", background_tasks)
     audit_log_entry(
         account_id=admin["user_id"],
         action="provision",
@@ -239,9 +248,9 @@ async def admin_provision_instance(
 
 @router.post("/admin/sync-instances", response_model=SyncResult)
 @limiter.limit("5/minute")
-async def admin_sync_instances(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
+async def admin_sync_instances(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008
     """Sync instance states between database and Kubernetes (admin proxy)."""
-    result = await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
+    result = await sync_instances(request, f"Bearer {PROVISIONER_API_KEY}")
     audit_log_entry(
         account_id=admin["user_id"],
         action="sync",
