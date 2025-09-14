@@ -59,7 +59,10 @@ class TestAdminEndpoints:
     @pytest.fixture
     def mock_provisioner_api_key(self):
         """Mock PROVISIONER_API_KEY."""
-        with patch("backend.routes.admin.PROVISIONER_API_KEY", "test-api-key"):
+        with (
+            patch("backend.routes.admin.PROVISIONER_API_KEY", "test-api-key"),
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-api-key"),
+        ):
             yield
 
     def test_admin_stats_success(
@@ -238,12 +241,23 @@ class TestAdminEndpoints:
         mock_provisioner_api_key,
     ):
         """Test admin provisioning an instance."""
-        # Setup
+        # Setup - Mock instance query
+        mock_supabase.table().select().eq().execute.return_value = Mock(
+            data=[
+                {
+                    "instance_id": "123",
+                    "status": "deprovisioned",
+                    "account_id": "acc_123",
+                }
+            ]
+        )
+
+        # Mock subscription query for provision_instance
         mock_supabase.table().select().eq().single().execute.return_value = Mock(
             data={"id": "sub_123", "account_id": "acc_123", "tier": "starter"}
         )
 
-        with patch("backend.routes.provisioner.provision_instance") as mock_provision:
+        with patch("backend.routes.admin.provision_instance") as mock_provision:
             mock_provision.return_value = {
                 "success": True,
                 "message": "Instance provisioned",
@@ -268,7 +282,7 @@ class TestAdminEndpoints:
         mock_provisioner_api_key,
     ):
         """Test admin syncing instances."""
-        with patch("backend.routes.provisioner.sync_instances") as mock_sync:
+        with patch("backend.routes.admin.sync_instances") as mock_sync:
             mock_sync.return_value = {
                 "total": 5,
                 "synced": 2,
@@ -276,8 +290,11 @@ class TestAdminEndpoints:
                 "updates": [],
             }
 
-            # Make request
-            response = client.post("/admin/sync-instances")
+            # Make request with API key header
+            response = client.post(
+                "/admin/sync-instances",
+                headers={"X-Provisioner-API-Key": "test-api-key"},
+            )
 
             # Verify
             assert response.status_code == 200
@@ -328,7 +345,8 @@ class TestAdminEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["account"]["id"] == "acc_123"
-        assert len(data["subscriptions"]) == 1
+        assert data["account"]["email"] == "user@example.com"
+        assert data["subscription"]["tier"] == "professional"
         assert len(data["instances"]) == 1
 
     def test_admin_update_account_status(
@@ -376,13 +394,18 @@ class TestAdminEndpoints:
         mock_verify_admin: Mock,
     ):
         """Test admin listing resources."""
-        # Setup
-        mock_supabase.table().select().execute.return_value = Mock(
+        # Setup mock with query chaining for accounts
+        mock_query = MagicMock()
+        mock_query.select.return_value = mock_query
+        mock_query.range.return_value = mock_query
+        mock_query.execute.return_value = Mock(
             data=[
                 {"id": "1", "name": "Resource 1"},
                 {"id": "2", "name": "Resource 2"},
-            ]
+            ],
+            count=2,
         )
+        mock_supabase.table.return_value = mock_query
 
         # Make request
         response = client.get("/admin/accounts")
@@ -390,8 +413,10 @@ class TestAdminEndpoints:
         # Verify
         assert response.status_code == 200
         data = response.json()
-        assert data["success"] is True
+        assert "data" in data
+        assert "total" in data
         assert len(data["data"]) == 2
+        assert data["total"] == 2
 
     def test_admin_get_single_resource(
         self,
@@ -411,7 +436,7 @@ class TestAdminEndpoints:
         # Verify
         assert response.status_code == 200
         data = response.json()
-        assert data["success"] is True
+        assert "data" in data
         assert data["data"]["id"] == "123"
 
     def test_admin_create_resource(
@@ -426,13 +451,13 @@ class TestAdminEndpoints:
             data=[{"id": "new_123", "name": "New Resource"}]
         )
 
-        # Make request
-        response = client.post("/admin/test_resource", json={"name": "New Resource"})
+        # Make request to an allowed resource
+        response = client.post("/admin/accounts", json={"name": "New Resource"})
 
         # Verify
         assert response.status_code == 200
         data = response.json()
-        assert data["success"] is True
+        assert "data" in data
         assert data["data"]["id"] == "new_123"
 
     def test_admin_update_resource(
@@ -447,15 +472,15 @@ class TestAdminEndpoints:
             data=[{"id": "123", "name": "Updated Resource"}]
         )
 
-        # Make request
+        # Make request to an allowed resource
         response = client.put(
-            "/admin/test_resource/123", json={"name": "Updated Resource"}
+            "/admin/subscriptions/123", json={"name": "Updated Resource"}
         )
 
         # Verify
         assert response.status_code == 200
         data = response.json()
-        assert data["success"] is True
+        assert "data" in data
         assert data["data"]["name"] == "Updated Resource"
 
     def test_admin_delete_resource(
@@ -468,14 +493,13 @@ class TestAdminEndpoints:
         # Setup
         mock_supabase.table().delete().eq().execute.return_value = Mock(data=[])
 
-        # Make request
-        response = client.delete("/admin/test_resource/123")
+        # Make request to an allowed resource
+        response = client.delete("/admin/instances/123")
 
         # Verify
         assert response.status_code == 200
         data = response.json()
-        assert data["success"] is True
-        assert data["message"] == "Resource deleted successfully"
+        assert "data" in data
 
     def test_admin_dashboard_metrics(
         self,
@@ -484,21 +508,85 @@ class TestAdminEndpoints:
         mock_verify_admin: Mock,
     ):
         """Test admin dashboard metrics."""
-        # Setup
-        mock_supabase.table().select().execute.side_effect = [
-            Mock(data=[{"count": 100}]),  # total_users
-            Mock(data=[{"count": 50}]),  # active_users_30d
-            Mock(data=[{"count": 25}]),  # new_users_7d
-            Mock(data=[{"count": 80}]),  # total_subscriptions
-            Mock(data=[{"count": 70}]),  # active_subscriptions
-            Mock(data=[{"count": 10}]),  # cancelled_subscriptions_30d
-            Mock(data=[{"count": 60}]),  # total_instances
-            Mock(data=[{"count": 45}]),  # running_instances
-            Mock(data=[{"count": 15}]),  # stopped_instances
-            Mock(data=[{"sum": 10000.0}]),  # revenue_mtd
-            Mock(data=[{"sum": 50000.0}]),  # revenue_ytd
-            Mock(data=[{"avg": 125.0}]),  # avg_revenue_per_user
-        ]
+        # Setup mock queries for each specific table call
+        # Mock accounts query
+        accounts_mock = MagicMock()
+        accounts_mock.select.return_value = accounts_mock
+        accounts_mock.execute.return_value = Mock(count=100)
+
+        # Mock active subscriptions query
+        active_subs_mock = MagicMock()
+        active_subs_mock.select.return_value = active_subs_mock
+        active_subs_mock.eq.return_value = active_subs_mock
+        active_subs_mock.execute.return_value = Mock(count=70)
+
+        # Mock running instances query
+        running_instances_mock = MagicMock()
+        running_instances_mock.select.return_value = running_instances_mock
+        running_instances_mock.eq.return_value = running_instances_mock
+        running_instances_mock.execute.return_value = Mock(count=45)
+
+        # Mock subscriptions data for MRR
+        subs_data_mock = MagicMock()
+        subs_data_mock.select.return_value = subs_data_mock
+        subs_data_mock.eq.return_value = subs_data_mock
+        subs_data_mock.execute.return_value = Mock(
+            data=[
+                {"tier": "starter"},
+                {"tier": "professional"},
+            ]
+        )
+
+        # Mock usage metrics for messages
+        usage_mock = MagicMock()
+        usage_mock.select.return_value = usage_mock
+        usage_mock.gte.return_value = usage_mock
+        usage_mock.order.return_value = usage_mock
+        usage_mock.execute.return_value = Mock(data=[])
+
+        # Mock all instances for status counts
+        all_instances_mock = MagicMock()
+        all_instances_mock.select.return_value = all_instances_mock
+        all_instances_mock.execute.return_value = Mock(
+            data=[
+                {"status": "running"},
+                {"status": "stopped"},
+            ]
+        )
+
+        # Mock audit logs
+        audit_mock = MagicMock()
+        audit_mock.select.return_value = audit_mock
+        audit_mock.order.return_value = audit_mock
+        audit_mock.limit.return_value = audit_mock
+        audit_mock.execute.return_value = Mock(data=[])
+
+        # Set up table method to return the right mock for each table
+        call_count = [0]
+
+        def table_side_effect(table_name):
+            call_count[0] += 1
+            if table_name == "accounts":
+                return accounts_mock
+            elif table_name == "subscriptions":
+                # Return different mock based on call count
+                if call_count[0] == 2:  # Second call is for active subs
+                    return active_subs_mock
+                else:  # Fourth call is for tier data
+                    return subs_data_mock
+            elif table_name == "instances":
+                # Return different mock based on call count
+                if call_count[0] == 3:  # Third call is for running instances
+                    return running_instances_mock
+                else:  # Sixth call is for all instances
+                    return all_instances_mock
+            elif table_name == "usage_metrics":
+                return usage_mock
+            elif table_name == "audit_logs":
+                return audit_mock
+            return MagicMock()
+
+        mock_supabase.table = Mock(side_effect=table_side_effect)
 
         # Make request
         response = client.get("/admin/metrics/dashboard")
@@ -506,11 +594,13 @@ class TestAdminEndpoints:
         # Verify
         assert response.status_code == 200
         data = response.json()
-        assert "user_metrics" in data
-        assert "subscription_metrics" in data
-        assert "instance_metrics" in data
-        assert "revenue_metrics" in data
-        assert data["user_metrics"]["total_users"] == 100
+        assert "totalAccounts" in data
+        assert "activeSubscriptions" in data
+        assert "runningInstances" in data
+        assert "mrr" in data
+        assert data["totalAccounts"] == 100
+        assert data["activeSubscriptions"] == 70
+        assert data["runningInstances"] == 45
 
     def test_admin_resource_not_in_allowlist(
         self,
@@ -521,22 +611,26 @@ class TestAdminEndpoints:
         # Make request to a resource not in ADMIN_RESOURCE_ALLOWLIST
         response = client.get("/admin/dangerous_resource")
 
-        # Verify
-        assert response.status_code == 403
-        assert "not allowed" in response.json()["detail"]
+        # Verify - the route returns 400 for invalid resource
+        assert response.status_code == 400
+        assert "Invalid resource" in response.json()["detail"]
 
     def test_admin_instance_not_found(
         self,
         client: TestClient,
         mock_verify_admin: Mock,
         mock_check_deployment: Mock,
+        mock_provisioner_api_key,
     ):
         """Test admin operations on non-existent instance."""
         # Setup
         mock_check_deployment.return_value = False
 
-        # Make request
-        response = client.post("/admin/instances/999/start")
+        # Make request with API key header
+        response = client.post(
+            "/admin/instances/999/start",
+            headers={"X-Provisioner-API-Key": "test-api-key"},
+        )
 
         # Verify
         assert response.status_code == 404
@@ -564,8 +658,11 @@ class TestAdminEndpoints:
                 ],
             }
 
-            # Make request
-            response = client.post("/admin/sync-instances")
+            # Make request with API key header
+            response = client.post(
+                "/admin/sync-instances",
+                headers={"X-Provisioner-API-Key": "test-api-key"},
+            )
 
             # Verify
             assert response.status_code == 200

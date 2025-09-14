@@ -7,7 +7,11 @@ from typing import Annotated, Any
 from backend.config import PLATFORM_DOMAIN, logger, stripe
 from backend.deps import ensure_supabase, limiter, verify_user, verify_user_optional
 from backend.models import UrlResponse
-from backend.pricing import get_stripe_price_id, get_trial_days, is_trial_enabled_for_plan
+from backend.pricing import (
+    get_stripe_price_id,
+    get_trial_days,
+    is_trial_enabled_for_plan,
+)
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -36,14 +40,23 @@ async def create_checkout_session(
     # Get price ID from config
     price_id = get_stripe_price_id(payload.tier, payload.billing_cycle)
     if not price_id:
-        raise HTTPException(status_code=400, detail=f"No price found for {payload.tier} ({payload.billing_cycle})")
+        raise HTTPException(
+            status_code=400,
+            detail=f"No price found for {payload.tier} ({payload.billing_cycle})",
+        )
 
     sb = ensure_supabase()
 
     customer_id: str | None = None
 
     if user:
-        result = sb.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()
+        result = (
+            sb.table("accounts")
+            .select("stripe_customer_id")
+            .eq("id", user["account_id"])
+            .single()
+            .execute()
+        )
         if result.data and result.data.get("stripe_customer_id"):
             customer_id = result.data["stripe_customer_id"]
         else:
@@ -60,7 +73,9 @@ async def create_checkout_session(
     # Check if customer already has an active subscription
     if customer_id:
         # Check for existing active subscriptions
-        subscriptions = stripe.Subscription.list(customer=customer_id, status="all", limit=10)
+        subscriptions = stripe.Subscription.list(
+            customer=customer_id, status="all", limit=10
+        )
         for sub in subscriptions.data:
             if sub.status in ["active", "trialing"]:
                 # Customer already has a subscription - they should use the portal to manage it
@@ -103,26 +118,47 @@ async def create_checkout_session(
     if customer_id:
         checkout_params["customer"] = customer_id
 
-    session = stripe.checkout.Session.create(**checkout_params)
+    try:
+        session = stripe.checkout.Session.create(**checkout_params)
+    except Exception as e:
+        logger.exception("Error creating checkout session")
+        raise HTTPException(
+            status_code=500, detail="Failed to create checkout session"
+        ) from e
+
     return {"url": session.url}
 
 
 @router.post("/stripe/portal", response_model=UrlResponse)
 @limiter.limit("10/minute")
-async def create_portal_session(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:  # noqa: ARG001
+async def create_portal_session(
+    request: Request, user: Annotated[dict, Depends(verify_user)]
+) -> dict[str, Any]:  # noqa: ARG001
     """Create Stripe customer portal session for subscription management."""
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")
     sb = ensure_supabase()
 
     # Stripe customer ID is stored on the accounts table
-    result = sb.table("accounts").select("stripe_customer_id").eq("id", user["account_id"]).single().execute()
+    result = (
+        sb.table("accounts")
+        .select("stripe_customer_id")
+        .eq("id", user["account_id"])
+        .single()
+        .execute()
+    )
     if not result.data or not result.data.get("stripe_customer_id"):
         raise HTTPException(status_code=404, detail="No Stripe customer found")
 
-    session = stripe.billing_portal.Session.create(
-        customer=result.data["stripe_customer_id"],
-        return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing?return=true",
-    )
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=result.data["stripe_customer_id"],
+            return_url=f"https://app.{PLATFORM_DOMAIN}/dashboard/billing?return=true",
+        )
+    except Exception as e:
+        logger.exception("Error creating portal session")
+        raise HTTPException(
+            status_code=500, detail="Failed to create portal session"
+        ) from e
 
     return {"url": session.url}
