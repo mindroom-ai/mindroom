@@ -75,7 +75,7 @@ def audit_log_entry(
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
 @limiter.limit("30/minute")
-async def get_admin_stats(request: Request, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
+async def get_admin_stats(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
     """Get platform statistics for admin dashboard."""
     audit_log_entry(
         account_id=admin["user_id"],
@@ -130,7 +130,7 @@ async def _proxy_to_provisioner(
 async def admin_start_instance(
     request: Request,  # noqa: ARG001
     instance_id: int,
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Start an instance (admin proxy)."""
     result = await _proxy_to_provisioner(start_instance_provisioner, instance_id, admin)
@@ -144,7 +144,7 @@ async def admin_start_instance(
 
 
 @router.post("/admin/instances/{instance_id}/stop", response_model=ActionResult)
-async def admin_stop_instance(instance_id: int, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008
+async def admin_stop_instance(instance_id: int, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008
     """Stop an instance (admin proxy)."""
     result = await _proxy_to_provisioner(stop_instance_provisioner, instance_id, admin)
     audit_log_entry(
@@ -161,7 +161,7 @@ async def admin_stop_instance(instance_id: int, admin: dict = Depends(verify_adm
 async def admin_restart_instance(
     request: Request,  # noqa: ARG001
     instance_id: int,
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Restart an instance (admin proxy)."""
     result = await _proxy_to_provisioner(restart_instance_provisioner, instance_id, admin)
@@ -179,7 +179,7 @@ async def admin_restart_instance(
 async def admin_uninstall_instance(
     request: Request,  # noqa: ARG001
     instance_id: int,
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Uninstall an instance (admin proxy)."""
     result = await _proxy_to_provisioner(uninstall_instance, instance_id, admin)
@@ -198,7 +198,7 @@ async def admin_provision_instance(
     request: Request,  # noqa: ARG001
     instance_id: int,
     background_tasks: BackgroundTasks,
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Provision a deprovisioned instance."""
     sb = ensure_supabase()
@@ -239,7 +239,7 @@ async def admin_provision_instance(
 
 @router.post("/admin/sync-instances", response_model=SyncResult)
 @limiter.limit("5/minute")
-async def admin_sync_instances(request: Request, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
+async def admin_sync_instances(request: Request, admin: Annotated[dict, Depends(verify_admin)]) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
     """Sync instance states between database and Kubernetes (admin proxy)."""
     result = await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
     audit_log_entry(
@@ -254,7 +254,7 @@ async def admin_sync_instances(request: Request, admin: dict = Depends(verify_ad
 @router.get("/admin/accounts/{account_id}", response_model=AdminAccountDetailsResponse)
 async def get_account_details(
     account_id: str,
-    admin: dict = Depends(verify_admin),  # noqa: ARG001, FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: ARG001, FAST002, B008
 ) -> dict[str, Any]:
     """Get detailed account information including subscription and instances."""
     sb = ensure_supabase()
@@ -306,7 +306,7 @@ class UpdateAccountStatusRequest(BaseModel):
 async def update_account_status(
     account_id: str,
     request: UpdateAccountStatusRequest,
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Update account status (active, suspended, etc)."""
     sb = ensure_supabase()
@@ -359,7 +359,7 @@ async def admin_logout() -> dict[str, bool]:
 @limiter.limit("30/minute")
 async def get_dashboard_metrics(
     request: Request,  # noqa: ARG001
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Get dashboard metrics for admin panel."""
     audit_log_entry(
@@ -452,7 +452,7 @@ async def get_dashboard_metrics(
 async def admin_get_list(  # noqa: C901
     request: Request,  # noqa: ARG001
     resource: str,
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
     _sort: Annotated[str | None, Query()] = None,
     _order: Annotated[str | None, Query()] = None,
     _start: int = Query(0),  # noqa: FAST002
@@ -514,7 +514,7 @@ async def admin_get_one(
     request: Request,  # noqa: ARG001
     resource: str,
     resource_id: str,
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Get single record for React Admin."""
     if resource not in ALLOWED_RESOURCES:
@@ -543,7 +543,7 @@ async def admin_create(
     request: Request,  # noqa: ARG001
     resource: str,
     data: dict,
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Create record for React Admin."""
     if resource not in ALLOWED_RESOURCES:
@@ -577,7 +577,7 @@ async def admin_update(
     resource: str,
     resource_id: str,
     data: dict,
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Update record for React Admin."""
     if resource not in ALLOWED_RESOURCES:
@@ -609,7 +609,7 @@ async def admin_delete(
     request: Request,  # noqa: ARG001
     resource: str,
     resource_id: str,
-    admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
+    admin: Annotated[dict, Depends(verify_admin)],  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Delete record for React Admin."""
     if resource not in ALLOWED_RESOURCES:
