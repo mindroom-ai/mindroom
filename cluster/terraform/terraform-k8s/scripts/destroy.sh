@@ -14,6 +14,9 @@ set -a
 source "$ENV_FILE"
 set +a
 
+# Fix SSH_AUTH_SOCK issue with kube-hetzner module
+unset SSH_AUTH_SOCK
+
 cd "$ROOT_DIR"
 
 echo "Destroying platform and cluster..."
