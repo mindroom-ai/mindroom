@@ -1,13 +1,9 @@
 """Admin-only routes for platform management."""
 
-from __future__ import annotations
-
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from typing import Annotated, Any
 
 from backend.config import PROVISIONER_API_KEY, logger
 from pydantic import BaseModel
