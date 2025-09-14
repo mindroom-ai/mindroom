@@ -11,15 +11,12 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Check if we're in the saas-platform directory or parent
-if [ -f "./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml" ]; then
-    KUBECONFIG="./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"
-elif [ -f "./terraform-k8s/mindroom-k8s_kubeconfig.yaml" ]; then
-    KUBECONFIG="./terraform-k8s/mindroom-k8s_kubeconfig.yaml"
-elif [ -f "./saas-platform/terraform-k8s/mindroom-k8s_kubeconfig.yaml" ]; then
-    KUBECONFIG="./saas-platform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"
-else
-    echo "Error: Could not find kubeconfig file"
+# Get kubeconfig path relative to this script's location
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+KUBECONFIG="$SCRIPT_DIR/../terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml"
+
+if [ ! -f "$KUBECONFIG" ]; then
+    echo "Error: Could not find kubeconfig file at $KUBECONFIG"
     exit 1
 fi
 
