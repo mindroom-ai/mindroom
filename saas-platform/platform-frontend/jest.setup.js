@@ -41,7 +41,8 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 })
 
-// Mock window.location
+// Mock window.location for tests
+// JSDOM location is read-only, so we delete and replace it
 delete window.location
 window.location = {
   origin: 'http://localhost:3000',
@@ -49,6 +50,10 @@ window.location = {
   pathname: '/',
   search: '',
   hash: '',
+  protocol: 'http:',
+  hostname: 'localhost',
+  host: 'localhost:3000',
+  port: '3000',
   reload: jest.fn(),
   replace: jest.fn(),
   assign: jest.fn(),
