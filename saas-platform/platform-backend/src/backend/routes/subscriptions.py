@@ -7,7 +7,11 @@ from typing import Annotated, Any
 
 from backend.config import logger, stripe
 from backend.deps import ensure_supabase, verify_user
-from backend.models import SubscriptionCancelResponse, SubscriptionOut, SubscriptionReactivateResponse
+from backend.models import (
+    SubscriptionCancelResponse,
+    SubscriptionOut,
+    SubscriptionReactivateResponse,
+)
 from backend.pricing import get_plan_limits_from_metadata
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -22,12 +26,20 @@ class CancelSubscriptionRequest(BaseModel):
 
 
 @router.get("/my/subscription", response_model=SubscriptionOut)
-async def get_user_subscription(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+async def get_user_subscription(
+    user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, Any]:
     """Get current user's subscription."""
     sb = ensure_supabase()
 
     account_id = user["account_id"]
-    result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
+    result = (
+        sb.table("subscriptions")
+        .select("*")
+        .eq("account_id", account_id)
+        .limit(1)
+        .execute()
+    )
     if not result.data:
         # Return a default free subscription if none exists
         limits = get_plan_limits_from_metadata("free")
@@ -66,12 +78,25 @@ async def cancel_subscription(
     account_id = user["account_id"]
 
     # Get current subscription
-    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).single().execute()
+    sub_result = (
+        sb.table("subscriptions")
+        .select("*")
+        .eq("account_id", account_id)
+        .limit(1)
+        .execute()
+    )
 
-    if not sub_result.data or not sub_result.data.get("stripe_subscription_id"):
+    if not sub_result.data:
+        raise HTTPException(status_code=404, detail="No subscription found")
+
+    subscription = sub_result.data[0]
+    if subscription.get("status") == "cancelled":
+        raise HTTPException(status_code=400, detail="Subscription is already cancelled")
+
+    if not subscription.get("stripe_subscription_id"):
         raise HTTPException(status_code=400, detail="No active subscription found")
 
-    stripe_sub_id = sub_result.data["stripe_subscription_id"]
+    stripe_sub_id = subscription["stripe_subscription_id"]
 
     try:
         if request.cancel_at_period_end:
@@ -92,13 +117,17 @@ async def cancel_subscription(
             "subscription_id": cancelled_sub.id,
         }
 
-    except stripe.error.StripeError:
-        logger.exception("Stripe error cancelling subscription")
-        raise HTTPException(status_code=400, detail="Payment provider error") from None
+    except Exception:
+        logger.exception("Error cancelling subscription")
+        raise HTTPException(status_code=500, detail="Failed to cancel subscription")
 
 
-@router.post("/my/subscription/reactivate", response_model=SubscriptionReactivateResponse)
-async def reactivate_subscription(user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
+@router.post(
+    "/my/subscription/reactivate", response_model=SubscriptionReactivateResponse
+)
+async def reactivate_subscription(
+    user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, Any]:
     """Reactivate a cancelled subscription (if still in billing period)."""
     if not stripe.api_key:
         raise HTTPException(status_code=500, detail="Stripe not configured")
@@ -107,12 +136,25 @@ async def reactivate_subscription(user: Annotated[dict, Depends(verify_user)]) -
     account_id = user["account_id"]
 
     # Get current subscription
-    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).single().execute()
+    sub_result = (
+        sb.table("subscriptions")
+        .select("*")
+        .eq("account_id", account_id)
+        .limit(1)
+        .execute()
+    )
 
-    if not sub_result.data or not sub_result.data.get("stripe_subscription_id"):
-        raise HTTPException(status_code=400, detail="No subscription found")
+    if not sub_result.data:
+        raise HTTPException(status_code=404, detail="No subscription found")
 
-    stripe_sub_id = sub_result.data["stripe_subscription_id"]
+    subscription = sub_result.data[0]
+    if subscription.get("status") != "cancelled":
+        raise HTTPException(status_code=400, detail="Subscription is not cancelled")
+
+    if not subscription.get("stripe_subscription_id"):
+        raise HTTPException(status_code=400, detail="No Stripe subscription found")
+
+    stripe_sub_id = subscription["stripe_subscription_id"]
 
     try:
         # Reactivate by removing the cancel_at_period_end flag
@@ -136,6 +178,6 @@ async def reactivate_subscription(user: Annotated[dict, Depends(verify_user)]) -
             "subscription_id": reactivated_sub.id,
         }
 
-    except stripe.error.StripeError:
-        logger.exception("Stripe error reactivating subscription")
-        raise HTTPException(status_code=400, detail="Payment provider error") from None
+    except Exception:
+        logger.exception("Error reactivating subscription")
+        raise HTTPException(status_code=500, detail="Failed to reactivate subscription")
