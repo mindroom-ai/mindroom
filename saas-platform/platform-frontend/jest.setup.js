@@ -44,6 +44,9 @@ Object.defineProperty(window, 'matchMedia', {
 // Mock window.location for tests
 // Suppress the JSDOM navigation error that doesn't affect test results
 const originalConsoleError = console.error
+const originalConsoleLog = console.log
+
+// Suppress expected console outputs during tests
 console.error = (...args) => {
   // Check if this is the JSDOM navigation error
   const firstArg = args[0]
@@ -54,7 +57,27 @@ console.error = (...args) => {
   if (typeof firstArg === 'string' && firstArg.includes('Not implemented: navigation')) {
     return
   }
+  // Suppress expected error outputs from tests
+  if (typeof firstArg === 'string' && (
+    firstArg.includes('Provision error:') ||
+    firstArg.includes('API call failed:') ||
+    firstArg.includes('Failed to') && firstArg.includes('instance:')
+  )) {
+    return
+  }
   originalConsoleError.call(console, ...args)
+}
+
+console.log = (...args) => {
+  // Suppress expected log outputs from tests
+  const firstArg = args[0]
+  if (typeof firstArg === 'string' && (
+    firstArg.includes('Provision result:') ||
+    firstArg.includes('Request cancelled:')
+  )) {
+    return
+  }
+  originalConsoleLog.call(console, ...args)
 }
 
 // JSDOM location is read-only, so we delete and replace it
