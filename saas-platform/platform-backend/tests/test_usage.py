@@ -59,12 +59,14 @@ class TestUsageEndpoints:
         usage_mock.execute.return_value = Mock(
             data=[
                 {
+                    "subscription_id": "sub_123",
                     "metric_date": "2024-01-01",
                     "messages_sent": 100,
                     "agents_used": 5,
                     "storage_used_gb": 2.5,
                 },
                 {
+                    "subscription_id": "sub_123",
                     "metric_date": "2024-01-02",
                     "messages_sent": 150,
                     "agents_used": 6,
@@ -91,9 +93,9 @@ class TestUsageEndpoints:
         assert "usage" in data
         assert "aggregated" in data
         assert len(data["usage"]) == 2
-        assert data["aggregated"]["total_messages"] == 250  # 100 + 150
-        assert data["aggregated"]["total_agents"] == 6  # max
-        assert data["aggregated"]["total_storage"] == 2.7  # max
+        assert data["aggregated"]["totalMessages"] == 250  # 100 + 150
+        assert data["aggregated"]["totalAgents"] == 6  # max
+        assert data["aggregated"]["totalStorage"] == 2.7  # max
 
     def test_get_usage_with_days_parameter(
         self,
@@ -117,6 +119,7 @@ class TestUsageEndpoints:
         usage_mock.execute.return_value = Mock(
             data=[
                 {
+                    "subscription_id": "sub_123",
                     "metric_date": "2024-01-01",
                     "messages_sent": 50,
                     "agents_used": 3,
@@ -164,9 +167,9 @@ class TestUsageEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["usage"] == []
-        assert data["aggregated"]["total_messages"] == 0
-        assert data["aggregated"]["total_agents"] == 0
-        assert data["aggregated"]["total_storage"] == 0
+        assert data["aggregated"]["totalMessages"] == 0
+        assert data["aggregated"]["totalAgents"] == 0
+        assert data["aggregated"]["totalStorage"] == 0
 
     def test_get_usage_no_metrics(
         self,
@@ -205,9 +208,9 @@ class TestUsageEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["usage"] == []
-        assert data["aggregated"]["total_messages"] == 0
-        assert data["aggregated"]["total_agents"] == 0
-        assert data["aggregated"]["total_storage"] == 0.0
+        assert data["aggregated"]["totalMessages"] == 0
+        assert data["aggregated"]["totalAgents"] == 0
+        assert data["aggregated"]["totalStorage"] == 0.0
 
     def test_get_usage_unauthorized(self, client: TestClient):
         """Test getting usage without authentication."""
@@ -247,12 +250,14 @@ class TestUsageEndpoints:
         usage_mock.execute.return_value = Mock(
             data=[
                 {
+                    "subscription_id": "sub_123",
                     "metric_date": "2024-01-01",
                     "messages_sent": 100,
                     "agents_used": None,  # null value
                     "storage_used_gb": None,  # null value
                 },
                 {
+                    "subscription_id": "sub_123",
                     "metric_date": "2024-01-02",
                     "messages_sent": 50,
                     "agents_used": 3,
@@ -277,9 +282,9 @@ class TestUsageEndpoints:
         assert response.status_code == 200
         data = response.json()
         # Should handle null values gracefully
-        assert data["aggregated"]["total_messages"] == 150
-        assert data["aggregated"]["total_agents"] == 3
-        assert data["aggregated"]["total_storage"] == 1.5
+        assert data["aggregated"]["totalMessages"] == 150
+        assert data["aggregated"]["totalAgents"] == 3
+        assert data["aggregated"]["totalStorage"] == 1.5
 
     def test_get_usage_large_dataset(
         self,
@@ -293,6 +298,7 @@ class TestUsageEndpoints:
         for i in range(100):
             metrics.append(
                 {
+                    "subscription_id": "sub_123",
                     "metric_date": f"2024-01-{i + 1:02d}",
                     "messages_sent": 10 * (i + 1),
                     "agents_used": min(i + 1, 10),  # cap at 10
@@ -331,6 +337,6 @@ class TestUsageEndpoints:
         data = response.json()
         assert len(data["usage"]) == 100
         # Sum of 10 + 20 + ... + 1000 = 10 * (1 + 2 + ... + 100) = 10 * 5050 = 50500
-        assert data["aggregated"]["total_messages"] == 50500
-        assert data["aggregated"]["total_agents"] == 10  # max capped at 10
-        assert data["aggregated"]["total_storage"] == 10.0  # 0.1 * 100
+        assert data["aggregated"]["totalMessages"] == 50500
+        assert data["aggregated"]["totalAgents"] == 10  # max capped at 10
+        assert data["aggregated"]["totalStorage"] == 10.0  # 0.1 * 100
