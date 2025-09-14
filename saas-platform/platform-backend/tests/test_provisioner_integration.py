@@ -200,47 +200,59 @@ class TestProvisionerIntegration:
             instance_id = provision_response.json()["customer_id"]
 
             # Step 2: Stop the instance
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
-                mock_kubectl.return_value = (0, "Deployment scaled to 0", "")
+            with patch(
+                "backend.routes.provisioner.check_deployment_exists"
+            ) as mock_check:
+                mock_check.return_value = True
+                with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                    mock_kubectl.return_value = (0, "Deployment scaled to 0", "")
 
-                with patch(
-                    "backend.routes.provisioner.update_instance_status"
-                ) as mock_update:
-                    mock_update.return_value = True
+                    with patch(
+                        "backend.routes.provisioner.update_instance_status"
+                    ) as mock_update:
+                        mock_update.return_value = True
 
-                    stop_response = client.post(
-                        f"/system/instances/{instance_id}/stop",
-                        headers=valid_auth,
-                    )
+                        stop_response = client.post(
+                            f"/system/instances/{instance_id}/stop",
+                            headers=valid_auth,
+                        )
 
             assert stop_response.status_code == 200
             assert stop_response.json()["success"] is True
 
             # Step 3: Start the instance
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
-                mock_kubectl.return_value = (0, "Deployment scaled to 1", "")
+            with patch(
+                "backend.routes.provisioner.check_deployment_exists"
+            ) as mock_check:
+                mock_check.return_value = True
+                with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                    mock_kubectl.return_value = (0, "Deployment scaled to 1", "")
 
-                with patch(
-                    "backend.routes.provisioner.update_instance_status"
-                ) as mock_update:
-                    mock_update.return_value = True
+                    with patch(
+                        "backend.routes.provisioner.update_instance_status"
+                    ) as mock_update:
+                        mock_update.return_value = True
 
-                    start_response = client.post(
-                        f"/system/instances/{instance_id}/start",
-                        headers=valid_auth,
-                    )
+                        start_response = client.post(
+                            f"/system/instances/{instance_id}/start",
+                            headers=valid_auth,
+                        )
 
             assert start_response.status_code == 200
             assert start_response.json()["success"] is True
 
             # Step 4: Restart the instance
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
-                mock_kubectl.return_value = (0, "Deployment restarted", "")
+            with patch(
+                "backend.routes.provisioner.check_deployment_exists"
+            ) as mock_check:
+                mock_check.return_value = True
+                with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                    mock_kubectl.return_value = (0, "Deployment restarted", "")
 
-                restart_response = client.post(
-                    f"/system/instances/{instance_id}/restart",
-                    headers=valid_auth,
-                )
+                    restart_response = client.post(
+                        f"/system/instances/{instance_id}/restart",
+                        headers=valid_auth,
+                    )
 
             assert restart_response.status_code == 200
             assert restart_response.json()["success"] is True
@@ -404,34 +416,36 @@ class TestProvisionerIntegration:
             mock_db = MagicMock()
             mock_sb.return_value = mock_db
 
-            # Database shows instances as running
+            # Database shows instances as running (with id field)
             mock_db.table().select().execute.return_value = Mock(
                 data=[
-                    {"instance_id": "1", "status": "running"},
-                    {"instance_id": "2", "status": "running"},
-                    {"instance_id": "3", "status": "stopped"},
-                    {"instance_id": "4", "status": "running"},
+                    {"id": 1, "instance_id": "1", "status": "running"},
+                    {"id": 2, "instance_id": "2", "status": "running"},
+                    {"id": 3, "instance_id": "3", "status": "stopped"},
+                    {"id": 4, "instance_id": "4", "status": "running"},
                 ]
             )
 
             with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
-                # Kubernetes shows different state
-                mock_kubectl.return_value = (
-                    0,
-                    """
-                    NAME                           READY
-                    mindroom-backend-1            1/1
-                    mindroom-backend-2            0/1
-                    mindroom-backend-4            1/1
-                    """,
-                    "",
-                )
+                # Return different values based on the kubectl command
+                def kubectl_side_effect(args, namespace=None):
+                    if "-o=jsonpath={.spec.replicas}" in args:
+                        # Extract instance_id from deployment name
+                        if "mindroom-backend-1" in args[1]:
+                            return (0, "1", "")  # Running (1 replica)
+                        elif "mindroom-backend-2" in args[1]:
+                            return (0, "0", "")  # Stopped (0 replicas)
+                        elif "mindroom-backend-4" in args[1]:
+                            return (0, "1", "")  # Running (1 replica)
+                    return (0, "", "")
+
+                mock_kubectl.side_effect = kubectl_side_effect
 
                 with patch(
                     "backend.routes.provisioner.check_deployment_exists"
                 ) as mock_check:
                     # Instance 3 doesn't exist in k8s
-                    def check_exists(instance_id, namespace):
+                    async def check_exists(instance_id, namespace=None):
                         return instance_id != "3"
 
                     mock_check.side_effect = check_exists
@@ -503,20 +517,25 @@ class TestProvisionerIntegration:
                             # Direct function call with background tasks
                             from backend.routes.provisioner import provision_instance
 
-                            result = asyncio.run(
-                                provision_instance(
-                                    {
-                                        "subscription_id": "sub-bg",
-                                        "account_id": "acc-bg",
-                                        "tier": "professional",
-                                    },
-                                    "Bearer test-api-key",
-                                    BackgroundTasks(),
+                            with patch(
+                                "backend.routes.provisioner.PROVISIONER_API_KEY",
+                                "test-api-key",
+                            ):
+                                result = asyncio.run(
+                                    provision_instance(
+                                        None,  # request
+                                        {
+                                            "subscription_id": "sub-bg",
+                                            "account_id": "acc-bg",
+                                            "tier": "professional",
+                                        },
+                                        "Bearer test-api-key",
+                                        BackgroundTasks(),
+                                    )
                                 )
-                            )
 
-                            assert result["success"] is True
-                            assert "customer_id" in result
+                                assert result["success"] is True
+                                assert "customer_id" in result
 
     def test_error_recovery_during_provisioning(
         self, client: TestClient, valid_auth: dict
@@ -584,15 +603,19 @@ class TestProvisionerIntegration:
         ]
 
         for operation, endpoint in test_cases:
-            with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
-                # Kubectl returns error
-                mock_kubectl.return_value = (
-                    1,
-                    "",
-                    f"Error: deployment 'mindroom-backend-{operation}' not found",
-                )
+            with patch(
+                "backend.routes.provisioner.check_deployment_exists"
+            ) as mock_check:
+                mock_check.return_value = True
+                with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
+                    # Kubectl returns error
+                    mock_kubectl.return_value = (
+                        1,
+                        "",
+                        f"Error: deployment 'mindroom-backend-{operation}' not found",
+                    )
 
-                response = client.post(endpoint, headers=valid_auth)
+                    response = client.post(endpoint, headers=valid_auth)
 
                 assert response.status_code == 500
                 assert "kubectl command failed" in response.json()["detail"]
@@ -610,7 +633,7 @@ class TestProvisionerIntegration:
 
             # Should handle gracefully
             assert response.status_code == 200
-            assert "already uninstalled" in response.json()["message"].lower()
+            assert "uninstalled successfully" in response.json()["message"].lower()
 
     def test_database_update_failures_are_non_fatal(
         self, client: TestClient, valid_auth: dict
