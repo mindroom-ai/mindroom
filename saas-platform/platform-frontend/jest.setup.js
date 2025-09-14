@@ -42,6 +42,21 @@ Object.defineProperty(window, 'matchMedia', {
 })
 
 // Mock window.location for tests
+// Suppress the JSDOM navigation error that doesn't affect test results
+const originalConsoleError = console.error
+console.error = (...args) => {
+  // Check if this is the JSDOM navigation error
+  const firstArg = args[0]
+  if (firstArg && typeof firstArg === 'object' && firstArg.type === 'not implemented') {
+    // Suppress JSDOM navigation errors - they don't affect our tests
+    return
+  }
+  if (typeof firstArg === 'string' && firstArg.includes('Not implemented: navigation')) {
+    return
+  }
+  originalConsoleError.call(console, ...args)
+}
+
 // JSDOM location is read-only, so we delete and replace it
 delete window.location
 window.location = {
