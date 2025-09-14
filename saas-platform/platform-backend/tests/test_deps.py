@@ -41,9 +41,7 @@ class TestDeps:
             yield mock
 
     @pytest.mark.asyncio
-    async def test_verify_user_success(
-        self, mock_supabase: MagicMock, mock_auth_client: MagicMock, mock_time: Mock
-    ):
+    async def test_verify_user_success(self, mock_supabase: MagicMock, mock_auth_client: MagicMock, mock_time: Mock):
         """Test successful user verification."""
         from backend.deps import verify_user
 
@@ -68,9 +66,7 @@ class TestDeps:
         assert result["email"] == "test@example.com"
 
     @pytest.mark.asyncio
-    async def test_verify_user_invalid_token(
-        self, mock_auth_client: MagicMock, mock_time: Mock, mock_sleep: AsyncMock
-    ):
+    async def test_verify_user_invalid_token(self, mock_auth_client: MagicMock, mock_time: Mock, mock_sleep: AsyncMock):
         """Test user verification with invalid token."""
         from backend.deps import verify_user
 
@@ -101,15 +97,11 @@ class TestDeps:
         # First select returns no data (account doesn't exist)
         mock_supabase.table().select().eq().single().execute.side_effect = [
             Exception("Not found"),  # First check fails
-            Mock(
-                data={"id": "new_user_123", "email": "new@example.com"}
-            ),  # After insert
+            Mock(data={"id": "new_user_123", "email": "new@example.com"}),  # After insert
         ]
 
         # Mock insert
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data={"id": "new_user_123"}
-        )
+        mock_supabase.table().insert().execute.return_value = Mock(data={"id": "new_user_123"})
 
         # Test
         result = await verify_user("Bearer new-user-token")
@@ -124,9 +116,7 @@ class TestDeps:
         assert insert_call["email"] == "new@example.com"
 
     @pytest.mark.asyncio
-    async def test_verify_user_cache_hit(
-        self, mock_supabase: MagicMock, mock_auth_client: MagicMock
-    ):
+    async def test_verify_user_cache_hit(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
         """Test user verification uses cache."""
         from backend.deps import _auth_cache, verify_user
 
@@ -161,9 +151,7 @@ class TestDeps:
         assert "Invalid authorization format" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    async def test_verify_user_constant_time(
-        self, mock_auth_client: MagicMock, mock_sleep: AsyncMock
-    ):
+    async def test_verify_user_constant_time(self, mock_auth_client: MagicMock, mock_sleep: AsyncMock):
         """Test constant-time operation for security."""
         from backend.deps import verify_user
 
@@ -186,9 +174,7 @@ class TestDeps:
                 assert sleep_time > 0  # Should sleep for remaining time
 
     @pytest.mark.asyncio
-    async def test_verify_admin_success(
-        self, mock_supabase: MagicMock, mock_auth_client: MagicMock
-    ):
+    async def test_verify_admin_success(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
         """Test successful admin verification."""
         from backend.deps import verify_admin
 
@@ -212,9 +198,7 @@ class TestDeps:
         assert result["email"] == "admin@example.com"
 
     @pytest.mark.asyncio
-    async def test_verify_admin_not_admin(
-        self, mock_supabase: MagicMock, mock_auth_client: MagicMock
-    ):
+    async def test_verify_admin_not_admin(self, mock_supabase: MagicMock, mock_auth_client: MagicMock):
         """Test admin verification fails for non-admin user."""
         from backend.deps import verify_admin
 

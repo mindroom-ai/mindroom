@@ -21,15 +21,11 @@ async def get_user_usage(
     sb = ensure_supabase()
 
     account_id = user["account_id"]
-    sub_result = (
-        sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
-    )
+    sub_result = sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
     if not sub_result.data:
         return UsageResponse(
             usage=[],
-            aggregated=UsageAggregateOut(
-                total_messages=0, total_agents=0, total_storage=0
-            ),
+            aggregated=UsageAggregateOut(total_messages=0, total_agents=0, total_storage=0),
         ).model_dump(by_alias=True)
 
     subscription_id = sub_result.data[0]["id"]

@@ -57,14 +57,10 @@ class TestProvisionerCommandValidation:
             return (0, "Success", "")
 
         with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch(
-                "backend.routes.provisioner.run_helm", side_effect=capture_helm_command
-            ):
+            with patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command):
                 with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
                     # Minimal mocking - just database
-                    mock_sb.return_value.table().insert().execute.return_value = Mock(
-                        data=[{"instance_id": "123"}]
-                    )
+                    mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
 
                     # Run actual provisioning
                     await provision_instance(
@@ -118,9 +114,7 @@ class TestProvisionerCommandValidation:
             return (0, "Success", "")
 
         with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch(
-                "backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl
-            ):
+            with patch("backend.routes.provisioner.run_kubectl", side_effect=capture_kubectl):
                 with patch(
                     "backend.routes.provisioner.check_deployment_exists",
                     return_value=True,
@@ -152,9 +146,7 @@ class TestProvisionerStateTransitions:
     }
 
     @given(
-        initial_state=st.sampled_from(
-            ["provisioning", "running", "stopped", "error", "deprovisioned"]
-        ),
+        initial_state=st.sampled_from(["provisioning", "running", "stopped", "error", "deprovisioned"]),
         action=st.sampled_from(["provision", "start", "stop", "restart", "uninstall"]),
     )
     @settings(max_examples=50)
@@ -172,15 +164,9 @@ class TestProvisionerStateTransitions:
             },
         }
 
-        if (
-            action in expected_transitions
-            and initial_state in expected_transitions[action]
-        ):
+        if action in expected_transitions and initial_state in expected_transitions[action]:
             new_state = expected_transitions[action][initial_state]
-            assert (
-                new_state in self.VALID_TRANSITIONS.get(initial_state, [])
-                or new_state == initial_state
-            )
+            assert new_state in self.VALID_TRANSITIONS.get(initial_state, []) or new_state == initial_state
 
     def test_concurrent_state_changes_maintain_consistency(self):
         """Test that concurrent operations don't corrupt state."""
@@ -288,25 +274,15 @@ class TestProvisionerErrorRecovery:
             return (0, "Success", "")
 
         with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
-            with patch(
-                "backend.routes.provisioner.run_helm", side_effect=helm_with_failure
-            ):
+            with patch("backend.routes.provisioner.run_helm", side_effect=helm_with_failure):
                 with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
-                    mock_sb.return_value.table().insert().execute.return_value = Mock(
-                        data=[{"instance_id": "123"}]
-                    )
-                    mock_sb.return_value.table().update().eq().execute.return_value = (
-                        Mock()
-                    )
+                    mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+                    mock_sb.return_value.table().update().eq().execute.return_value = Mock()
 
-                    with patch(
-                        "backend.routes.provisioner.run_kubectl"
-                    ) as mock_kubectl:
+                    with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                         mock_kubectl.return_value = (0, "Success", "")
 
-                        with patch(
-                            "backend.routes.provisioner.ensure_docker_registry_secret"
-                        ) as mock_secret:
+                        with patch("backend.routes.provisioner.ensure_docker_registry_secret") as mock_secret:
                             mock_secret.return_value = True
 
                             with pytest.raises(Exception):
@@ -346,9 +322,7 @@ class TestProvisionerErrorRecovery:
                     mock_helm.return_value = (1, "", "Deployment failed")
 
                     with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
-                        mock_sb.return_value.table().insert().execute.return_value = (
-                            Mock(data=[{"instance_id": "123"}])
-                        )
+                        mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
 
                         with pytest.raises(Exception):
                             await provision_instance(
@@ -387,12 +361,8 @@ class TestProvisionerResourceValidation:
         # In production, these values would come from Helm values
         # This test ensures we don't over-provision resources
         if tier in tier_limits:
-            assert cpu_limit <= expected["cpu"], (
-                f"CPU limit {cpu_limit} exceeds tier {tier} limit"
-            )
-            assert memory_limit <= expected["memory"], (
-                f"Memory limit {memory_limit} exceeds tier {tier} limit"
-            )
+            assert cpu_limit <= expected["cpu"], f"CPU limit {cpu_limit} exceeds tier {tier} limit"
+            assert memory_limit <= expected["memory"], f"Memory limit {memory_limit} exceeds tier {tier} limit"
 
 
 class ProvisionerStateMachine(RuleBasedStateMachine):
@@ -449,9 +419,7 @@ class ProvisionerStateMachine(RuleBasedStateMachine):
         """Invariant: All instances must be in valid states."""
         valid_states = {"provisioning", "running", "stopped", "error", "deprovisioned"}
         for instance_id, state in self.instances.items():
-            assert state in valid_states, (
-                f"Instance {instance_id} in invalid state: {state}"
-            )
+            assert state in valid_states, f"Instance {instance_id} in invalid state: {state}"
 
     @invariant()
     def no_duplicate_ids(self):
@@ -512,9 +480,7 @@ class TestProvisionerRealScenarios:
                 )
 
                 with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
-                    mock_sb.return_value.table().insert().execute.return_value = Mock(
-                        data=[{"instance_id": "123"}]
-                    )
+                    mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
 
                     with pytest.raises(Exception) as exc_info:
                         await provision_instance(
@@ -573,9 +539,7 @@ class TestProvisionerRealScenarios:
 
         # Should handle gracefully - either queue or reject duplicates
         success_count = sum(1 for status, _ in results if status == "success")
-        assert success_count <= 1, (
-            "Should not provision multiple instances for same account"
-        )
+        assert success_count <= 1, "Should not provision multiple instances for same account"
 
 
 class TestProvisionerObservability:
@@ -590,24 +554,16 @@ class TestProvisionerObservability:
         with patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"):
             with patch("backend.routes.provisioner.logger") as mock_logger:
                 with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
-                    mock_sb.return_value.table().insert().execute.return_value = Mock(
-                        data=[{"instance_id": "123"}]
-                    )
-                    mock_sb.return_value.table().update().eq().execute.return_value = (
-                        Mock()
-                    )
+                    mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+                    mock_sb.return_value.table().update().eq().execute.return_value = Mock()
 
-                    with patch(
-                        "backend.routes.provisioner.run_kubectl"
-                    ) as mock_kubectl:
+                    with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                         mock_kubectl.return_value = (0, "Success", "")
 
                         with patch("backend.routes.provisioner.run_helm") as mock_helm:
                             mock_helm.return_value = (0, "Deployed", "")
 
-                            with patch(
-                                "backend.routes.provisioner.wait_for_deployment_ready"
-                            ) as mock_wait:
+                            with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
                                 mock_wait.return_value = True
 
                                 await provision_instance(
@@ -627,14 +583,10 @@ class TestProvisionerObservability:
             assert any("123" in msg for msg in log_messages), "Instance ID not in logs"
 
             # Should log subscription for debugging
-            assert any("sub-123" in msg for msg in log_messages), (
-                "Subscription not in logs"
-            )
+            assert any("sub-123" in msg for msg in log_messages), "Subscription not in logs"
 
             # Should log tier for capacity planning
-            assert any("tier" in msg.lower() for msg in log_messages), (
-                "Tier not in logs"
-            )
+            assert any("tier" in msg.lower() for msg in log_messages), "Tier not in logs"
 
     @pytest.mark.asyncio
     async def test_provision_failures_include_debugging_context(self):
@@ -645,17 +597,13 @@ class TestProvisionerObservability:
             with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                 mock_kubectl.return_value = (0, "Success", "")
 
-                with patch(
-                    "backend.routes.provisioner.ensure_docker_registry_secret"
-                ) as mock_secret:
+                with patch("backend.routes.provisioner.ensure_docker_registry_secret") as mock_secret:
                     mock_secret.return_value = True
 
                     with patch("backend.routes.provisioner.run_helm") as mock_helm:
                         mock_helm.return_value = (1, "", "Connection refused")
 
-                        with patch(
-                            "backend.routes.provisioner.ensure_supabase"
-                        ) as mock_sb:
+                        with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
                             mock_sb.return_value.table().insert().execute.return_value = Mock(
                                 data=[{"instance_id": "123"}]
                             )

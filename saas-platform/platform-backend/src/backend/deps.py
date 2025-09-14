@@ -100,9 +100,7 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901,
 
         # Ensure account exists
         try:
-            result = (
-                sb.table("accounts").select("*").eq("id", account_id).single().execute()
-            )
+            result = sb.table("accounts").select("*").eq("id", account_id).single().execute()
             if not result.data:
                 msg = "No data"
                 raise ValueError(msg)  # noqa: TRY301
@@ -129,13 +127,7 @@ async def verify_user(authorization: str = Header(None)) -> dict:  # noqa: C901,
             except Exception:
                 logger.exception("Failed to create account")
                 # Try to fetch again in case it was a race condition
-                result = (
-                    sb.table("accounts")
-                    .select("*")
-                    .eq("id", account_id)
-                    .single()
-                    .execute()
-                )
+                result = sb.table("accounts").select("*").eq("id", account_id).single().execute()
                 if not result.data:
                     msg = "Account creation failed. Please contact support."
                     raise HTTPException(status_code=404, detail=msg) from None
@@ -201,13 +193,7 @@ async def verify_admin(authorization: str = Header(None)) -> dict:
             msg = "Invalid token"
             raise HTTPException(status_code=401, detail=msg)  # noqa: TRY301
 
-        result = (
-            sb.table("accounts")
-            .select("is_admin")
-            .eq("id", user.user.id)
-            .single()
-            .execute()
-        )
+        result = sb.table("accounts").select("is_admin").eq("id", user.user.id).single().execute()
         if not result.data or not result.data.get("is_admin"):
             msg = "Admin access required"
             raise HTTPException(status_code=403, detail=msg)  # noqa: TRY301

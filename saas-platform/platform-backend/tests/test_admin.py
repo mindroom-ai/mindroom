@@ -76,23 +76,17 @@ class TestAdminEndpoints:
         # Setup - create separate mock chains for each table query
         accounts_mock = MagicMock()
         accounts_mock.select.return_value = accounts_mock
-        accounts_mock.execute.return_value = Mock(
-            data=[{}, {}, {}, {}, {}, {}, {}, {}, {}, {}]
-        )  # 10 accounts
+        accounts_mock.execute.return_value = Mock(data=[{}, {}, {}, {}, {}, {}, {}, {}, {}, {}])  # 10 accounts
 
         subscriptions_mock = MagicMock()
         subscriptions_mock.select.return_value = subscriptions_mock
         subscriptions_mock.eq.return_value = subscriptions_mock
-        subscriptions_mock.execute.return_value = Mock(
-            data=[{}, {}, {}, {}, {}, {}, {}, {}]
-        )  # 8 active
+        subscriptions_mock.execute.return_value = Mock(data=[{}, {}, {}, {}, {}, {}, {}, {}])  # 8 active
 
         instances_mock = MagicMock()
         instances_mock.select.return_value = instances_mock
         instances_mock.eq.return_value = instances_mock
-        instances_mock.execute.return_value = Mock(
-            data=[{}, {}, {}, {}, {}, {}, {}]
-        )  # 7 running
+        instances_mock.execute.return_value = Mock(data=[{}, {}, {}, {}, {}, {}, {}])  # 7 running
 
         audit_mock = MagicMock()
         audit_mock.select.return_value = audit_mock
@@ -388,9 +382,7 @@ class TestAdminEndpoints:
     ):
         """Test admin updating account status."""
         # Setup
-        mock_supabase.table().update().eq().execute.return_value = Mock(
-            data=[{"id": "acc_123", "status": "suspended"}]
-        )
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"id": "acc_123", "status": "suspended"}])
 
         # Make request
         response = client.put(
@@ -479,9 +471,7 @@ class TestAdminEndpoints:
     ):
         """Test admin creating a resource."""
         # Setup
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"id": "new_123", "name": "New Resource"}]
-        )
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"id": "new_123", "name": "New Resource"}])
 
         # Make request to an allowed resource
         response = client.post("/admin/accounts", json={"name": "New Resource"})
@@ -505,9 +495,7 @@ class TestAdminEndpoints:
         )
 
         # Make request to an allowed resource
-        response = client.put(
-            "/admin/subscriptions/123", json={"name": "Updated Resource"}
-        )
+        response = client.put("/admin/subscriptions/123", json={"name": "Updated Resource"})
 
         # Verify
         assert response.status_code == 200

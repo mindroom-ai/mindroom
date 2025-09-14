@@ -403,9 +403,7 @@ class TestInstancesEndpoints:
     ):
         """Test starting user's instance successfully."""
         # Setup
-        mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(
-            data=[{"id": 1}]
-        )
+        mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(data=[{"id": 1}])
 
         # Make request
         response = client.post("/my/instances/123/start")
@@ -427,9 +425,7 @@ class TestInstancesEndpoints:
     ):
         """Test starting instance not owned by user."""
         # Setup
-        mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(
-            data=[]
-        )
+        mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(data=[])
 
         # Make request
         response = client.post("/my/instances/999/start")
@@ -448,9 +444,7 @@ class TestInstancesEndpoints:
     ):
         """Test stopping user's instance successfully."""
         # Setup
-        mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(
-            data=[{"id": 1}]
-        )
+        mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(data=[{"id": 1}])
 
         # Make request
         response = client.post("/my/instances/123/stop")
@@ -474,9 +468,7 @@ class TestInstancesEndpoints:
     ):
         """Test restarting user's instance successfully."""
         # Setup
-        mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(
-            data=[{"id": 1}]
-        )
+        mock_supabase.table().select().eq().eq().limit().execute.return_value = Mock(data=[{"id": 1}])
 
         # Make request
         response = client.post("/my/instances/456/restart")
@@ -501,9 +493,7 @@ class TestInstancesEndpoints:
         from backend.routes.instances import _background_sync_instance_status
 
         # Setup
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"status": "running"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"status": "running"})
         mock_check_deployment.return_value = True
         mock_kubectl.return_value = (0, "0", "")  # 0 replicas = stopped
         mock_supabase.table().update().eq().execute.return_value = Mock()
@@ -526,9 +516,7 @@ class TestInstancesEndpoints:
         from backend.routes.instances import _background_sync_instance_status
 
         # Setup
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"status": "running"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"status": "running"})
         mock_check_deployment.return_value = False
         mock_supabase.table().update().eq().execute.return_value = Mock()
 

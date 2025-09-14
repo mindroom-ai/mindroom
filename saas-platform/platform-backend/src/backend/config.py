@@ -53,9 +53,7 @@ if SUPABASE_URL and SUPABASE_SERVICE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     auth_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 else:
-    logger.warning(
-        "Supabase not configured: missing SUPABASE_URL or SUPABASE_SERVICE_KEY"
-    )
+    logger.warning("Supabase not configured: missing SUPABASE_URL or SUPABASE_SERVICE_KEY")
     supabase = None  # type: ignore[assignment]
     auth_client = None  # type: ignore[assignment]
 

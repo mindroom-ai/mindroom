@@ -22,11 +22,7 @@ async def get_current_account(
     account_id = user["account_id"]
 
     account_result = (
-        sb.table("accounts")
-        .select("*, subscriptions(*, instances(*))")
-        .eq("id", account_id)
-        .single()
-        .execute()
+        sb.table("accounts").select("*, subscriptions(*, instances(*))").eq("id", account_id).single().execute()
     )
 
     if not account_result.data:
@@ -43,29 +39,21 @@ async def check_admin_status(
     sb = ensure_supabase()
 
     account_id = user["account_id"]
-    account_result = (
-        sb.table("accounts").select("is_admin").eq("id", account_id).single().execute()
-    )
+    account_result = sb.table("accounts").select("is_admin").eq("id", account_id).single().execute()
     if not account_result.data:
         return AdminStatusOut(is_admin=False).model_dump()
-    return AdminStatusOut(
-        is_admin=bool(account_result.data.get("is_admin", False))
-    ).model_dump()
+    return AdminStatusOut(is_admin=bool(account_result.data.get("is_admin", False))).model_dump()
 
 
 @router.post("/my/account/setup", response_model=AccountSetupResponse)
 @limiter.limit("5/minute")
-async def setup_account(
-    request: Request, user: Annotated[dict, Depends(verify_user)]
-) -> dict[str, Any]:  # noqa: ARG001
+async def setup_account(request: Request, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:  # noqa: ARG001
     """Setup free tier account for new user."""
     sb = ensure_supabase()
 
     account_id = user["account_id"]
 
-    sub_result = (
-        sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
-    )
+    sub_result = sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
     if sub_result.data:
         return {"message": "Account already setup", "account_id": account_id}
 

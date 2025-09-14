@@ -66,9 +66,7 @@ class TestSubscriptionsEndpoints:
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
-            data=[subscription]
-        )
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[subscription])
 
         # Make request
         response = client.get("/my/subscription")
@@ -116,9 +114,7 @@ class TestSubscriptionsEndpoints:
             "stripe_subscription_id": "stripe_sub_123",
             "status": "active",
         }
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
-            data=[subscription]
-        )
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[subscription])
 
         # Mock Stripe cancellation
         mock_stripe_sub = Mock()
@@ -127,14 +123,10 @@ class TestSubscriptionsEndpoints:
         mock_stripe_sub.id = "stripe_sub_123"
         mock_stripe.Subscription.modify.return_value = mock_stripe_sub
 
-        mock_supabase.table().update().eq().execute.return_value = Mock(
-            data=[{"id": "sub_123", "status": "cancelled"}]
-        )
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"id": "sub_123", "status": "cancelled"}])
 
         # Make request with valid JSON body
-        response = client.post(
-            "/my/subscription/cancel", json={"cancel_at_period_end": True}
-        )
+        response = client.post("/my/subscription/cancel", json={"cancel_at_period_end": True})
 
         # Verify
         assert response.status_code == 200
@@ -153,9 +145,7 @@ class TestSubscriptionsEndpoints:
         mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[])
 
         # Make request
-        response = client.post(
-            "/my/subscription/cancel", json={"cancel_at_period_end": True}
-        )
+        response = client.post("/my/subscription/cancel", json={"cancel_at_period_end": True})
 
         # Verify
         assert response.status_code == 404
@@ -175,14 +165,10 @@ class TestSubscriptionsEndpoints:
             "status": "cancelled",
             "stripe_subscription_id": "stripe_sub_123",
         }
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
-            data=[subscription]
-        )
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[subscription])
 
         # Make request
-        response = client.post(
-            "/my/subscription/cancel", json={"cancel_at_period_end": True}
-        )
+        response = client.post("/my/subscription/cancel", json={"cancel_at_period_end": True})
 
         # Verify
         assert response.status_code == 400
@@ -203,17 +189,13 @@ class TestSubscriptionsEndpoints:
             "stripe_subscription_id": "stripe_sub_123",
             "status": "active",
         }
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
-            data=[subscription]
-        )
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[subscription])
 
         # Mock Stripe error
         mock_stripe.Subscription.modify.side_effect = Exception("Stripe error")
 
         # Make request
-        response = client.post(
-            "/my/subscription/cancel", json={"cancel_at_period_end": True}
-        )
+        response = client.post("/my/subscription/cancel", json={"cancel_at_period_end": True})
 
         # Verify
         assert response.status_code == 500
@@ -234,9 +216,7 @@ class TestSubscriptionsEndpoints:
             "stripe_subscription_id": "stripe_sub_123",
             "status": "cancelled",
         }
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
-            data=[subscription]
-        )
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[subscription])
 
         # Mock Stripe reactivation
         mock_stripe_sub = Mock()
@@ -245,9 +225,7 @@ class TestSubscriptionsEndpoints:
         mock_stripe_sub.id = "stripe_sub_123"  # Set the id attribute properly
         mock_stripe.Subscription.modify.return_value = mock_stripe_sub
 
-        mock_supabase.table().update().eq().execute.return_value = Mock(
-            data=[{"id": "sub_123", "status": "active"}]
-        )
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"id": "sub_123", "status": "active"}])
 
         # Make request
         response = client.post("/my/subscription/reactivate")
@@ -273,9 +251,7 @@ class TestSubscriptionsEndpoints:
             "status": "active",
             "stripe_subscription_id": "stripe_sub_123",
         }
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
-            data=[subscription]
-        )
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[subscription])
 
         # Make request
         response = client.post("/my/subscription/reactivate")
@@ -339,9 +315,7 @@ class TestSubscriptionsEndpoints:
             "created_at": datetime.now(UTC).isoformat(),
             "updated_at": datetime.now(UTC).isoformat(),
         }
-        mock_supabase.table().select().eq().limit().execute.return_value = Mock(
-            data=[subscription]
-        )
+        mock_supabase.table().select().eq().limit().execute.return_value = Mock(data=[subscription])
 
         # Make request
         response = client.get("/my/subscription")

@@ -67,15 +67,11 @@ class TestPricingConfig:
 
         # Starter plan - $10/month
         assert model.plans["starter"].price_monthly == 1000  # $10.00 in cents
-        assert (
-            model.plans["starter"].price_yearly == 9600
-        )  # $96.00 in cents (20% discount)
+        assert model.plans["starter"].price_yearly == 9600  # $96.00 in cents (20% discount)
 
         # Professional plan - $8/user/month
         assert model.plans["professional"].price_monthly == 800  # $8.00 in cents
-        assert (
-            model.plans["professional"].price_yearly == 7680
-        )  # $76.80 in cents (20% discount)
+        assert model.plans["professional"].price_yearly == 7680  # $76.80 in cents (20% discount)
         assert model.plans["professional"].price_model == "per_user"
 
         # Enterprise plan
@@ -143,9 +139,7 @@ class TestPricingConfig:
                 load_pricing_config()
 
             assert "Pricing configuration file not found" in str(exc_info.value)
-            assert "This file is required for the application to run" in str(
-                exc_info.value
-            )
+            assert "This file is required for the application to run" in str(exc_info.value)
 
             # Model should also fail without valid config
             with pytest.raises(FileNotFoundError):
@@ -158,27 +152,16 @@ class TestPricingHelperFunctions:
     def test_get_stripe_price_id(self) -> None:
         """Test getting Stripe price IDs."""
         # Starter monthly
-        assert (
-            get_stripe_price_id("starter", "monthly")
-            == "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
-        )
+        assert get_stripe_price_id("starter", "monthly") == "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
 
         # Starter yearly
-        assert (
-            get_stripe_price_id("starter", "yearly") == "price_1S6FvF3GVsrZHuzXDjv76gwE"
-        )
+        assert get_stripe_price_id("starter", "yearly") == "price_1S6FvF3GVsrZHuzXDjv76gwE"
 
         # Professional monthly
-        assert (
-            get_stripe_price_id("professional", "monthly")
-            == "price_1S6FvG3GVsrZHuzXBwljASJB"
-        )
+        assert get_stripe_price_id("professional", "monthly") == "price_1S6FvG3GVsrZHuzXBwljASJB"
 
         # Professional yearly
-        assert (
-            get_stripe_price_id("professional", "yearly")
-            == "price_1S6FvG3GVsrZHuzXQV9y2VEo"
-        )
+        assert get_stripe_price_id("professional", "yearly") == "price_1S6FvG3GVsrZHuzXQV9y2VEo"
 
         # Free plan (no Stripe IDs)
         assert get_stripe_price_id("free", "monthly") is None
@@ -238,9 +221,7 @@ class TestPricingHelperFunctions:
             mock_model.trial.applicable_plans = ["starter", "professional"]
 
             # Mock the function to use our patched model
-            with patch(
-                "backend.pricing.load_pricing_config_model", return_value=mock_model
-            ):
+            with patch("backend.pricing.load_pricing_config_model", return_value=mock_model):
                 # Even though starter is in applicable_plans, trial should be False
                 assert is_trial_enabled_for_plan("starter") is False
 
@@ -323,10 +304,5 @@ class TestPricingIntegration:
         # Check Stripe IDs consistency
         starter_monthly_id = "price_1S6FvF3GVsrZHuzXrDZ5H7EW"
         assert get_stripe_price_id("starter", "monthly") == starter_monthly_id
-        assert (
-            config_model.plans["starter"].stripe_price_id_monthly == starter_monthly_id
-        )
-        assert (
-            yaml_data["plans"]["starter"]["stripe_price_id_monthly"]
-            == starter_monthly_id
-        )
+        assert config_model.plans["starter"].stripe_price_id_monthly == starter_monthly_id
+        assert yaml_data["plans"]["starter"]["stripe_price_id_monthly"] == starter_monthly_id

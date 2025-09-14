@@ -31,9 +31,7 @@ class TestWebhookEndpoints:
             mock.return_value = sb
             yield sb
 
-    def _create_stripe_event(
-        self, event_type: str, data: dict, event_id: str = "evt_test_123"
-    ) -> Mock:
+    def _create_stripe_event(self, event_type: str, data: dict, event_id: str = "evt_test_123") -> Mock:
         """Create a mock Stripe event."""
         event = Mock()
         event.id = event_id
@@ -99,13 +97,9 @@ class TestWebhookEndpoints:
         assert response.status_code == 400
         assert response.json()["detail"] == "Missing signature"
 
-    def test_webhook_invalid_signature(
-        self, client: TestClient, mock_stripe_signature: Mock
-    ):
+    def test_webhook_invalid_signature(self, client: TestClient, mock_stripe_signature: Mock):
         """Test webhook with invalid signature."""
-        mock_stripe_signature.side_effect = stripe.error.SignatureVerificationError(
-            "Invalid signature", None
-        )
+        mock_stripe_signature.side_effect = stripe.error.SignatureVerificationError("Invalid signature", None)
 
         response = client.post(
             "/webhooks/stripe",
@@ -124,15 +118,11 @@ class TestWebhookEndpoints:
         """Test successful subscription creation webhook."""
         # Setup
         subscription_data = self._create_subscription_data()
-        event = self._create_stripe_event(
-            "customer.subscription.created", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.created", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
         mock_supabase.table().insert().execute.return_value = Mock()
 
@@ -150,9 +140,7 @@ class TestWebhookEndpoints:
         assert data["error"] is None
 
         # Verify Supabase calls
-        assert (
-            mock_supabase.table.call_count >= 3
-        )  # accounts, subscriptions check, insert
+        assert mock_supabase.table.call_count >= 3  # accounts, subscriptions check, insert
 
     def test_subscription_created_no_account(
         self,
@@ -163,15 +151,11 @@ class TestWebhookEndpoints:
         """Test subscription creation with no matching account."""
         # Setup
         subscription_data = self._create_subscription_data()
-        event = self._create_stripe_event(
-            "customer.subscription.created", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.created", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock no account found
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
 
         # Make request
         response = client.post(
@@ -195,18 +179,12 @@ class TestWebhookEndpoints:
     ):
         """Test successful subscription update webhook."""
         # Setup
-        subscription_data = self._create_subscription_data(
-            tier="professional", quantity=5
-        )
-        event = self._create_stripe_event(
-            "customer.subscription.updated", subscription_data
-        )
+        subscription_data = self._create_subscription_data(tier="professional", quantity=5)
+        event = self._create_stripe_event("customer.subscription.updated", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
         # Make request
@@ -231,15 +209,11 @@ class TestWebhookEndpoints:
         """Test successful subscription deletion webhook."""
         # Setup
         subscription_data = {"id": "sub_test_123", "customer": "cus_test_123"}
-        event = self._create_stripe_event(
-            "customer.subscription.deleted", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.deleted", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"account_id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"account_id": "account_123"})
         mock_supabase.table().update().eq().eq().execute.return_value = Mock()
 
         # Make request
@@ -264,15 +238,11 @@ class TestWebhookEndpoints:
         """Test subscription deletion for non-existent subscription."""
         # Setup
         subscription_data = {"id": "sub_test_123", "customer": "cus_test_123"}
-        event = self._create_stripe_event(
-            "customer.subscription.deleted", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.deleted", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock subscription not found
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
 
         # Make request
         response = client.post(
@@ -301,9 +271,7 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
         mock_supabase.table().insert().execute.return_value = Mock()
 
         # Make request
@@ -363,9 +331,7 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"account_id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"account_id": "account_123"})
         mock_supabase.table().update().eq().eq().execute.return_value = Mock()
 
         # Make request
@@ -394,9 +360,7 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock no subscription found
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
 
         # Make request
         response = client.post(
@@ -424,17 +388,13 @@ class TestWebhookEndpoints:
         subscription_data["trial_end"] = 1700086400  # Tomorrow
         subscription_data["id"] = "sub_test_123"
         subscription_data["customer"] = "cus_test_123"
-        event = self._create_stripe_event(
-            "customer.subscription.trial_will_end", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.trial_will_end", subscription_data)
         # Set data.object as a dict-like object that the handler expects
         event.data.object = subscription_data
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
 
         # Make request
         response = client.post(
@@ -464,9 +424,7 @@ class TestWebhookEndpoints:
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
 
         # Make request
         response = client.post(
@@ -490,15 +448,11 @@ class TestWebhookEndpoints:
         """Test webhook with processing exception."""
         # Setup
         subscription_data = self._create_subscription_data()
-        event = self._create_stripe_event(
-            "customer.subscription.created", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.created", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock Supabase to raise exception
-        mock_supabase.table().select().eq().single().execute.side_effect = Exception(
-            "Database error"
-        )
+        mock_supabase.table().select().eq().single().execute.side_effect = Exception("Database error")
 
         # Make request
         response = client.post(
@@ -520,16 +474,12 @@ class TestWebhookEndpoints:
         """Test webhook when event recording fails."""
         # Setup
         subscription_data = self._create_subscription_data()
-        event = self._create_stripe_event(
-            "customer.subscription.created", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.created", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock successful processing but failed recording
         accounts_table = MagicMock()
-        accounts_table.select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        accounts_table.select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
 
         subscriptions_table = MagicMock()
         subscriptions_table.select().eq().execute.return_value = Mock(data=[])
@@ -573,15 +523,11 @@ class TestWebhookEndpoints:
         # Setup
         subscription_data = self._create_subscription_data()
         subscription_data["trial_end"] = 1702678400  # Future timestamp
-        event = self._create_stripe_event(
-            "customer.subscription.created", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.created", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
         mock_supabase.table().insert().execute.return_value = Mock()
 
@@ -606,18 +552,12 @@ class TestWebhookEndpoints:
     ):
         """Test professional plan with multiple users scales limits correctly."""
         # Setup
-        subscription_data = self._create_subscription_data(
-            tier="professional", quantity=10
-        )
-        event = self._create_stripe_event(
-            "customer.subscription.created", subscription_data
-        )
+        subscription_data = self._create_subscription_data(tier="professional", quantity=10)
+        event = self._create_stripe_event("customer.subscription.created", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
 
         # Capture the insert call to verify scaled limits
@@ -657,15 +597,11 @@ class TestWebhookEndpoints:
         # Setup
         subscription_data = self._create_subscription_data(status="canceled")
         subscription_data["canceled_at"] = 1700086400
-        event = self._create_stripe_event(
-            "customer.subscription.updated", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.updated", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
         # Make request
@@ -681,20 +617,14 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
-    def test_rate_limiting(
-        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
-    ):
+    def test_rate_limiting(self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock):
         """Test webhook rate limiting."""
         # Setup a valid event
-        event = self._create_stripe_event(
-            "customer.subscription.created", self._create_subscription_data()
-        )
+        event = self._create_stripe_event("customer.subscription.created", self._create_subscription_data())
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses for all requests
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
         mock_supabase.table().insert().execute.return_value = Mock()
 
@@ -726,15 +656,11 @@ class TestWebhookEndpoints:
             "tier": "starter",  # Legacy field name
             "billing_cycle": "monthly",
         }
-        event = self._create_stripe_event(
-            "customer.subscription.created", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.created", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
         mock_supabase.table().insert().execute.return_value = Mock()
 
@@ -761,15 +687,11 @@ class TestWebhookEndpoints:
         # Setup with no metadata
         subscription_data = self._create_subscription_data()
         subscription_data["items"]["data"][0]["price"]["metadata"] = {}
-        event = self._create_stripe_event(
-            "customer.subscription.created", subscription_data
-        )
+        event = self._create_stripe_event("customer.subscription.created", subscription_data)
         mock_stripe_signature.return_value = event
 
         # Mock Supabase responses
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "account_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
 
         # Make request
         response = client.post(

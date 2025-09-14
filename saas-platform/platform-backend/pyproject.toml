@@ -37,6 +37,9 @@ include = [
 ]
 
 [tool.ruff]
+target-version = "py313"
+line-length = 120
+
 extend-exclude = [ "tests/conftest.py" ]
 
 [tool.pytest.ini_options]

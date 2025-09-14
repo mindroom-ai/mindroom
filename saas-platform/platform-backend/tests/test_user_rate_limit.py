@@ -91,9 +91,7 @@ def test_setup_account_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
                     print(f"First request failed with {r.status_code}: {r.text}")
 
             # Check that rate limiting is working (last request should be 429)
-            assert statuses[5] == 429, (
-                f"Expected 429 on 6th request, got {statuses[5]}. All statuses: {statuses}"
-            )
+            assert statuses[5] == 429, f"Expected 429 on 6th request, got {statuses[5]}. All statuses: {statuses}"
             # Check that at least some requests succeeded or all were rate limited
             successful = [s for s in statuses[:5] if s in (200, 201)]
             assert len(successful) > 0 or all(s == 429 for s in statuses[1:]), (

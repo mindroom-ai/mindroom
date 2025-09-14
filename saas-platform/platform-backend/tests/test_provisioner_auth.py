@@ -36,15 +36,11 @@ def test_start_ok_with_valid_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(prov, "check_deployment_exists", _exists)
 
-    async def _fake_kubectl(
-        args: list[str], namespace: str = "mindroom-instances"
-    ) -> tuple[int, str, str]:  # noqa: ARG001
+    async def _fake_kubectl(args: list[str], namespace: str = "mindroom-instances") -> tuple[int, str, str]:  # noqa: ARG001
         return 0, "ok", ""
 
     monkeypatch.setattr(prov, "run_kubectl", _fake_kubectl)
-    monkeypatch.setattr(
-        prov, "update_instance_status", lambda instance_id, status: True
-    )  # noqa: ARG005
+    monkeypatch.setattr(prov, "update_instance_status", lambda instance_id, status: True)  # noqa: ARG005
 
     client = TestClient(app)
     r = client.post(

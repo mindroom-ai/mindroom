@@ -106,9 +106,7 @@ class AuditLoggingMiddleware(BaseHTTPMiddleware):
                             k: v
                             for k, v in data.items()
                             if k.lower() not in sensitive_fields
-                            and not any(
-                                sensitive in k.lower() for sensitive in sensitive_fields
-                            )
+                            and not any(sensitive in k.lower() for sensitive in sensitive_fields)
                         }
             except Exception as e:
                 logger.warning(f"Failed to parse request body for audit: {e}")

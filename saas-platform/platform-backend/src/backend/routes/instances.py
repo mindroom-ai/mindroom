@@ -39,13 +39,7 @@ async def _background_sync_instance_status(instance_id: str) -> None:
         sb = ensure_supabase()
 
         # Get current status from DB
-        result = (
-            sb.table("instances")
-            .select("status")
-            .eq("instance_id", instance_id)
-            .single()
-            .execute()
-        )
+        result = sb.table("instances").select("status").eq("instance_id", instance_id).single().execute()
         current_status = result.data.get("status") if result.data else None
 
         # Check if deployment exists
@@ -139,9 +133,7 @@ async def list_user_instances(
                 "Instance %s has stale K8s status, scheduling background sync",
                 instance_id,
             )
-            background_tasks.add_task(
-                _background_sync_instance_status, str(instance_id)
-            )
+            background_tasks.add_task(_background_sync_instance_status, str(instance_id))
 
     # Log cache effectiveness
     total_time = (time.perf_counter() - start) * 1000
@@ -164,9 +156,7 @@ async def provision_user_instance(
     sb = ensure_supabase()
 
     account_id = user["account_id"]
-    sub_result = (
-        sb.table("subscriptions").select("*").eq("account_id", account_id).execute()
-    )
+    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).execute()
     if not sub_result.data:
         raise HTTPException(status_code=404, detail="No subscription found")
     subscription = sub_result.data[0]
@@ -193,9 +183,7 @@ async def provision_user_instance(
                     "subscription_id": subscription["id"],
                     "account_id": account_id,
                     "tier": subscription["tier"],
-                    "instance_id": existing[
-                        "instance_id"
-                    ],  # Reuse the same instance ID
+                    "instance_id": existing["instance_id"],  # Reuse the same instance ID
                 },
                 authorization=f"Bearer {PROVISIONER_API_KEY}",
                 background_tasks=background_tasks,
@@ -203,11 +191,7 @@ async def provision_user_instance(
 
         # Otherwise return existing instance metadata
         status = existing.get("status", "unknown")
-        message = (
-            "Instance is already provisioning"
-            if status == "provisioning"
-            else "Instance already exists"
-        )
+        message = "Instance is already provisioning" if status == "provisioning" else "Instance already exists"
         logger.info(
             "Instance already exists for user %s with status %s, returning existing metadata",
             account_id,
@@ -216,14 +200,10 @@ async def provision_user_instance(
         return {
             "success": True,
             "message": message,
-            "customer_id": existing.get("instance_id")
-            or existing.get("subdomain")
-            or "",
-            "frontend_url": existing.get("frontend_url")
-            or existing.get("instance_url"),
+            "customer_id": existing.get("instance_id") or existing.get("subdomain") or "",
+            "frontend_url": existing.get("frontend_url") or existing.get("instance_url"),
             "api_url": existing.get("backend_url") or existing.get("api_url"),
-            "matrix_url": existing.get("matrix_server_url")
-            or existing.get("matrix_url"),
+            "matrix_url": existing.get("matrix_server_url") or existing.get("matrix_url"),
         }
 
     return await provision_instance(
@@ -255,38 +235,24 @@ async def _verify_instance_ownership_and_proxy(
         .execute()
     )
     if not result.data:
-        raise HTTPException(
-            status_code=404, detail="Instance not found or access denied"
-        )
+        raise HTTPException(status_code=404, detail="Instance not found or access denied")
 
     return await provisioner_func(instance_id, f"Bearer {PROVISIONER_API_KEY}")
 
 
 @router.post("/my/instances/{instance_id}/start", response_model=ActionResult)
-async def start_user_instance(
-    instance_id: int, user: Annotated[dict, Depends(verify_user)]
-) -> dict[str, Any]:
+async def start_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Start user's instance."""
-    return await _verify_instance_ownership_and_proxy(
-        instance_id, user, start_instance_provisioner
-    )
+    return await _verify_instance_ownership_and_proxy(instance_id, user, start_instance_provisioner)
 
 
 @router.post("/my/instances/{instance_id}/stop", response_model=ActionResult)
-async def stop_user_instance(
-    instance_id: int, user: Annotated[dict, Depends(verify_user)]
-) -> dict[str, Any]:
+async def stop_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Stop user's instance."""
-    return await _verify_instance_ownership_and_proxy(
-        instance_id, user, stop_instance_provisioner
-    )
+    return await _verify_instance_ownership_and_proxy(instance_id, user, stop_instance_provisioner)
 
 
 @router.post("/my/instances/{instance_id}/restart", response_model=ActionResult)
-async def restart_user_instance(
-    instance_id: int, user: Annotated[dict, Depends(verify_user)]
-) -> dict[str, Any]:
+async def restart_user_instance(instance_id: int, user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Restart user's instance."""
-    return await _verify_instance_ownership_and_proxy(
-        instance_id, user, restart_instance_provisioner
-    )
+    return await _verify_instance_ownership_and_proxy(instance_id, user, restart_instance_provisioner)

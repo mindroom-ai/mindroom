@@ -22,9 +22,7 @@ class TestUsageMetrics:
             yield mock
 
     @pytest.mark.asyncio
-    async def test_collect_daily_usage_metrics_no_accounts(
-        self, mock_supabase: MagicMock, mock_logger: MagicMock
-    ):
+    async def test_collect_daily_usage_metrics_no_accounts(self, mock_supabase: MagicMock, mock_logger: MagicMock):
         """Test metrics collection with no active accounts."""
         from backend.tasks.usage_metrics import collect_daily_usage_metrics
 
@@ -40,9 +38,7 @@ class TestUsageMetrics:
         mock_supabase.table().insert.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_collect_daily_usage_metrics_with_accounts(
-        self, mock_supabase: MagicMock, mock_logger: MagicMock
-    ):
+    async def test_collect_daily_usage_metrics_with_accounts(self, mock_supabase: MagicMock, mock_logger: MagicMock):
         """Test metrics collection with active accounts."""
         from backend.tasks.usage_metrics import collect_daily_usage_metrics
 
@@ -110,15 +106,11 @@ class TestUsageMetrics:
         await collect_daily_usage_metrics()
 
         # Verify
-        assert (
-            mock_supabase.table.call_count >= 4
-        )  # accounts + 2x(audit + instances + insert)
+        assert mock_supabase.table.call_count >= 4  # accounts + 2x(audit + instances + insert)
         assert mock_logger.info.call_count >= 2  # One for each account
 
     @pytest.mark.asyncio
-    async def test_collect_daily_usage_metrics_error_handling(
-        self, mock_supabase: MagicMock, mock_logger: MagicMock
-    ):
+    async def test_collect_daily_usage_metrics_error_handling(self, mock_supabase: MagicMock, mock_logger: MagicMock):
         """Test error handling in metrics collection."""
         from backend.tasks.usage_metrics import collect_daily_usage_metrics
 
@@ -181,9 +173,7 @@ class TestUsageMetrics:
         mock_table.execute.side_effect = execute_side_effect
 
         # Test
-        metrics = await _collect_account_metrics(
-            mock_supabase, "account_1", start_date, end_date
-        )
+        metrics = await _collect_account_metrics(mock_supabase, "account_1", start_date, end_date)
 
         # Verify
         assert metrics["api_calls"] == 4  # Total audit logs
@@ -197,18 +187,14 @@ class TestUsageMetrics:
         from backend.tasks.usage_metrics import _collect_account_metrics
 
         # Setup - no data
-        mock_supabase.table().select().eq().gte().lte().execute.return_value = Mock(
-            data=[]
-        )
+        mock_supabase.table().select().eq().gte().lte().execute.return_value = Mock(data=[])
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
 
         start_date = datetime.now(UTC) - timedelta(days=1)
         end_date = datetime.now(UTC)
 
         # Test
-        metrics = await _collect_account_metrics(
-            mock_supabase, "account_1", start_date, end_date
-        )
+        metrics = await _collect_account_metrics(mock_supabase, "account_1", start_date, end_date)
 
         # Verify - should return zeros
         assert metrics["messages_sent"] == 0
@@ -217,9 +203,7 @@ class TestUsageMetrics:
         assert metrics["storage_mb"] == 0
 
     @pytest.mark.asyncio
-    async def test_collect_account_metrics_error_handling(
-        self, mock_supabase: MagicMock, mock_logger: MagicMock
-    ):
+    async def test_collect_account_metrics_error_handling(self, mock_supabase: MagicMock, mock_logger: MagicMock):
         """Test error handling in account metrics collection."""
         from backend.tasks.usage_metrics import _collect_account_metrics
 
@@ -230,9 +214,7 @@ class TestUsageMetrics:
         end_date = datetime.now(UTC)
 
         # Test
-        metrics = await _collect_account_metrics(
-            mock_supabase, "account_1", start_date, end_date
-        )
+        metrics = await _collect_account_metrics(mock_supabase, "account_1", start_date, end_date)
 
         # Verify - should return default metrics on error
         assert metrics["messages_sent"] == 0
@@ -240,16 +222,12 @@ class TestUsageMetrics:
         mock_logger.error.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_update_realtime_metrics_existing_record(
-        self, mock_supabase: MagicMock
-    ):
+    async def test_update_realtime_metrics_existing_record(self, mock_supabase: MagicMock):
         """Test updating existing metrics record."""
         from backend.tasks.usage_metrics import update_realtime_metrics
 
         # Setup - existing record
-        existing_record = Mock(
-            data={"id": "metric_1", "messages_sent": 10, "api_calls": 5}
-        )
+        existing_record = Mock(data={"id": "metric_1", "messages_sent": 10, "api_calls": 5})
 
         mock_table = MagicMock()
         mock_supabase.table.return_value = mock_table
@@ -310,9 +288,7 @@ class TestUsageMetrics:
             # No assertion needed - just verify it doesn't crash
 
     @pytest.mark.asyncio
-    async def test_update_realtime_metrics_error_handling(
-        self, mock_supabase: MagicMock, mock_logger: MagicMock
-    ):
+    async def test_update_realtime_metrics_error_handling(self, mock_supabase: MagicMock, mock_logger: MagicMock):
         """Test error handling in realtime metrics update."""
         from backend.tasks.usage_metrics import update_realtime_metrics
 
@@ -328,9 +304,7 @@ class TestUsageMetrics:
         assert "Error updating realtime metrics" in str(mock_logger.error.call_args)
 
     @pytest.mark.asyncio
-    async def test_collect_account_metrics_with_agent_count(
-        self, mock_supabase: MagicMock
-    ):
+    async def test_collect_account_metrics_with_agent_count(self, mock_supabase: MagicMock):
         """Test agent count calculation from instances."""
         from backend.tasks.usage_metrics import _collect_account_metrics
 
@@ -370,9 +344,7 @@ class TestUsageMetrics:
         mock_table.execute.side_effect = execute_side_effect
 
         # Test
-        metrics = await _collect_account_metrics(
-            mock_supabase, "account_1", start_date, end_date
-        )
+        metrics = await _collect_account_metrics(mock_supabase, "account_1", start_date, end_date)
 
         # Verify
         # The code uses: inst.get("agent_count", 1) which means missing key becomes 1

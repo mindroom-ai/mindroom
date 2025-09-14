@@ -23,9 +23,7 @@ def test_security_headers_present() -> None:
     assert r.headers.get("x-xss-protection") == "1; mode=block"
     assert "max-age=31536000" in (r.headers.get("strict-transport-security") or "")
     # Additional headers
-    assert (
-        r.headers.get("referrer-policy") or ""
-    ).lower() == "strict-origin-when-cross-origin"
+    assert (r.headers.get("referrer-policy") or "").lower() == "strict-origin-when-cross-origin"
     assert "camera=()" in (r.headers.get("permissions-policy") or "")
 
 

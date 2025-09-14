@@ -6,9 +6,7 @@ from backend.config import logger
 from backend.process import run_cmd
 
 
-async def check_deployment_exists(
-    instance_id: str, namespace: str = "mindroom-instances"
-) -> bool:
+async def check_deployment_exists(instance_id: str, namespace: str = "mindroom-instances") -> bool:
     """Check if a Kubernetes deployment exists for an instance."""
     try:
         code, _out, err = await run_kubectl(
@@ -52,9 +50,7 @@ async def wait_for_deployment_ready(
         if code == 0:
             logger.info("Deployment %s ready: %s", instance_id, out)
             return True
-        logger.warning(
-            "Deployment %s not ready within timeout: %s", instance_id, err or out
-        )
+        logger.warning("Deployment %s not ready within timeout: %s", instance_id, err or out)
         return False  # noqa: TRY300
     except FileNotFoundError:
         logger.exception("kubectl not found when waiting for deployment readiness")
@@ -64,9 +60,7 @@ async def wait_for_deployment_ready(
         return False
 
 
-async def run_kubectl(
-    args: list[str], namespace: str | None = None
-) -> tuple[int, str, str]:
+async def run_kubectl(args: list[str], namespace: str | None = None) -> tuple[int, str, str]:
     """Run a kubectl command and return (returncode, stdout, stderr) as strings.
 
     - args: positional arguments passed to kubectl (e.g., ["get", "pods"]).
@@ -90,9 +84,7 @@ async def ensure_docker_registry_secret(
     Returns True if the secret exists (already or created), False on creation failure.
     """
     try:
-        code, _out, _err = await run_kubectl(
-            ["get", "secret", secret_name], namespace=namespace
-        )
+        code, _out, _err = await run_kubectl(["get", "secret", secret_name], namespace=namespace)
         if code == 0:
             return True
         # Create the secret
@@ -107,13 +99,9 @@ async def ensure_docker_registry_secret(
         ]
         code, out, err = await run_kubectl(args, namespace=namespace)
         if code != 0:
-            logger.error(
-                "Failed to create imagePullSecret %s: %s", secret_name, err or out
-            )
+            logger.error("Failed to create imagePullSecret %s: %s", secret_name, err or out)
             return False
-        logger.info(
-            "Created imagePullSecret %s in namespace %s", secret_name, namespace
-        )
+        logger.info("Created imagePullSecret %s in namespace %s", secret_name, namespace)
         return True  # noqa: TRY300
     except Exception:
         logger.exception("Error ensuring imagePullSecret %s", secret_name)

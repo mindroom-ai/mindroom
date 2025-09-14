@@ -94,9 +94,7 @@ class TestProvisionerExtended:
                 mock_db = MagicMock()
                 mock_sb.return_value = mock_db
                 # Make update fail
-                mock_db.table().update().eq().execute.side_effect = Exception(
-                    "DB error"
-                )
+                mock_db.table().update().eq().execute.side_effect = Exception("DB error")
 
                 # Should not raise, just log warning
                 await _background_mark_running_when_ready("test-instance", "test-ns")
@@ -132,9 +130,7 @@ class TestProvisionerExtended:
                     }
                 )
                 # Make update fail
-                mock_db.table().update().eq().execute.side_effect = Exception(
-                    "Update failed"
-                )
+                mock_db.table().update().eq().execute.side_effect = Exception("Update failed")
 
                 with pytest.raises(HTTPException) as exc_info:
                     await provision_instance(
@@ -164,12 +160,8 @@ class TestProvisionerExtended:
                 mock_sb.return_value = mock_db
 
                 # Setup new instance
-                mock_db.table().select().eq().single().execute.return_value = Mock(
-                    data=None
-                )
-                mock_db.table().insert().execute.return_value = Mock(
-                    data=[{"instance_id": "456"}]
-                )
+                mock_db.table().select().eq().single().execute.return_value = Mock(data=None)
+                mock_db.table().insert().execute.return_value = Mock(data=[{"instance_id": "456"}])
 
                 with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                     mock_kubectl.side_effect = FileNotFoundError("kubectl not found")
@@ -198,12 +190,8 @@ class TestProvisionerExtended:
     ):
         """Test provision handles namespace creation failure gracefully."""
         # Setup new instance
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "789"}]
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "789"}])
 
         # Make namespace creation fail (non-FileNotFoundError)
         mock_kubectl.side_effect = [
@@ -237,12 +225,8 @@ class TestProvisionerExtended:
     ):
         """Test provision handles URL update failure gracefully."""
         # Setup new instance
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "999"}]
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "999"}])
 
         # Make URL update fail
         update_count = 0
@@ -280,12 +264,8 @@ class TestProvisionerExtended:
     ):
         """Test provision handles helm failure with DB update error."""
         # Setup new instance
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "111"}]
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "111"}])
 
         # Make helm fail
         mock_helm.return_value = (1, "", "Helm deployment failed")
@@ -324,12 +304,8 @@ class TestProvisionerExtended:
     ):
         """Test provision handles general exception with DB update error."""
         # Setup new instance
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "222"}]
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "222"}])
 
         # Make helm raise unexpected exception
         with patch("backend.routes.provisioner.run_helm") as mock_helm:
@@ -371,12 +347,8 @@ class TestProvisionerExtended:
     ):
         """Test provision handles status update failure after readiness check."""
         # Setup new instance
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "333"}]
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "333"}])
 
         with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
             mock_wait.return_value = True  # Ready
@@ -417,12 +389,8 @@ class TestProvisionerExtended:
     ):
         """Test provision handles background task scheduling failure."""
         # Setup new instance
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "444"}]
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "444"}])
 
         with patch("backend.routes.provisioner.wait_for_deployment_ready") as mock_wait:
             mock_wait.return_value = False  # Not ready
@@ -462,9 +430,7 @@ class TestProvisionerExtended:
         """Test start instance handles status update failure."""
         with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
             mock_check.return_value = True
-            with patch(
-                "backend.routes.provisioner.update_instance_status"
-            ) as mock_update:
+            with patch("backend.routes.provisioner.update_instance_status") as mock_update:
                 mock_update.return_value = False  # Update fails
 
                 response = client.post(
@@ -484,9 +450,7 @@ class TestProvisionerExtended:
         """Test stop instance handles status update failure."""
         with patch("backend.routes.provisioner.check_deployment_exists") as mock_check:
             mock_check.return_value = True
-            with patch(
-                "backend.routes.provisioner.update_instance_status"
-            ) as mock_update:
+            with patch("backend.routes.provisioner.update_instance_status") as mock_update:
                 mock_update.return_value = False  # Update fails
 
                 response = client.post(
@@ -543,9 +507,7 @@ class TestProvisionerExtended:
     ):
         """Test uninstall handles status update failure."""
         with patch("backend.config.PROVISIONER_API_KEY", "test-api-key"):
-            with patch(
-                "backend.routes.provisioner.update_instance_status"
-            ) as mock_update:
+            with patch("backend.routes.provisioner.update_instance_status") as mock_update:
                 mock_update.return_value = False  # Update fails
 
                 response = client.delete(
@@ -584,9 +546,7 @@ class TestProvisionerExtended:
             mock_db = MagicMock()
             mock_sb.return_value = mock_db
             # Make the select().execute() call raise an exception
-            mock_db.table().select().execute.side_effect = RuntimeError(
-                "Database connection failed"
-            )
+            mock_db.table().select().execute.side_effect = RuntimeError("Database connection failed")
 
             response = client.post(
                 "/system/sync-instances",

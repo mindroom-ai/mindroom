@@ -75,9 +75,7 @@ def audit_log_entry(
 
 @router.get("/admin/stats", response_model=AdminStatsOut)
 @limiter.limit("30/minute")
-async def get_admin_stats(
-    request: Request, admin: dict = Depends(verify_admin)
-) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
+async def get_admin_stats(request: Request, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
     """Get platform statistics for admin dashboard."""
     audit_log_entry(
         account_id=admin["user_id"],
@@ -88,26 +86,12 @@ async def get_admin_stats(
 
     try:
         accounts = sb.table("accounts").select("*", count="exact").execute()
-        subscriptions = (
-            sb.table("subscriptions")
-            .select("*", count="exact")
-            .eq("status", "active")
-            .execute()
-        )
-        instances = (
-            sb.table("instances")
-            .select("*", count="exact")
-            .eq("status", "running")
-            .execute()
-        )
+        subscriptions = sb.table("subscriptions").select("*", count="exact").eq("status", "active").execute()
+        instances = sb.table("instances").select("*", count="exact").eq("status", "running").execute()
 
         # Get recent activity for dashboard
         recent_logs = (
-            sb.table("audit_logs")
-            .select("*, accounts(email)")
-            .order("created_at", desc=True)
-            .limit(5)
-            .execute()
+            sb.table("audit_logs").select("*, accounts(email)").order("created_at", desc=True).limit(5).execute()
         )
 
         recent_activity = []
@@ -123,9 +107,7 @@ async def get_admin_stats(
 
         return {
             "accounts": len(accounts.data) if accounts.data else 0,
-            "active_subscriptions": len(subscriptions.data)
-            if subscriptions.data
-            else 0,
+            "active_subscriptions": len(subscriptions.data) if subscriptions.data else 0,
             "running_instances": len(instances.data) if instances.data else 0,
         }
     except Exception as e:
@@ -162,9 +144,7 @@ async def admin_start_instance(
 
 
 @router.post("/admin/instances/{instance_id}/stop", response_model=ActionResult)
-async def admin_stop_instance(
-    instance_id: int, admin: dict = Depends(verify_admin)
-) -> dict[str, Any]:  # noqa: FAST002, B008
+async def admin_stop_instance(instance_id: int, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008
     """Stop an instance (admin proxy)."""
     result = await _proxy_to_provisioner(stop_instance_provisioner, instance_id, admin)
     audit_log_entry(
@@ -184,9 +164,7 @@ async def admin_restart_instance(
     admin: dict = Depends(verify_admin),  # noqa: FAST002, B008
 ) -> dict[str, Any]:
     """Restart an instance (admin proxy)."""
-    result = await _proxy_to_provisioner(
-        restart_instance_provisioner, instance_id, admin
-    )
+    result = await _proxy_to_provisioner(restart_instance_provisioner, instance_id, admin)
     audit_log_entry(
         account_id=admin["user_id"],
         action="restart",
@@ -214,9 +192,7 @@ async def admin_uninstall_instance(
     return result
 
 
-@router.post(
-    "/admin/instances/{instance_id}/provision", response_model=ProvisionResponse
-)
+@router.post("/admin/instances/{instance_id}/provision", response_model=ProvisionResponse)
 @limiter.limit("5/minute")
 async def admin_provision_instance(
     request: Request,  # noqa: ARG001
@@ -228,9 +204,7 @@ async def admin_provision_instance(
     sb = ensure_supabase()
 
     # Get instance details
-    result = (
-        sb.table("instances").select("*").eq("instance_id", str(instance_id)).execute()
-    )
+    result = sb.table("instances").select("*").eq("instance_id", str(instance_id)).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Instance not found")
 
@@ -249,9 +223,7 @@ async def admin_provision_instance(
         "instance_id": instance_id,  # Re-use existing instance ID
     }
 
-    result = await provision_instance(
-        data, f"Bearer {PROVISIONER_API_KEY}", background_tasks
-    )
+    result = await provision_instance(data, f"Bearer {PROVISIONER_API_KEY}", background_tasks)
     audit_log_entry(
         account_id=admin["user_id"],
         action="provision",
@@ -267,9 +239,7 @@ async def admin_provision_instance(
 
 @router.post("/admin/sync-instances", response_model=SyncResult)
 @limiter.limit("5/minute")
-async def admin_sync_instances(
-    request: Request, admin: dict = Depends(verify_admin)
-) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
+async def admin_sync_instances(request: Request, admin: dict = Depends(verify_admin)) -> dict[str, Any]:  # noqa: FAST002, B008, ARG001
     """Sync instance states between database and Kubernetes (admin proxy)."""
     result = await sync_instances(f"Bearer {PROVISIONER_API_KEY}")
     audit_log_entry(
@@ -291,9 +261,7 @@ async def get_account_details(
 
     try:
         # Get account details
-        account_result = (
-            sb.table("accounts").select("*").eq("id", account_id).single().execute()
-        )
+        account_result = sb.table("accounts").select("*").eq("id", account_id).single().execute()
         if not account_result.data:
             raise HTTPException(status_code=404, detail="Account not found")  # noqa: TRY301
 
@@ -311,28 +279,20 @@ async def get_account_details(
 
         # Get instances if exist
         instances_result = (
-            sb.table("instances")
-            .select("*")
-            .eq("account_id", account_id)
-            .order("created_at", desc=True)
-            .execute()
+            sb.table("instances").select("*").eq("account_id", account_id).order("created_at", desc=True).execute()
         )
 
         # Build response
         return {
             "account": account,
-            "subscription": subscription_result.data[0]
-            if subscription_result.data
-            else None,
+            "subscription": subscription_result.data[0] if subscription_result.data else None,
             "instances": instances_result.data if instances_result.data else [],
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Error fetching account details")
-        raise HTTPException(
-            status_code=500, detail="Failed to fetch account details"
-        ) from e
+        raise HTTPException(status_code=500, detail="Failed to fetch account details") from e
 
 
 class UpdateAccountStatusRequest(BaseModel):
@@ -342,9 +302,7 @@ class UpdateAccountStatusRequest(BaseModel):
     reason: str | None = None
 
 
-@router.put(
-    "/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse
-)
+@router.put("/admin/accounts/{account_id}/status", response_model=UpdateAccountStatusResponse)
 async def update_account_status(
     account_id: str,
     request: UpdateAccountStatusRequest,
@@ -355,9 +313,7 @@ async def update_account_status(
 
     valid_statuses = ["active", "suspended", "deleted", "pending_verification"]
     if request.status not in valid_statuses:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}"
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
 
     try:
         result = (
@@ -390,9 +346,7 @@ async def update_account_status(
         }  # noqa: TRY300
     except Exception as e:
         logger.exception("Error updating account status")
-        raise HTTPException(
-            status_code=500, detail="Failed to update account status"
-        ) from e
+        raise HTTPException(status_code=500, detail="Failed to update account status") from e
 
 
 @router.post("/admin/auth/logout", response_model=AdminLogoutResponse)
@@ -417,27 +371,12 @@ async def get_dashboard_metrics(
 
     try:
         accounts = sb.table("accounts").select("*", count="exact", head=True).execute()
-        active_subs = (
-            sb.table("subscriptions")
-            .select("*", count="exact", head=True)
-            .eq("status", "active")
-            .execute()
-        )
-        _ = (
-            sb.table("instances")
-            .select("*", count="exact", head=True)
-            .eq("status", "running")
-            .execute()
-        )
+        active_subs = sb.table("subscriptions").select("*", count="exact", head=True).eq("status", "active").execute()
+        _ = sb.table("instances").select("*", count="exact", head=True).eq("status", "running").execute()
 
-        subs_data = (
-            sb.table("subscriptions").select("tier").eq("status", "active").execute()
-        )
+        subs_data = sb.table("subscriptions").select("tier").eq("status", "active").execute()
         tier_prices = {"starter": 49, "professional": 199, "enterprise": 999, "free": 0}
-        mrr = sum(
-            tier_prices.get(sub.get("tier", "free"), 0)
-            for sub in (subs_data.data or [])
-        )
+        mrr = sum(tier_prices.get(sub.get("tier", "free"), 0) for sub in (subs_data.data or []))
 
         seven_days_ago = (datetime.now(UTC) - timedelta(days=7)).isoformat()
         messages = (
@@ -454,8 +393,7 @@ async def get_dashboard_metrics(
                 date = m["metric_date"][:10]
                 by_date[date] += m.get("messages_sent", 0)
             _ = [  # noqa: F841
-                {"date": date, "messages_sent": count}
-                for date, count in sorted(by_date.items())
+                {"date": date, "messages_sent": count} for date, count in sorted(by_date.items())
             ]
 
         all_instances = sb.table("instances").select("status").execute()
@@ -536,19 +474,13 @@ async def admin_get_list(  # noqa: C901
     try:
         # Add joins for better data display in admin panel
         if resource == "instances":
-            query = sb.table("instances").select(
-                "*, accounts(email, full_name)", count="exact"
-            )
+            query = sb.table("instances").select("*, accounts(email, full_name)", count="exact")
         elif resource == "subscriptions":
-            query = sb.table("subscriptions").select(
-                "*, accounts(email, full_name)", count="exact"
-            )
+            query = sb.table("subscriptions").select("*, accounts(email, full_name)", count="exact")
         elif resource == "audit_logs":
             query = sb.table("audit_logs").select("*, accounts(email)", count="exact")
         elif resource == "usage_metrics":
-            query = sb.table("usage_metrics").select(
-                "*, accounts(email, full_name)", count="exact"
-            )
+            query = sb.table("usage_metrics").select("*, accounts(email, full_name)", count="exact")
         else:
             query = sb.table(resource).select("*", count="exact")
 
@@ -560,9 +492,7 @@ async def admin_get_list(  # noqa: C901
                 "subscriptions": ["tier", "status"],
             }
             if resource in search_fields:
-                or_conditions = [
-                    f"{field}.ilike.%{q}%" for field in search_fields[resource]
-                ]
+                or_conditions = [f"{field}.ilike.%{q}%" for field in search_fields[resource]]
                 query = query.or_(",".join(or_conditions))
 
         if _sort:

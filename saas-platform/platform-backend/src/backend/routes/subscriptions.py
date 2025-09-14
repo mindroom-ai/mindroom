@@ -33,13 +33,7 @@ async def get_user_subscription(
     sb = ensure_supabase()
 
     account_id = user["account_id"]
-    result = (
-        sb.table("subscriptions")
-        .select("*")
-        .eq("account_id", account_id)
-        .limit(1)
-        .execute()
-    )
+    result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
     if not result.data:
         # Return a default free subscription if none exists
         limits = get_plan_limits_from_metadata("free")
@@ -78,13 +72,7 @@ async def cancel_subscription(
     account_id = user["account_id"]
 
     # Get current subscription
-    sub_result = (
-        sb.table("subscriptions")
-        .select("*")
-        .eq("account_id", account_id)
-        .limit(1)
-        .execute()
-    )
+    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
 
     if not sub_result.data:
         raise HTTPException(status_code=404, detail="No subscription found")
@@ -122,9 +110,7 @@ async def cancel_subscription(
         raise HTTPException(status_code=500, detail="Failed to cancel subscription")
 
 
-@router.post(
-    "/my/subscription/reactivate", response_model=SubscriptionReactivateResponse
-)
+@router.post("/my/subscription/reactivate", response_model=SubscriptionReactivateResponse)
 async def reactivate_subscription(
     user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, Any]:
@@ -136,13 +122,7 @@ async def reactivate_subscription(
     account_id = user["account_id"]
 
     # Get current subscription
-    sub_result = (
-        sb.table("subscriptions")
-        .select("*")
-        .eq("account_id", account_id)
-        .limit(1)
-        .execute()
-    )
+    sub_result = sb.table("subscriptions").select("*").eq("account_id", account_id).limit(1).execute()
 
     if not sub_result.data:
         raise HTTPException(status_code=404, detail="No subscription found")

@@ -69,9 +69,7 @@ class TestAccountsEndpoints:
                 }
             ],
         }
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=account_data
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=account_data)
 
         # Make request
         response = client.get("/my/account")
@@ -92,9 +90,7 @@ class TestAccountsEndpoints:
     ):
         """Test getting account when it doesn't exist."""
         # Setup
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
 
         # Make request
         response = client.get("/my/account")
@@ -127,9 +123,7 @@ class TestAccountsEndpoints:
     ):
         """Test checking admin status when user is admin."""
         # Setup
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"is_admin": True}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"is_admin": True})
 
         # Make request
         response = client.get("/my/account/admin-status")
@@ -147,9 +141,7 @@ class TestAccountsEndpoints:
     ):
         """Test checking admin status when user is not admin."""
         # Setup
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"is_admin": False}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"is_admin": False})
 
         # Make request
         response = client.get("/my/account/admin-status")
@@ -167,9 +159,7 @@ class TestAccountsEndpoints:
     ):
         """Test checking admin status when account not found."""
         # Setup
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
 
         # Make request
         response = client.get("/my/account/admin-status")
@@ -201,9 +191,7 @@ class TestAccountsEndpoints:
             "max_storage_gb": 10,
             "created_at": datetime.now(UTC).isoformat(),
         }
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[new_subscription]
-        )
+        mock_supabase.table().insert().execute.return_value = Mock(data=[new_subscription])
 
         # Make request
         response = client.post("/my/account/setup")
@@ -223,9 +211,7 @@ class TestAccountsEndpoints:
     ):
         """Test setting up account when user already has subscription."""
         # Setup - existing subscription
-        mock_supabase.table().select().eq().execute.return_value = Mock(
-            data=[{"id": "sub_existing_123"}]
-        )
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"id": "sub_existing_123"}])
 
         # Make request
         response = client.post("/my/account/setup")
@@ -287,9 +273,7 @@ class TestAccountsEndpoints:
             "updated_at": datetime.now(UTC).isoformat(),
             "subscriptions": [],
         }
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=account_data
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=account_data)
 
         # Make request
         response = client.get("/my/account")
@@ -335,9 +319,7 @@ class TestAccountsEndpoints:
                 },
             ],
         }
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=account_data
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=account_data)
 
         # Make request
         response = client.get("/my/account")
@@ -357,9 +339,7 @@ class TestAccountsEndpoints:
     ):
         """Test checking admin status when is_admin field is missing."""
         # Setup - data exists but no is_admin field
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"id": "acc_test_123"}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "acc_test_123"})
 
         # Make request
         response = client.get("/my/account/admin-status")

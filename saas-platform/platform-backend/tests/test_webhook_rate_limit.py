@@ -83,7 +83,5 @@ def test_stripe_webhook_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # The first 20 requests should return 400 (invalid signature)
     # The 21st request should be rate limited (429)
-    assert statuses[:20] == [400] * 20, (
-        f"Expected 20 400 responses, got: {statuses[:20]}"
-    )
+    assert statuses[:20] == [400] * 20, f"Expected 20 400 responses, got: {statuses[:20]}"
     assert statuses[20] == 429, f"Expected 429 on 21st request, got: {statuses[20]}"

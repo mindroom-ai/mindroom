@@ -118,9 +118,7 @@ class TestProvisionerEndpoints:
     ):
         """Test successful provisioning of a new instance."""
         # Setup
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "123"}]
-        )
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_supabase.table().update().eq().execute.return_value = Mock()
 
         provision_data = {
@@ -130,9 +128,7 @@ class TestProvisionerEndpoints:
         }
 
         # Make request
-        response = client.post(
-            "/system/provision", json=provision_data, headers=valid_auth_header
-        )
+        response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 200
@@ -161,9 +157,7 @@ class TestProvisionerEndpoints:
     ):
         """Test re-provisioning an existing instance."""
         # Setup
-        mock_supabase.table().update().eq().execute.return_value = Mock(
-            data=[{"instance_id": "456"}]
-        )
+        mock_supabase.table().update().eq().execute.return_value = Mock(data=[{"instance_id": "456"}])
 
         provision_data = {
             "subscription_id": "sub_test_123",
@@ -173,9 +167,7 @@ class TestProvisionerEndpoints:
         }
 
         # Make request
-        response = client.post(
-            "/system/provision", json=provision_data, headers=valid_auth_header
-        )
+        response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 200
@@ -196,9 +188,7 @@ class TestProvisionerEndpoints:
         provision_data = {"instance_id": "999"}  # Non-existent
 
         # Make request
-        response = client.post(
-            "/system/provision", json=provision_data, headers=valid_auth_header
-        )
+        response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 404
@@ -213,9 +203,7 @@ class TestProvisionerEndpoints:
     ):
         """Test provisioning when kubectl is not available."""
         # Setup
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "123"}]
-        )
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_kubectl.side_effect = FileNotFoundError()
 
         provision_data = {
@@ -224,9 +212,7 @@ class TestProvisionerEndpoints:
         }
 
         # Make request
-        response = client.post(
-            "/system/provision", json=provision_data, headers=valid_auth_header
-        )
+        response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 503
@@ -243,9 +229,7 @@ class TestProvisionerEndpoints:
     ):
         """Test provisioning when helm deployment fails."""
         # Setup
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "123"}]
-        )
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_helm.return_value = (1, "", "Helm error")  # Failure
 
         provision_data = {
@@ -254,9 +238,7 @@ class TestProvisionerEndpoints:
         }
 
         # Make request
-        response = client.post(
-            "/system/provision", json=provision_data, headers=valid_auth_header
-        )
+        response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 500
@@ -274,9 +256,7 @@ class TestProvisionerEndpoints:
     ):
         """Test provisioning when deployment is not immediately ready."""
         # Setup
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "123"}]
-        )
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
         mock_wait_for_deployment.return_value = False  # Not ready
 
         provision_data = {
@@ -285,9 +265,7 @@ class TestProvisionerEndpoints:
         }
 
         # Make request
-        response = client.post(
-            "/system/provision", json=provision_data, headers=valid_auth_header
-        )
+        response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 200
@@ -406,9 +384,7 @@ class TestProvisionerEndpoints:
     ):
         """Test restarting an instance successfully."""
         # Make request
-        response = client.post(
-            "/system/instances/123/restart", headers=valid_auth_header
-        )
+        response = client.post("/system/instances/123/restart", headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 200
@@ -433,9 +409,7 @@ class TestProvisionerEndpoints:
         mock_check_deployment.return_value = False
 
         # Make request
-        response = client.post(
-            "/system/instances/999/restart", headers=valid_auth_header
-        )
+        response = client.post("/system/instances/999/restart", headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 404
@@ -450,9 +424,7 @@ class TestProvisionerEndpoints:
     ):
         """Test uninstalling an instance successfully."""
         # Make request
-        response = client.delete(
-            "/system/instances/123/uninstall", headers=valid_auth_header
-        )
+        response = client.delete("/system/instances/123/uninstall", headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 200
@@ -462,9 +434,7 @@ class TestProvisionerEndpoints:
         # Note: instance_id is not in ActionResult model, so it won't be in response
 
         # Verify helm was called
-        mock_helm.assert_called_with(
-            ["uninstall", "instance-123", "--namespace=mindroom-instances"]
-        )
+        mock_helm.assert_called_with(["uninstall", "instance-123", "--namespace=mindroom-instances"])
         mock_update_status.assert_called_with(123, "deprovisioned")
 
     def test_uninstall_instance_already_uninstalled(
@@ -479,9 +449,7 @@ class TestProvisionerEndpoints:
         mock_helm.return_value = (1, "", "release not found")
 
         # Make request
-        response = client.delete(
-            "/system/instances/123/uninstall", headers=valid_auth_header
-        )
+        response = client.delete("/system/instances/123/uninstall", headers=valid_auth_header)
 
         # Verify - should succeed
         assert response.status_code == 200
@@ -499,9 +467,7 @@ class TestProvisionerEndpoints:
         mock_helm.return_value = (1, "", "some other error")
 
         # Make request
-        response = client.delete(
-            "/system/instances/123/uninstall", headers=valid_auth_header
-        )
+        response = client.delete("/system/instances/123/uninstall", headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 500
@@ -675,9 +641,7 @@ class TestProvisionerEndpoints:
         # The provision endpoint has a limit of 5/minute
         responses = []
         for _ in range(7):
-            response = client.post(
-                "/system/provision", json={}, headers=valid_auth_header
-            )
+            response = client.post("/system/provision", json={}, headers=valid_auth_header)
             responses.append(response.status_code)
 
         # At least one should be rate limited (429)
@@ -699,9 +663,7 @@ class TestProvisionerEndpoints:
         }
 
         # Make request
-        response = client.post(
-            "/system/provision", json=provision_data, headers=valid_auth_header
-        )
+        response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 500
@@ -719,9 +681,7 @@ class TestProvisionerEndpoints:
     ):
         """Test provisioning with free tier."""
         # Setup
-        mock_supabase.table().insert().execute.return_value = Mock(
-            data=[{"instance_id": "123"}]
-        )
+        mock_supabase.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
 
         provision_data = {
             "subscription_id": None,  # Free tier might not have subscription
@@ -730,9 +690,7 @@ class TestProvisionerEndpoints:
         }
 
         # Make request
-        response = client.post(
-            "/system/provision", json=provision_data, headers=valid_auth_header
-        )
+        response = client.post("/system/provision", json=provision_data, headers=valid_auth_header)
 
         # Verify
         assert response.status_code == 200

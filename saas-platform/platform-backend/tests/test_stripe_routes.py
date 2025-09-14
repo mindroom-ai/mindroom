@@ -118,9 +118,7 @@ class TestStripeRoutesEndpoints:
     ):
         """Test creating portal session when no Stripe customer exists."""
         # Setup
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"stripe_customer_id": None}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"stripe_customer_id": None})
 
         # Make request
         response = client.post("/stripe/portal")
@@ -144,9 +142,7 @@ class TestStripeRoutesEndpoints:
 
         # Wrap the side_effect in a try-except in the route
         # The route should catch this Exception and return 500 with proper message
-        mock_stripe.billing_portal.Session.create.side_effect = Exception(
-            "Portal error"
-        )
+        mock_stripe.billing_portal.Session.create.side_effect = Exception("Portal error")
 
         # Make request
         response = client.post("/stripe/portal")
@@ -164,9 +160,7 @@ class TestStripeRoutesEndpoints:
     ):
         """Test creating checkout for new customer."""
         # Setup - no existing customer
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data={"stripe_customer_id": None}
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"stripe_customer_id": None})
 
         # Mock pricing functions
         with (
@@ -273,9 +267,7 @@ class TestStripeRoutesEndpoints:
                 return_value=False,
             ),
         ):
-            mock_stripe.checkout.Session.create.side_effect = Exception(
-                "Checkout error"
-            )
+            mock_stripe.checkout.Session.create.side_effect = Exception("Checkout error")
 
             # Make request
             response = client.post(
@@ -298,9 +290,7 @@ class TestStripeRoutesEndpoints:
     ):
         """Test portal when account not found."""
         # Setup
-        mock_supabase.table().select().eq().single().execute.return_value = Mock(
-            data=None
-        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data=None)
 
         # Make request
         response = client.post("/stripe/portal")
@@ -334,9 +324,7 @@ class TestStripeRoutesEndpoints:
             def override_verify_user_optional():
                 return None  # Return None to simulate no user
 
-            app.dependency_overrides[verify_user_optional] = (
-                override_verify_user_optional
-            )
+            app.dependency_overrides[verify_user_optional] = override_verify_user_optional
             try:
                 # When there's no authenticated user, checkout should still work
                 # as stripe_routes allows optional user for checkout
@@ -349,9 +337,6 @@ class TestStripeRoutesEndpoints:
                 )
                 # The route actually allows unauthenticated access
                 assert response.status_code == 200
-                assert (
-                    response.json()["url"]
-                    == "https://checkout.stripe.com/pay/cs_test_123"
-                )
+                assert response.json()["url"] == "https://checkout.stripe.com/pay/cs_test_123"
             finally:
                 app.dependency_overrides.clear()

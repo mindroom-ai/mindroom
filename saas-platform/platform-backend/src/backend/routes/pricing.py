@@ -49,9 +49,7 @@ async def get_pricing_config() -> dict[str, Any]:
             "price_monthly": f"${price_monthly / 100:.0f}"
             if isinstance(price_monthly, (int, float))
             else price_monthly,
-            "price_yearly": f"${price_yearly / 100:.0f}"
-            if isinstance(price_yearly, (int, float))
-            else price_yearly,
+            "price_yearly": f"${price_yearly / 100:.0f}" if isinstance(price_yearly, (int, float)) else price_yearly,
             "price_model": plan_data.price_model or "flat",
             "description": plan_data.description,
             "features": plan_data.features,
@@ -65,9 +63,7 @@ async def get_pricing_config() -> dict[str, Any]:
     return config
 
 
-@router.get(
-    "/pricing/stripe-price/{plan}/{billing_cycle}", response_model=StripePriceResponse
-)
+@router.get("/pricing/stripe-price/{plan}/{billing_cycle}", response_model=StripePriceResponse)
 async def get_stripe_price(plan: str, billing_cycle: str) -> dict[str, Any]:
     """Get the Stripe price ID for a specific plan and billing cycle.
 
