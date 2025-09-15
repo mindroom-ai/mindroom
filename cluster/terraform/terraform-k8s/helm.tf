@@ -3,8 +3,7 @@
 # ===========================================
 
 locals {
-  # var.domain is now the full superdomain (e.g., staging.mindroom.chat)
-  # No need to construct it based on environment
+  # Full superdomain (e.g., staging.mindroom.chat or mindroom.chat)
   dns_domain = var.domain
 }
 
