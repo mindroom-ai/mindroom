@@ -42,7 +42,7 @@ resource "tls_private_key" "cluster" {
 }
 
 module "kube-hetzner" {
-  source = "kube-hetzner/kube-hetzner/hcloud"
+  source  = "kube-hetzner/kube-hetzner/hcloud"
   version = "2.15.0"
 
   providers = {
@@ -58,7 +58,7 @@ module "kube-hetzner" {
   cluster_name = var.cluster_name
 
   # SSH key configuration - use dedicated cluster key
-  ssh_public_key = tls_private_key.cluster.public_key_openssh
+  ssh_public_key  = tls_private_key.cluster.public_key_openssh
   ssh_private_key = tls_private_key.cluster.private_key_pem
 
   # Single node configuration - everything runs on one node
@@ -68,7 +68,7 @@ module "kube-hetzner" {
       server_type = var.server_type
       location    = var.location
       labels      = []
-      taints      = []  # No taints - allow workloads to run
+      taints      = [] # No taints - allow workloads to run
       count       = 1
     }
   ]
@@ -80,7 +80,7 @@ module "kube-hetzner" {
     location    = var.location
     labels      = []
     taints      = []
-    count       = 0  # No nodes will be created
+    count       = 0 # No nodes will be created
   }]
 
   # Allow scheduling on control plane (required for single node)
@@ -105,8 +105,8 @@ module "kube-hetzner" {
   enable_cert_manager = true
 
   # Storage - Longhorn
-  enable_longhorn = true
-  longhorn_replica_count = 1  # Single replica for single node
+  enable_longhorn        = true
+  longhorn_replica_count = 1 # Single replica for single node
 
   # Disable Rancher UI for now
   enable_rancher = false
@@ -119,8 +119,8 @@ module "kube-hetzner" {
   kured_version = "1.19.0"
 
   # Firewall settings - be careful with these in production!
-  firewall_kube_api_source = ["0.0.0.0/0", "::/0"]  # Open to all for now
-  firewall_ssh_source = ["0.0.0.0/0", "::/0"]  # Open to all for now
+  firewall_kube_api_source = ["0.0.0.0/0", "::/0"] # Open to all for now
+  firewall_ssh_source      = ["0.0.0.0/0", "::/0"] # Open to all for now
 
   # Use existing network (optional - comment out if not needed)
   # existing_network_id = []
