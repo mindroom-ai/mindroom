@@ -79,10 +79,10 @@ resource "helm_release" "mindroom_platform" {
     kubectl_manifest.cluster_issuer_staging
   ]
 
-  name       = "mindroom-${var.environment}"
-  namespace  = var.environment
+  name      = "mindroom-${var.environment}"
+  namespace = var.environment
   # Charts live at cluster/k8s/platform relative to this module
-  chart      = "${path.module}/../../k8s/platform"
+  chart = "${path.module}/../../k8s/platform"
 
   create_namespace = true
   wait             = true
@@ -102,13 +102,12 @@ output "platform_status" {
     status    = "✅ Platform deployed"
     namespace = var.environment
     release   = helm_release.mindroom_platform[0].name
-    urls      = {
+    urls = {
       app      = "https://app.${local.dns_domain}"
-      admin    = "https://admin.${local.dns_domain}"
       api      = "https://api.${local.dns_domain}"
       webhooks = "https://webhooks.${local.dns_domain}"
     }
-  } : {
+    } : {
     status    = "ℹ️ Platform deployment skipped (deploy_platform=false)"
     namespace = var.environment
     release   = ""
