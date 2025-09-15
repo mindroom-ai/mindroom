@@ -1,21 +1,20 @@
-# MindRoom Local Development
+# MindRoom Local Development with Kind
 
 Run MindRoom locally with Kubernetes using [kind](https://kind.sigs.k8s.io/).
 
 ## Quick Start (30 seconds)
 
 ```bash
-# Start everything
-make up
+# Start everything (creates cluster, builds images, deploys platform)
+just cluster-kind-fresh
 
 # Access the platform
-make frontend   # Opens http://localhost:3000
-
-# Check status
-make status
+just cluster-kind-port-frontend   # Opens http://localhost:3000
+# In another terminal:
+just cluster-kind-port-backend    # Backend API at http://localhost:8000
 
 # Clean up
-make clean
+just cluster-kind-down
 ```
 
 ## Prerequisites
