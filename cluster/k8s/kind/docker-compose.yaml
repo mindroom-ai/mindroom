@@ -1,0 +1,71 @@
+# Docker Compose setup for MindRoom (simpler alternative to kind)
+# This runs the platform without Kubernetes for quick development
+
+version: '3.8'
+
+services:
+  # Platform Backend
+  platform-backend:
+    build:
+      context: ../../../
+      dockerfile: saas-platform/Dockerfile.platform-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL:-https://placeholder.supabase.co}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-placeholder}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-placeholder}
+      - ENVIRONMENT=local
+      - DEBUG=true
+      - FRONTEND_URL=http://localhost:3000
+      - BACKEND_URL=http://localhost:8000
+    volumes:
+      - ./data/backend:/app/data
+    networks:
+      - mindroom
+
+  # Platform Frontend
+  platform-frontend:
+    build:
+      context: ../../../
+      dockerfile: saas-platform/Dockerfile.platform-frontend
+      args:
+        - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL:-https://placeholder.supabase.co}
+        - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-placeholder}
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+    networks:
+      - mindroom
+    depends_on:
+      - platform-backend
+
+  # Local PostgreSQL (if not using Supabase)
+  postgres:
+    image: postgres:15
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=mindroom
+      - POSTGRES_PASSWORD=mindroom
+      - POSTGRES_DB=mindroom
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - mindroom
+
+  # Local Redis for caching
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - mindroom
+
+networks:
+  mindroom:
+    driver: bridge
+
+volumes:
+  postgres_data:
