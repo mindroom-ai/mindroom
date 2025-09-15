@@ -30,9 +30,14 @@ IMAGE="git.nijho.lt/basnijholt/$APP:latest"
 
 echo "[build] Building $APP from repo root context..."
 if [ "$APP" = "platform-frontend" ]; then
+  # Build API URL from PLATFORM_DOMAIN in .env
+  API_URL="https://api.${PLATFORM_DOMAIN}"
+  echo "[build] Using API URL: $API_URL"
+
   docker build \
     --build-arg NEXT_PUBLIC_SUPABASE_URL="${SUPABASE_URL:-}" \
     --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-}" \
+    --build-arg NEXT_PUBLIC_API_URL="${API_URL}" \
     -t "$IMAGE" \
     -f "$SCRIPT_DIR/Dockerfile.$APP" \
     "$REPO_ROOT"
