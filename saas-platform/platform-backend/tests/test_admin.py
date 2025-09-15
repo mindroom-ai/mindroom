@@ -279,7 +279,7 @@ class TestAdminEndpoints:
         """Test admin syncing instances."""
         with patch("backend.routes.admin.sync_instances") as mock_sync:
 
-            async def mock_sync_func(auth):
+            async def mock_sync_func(request, auth):
                 return {
                     "total": 5,
                     "synced": 2,
@@ -676,7 +676,7 @@ class TestAdminEndpoints:
         # Setup - mock the start_instance_provisioner function to raise 404
         with patch("backend.routes.admin.start_instance_provisioner") as mock_start:
 
-            async def mock_start_func(instance_id, auth):
+            async def mock_start_func(request, instance_id, auth):
                 raise HTTPException(status_code=404, detail="Deployment not found")
 
             mock_start.side_effect = mock_start_func
@@ -697,7 +697,7 @@ class TestAdminEndpoints:
         """Test admin sync with some errors."""
         with patch("backend.routes.admin.sync_instances") as mock_sync:
 
-            async def mock_sync_func(auth):
+            async def mock_sync_func(request, auth):
                 return {
                     "total": 10,
                     "synced": 7,

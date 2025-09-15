@@ -8,26 +8,38 @@ metadata:
 ---
 ---
 # Namespaced Role for managing instance resources (least privilege)
+# Aligned with security documentation: specific resources, no wildcards
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: platform-backend
   namespace: mindroom-instances
 rules:
-  # Core resources used by the instance chart (namespace-scoped only)
+  # Core resources used by the instance chart and Helm release management
+  # Note: Includes configmaps/secrets for Helm releases (sh.helm.release.v1.*)
   - apiGroups: [""]
-    resources: ["configmaps", "secrets", "services", "pods", "persistentvolumeclaims", "events", "serviceaccounts"]
+    resources: ["configmaps", "secrets", "services", "persistentvolumeclaims", "serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Pods and events for monitoring/debugging (read-only for security)
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
 
   # Workloads in namespace
   - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale", "statefulsets", "replicasets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-  # Network policies within namespace
+  # Network policies and ingresses within namespace
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies", "ingresses"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Allow reading ingress status (required for Helm to track ingress readiness)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["get", "watch"]
 ---
 ---
 # Bind the Role in mindroom-instances to the platform service account
@@ -40,6 +52,33 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: platform-backend
+subjects:
+  - kind: ServiceAccount
+    name: platform-backend
+    namespace: mindroom-{{ .Values.environment }}
+---
+---
+# ClusterRole for platform-backend to manage namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-backend-namespace-manager
+rules:
+  # Permission to create/manage namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+---
+# Bind namespace management ClusterRole to platform-backend
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-backend-namespace-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: platform-backend-namespace-manager
 subjects:
   - kind: ServiceAccount
     name: platform-backend

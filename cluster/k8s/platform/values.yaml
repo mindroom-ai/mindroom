@@ -1,10 +1,10 @@
 # Default values for platform services
 environment: staging
-domain: mindroom.chat  # Base domain (subdomains: app, admin, api, webhooks)
+domain: mindroom.chat  # Base domain - override with --set domain based on environment
 
 # Image settings
 registry: git.nijho.lt/basnijholt
-imageTag: amd64
+imageTag: latest
 
 # Replicas
 replicas: 1
