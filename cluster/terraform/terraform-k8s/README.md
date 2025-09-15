@@ -123,8 +123,7 @@ After deployment, configure OAuth providers in Supabase:
 2. **Enable Providers**: Authentication → Providers → Enable Google/GitHub
 3. **Add Redirect URLs**: Authentication → URL Configuration
    ```
-   https://app.staging.mindroom.chat/auth/callback
-   https://app.mindroom.chat/auth/callback
+   https://app.<superdomain>/auth/callback
    http://localhost:3000/auth/callback
    ```
 
@@ -132,8 +131,8 @@ Terraform will output OAuth setup instructions after deployment.
 
 ## Environments
 
-- **Staging**: Uses `staging.mindroom.chat` subdomain
-- **Production**: Uses root `mindroom.chat` domain
+- **Staging/Test**: Uses `<environment>.<domain>` as the superdomain
+- **Production**: Uses root `<domain>` as the superdomain
 
 Set via `environment` variable in terraform.tfvars.
 

@@ -195,8 +195,8 @@ async def create_checkout_session(
     checkout_params = {
         "line_items": [{"price": request.price_id, "quantity": 1}],
         "mode": "subscription",
-        "success_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/dashboard?success=true&session_id={{CHECKOUT_SESSION_ID}}",
-        "cancel_url": f"{os.getenv('APP_URL', 'https://app.staging.mindroom.chat')}/pricing?cancelled=true",
+        "success_url": f"{os.getenv('APP_URL', 'https://app.<superdomain>')}/dashboard?success=true&session_id={{CHECKOUT_SESSION_ID}}",
+        "cancel_url": f"{os.getenv('APP_URL', 'https://app.<superdomain>')}/pricing?cancelled=true",
         # ...
     }
     session = stripe.checkout.Session.create(**checkout_params)

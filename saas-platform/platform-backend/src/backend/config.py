@@ -78,14 +78,31 @@ OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY", "")
 OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "")
 GITEA_TOKEN = _get_secret("GITEA_TOKEN", "")
 
+
+def _build_allowed_origins(domain: str, environment: str) -> list[str]:
+    """Compute allowed CORS origins from superdomain and environment.
+
+    Always allow the platform app origin. Include localhost origins in
+    non-production environments to ease development.
+    Additional origins can be supplied via comma-separated ALLOWED_ORIGINS env.
+    """
+    origins = [f"https://app.{domain}"]
+
+    if environment != "production":
+        origins += [
+            "http://localhost:3000",
+            "http://localhost:3001",
+        ]
+
+    extra = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if extra:
+        origins += [o.strip() for o in extra.split(",") if o.strip()]
+
+    return origins
+
+
 # CORS allowed origins
-ALLOWED_ORIGINS = [
-    "https://app.staging.mindroom.chat",
-    "https://app.test.mindroom.chat",
-    "https://app.mindroom.chat",
-    "http://localhost:3000",
-    "http://localhost:3001",
-]
+ALLOWED_ORIGINS = _build_allowed_origins(PLATFORM_DOMAIN, ENVIRONMENT)
 
 __all__ = [
     "ALLOWED_ORIGINS",

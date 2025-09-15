@@ -416,7 +416,7 @@ async def test_cache_invalidation():
    ```bash
    # Test alg: none JWT
    curl -H "Authorization: Bearer eyJhbGciOiAibm9uZSIsICJ0eXAiOiAiSldUIn0.eyJzdWIiOiAidGVzdCJ9." \
-        http://api.staging.mindroom.chat/my/account
+        https://api.<superdomain>/my/account
    # Expected: 401 Unauthorized
    ```
 
@@ -425,7 +425,7 @@ async def test_cache_invalidation():
    # Rapid fire requests (should be blocked after implementing rate limiting)
    for i in {1..10}; do
      curl -H "Authorization: Bearer fake-token" \
-          http://api.staging.mindroom.chat/my/sso-cookie -X POST
+          https://api.<superdomain>/my/sso-cookie -X POST
    done
    ```
 

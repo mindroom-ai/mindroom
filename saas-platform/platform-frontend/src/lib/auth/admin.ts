@@ -1,7 +1,9 @@
 import { redirect } from 'next/navigation'
 import { createServerClientSupabase } from '@/lib/supabase/server'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.staging.mindroom.chat'
+const API_URL = process.env.NEXT_PUBLIC_API_URL || (
+  process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : 'http://localhost:8000'
+)
 
 export async function requireAdmin() {
   const supabase = await createServerClientSupabase()
