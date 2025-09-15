@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from backend.config import (
+    ANTHROPIC_API_KEY,
     GITEA_TOKEN,
     GITEA_USER,
     OPENAI_API_KEY,
@@ -207,6 +208,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 f"openrouter_key={OPENROUTER_API_KEY}",
                 "--set",
                 f"openai_key={OPENAI_API_KEY}",
+                "--set",
+                f"anthropic_key={ANTHROPIC_API_KEY}",
                 "--set",
                 "mindroom_image=git.nijho.lt/basnijholt/mindroom-frontend:latest",
             ],

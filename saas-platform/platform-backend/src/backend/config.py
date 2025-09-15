@@ -71,11 +71,12 @@ PROVISIONER_API_KEY = _get_secret("PROVISIONER_API_KEY", "")
 # Gitea registry credentials (for pulling instance images)
 GITEA_USER = os.getenv("GITEA_USER", "")
 
-# OpenRouter API key for AI model access
+# API keys for MindRoom instances (shared across customers for now)
 OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY", "")
-
-# OpenAI API key for embeddings
 OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "")
+ANTHROPIC_API_KEY = _get_secret("ANTHROPIC_API_KEY", "")
+
+# Gitea registry token
 GITEA_TOKEN = _get_secret("GITEA_TOKEN", "")
 
 
