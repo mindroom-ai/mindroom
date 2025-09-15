@@ -76,7 +76,9 @@ export async function middleware(request: NextRequest) {
     }
 
     // Check admin status via API
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.staging.mindroom.chat'
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || (
+      process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : 'http://localhost:8000'
+    )
 
     try {
       const apiResponse = await fetch(`${API_URL}/my/account/admin-status`, {

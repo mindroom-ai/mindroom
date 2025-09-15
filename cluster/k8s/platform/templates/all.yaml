@@ -101,6 +101,8 @@ spec:
             configMapKeyRef:
               name: platform-config
               key: SUPABASE_ANON_KEY
+        - name: NEXT_PUBLIC_PLATFORM_DOMAIN
+          value: {{ .Values.domain }}
         - name: NEXT_PUBLIC_API_URL
           value: https://api.{{ .Values.domain }}
         # Also provide without prefix for server-side

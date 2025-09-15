@@ -13,10 +13,10 @@ Components
 - Instance Backend (FastAPI): serves instance-specific APIs and verifies JWTs.
 
 How Auth Works (Platform Mode)
-1) User signs in at the Platform app (e.g., https://app.staging.mindroom.chat).
+1) User signs in at the Platform app (e.g., https://app.<superdomain>).
 2) Platform Frontend calls Platform Backend POST /my/sso-cookie with the Supabase access token.
-   - Platform Backend sets an HttpOnly cookie mindroom_jwt on the superdomain (e.g., .staging.mindroom.chat).
-3) User navigates to an Instance domain (e.g., https://<id>.staging.mindroom.chat).
+   - Platform Backend sets an HttpOnly cookie mindroom_jwt on the superdomain (e.g., .<superdomain>).
+3) User navigates to an Instance domain (e.g., https://<id>.<superdomain>).
    - Instance nginx sidecar checks for mindroom_jwt on UI routes and redirects to platform login if missing.
 4) For /api calls on the Instance domain:
    - Ingress routes /api to the instance’s nginx sidecar (not directly to the backend).
@@ -29,7 +29,7 @@ Why /api goes through nginx sidecar
 
 Key Settings
 - Platform Backend
-  - PLATFORM_DOMAIN must be the superdomain (e.g., staging.mindroom.chat) so the cookie covers all subdomains.
+  - PLATFORM_DOMAIN must be the superdomain (e.g., <superdomain>) so the cookie covers all subdomains.
   - SUPABASE_URL/ANON_KEY/SERVICE_KEY used to validate tokens and perform server actions.
 - Instance (Helm release instance-<id>)
   - values.yaml: supabaseUrl, supabaseAnonKey, supabaseServiceKey must match the platform project.

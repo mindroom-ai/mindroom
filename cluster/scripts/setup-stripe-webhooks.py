@@ -29,7 +29,11 @@ if not stripe.api_key:
     sys.exit(1)
 
 # Get API URL from environment or use default
-api_url = os.getenv("API_URL", "https://api.staging.mindroom.chat")
+api_url = os.getenv("API_URL") or (
+    f"https://api.{os.getenv('PLATFORM_DOMAIN')}"
+    if os.getenv("PLATFORM_DOMAIN")
+    else "https://api.staging.mindroom.chat"
+)
 if "localhost" in api_url or "127.0.0.1" in api_url:
     print("⚠️  Warning: Using localhost API URL. Webhooks won't work with local development.")
     print("   Use ngrok or similar to expose your local server for webhook testing.")

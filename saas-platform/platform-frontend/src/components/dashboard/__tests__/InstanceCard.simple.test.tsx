@@ -82,8 +82,8 @@ describe('InstanceCard - Simplified Tests', () => {
       account_id: 'acc-123',
       status: 'running',
       frontend_url: 'https://customer.mindroom.chat',
-      backend_url: 'https://api.customer.mindroom.chat',
-      matrix_server_url: 'https://matrix.customer.mindroom.chat',
+      backend_url: 'https://customer.api.mindroom.chat',
+      matrix_server_url: 'https://customer.matrix.mindroom.chat',
       tier: 'pro',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
@@ -100,8 +100,8 @@ describe('InstanceCard - Simplified Tests', () => {
 
       // Check URLs are displayed (use getAllByText since domain appears multiple times)
       expect(screen.getAllByText('customer.mindroom.chat')).toHaveLength(2) // Domain and Frontend
-      expect(screen.getByText('api.customer.mindroom.chat')).toBeInTheDocument()
-      expect(screen.getByText('matrix.customer.mindroom.chat')).toBeInTheDocument()
+      expect(screen.getByText('customer.api.mindroom.chat')).toBeInTheDocument()
+      expect(screen.getByText('customer.matrix.mindroom.chat')).toBeInTheDocument()
 
       // Check tier (it's showing as 'pro' not 'Pro' due to capitalize class)
       expect(screen.getByText(/pro/i)).toBeInTheDocument()

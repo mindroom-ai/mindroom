@@ -22,7 +22,7 @@ const nextConfig: NextConfig = {
     root: __dirname,
   },
   async headers() {
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.staging.mindroom.chat'
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || (process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : 'http://localhost:8000')
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
 
     const connectSrc = ["'self'", 'https:', 'wss:']

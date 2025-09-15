@@ -172,7 +172,7 @@ PAYLOADS=(
 kubectl logs -n mindroom-instances -l customer=$2 --all-containers=true --kubeconfig=$KUBECONFIG
 
 # Lines 53-74: User input directly in curl commands
-curl -k -X POST https://api.staging.mindroom.chat/system/provision \
+curl -k -X POST https://api.<superdomain>/system/provision \
     -d "{
         \"account_id\": \"$2\",
         \"subscription_id\": \"sub-$2\",

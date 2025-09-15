@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from fastapi.testclient import TestClient
+
+# Configure test superdomain before importing app
+os.environ.setdefault("PLATFORM_DOMAIN", "test.mindroom.chat")
+os.environ.setdefault("ENVIRONMENT", "test")
+
 from main import app
 
 

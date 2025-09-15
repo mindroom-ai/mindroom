@@ -2,7 +2,9 @@ import { createServerClientSupabase } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import { NextRequest } from 'next/server'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.staging.mindroom.chat'
+const API_URL = process.env.NEXT_PUBLIC_API_URL || (
+  process.env.PLATFORM_DOMAIN ? `https://api.${process.env.PLATFORM_DOMAIN}` : 'http://localhost:8000'
+)
 
 export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url)
